@@ -22,6 +22,10 @@ public enum ClaudeProjectPaths {
         projectsRoot.appendingPathComponent(slug(forPath: path))
     }
 
+    public static func transcriptURL(forCwd path: String, sessionId: String, projectsRoot: URL = defaultProjectsRoot) -> URL {
+        projectDir(forPath: path, projectsRoot: projectsRoot).appendingPathComponent("\(sessionId).jsonl")
+    }
+
     public static func memoryDir(forPath path: String, projectsRoot: URL = defaultProjectsRoot) -> URL {
         projectDir(forPath: path, projectsRoot: projectsRoot).appendingPathComponent("memory")
     }
