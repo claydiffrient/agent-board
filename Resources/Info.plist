@@ -5,6 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key><string>en</string>
 	<key>CFBundleExecutable</key><string>AgentBoard</string>
 	<key>CFBundleIdentifier</key><string>dev.clayd.agentboard</string>
+	<key>CFBundleIconFile</key><string>AppIcon</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 	<key>CFBundleName</key><string>Agent Board</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
