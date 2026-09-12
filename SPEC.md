@@ -445,7 +445,7 @@ Generated into each managed session's `--settings`. All post to
 | `SessionStart` | Mark `agent_session.state = running`; record transcript path |
 | `PreToolUse` (matcher `Bash`) | Deny `git push`, `gh pr create`, `gh pr merge`; append an `error` progress row (§8) |
 | `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row |
-| `Notification` | Set `blocked` + reason on the task and session; macOS notification |
+| `Notification` | Set `blocked` + reason on the task and session; macOS notification; the task appears in the orchestrator's **Blocked** section (§10) |
 | `Stop` | Mark session idle. **On the orchestrator, this is the trigger for the report notice** (§9) |
 | `SessionEnd` | Mark stopped/completed; reconcile final spend from the transcript |
 | `WorktreeRemove` | Chain to the user's existing hook, then clear the worktree row |
@@ -462,6 +462,24 @@ installed CLI reads. Every other event replies `{}`.
 
 Spend metering tails the session's JSONL transcript rather than relying on
 hooks, since hooks do not carry `usage`.
+
+The blocking `Notification` types are `permission_prompt`, `agent_needs_input`,
+and anything prefixed `elicitation`. Each sets `task.blocked` with the
+notification message as `blocked_reason`, moves the session to `blocked`, files
+a `blocked` report for the orchestrator, and raises a macOS notification titled
+"Agent needs input". The next `PostToolUse` clears `blocked` again, so a worker
+that was answered leaves the section without anyone pressing anything.
+
+**Stall detection.** Some prompts fire no hook at all — a grandchild process
+reading stdin (`cp -i`, `ssh` asking for a passphrase) belongs to neither
+Claude Code nor Agent Board, so nothing is posted and `last_activity` simply
+stops advancing. The metering tick (already running every 5s, already reading
+`last_activity`) flags a `running` worker whose activity clock has not moved
+for `caps.stallSeconds` — default 120s, deliberately below the 300s idle cap so
+it surfaces before the cap kills it. A stall is a suspicion, not a reported
+state: nothing is written to the task, nothing is killed, one macOS
+notification ("Worker may be stuck") is raised on the transition, and the
+sidebar shows the row until activity resumes or the human acts.
 
 ---
 
@@ -581,8 +599,24 @@ a malicious file into its report must not be able to drive it.
 ## 10. Screens
 
 **Orchestrator Command** — the project's orchestrator terminal (SwiftTerm),
-with a sidebar of pending approvals: spawns awaiting authorization, worker
-proposals, and integration requests.
+with a sidebar of everything waiting on the human, in the order it is urgent:
+
+1. **Blocked** — workers that have stopped making progress. A task with
+   `blocked = 1` joined to its newest active session, and any `running` worker
+   past the stall threshold (§7), the two distinguished by a badge because one
+   is a reported state and the other a suspicion. Each row shows the task
+   title, the session short id, the reason (`blocked_reason`, or a note about
+   stdin for a stall), and how long it has been that way. **Attach** opens the
+   session's real terminal — D15, the only place a permission prompt is
+   answered; **Stop** ends a worker that is wedged rather than asking.
+2. **Pending approvals** — spawns awaiting authorization and integration
+   requests.
+3. **Pending reviews** — tasks in `review`, with branch, worktree and diffstat.
+4. **Proposals** — worker-proposed tasks awaiting promotion.
+
+A blocked worker was previously invisible here: it sat in `running`, burned its
+idle cap, and died with the only evidence being a `last_tool` that had stopped
+moving on the Status screen.
 
 **Task Board** — columns from §5, swimlanes by epic. A card shows title, epic,
 assigned agent, elapsed, spend, and its `blocked`/`failed` flag. Drag between
@@ -743,3 +777,21 @@ from knowing how the agents actually behave first.
 - **Accepted limitation:** "native Mac app" means native chrome around embedded
   terminals. The agent conversation is Claude Code's TUI, not a SwiftUI rendering
   of it.
+- **Partly solved: a child process blocking on stdin.** Observed 2026-09-12 —
+  session `b2b3848d` on task `61da923d` ran `cp -i` (the shell's interactive
+  alias) inside its worktree and wedged waiting for a y/n that never arrived.
+  The prompt belonged to a grandchild process, not to Claude Code, so no
+  `Notification` hook fired, `blocked` was never set, and the session looked
+  healthy until the idle cap killed it.
+
+  **Solved:** it is now visible. The metering tick flags a `running` worker
+  whose `last_activity` has not moved for `caps.stallSeconds` and the
+  orchestrator's Blocked section shows it as `stalled`, with a macOS
+  notification on the transition (§7). **Still unsolved:** the signal is a
+  heuristic, not a report — a worker legitimately inside one very long tool
+  call is indistinguishable from a wedged one, so the threshold trades false
+  positives against how late the wedge is caught. And there is no way to answer
+  a grandchild's prompt from Agent Board: the only remedy is Attach (D15) or
+  Stop. A `PreToolUse` matcher that rejected known-interactive commands
+  (`cp -i`, `rm -i`, `ssh` without `BatchMode`) would prevent the class rather
+  than detect it, but has not been built.

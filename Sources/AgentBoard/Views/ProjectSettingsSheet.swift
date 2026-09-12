@@ -48,6 +48,7 @@ struct ProjectSettingsSheet: View {
                     TextField("Tokens per agent", value: $settings.caps.maxTokensPerAgent, format: .number, prompt: Text("Unlimited"))
                     TextField("Wall clock per agent (seconds)", value: $settings.caps.maxWallClockSeconds, format: .number)
                     TextField("Idle limit (seconds)", value: $settings.caps.maxIdleSeconds, format: .number)
+                    TextField("Stalled after (seconds)", value: $settings.caps.stallSeconds, format: .number)
                     TextField("Project session ceiling", value: $settings.caps.sessionCeiling, format: .number, prompt: Text("Unlimited"))
                 }
 

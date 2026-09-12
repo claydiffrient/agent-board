@@ -6,19 +6,24 @@ public struct Caps: Codable, Sendable, Equatable {
     public var maxWallClockSeconds: Int = 1800
     public var maxIdleSeconds: Int = 300
     public var sessionCeiling: Int? = nil
+    /// How long a running worker may go without a hook before the orchestrator sidebar calls it
+    /// stalled. Deliberately below `maxIdleSeconds` so a wedge surfaces before the cap kills it.
+    public var stallSeconds: Int = 120
 
     public init(
         maxConcurrentWorkers: Int = 3,
         maxTokensPerAgent: Int? = nil,
         maxWallClockSeconds: Int = 1800,
         maxIdleSeconds: Int = 300,
-        sessionCeiling: Int? = nil
+        sessionCeiling: Int? = nil,
+        stallSeconds: Int = 120
     ) {
         self.maxConcurrentWorkers = maxConcurrentWorkers
         self.maxTokensPerAgent = maxTokensPerAgent
         self.maxWallClockSeconds = maxWallClockSeconds
         self.maxIdleSeconds = maxIdleSeconds
         self.sessionCeiling = sessionCeiling
+        self.stallSeconds = stallSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -29,6 +34,7 @@ public struct Caps: Codable, Sendable, Equatable {
         maxWallClockSeconds = try c.decodeIfPresent(Int.self, forKey: .maxWallClockSeconds) ?? defaults.maxWallClockSeconds
         maxIdleSeconds = try c.decodeIfPresent(Int.self, forKey: .maxIdleSeconds) ?? defaults.maxIdleSeconds
         sessionCeiling = try c.decodeIfPresent(Int.self, forKey: .sessionCeiling)
+        stallSeconds = try c.decodeIfPresent(Int.self, forKey: .stallSeconds) ?? defaults.stallSeconds
     }
 }
 
