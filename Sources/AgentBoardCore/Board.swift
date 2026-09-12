@@ -405,6 +405,24 @@ public struct Board: Sendable {
         }
     }
 
+    /// The only path that creates an `integration` approval row: `request_integration` and the epic
+    /// lane button both land here. A pending request is returned as-is rather than duplicated.
+    @discardableResult
+    public func requestIntegration(epicId: String, requestedBy: String) throws -> Approval {
+        try db.writer.write { db in
+            guard let epic = try Epic.fetchOne(db, key: epicId) else {
+                throw BoardError.epicNotFound(epicId)
+            }
+            if let existing = try ApprovalStore.pendingIntegration(db, epicId: epicId) {
+                return existing
+            }
+            return try ApprovalStore.insert(
+                db, projectId: epic.projectId, kind: .integration, taskId: nil, epicId: epicId,
+                requestedBy: requestedBy, reason: nil
+            )
+        }
+    }
+
     /// True when the epic holds at least one task and every one of them is in `done`.
     public func epicReadyForIntegration(epicId: String) throws -> Bool {
         try db.reader.read { db in

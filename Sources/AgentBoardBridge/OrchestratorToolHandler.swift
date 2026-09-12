@@ -561,13 +561,9 @@ public final class OrchestratorToolHandler: ToolHandler {
                 "Epic \(epic.id) is not ready for integration: \(unfinished) of \(counts.total) task(s) are not done yet."
             )
         }
-        let approval = try approvals.create(
-            projectId: identity.projectId,
-            kind: .integration,
-            taskId: nil,
+        let approval = try board.requestIntegration(
             epicId: epic.id,
-            requestedBy: identity.sessionId ?? "orchestrator",
-            reason: nil
+            requestedBy: identity.sessionId ?? "orchestrator"
         )
         return ToolResult(text: "integration approval \(approval.id) pending")
     }

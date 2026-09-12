@@ -2,6 +2,7 @@ import AgentBoardBridge
 import AgentBoardCore
 import AgentBoardRuntime
 import AgentBoardServer
+import AppKit
 import Foundation
 import Observation
 
@@ -21,9 +22,9 @@ enum SupervisorError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .approvalNotFound(let id): return "approval \(id) not found"
+        case .epicNotFound(let id): return "epic \(id) not found"
         case .notAGitRepository(let path): return "\(path) is not a git repository"
         case .projectNotFound(let id): return "project \(id) not found"
-        case .epicNotFound(let id): return "epic \(id) not found"
         case .taskNotFound(let id): return "task \(id) not found"
         case .sessionNotFound(let id): return "session \(id) not found"
         case .sessionHasNoShortId(let id): return "session \(id) has no claude short id yet; reconcile first"
@@ -717,6 +718,35 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 approvalId, approved: false, by: "human", reason: trimmed?.isEmpty == false ? trimmed : nil
             )
             announceReports(projectId: approval.projectId)
+        }
+    }
+
+    // MARK: - Epics
+
+    /// SPEC §5.2 step 2: queues the human approval and nothing else. Same row `request_integration` creates.
+    func requestIntegration(epicId: String) async throws {
+        try await recording {
+            guard try epics.get(epicId) != nil else { throw SupervisorError.epicNotFound(epicId) }
+            try board.requestIntegration(epicId: epicId, requestedBy: "human")
+        }
+    }
+
+    /// SPEC §5.2 step 4: opens the compare page for the human. Never creates the PR, never pushes (D8).
+    @discardableResult
+    func openPullRequest(epicId: String) async throws -> PullRequestOutcome {
+        try await recording {
+            guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
+            guard let project = try projects.get(epic.projectId) else {
+                throw SupervisorError.projectNotFound(epic.projectId)
+            }
+            let opener = PullRequestOpener(repoPath: URL(fileURLWithPath: project.repoPath))
+            let base = project.baseBranch
+            let head = epic.branch
+            let outcome = try await offMain { try opener.open(baseBranch: base, headBranch: head) }
+            if case .openInBrowser(let url, _) = outcome {
+                NSWorkspace.shared.open(url)
+            }
+            return outcome
         }
     }
 

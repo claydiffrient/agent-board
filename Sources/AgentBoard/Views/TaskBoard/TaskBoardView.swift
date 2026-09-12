@@ -11,6 +11,8 @@ struct TaskBoardView: View {
     @State private var epics = Observed<[Epic]>([])
     @State private var selectedTaskId: String?
     @State private var showNewTask = false
+    @State private var showNewEpic = false
+    @State private var approvals = Observed<[Approval]>([])
     @State private var busyMessage: String?
     @State private var errorMessage: String?
     @State private var taskPendingDelete: BoardTask?
@@ -21,6 +23,7 @@ struct TaskBoardView: View {
     private struct Lane: Identifiable {
         let id: String
         let title: String
+        let epic: Epic?
         let tasks: [BoardTask]
 
         func tasks(in column: TaskColumn) -> [BoardTask] {
@@ -33,9 +36,9 @@ struct TaskBoardView: View {
         for task in tasks.value {
             byEpic[task.epicId, default: []].append(task)
         }
-        var result = [Lane(id: "no-epic", title: "No epic", tasks: byEpic[nil] ?? [])]
+        var result = [Lane(id: "no-epic", title: "No epic", epic: nil, tasks: byEpic[nil] ?? [])]
         for epic in epics.value {
-            result.append(Lane(id: epic.id, title: epic.title, tasks: byEpic[epic.id] ?? []))
+            result.append(Lane(id: epic.id, title: epic.title, epic: epic, tasks: byEpic[epic.id] ?? []))
         }
         return result
     }
@@ -47,6 +50,10 @@ struct TaskBoardView: View {
             result[taskId, default: []].append(session)
         }
         return result
+    }
+
+    private var epicsAwaitingIntegrationApproval: Set<String> {
+        Set(approvals.value.filter { $0.kind == .integration }.compactMap(\.epicId))
     }
 
     private var epicTitles: [String: String] {
@@ -100,7 +107,18 @@ struct TaskBoardView: View {
             }
             await epics.run(observation, in: env.db.reader)
         }
+        .task(id: project.id) {
+            await approvals.run(ApprovalStore(env.db).observePending(projectId: project.id), in: env.db.reader)
+        }
         .toolbar {
+            ToolbarItem {
+                Button {
+                    showNewEpic = true
+                } label: {
+                    Label("New Epic", systemImage: "square.stack.3d.up")
+                }
+                .help("Create an epic and its initial tasks")
+            }
             ToolbarItem {
                 Button {
                     showNewTask = true
@@ -112,6 +130,9 @@ struct TaskBoardView: View {
         }
         .sheet(isPresented: $showNewTask) {
             NewTaskSheet(projectId: project.id)
+        }
+        .sheet(isPresented: $showNewEpic) {
+            NewEpicSheet(projectId: project.id)
         }
         .inspector(isPresented: inspectorShown) {
             if let task = tasks.value.first(where: { $0.id == selectedTaskId }) {
@@ -184,7 +205,15 @@ struct TaskBoardView: View {
     @ViewBuilder
     private func laneView(_ lane: Lane) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            if lanes.count > 1 {
+            if let epic = lane.epic {
+                EpicLaneHeader(
+                    epic: epic,
+                    count: EpicLane.taskCount(columns: lane.tasks.lazy.map(\.column)),
+                    integrationPending: epicsAwaitingIntegrationApproval.contains(epic.id),
+                    onRequestIntegration: { requestIntegration(epic) },
+                    onOpenPullRequest: { openPullRequest(epic) }
+                )
+            } else if lanes.count > 1 {
                 Text(lane.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -257,6 +286,16 @@ struct TaskBoardView: View {
             }
         }
         return true
+    }
+
+    private func requestIntegration(_ epic: Epic) {
+        runSupervised("Requesting integration…") { try await env.supervisor.requestIntegration(epicId: epic.id) }
+    }
+
+    private func openPullRequest(_ epic: Epic) {
+        runSupervised("Opening pull request page…") {
+            _ = try await env.supervisor.openPullRequest(epicId: epic.id)
+        }
     }
 
     private func assign(_ taskId: String) {

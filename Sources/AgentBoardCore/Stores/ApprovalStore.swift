@@ -71,6 +71,18 @@ public struct ApprovalStore: Sendable {
         )
     }
 
+    public static func pendingIntegration(_ db: Database, epicId: String) throws -> Approval? {
+        try Approval.fetchOne(
+            db,
+            sql: """
+            SELECT * FROM approval
+            WHERE epic_id = ? AND kind = 'integration' AND resolved_at IS NULL
+            ORDER BY created_at, rowid LIMIT 1
+            """,
+            arguments: [epicId]
+        )
+    }
+
     @discardableResult
     public func resolve(_ id: String, _ resolution: ApprovalResolution) throws -> Approval {
         try db.writer.write { db in try Self.resolve(db, id, resolution) }
