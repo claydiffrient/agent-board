@@ -48,9 +48,22 @@ final class ChildEnvironmentTests: XCTestCase {
         XCTAssertEqual(env, ["PATH": "/bin", "HOME": "/h"])
     }
 
+    func testStripsColorForcingVariables() {
+        let env = ChildEnvironment.sanitized([
+            "FORCE_COLOR": "3", "COLORTERM": "truecolor", "CLICOLOR_FORCE": "1",
+            "TERM": "xterm-256color", "PATH": "/bin", "NO_COLOR": "1",
+        ])
+        XCTAssertNil(env["FORCE_COLOR"])
+        XCTAssertNil(env["COLORTERM"])
+        XCTAssertNil(env["CLICOLOR_FORCE"])
+        XCTAssertEqual(env, ["TERM": "xterm-256color", "PATH": "/bin", "NO_COLOR": "1"])
+    }
+
     func testTerminalEnvironmentForcesTerm() {
-        let lines = ChildEnvironment.forTerminal(["TERM": "dumb"])
+        let lines = ChildEnvironment.forTerminal(["TERM": "dumb", "FORCE_COLOR": "3"])
         XCTAssertTrue(lines.contains("TERM=xterm-256color"))
         XCTAssertTrue(lines.contains("COLORTERM=truecolor"))
+        XCTAssertFalse(lines.contains { $0.hasPrefix("FORCE_COLOR=") })
+        XCTAssertEqual(lines.filter { $0.hasPrefix("COLORTERM=") }, ["COLORTERM=truecolor"])
     }
 }

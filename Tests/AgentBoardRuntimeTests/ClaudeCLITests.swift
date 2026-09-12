@@ -23,6 +23,55 @@ final class ClaudeCLITests: XCTestCase {
         XCTAssertNil(ClaudeCLI.parseShortId(from: ""))
     }
 
+    func testParseShortIdStripsANSIColorCodes() {
+        let stdout = "\u{1B}[2K\u{1B}[1mbackgrounded\u{1B}[0m \u{B7} \u{1B}[36m3f9a1c2b\u{1B}[0m \u{B7} \u{1B}[32mfix-login-bug\u{1B}[0m\n"
+        XCTAssertEqual(ClaudeCLI.parseShortId(from: stdout), "3f9a1c2b")
+    }
+
+    func testParseShortIdStripsOSCAndCursorSequences() {
+        let stdout = "\u{1B}]0;claude\u{07}\u{1B}[?25l\u{1B}[38;5;208mbackgrounded \u{B7} deadbeef\u{1B}[0m\n"
+        XCTAssertEqual(ClaudeCLI.parseShortId(from: stdout), "deadbeef")
+    }
+
+    func testStrippingANSIEscapesLeavesPlainTextAlone() {
+        XCTAssertEqual(ClaudeCLI.strippingANSIEscapes("backgrounded \u{B7} abc"), "backgrounded \u{B7} abc")
+        XCTAssertEqual(ClaudeCLI.strippingANSIEscapes("a\u{1B}[31mb\u{1B}[0mc"), "abc")
+    }
+
+    func testRecoveredAgentMatchesCwdNameAndLaunchTime() {
+        let launchedAt = Date(timeIntervalSince1970: 1_788_000_000)
+        let cwd = URL(fileURLWithPath: "/wt/task-1")
+        let match = AgentInfo(
+            id: "aa11bb22", cwd: "/wt/task-1", kind: "background", sessionId: "S-match",
+            name: "task-1", startedAt: launchedAt.timeIntervalSince1970 * 1000 + 500
+        )
+        let agents = [
+            AgentInfo(id: "cc33", cwd: "/wt/task-2", kind: "background", sessionId: "S-other-cwd",
+                      name: "task-1", startedAt: match.startedAt),
+            AgentInfo(id: "dd44", cwd: "/wt/task-1", kind: "background", sessionId: "S-other-name",
+                      name: "task-9", startedAt: match.startedAt),
+            AgentInfo(id: "ee55", cwd: "/wt/task-1", kind: "background", sessionId: "S-stale",
+                      name: "task-1", startedAt: (launchedAt.timeIntervalSince1970 - 600) * 1000),
+            AgentInfo(cwd: "/wt/task-1", kind: "interactive", sessionId: "S-interactive",
+                      name: "task-1", pid: 99, startedAt: match.startedAt),
+            match,
+        ]
+        let recovered = ClaudeCLI.recoveredAgent(from: agents, cwd: cwd, name: "task-1", launchedAt: launchedAt)
+        XCTAssertEqual(recovered?.sessionId, "S-match")
+        XCTAssertEqual(recovered?.id, "aa11bb22")
+    }
+
+    func testRecoveredAgentReturnsNilWhenNothingMatches() {
+        let launchedAt = Date(timeIntervalSince1970: 1_788_000_000)
+        let agents = [
+            AgentInfo(id: "aa11", cwd: "/wt/task-1", kind: "background", sessionId: "S",
+                      name: "task-1", startedAt: (launchedAt.timeIntervalSince1970 - 60) * 1000)
+        ]
+        XCTAssertNil(ClaudeCLI.recoveredAgent(
+            from: agents, cwd: URL(fileURLWithPath: "/wt/task-1"), name: "task-1", launchedAt: launchedAt
+        ))
+    }
+
     func testAgentInfoDecodesBothShapes() throws {
         let json = """
         [

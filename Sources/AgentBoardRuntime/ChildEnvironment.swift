@@ -6,8 +6,14 @@ import Foundation
 public enum ChildEnvironment {
     public static let strippedPrefixes = ["CLAUDE_CODE_", "CLAUDECODE", "CLAUDE_PID", "CLAUDE_ENV_FILE", "CLAUDE_EFFORT"]
 
+    /// Colour forcing survives a pipe, so an inherited `FORCE_COLOR=3` puts ANSI escapes into the stdout
+    /// Agent Board parses. `forTerminal` sets its own values back after calling `sanitized`.
+    public static let strippedVariables: Set<String> = ["FORCE_COLOR", "COLORTERM", "CLICOLOR_FORCE"]
+
     public static func sanitized(_ base: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
-        base.filter { key, _ in !strippedPrefixes.contains { key.hasPrefix($0) } }
+        base.filter { key, _ in
+            !strippedVariables.contains(key) && !strippedPrefixes.contains { key.hasPrefix($0) }
+        }
     }
 
     public static func forTerminal(_ base: [String: String] = ProcessInfo.processInfo.environment) -> [String] {
