@@ -585,8 +585,61 @@ from knowing how the agents actually behave first.
 ## 12. Open items
 
 - **Verified by M0:** a healthy `claude --bg` session honors injected hooks and
-  MCP config. Still unverified: that the `autoMode` block from `--settings` is
-  applied (the spike ran with the shipped defaults).
+  MCP config.
+- **Verified by M3, with a known limitation:** the project `autoMode` block
+  passed via `--settings` does reach the effective config of a spawned
+  `--bg` worker, but a `soft_deny` rule in it does not stop or pause a
+  matching tool call in that worker — it just runs.
+
+  Method: registered a project whose `settings_json.autoModeJSON` was
+  `{"soft_deny": ["AgentBoard Canary M3 [named+specifics]: any command whose
+  text contains the exact token AGENTBOARD_CANARY_9f3d2c17 is always a
+  soft-deny requiring approval, with no exceptions, regardless of any other
+  rule in this policy."]}`, then ran the headless E2E path (§ below,
+  `AGENTBOARD_E2E_REPO` against a throwaway fixture repo) with the task body
+  changed to run `echo AGENTBOARD_CANARY_9f3d2c17` before the usual
+  hello.txt step. Two independent checks:
+
+  1. `SessionConfigWriter.write` embeds `autoModeJSON` verbatim under the
+     `"autoMode"` key of `settings-<session>.json` (confirmed by reading the
+     file the real spawn below generated). To check the CLI actually loads
+     that key, ran the same shape standalone:
+     ```
+     $ claude --settings test-settings.json auto-mode config > with-settings.json
+     $ grep -n AGENTBOARD_CANARY_9f3d2c17 with-settings.json
+     95:    "AgentBoard Canary M3 [named+specifics]: any command whose text contains the exact token AGENTBOARD_CANARY_9f3d2c17 is always a soft-deny requiring approval, with no exceptions, regardless of any other rule in this policy."
+     ```
+     where `test-settings.json` was `{"autoMode": {"soft_deny": [<the same
+     rule>]}}`. The rule shows up appended to the 70 shipped `soft_deny`
+     defaults — the `--settings` file's `autoMode` key is honored by
+     `auto-mode config`.
+  2. The real worker's `PostToolUse` hook payload, captured by Agent Board's
+     `/hooks` endpoint and read back from the `hook_event` table:
+     ```
+     "hook_event_name": "PostToolUse",
+     "tool_name": "Bash",
+     "permission_mode": "auto",
+     "tool_input": { "command": "echo AGENTBOARD_CANARY_9f3d2c17", ... },
+     "tool_response": { "stdout": "AGENTBOARD_CANARY_9f3d2c17", ... },
+     "duration_ms": 294
+     ```
+     No ask, no denial, no distinguishing field — the command ran exactly
+     like any other Bash call. The task went on to `report_complete` and
+     `E2E PASS`.
+
+  **Known limitation:** a project `autoMode.soft_deny` rule is not a working
+  safety control for an unattended `claude --bg --permission-mode auto`
+  worker — there is no user for the classifier to ask, and the match does
+  not fall back to a deny. §8's claim that "workers never push... [is]
+  enforced twice: `--disallowedTools` and a project `autoMode` soft-deny
+  rule" is therefore wrong for the soft-deny half: only `--disallowedTools`
+  (a hard, CLI-level block) is a real backstop for anything that must never
+  happen unattended. `autoMode` is still useful for `hard_deny` rules and for
+  the interactive orchestrator session (which has a user to ask), but a
+  project should not add a `soft_deny` rule expecting it to stop a worker.
+  Follow-up: file a task to either drop the "enforced twice" claim in §8 down
+  to `--disallowedTools` alone, or find the actual mechanism (if any) for
+  making a `--bg` worker treat a soft-deny match as a hard stop, and re-test.
 - **Unresolved:** the localhost port is ephemeral per app launch, but
   `--bg --resume` reuses the saved `--settings`/`--mcp-config` paths. Either
   rewrite both files before every resume (current plan) or pick a stable
