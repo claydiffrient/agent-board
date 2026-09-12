@@ -371,17 +371,9 @@ policy is worse than one that does nothing.
 Automatic archiving never fights a human: `unarchive` stamps `unarchived_at`,
 and while that is set no policy re-archives the task. Moving a task out of `done`
 clears `done_at` and `unarchived_at` together, so a reopened task starts both the
-clock and the policy from scratch.
-
-The human's side of the archive is the Task Board. Its **Archive** toolbar
-button names its target set — "Archive 23 Done Tasks" — and confirms before
-acting; it is offered under every policy, because the automatic modes save the
-human from remembering, not from deciding. A column that is hiding archived
-tasks says so, in its header and in each lane's cell, so the board never loses
-work silently. Archived tasks come back into view through the **Show Archived**
-toggle, which is off at every launch and draws them dimmed and dashed in the
-columns they are actually in; from there a single task is unarchived from its
-context menu or from the inspector.
+clock and the policy from scratch. The picker for the three modes lives in
+Project Settings, next to the day count it disables outside `afterDays`; the
+Task Board's own archive controls are in §10.
 
 ---
 
@@ -413,6 +405,11 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
   Derivita), and `agentboard/<task-id>` is deleted once it is merged into the
   base or epic branch. An unmerged branch, or a worktree with uncommitted
   changes, is kept and the reason surfaced in the status bar.
+- `archived` — also a flag, not a column, with `blocked` and `failed` as the
+  precedent: D7's six columns (`proposed`/`backlog`/`ready`/`running`/`review`/
+  `done`) are unchanged by the archive feature. Only a `done` task can be
+  archived (§4), and archiving does not move it — an archived task is still a
+  `done` task, just hidden from the default board query.
 
 Reconcile also reaps worktrees under the project's worktree root that no active
 session owns, and deletes merged `agentboard/*` branches that no longer have a
@@ -442,8 +439,18 @@ of the autonomy setting.
    `agentboard/epic-<id>` and spawns an integrator worker whose job is to merge
    each `agentboard/<task-id>` into the epic branch, resolve conflicts, and get
    the build green.
-4. The integrator reports. The PR from `agentboard/epic-<id>` → base is opened
-   **by you**, from a button on the epic — not by an agent.
+4. The integrator reports. Under the default `afterEpicMerge` archive policy
+   (§4), the epic's merge is itself the trigger: `Board.complete` moves the
+   epic to `done` and archives every `done` task of it, the synthetic
+   `origin=integration` task included, inside the same transaction. **That
+   integration task lands directly in `done`, not `review`** — the epic
+   reaching `done` is its acceptance, and a task about to be archived has no
+   business sitting in the review queue. This is a real trade-off, not an
+   implementation detail: under the default policy, the integrator's own
+   completion produces no review-queue entry. Every other archive policy
+   leaves it in `review` for a human, exactly as before this feature existed.
+5. The PR from `agentboard/epic-<id>` → base is opened **by you**, from a
+   button on the epic — not by an agent.
 
 ---
 
@@ -692,6 +699,17 @@ moving on the Status screen.
 assigned agent, elapsed, spend, and its `blocked`/`failed` flag. Drag between
 columns. Cards in `review` show the branch, worktree path, and a diffstat.
 
+The toolbar's **Archive** button names its target set in its label — "Archive
+23 Done Tasks" — and confirms before acting; it is offered under every archive
+policy (§4), because the automatic modes save the human from remembering, not
+from deciding. With the **Show Archived** toggle off (its state at every
+launch) an archived card is hidden and each column that is hiding one says so
+in a small per-column count — "3 archived" — rather than letting the work
+disappear silently. Turning the toggle on draws archived cards back into the
+columns they actually sit in (always `done`), dimmed to 55% opacity with a
+dashed border and an "archived `<when>`" line; from there a card's context menu
+or the inspector unarchives it.
+
 **Status** — the agent roster. Reconciled from `claude agents --json --all`
 joined against `agent_session`, so a session that died outside the app is shown
 as dead rather than phantom-running. Per agent: task, state, elapsed, spend
@@ -865,3 +883,17 @@ from knowing how the agents actually behave first.
   Stop. A `PreToolUse` matcher that rejected known-interactive commands
   (`cp -i`, `rm -i`, `ssh` without `BatchMode`) would prevent the class rather
   than detect it, but has not been built.
+- **Deliberate gap: a standalone `done` task never auto-archives under
+  `afterEpicMerge`.** That policy's only trigger is `Board.complete` merging an
+  epic (§5.2); a task with no `epic_id` has no merge event to ride, so it
+  accumulates on the board until archived by hand with the Task Board button.
+  There is intentionally no age fallback for this case — a policy that quietly
+  behaves like a different policy (`afterDays`) is worse than one that does
+  nothing, per the workers' own reasoning in `bf81e80`. If this project's done
+  work is mostly standalone rather than epic-scoped, `afterEpicMerge`'s default
+  archives almost nothing automatically; `afterDays` is the policy that fits.
+- **Not built: any UI for the `afterDays` sweep's cadence or backlog.** The
+  sweep only runs while the app is open (it rides `WorkerSupervisor`'s existing
+  metering tick, throttled to once per 5 minutes) and there is no indicator of
+  when it last ran or how many tasks are currently past their threshold and
+  waiting for the next tick — you only see the effect once a card disappears.
