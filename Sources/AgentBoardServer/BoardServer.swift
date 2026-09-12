@@ -41,7 +41,9 @@ public final class BoardServer: Sendable {
     /// Falls back to an ephemeral port when the preferred one is taken.
     public func start(preferredPort: Int? = nil) async throws -> Int {
         if let preferredPort, preferredPort > 0 {
-            do { return try await bind(port: preferredPort) } catch BoardServerError.failedToBind {}
+            do { return try await bind(port: preferredPort) } catch {
+                logger.warning("port \(preferredPort) unavailable (\(error)); falling back to an ephemeral port")
+            }
         }
         return try await bind(port: 0)
     }

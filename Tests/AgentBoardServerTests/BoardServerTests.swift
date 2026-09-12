@@ -367,3 +367,28 @@ final class BoardServerTests: XCTestCase {
         return (status, try JSONSerialization.jsonObject(with: data), headers)
     }
 }
+
+final class PreferredPortTests: XCTestCase {
+    func testFallsBackWhenPreferredPortIsTaken() async throws {
+        let tokens = InMemoryTokenResolver()
+        let first = BoardServer(tokens: tokens, hooks: RecordingHookSink(), tools: FakeToolHandler())
+        let taken = try await first.start()
+        let second = BoardServer(tokens: tokens, hooks: RecordingHookSink(), tools: FakeToolHandler())
+        let port = try await second.start(preferredPort: taken)
+        XCTAssertNotEqual(port, taken)
+        XCTAssertGreaterThan(port, 0)
+        await second.stop()
+        await first.stop()
+    }
+
+    func testUsesPreferredPortWhenFree() async throws {
+        let tokens = InMemoryTokenResolver()
+        let probe = BoardServer(tokens: tokens, hooks: RecordingHookSink(), tools: FakeToolHandler())
+        let free = try await probe.start()
+        await probe.stop()
+        let server = BoardServer(tokens: tokens, hooks: RecordingHookSink(), tools: FakeToolHandler())
+        let port = try await server.start(preferredPort: free)
+        XCTAssertEqual(port, free)
+        await server.stop()
+    }
+}
