@@ -6,6 +6,8 @@ struct TaskInspectorView: View {
     let task: BoardTask
     let allTasks: [BoardTask]
     let sessions: [AgentSession]
+    let drafts: TaskDraftCache
+    let onClose: () -> Void
 
     @Environment(AppEnvironment.self) private var env
     @Environment(\.openWindow) private var openWindow
@@ -21,8 +23,16 @@ struct TaskInspectorView: View {
         allTasks.filter { $0.id != task.id }
     }
 
+    private var savedDraft: TaskDraft {
+        TaskDraft(body: task.body ?? "", acceptance: task.acceptance ?? "", model: task.model)
+    }
+
+    private var currentDraft: TaskDraft {
+        TaskDraft(body: draftBody, acceptance: draftAcceptance, model: draftModel)
+    }
+
     private var hasEdits: Bool {
-        draftBody != (task.body ?? "") || draftAcceptance != (task.acceptance ?? "")
+        currentDraft != savedDraft
     }
 
     var body: some View {
@@ -57,7 +67,20 @@ struct TaskInspectorView: View {
             }
             .padding()
         }
-        .onChange(of: task.id, initial: true) { resetDrafts() }
+        .onChange(of: task.id, initial: true) { previousId, newId in
+            if previousId != newId { retainDrafts(for: previousId) }
+            loadDrafts()
+        }
+        .onDisappear { retainDrafts(for: task.id) }
+        .onExitCommand(perform: onClose)
+        .toolbar {
+            ToolbarItem {
+                Button(action: onClose) {
+                    Label("Close Inspector", systemImage: "sidebar.trailing")
+                }
+                .help("Close the inspector (unsaved edits are kept)")
+            }
+        }
         .task(id: task.id) {
             let taskId = task.id
             let observation = ValueObservation.tracking { db -> [String] in
@@ -229,9 +252,29 @@ struct TaskInspectorView: View {
     }
 
     private func resetDrafts() {
-        draftBody = task.body ?? ""
-        draftAcceptance = task.acceptance ?? ""
-        draftModel = task.model
+        apply(savedDraft)
+        drafts.clear(task.id)
+    }
+
+    /// Restores whatever was typed before the tray was last closed, falling back to the saved task.
+    private func loadDrafts() {
+        apply(drafts.draft(for: task.id) ?? savedDraft)
+    }
+
+    private func apply(_ draft: TaskDraft) {
+        draftBody = draft.body
+        draftAcceptance = draft.acceptance
+        draftModel = draft.model
+    }
+
+    private func retainDrafts(for taskId: String) {
+        let saved = taskId == task.id
+            ? savedDraft
+            : allTasks.first { $0.id == taskId }.map {
+                TaskDraft(body: $0.body ?? "", acceptance: $0.acceptance ?? "", model: $0.model)
+            }
+        guard let saved else { return }
+        drafts.retain(currentDraft, for: taskId, ifDifferentFrom: saved)
     }
 
     private func save() {
@@ -241,6 +284,7 @@ struct TaskInspectorView: View {
         updated.model = draftModel
         do {
             try TaskStore(env.db).update(updated)
+            drafts.clear(task.id)
         } catch {
             errorMessage = errorText(error)
         }
