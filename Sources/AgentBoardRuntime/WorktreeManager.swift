@@ -52,6 +52,17 @@ public struct WorktreeManager: Sendable {
         return path
     }
 
+    /// Checks out an existing branch (the epic branch cut by `ensureBranch`) rather than cutting a new one.
+    public func createForBranch(name: String, branch: String) throws -> URL {
+        guard try branchExists(branch) else {
+            throw AgentRuntimeError("cannot create a worktree for branch \(branch): no such branch in \(repoPath.path)")
+        }
+        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
+        let path = worktreeRoot.appendingPathComponent(name)
+        try git(["worktree", "add", path.path, branch])
+        return path
+    }
+
     public func ensureBranch(_ name: String, from base: String) throws {
         if try branchExists(name) { return }
         try git(["branch", name, base])
@@ -87,6 +98,17 @@ public struct WorktreeManager: Sendable {
     public func headCommit(worktree: URL) throws -> String {
         try gitChecked(["rev-parse", "HEAD"], cwd: worktree).stdout
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Branches absent from the repo are reported as unmerged rather than raising.
+    public func mergeStatus(worktree: URL, branches: [String]) throws -> [String: Bool] {
+        let output = try gitChecked(["branch", "--merged", "HEAD", "--format=%(refname:short)"], cwd: worktree).stdout
+        let merged = Set(
+            output.split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        )
+        return branches.reduce(into: [:]) { $0[$1] = merged.contains($1) }
     }
 
     public func hasUncommittedChanges(worktree: URL) throws -> Bool {
