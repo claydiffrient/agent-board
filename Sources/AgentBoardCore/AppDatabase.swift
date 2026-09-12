@@ -45,6 +45,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("shutdown_order") { db in
             try db.execute(sql: Schema.shutdownOrder)
         }
+        migrator.registerMigration("shutdown_delivery") { db in
+            try db.execute(sql: Schema.shutdownDelivery)
+        }
         return migrator
     }
 }

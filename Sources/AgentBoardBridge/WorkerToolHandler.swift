@@ -76,6 +76,16 @@ public final class WorkerToolHandler: ToolHandler {
             )
         ),
         ToolDescriptor(
+            name: "acknowledge_shutdown",
+            description: "Answer a wind-down order. Call it only after you have committed what is in your worktree. "
+                + "The note is what the next worker on this task reads, so say where you stopped and what still "
+                + "remains. Your task goes back to ready, not review, and Agent Board stops your session.",
+            inputSchema: ToolSchema.object(
+                properties: ["note": ToolSchema.string("Where you stopped and what remains.", maxLength: 4000)],
+                required: ["note"]
+            )
+        ),
+        ToolDescriptor(
             name: "report_blocked",
             description: "Declare that you cannot make progress without a human decision or information you do not have. "
                 + "State exactly what you need. The task is flagged blocked and a person is notified.",
@@ -119,6 +129,16 @@ public final class WorkerToolHandler: ToolHandler {
             let result = try reportComplete(task, arguments: arguments, identity: identity)
             await events.reportQueued(projectId: identity.projectId)
             return result
+        case "acknowledge_shutdown":
+            let note = try ToolArguments.requiredString("note", in: arguments)
+            let sessionId = try requiredSession(identity)
+            do {
+                _ = try board.acknowledgeShutdown(sessionId: sessionId, note: note)
+            } catch BoardError.noShutdownOrder {
+                throw ToolError("No shutdown order is outstanding on this project; keep working on your task.")
+            }
+            await events.workerAcknowledgedShutdown(projectId: identity.projectId, sessionId: sessionId)
+            return ToolResult(text: "acknowledged — stop now")
         case "report_blocked":
             let reason = try ToolArguments.requiredString("reason", in: arguments)
             try board.block(taskId: task.id, sessionId: try requiredSession(identity), reason: reason)

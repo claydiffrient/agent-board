@@ -9,6 +9,7 @@ actor RecordingEventSink: BoardEventSink {
         case notify(title: String, body: String)
         case orchestratorTurnEnded(projectId: String, sessionId: String)
         case reportQueued(projectId: String)
+        case workerAcknowledgedShutdown(projectId: String, sessionId: String)
     }
 
     private(set) var events: [Event] = []
@@ -23,6 +24,10 @@ actor RecordingEventSink: BoardEventSink {
 
     func reportQueued(projectId: String) async {
         events.append(.reportQueued(projectId: projectId))
+    }
+
+    func workerAcknowledgedShutdown(projectId: String, sessionId: String) async {
+        events.append(.workerAcknowledgedShutdown(projectId: projectId, sessionId: sessionId))
     }
 }
 
@@ -151,6 +156,10 @@ struct BridgeFixture {
     func hook(_ name: String, sessionId: String, identity: TokenIdentity, lastAssistantMessage: String? = nil) async -> HookDecision? {
         let event = HookEvent(name: name, sessionId: sessionId, lastAssistantMessage: lastAssistantMessage, rawJSON: "{}")
         return await hooks.handle(event, identity: identity)
+    }
+
+    func workerSession(_ id: String, taskId: String, state: SessionState = .running) throws -> AgentSession {
+        try session(id, role: .worker, state: state, taskId: taskId)
     }
 
     func preToolUse(_ command: String, sessionId: String, identity: TokenIdentity, tool: String = "Bash") async -> HookDecision? {

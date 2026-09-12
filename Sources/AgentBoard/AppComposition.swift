@@ -57,4 +57,6 @@ final class StubSupervisor: WorkerSupervising {
     }
     func cancelShutdown(projectId: String, by: String) async throws -> ShutdownOrder? { throw StubError.notWired }
     func isShuttingDown(projectId: String) -> Bool { false }
+    func deliverShutdownOrder(projectId: String) async throws -> ShutdownProgress { throw StubError.notWired }
+    var shutdownProgress: [String: ShutdownProgress] { [:] }
 }

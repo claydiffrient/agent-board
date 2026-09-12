@@ -8,6 +8,7 @@ import Foundation
 actor FakeRuntime: AgentRuntime {
     private(set) var stopped: [String] = []
     private(set) var resumed: [String] = []
+    private(set) var resumePrompts: [String] = []
     private(set) var spawns: [SpawnRequest] = []
 
     func spawn(_ request: SpawnRequest) async throws -> SpawnedAgent {
@@ -17,6 +18,7 @@ actor FakeRuntime: AgentRuntime {
 
     func resume(sessionId: String, cwd: URL, prompt: String) async throws -> SpawnedAgent {
         resumed.append(sessionId)
+        resumePrompts.append(prompt)
         return SpawnedAgent(shortId: "short-\(sessionId)", sessionId: sessionId)
     }
 
@@ -48,6 +50,7 @@ struct SupervisorFixture {
     var board: Board { Board(db) }
 
     var tasks: TaskStore { TaskStore(db) }
+    var deliveries: ShutdownDeliveryStore { ShutdownDeliveryStore(db) }
     var sessions: SessionStore { SessionStore(db) }
     var grants: TokenGrantStore { TokenGrantStore(db) }
 
@@ -212,6 +215,22 @@ struct SupervisorFixture {
 
     private func trimmed(_ output: String) -> String {
         output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func setGraceSeconds(_ seconds: Int) throws {
+        var settings = project.settings
+        settings.caps.shutdownGraceSeconds = seconds
+        try ProjectStore(db).updateSettings(project.id, settings)
+    }
+
+    /// Backdates the enrollment so a grace period can expire without the test sleeping through it.
+    func age(orderId: String, sessionId: String, bySeconds: Int) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE shutdown_delivery SET ordered_at = ordered_at - ? WHERE order_id = ? AND session_id = ?",
+                arguments: [Int64(bySeconds) * 1000, orderId, sessionId]
+            )
+        }
     }
 
     func cleanUp() {

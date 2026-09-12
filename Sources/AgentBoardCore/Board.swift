@@ -57,18 +57,21 @@ public enum SessionTermination: Sendable, Equatable {
     case stoppedByHuman
     /// `reconcile` found the process gone without Agent Board having stopped it.
     case vanished
+    /// The worker was told to wind down, committed, and answered. Neither a kill nor a cap breach:
+    /// the task is unfinished work with a note on it, so it must not read as failed or accepted.
+    case shutdownAcknowledged(note: String?)
 
     var sessionState: SessionState {
         switch self {
         case .capBreach: return .failed
-        case .stoppedByHuman, .vanished: return .stopped
+        case .stoppedByHuman, .vanished, .shutdownAcknowledged: return .stopped
         }
     }
 
     var flagsTaskFailed: Bool {
         switch self {
         case .capBreach, .vanished: return true
-        case .stoppedByHuman: return false
+        case .stoppedByHuman, .shutdownAcknowledged: return false
         }
     }
 
@@ -77,6 +80,31 @@ public enum SessionTermination: Sendable, Equatable {
         case .capBreach(let breach): return breach
         case .stoppedByHuman: return "stopped from Agent Board by a human"
         case .vanished: return "the session is no longer running and Agent Board did not stop it"
+        case .shutdownAcknowledged: return "wound down for the project shutdown order and acknowledged"
+        }
+    }
+
+    var reportKind: ReportKind {
+        switch self {
+        case .shutdownAcknowledged: return .decision
+        case .capBreach, .stoppedByHuman, .vanished: return .failed
+        }
+    }
+
+    var headline: String {
+        switch self {
+        case .shutdownAcknowledged: return "Worker wound down for the shutdown order: \(reason)"
+        case .capBreach, .stoppedByHuman, .vanished: return "Worker session ended without reporting: \(reason)"
+        }
+    }
+
+    /// The worker's own account of where it stopped, carried into the report the orchestrator reads.
+    var detail: String? {
+        switch self {
+        case .shutdownAcknowledged(let note):
+            guard let note, !note.isEmpty else { return nil }
+            return note
+        case .capBreach, .stoppedByHuman, .vanished: return nil
         }
     }
 }
@@ -202,6 +230,31 @@ public struct Board: Sendable {
                 db, projectId: approval.projectId, taskId: approval.taskId, sessionId: nil, kind: .decision, body: body
             )
             return approval
+        }
+    }
+
+    /// A worker's half of the wind-down: the resume note is recorded against the order and the task,
+    /// and nothing else moves. Stopping the session and terminating the row is Agent Board's half,
+    /// because the worker cannot be trusted to still be alive once it has been told to stop.
+    @discardableResult
+    public func acknowledgeShutdown(sessionId: String, note: String) throws -> ShutdownAcknowledgement {
+        try db.writer.write { db in
+            guard let session = try AgentSession.fetchOne(db, key: sessionId) else {
+                throw BoardError.sessionNotFound(sessionId)
+            }
+            guard let order = try ShutdownOrderStore.outstanding(db, projectId: session.projectId) else {
+                throw BoardError.noShutdownOrder(session.projectId)
+            }
+            let delivery = try ShutdownDeliveryStore.acknowledge(
+                db, orderId: order.id, sessionId: sessionId, taskId: session.taskId, note: note, at: .nowMillis
+            )
+            if let taskId = session.taskId {
+                _ = try ProgressStore.append(
+                    db, taskId: taskId, sessionId: sessionId, kind: .status,
+                    text: "Shutdown acknowledged: \(note)"
+                )
+            }
+            return ShutdownAcknowledgement(order: order, delivery: delivery, projectId: session.projectId, taskId: session.taskId)
         }
     }
 
@@ -360,16 +413,20 @@ public struct Board: Sendable {
             if stranded {
                 try TaskStore.move(db, taskId, to: .ready, before: nil)
             }
-            let body = [
-                "Worker session ended without reporting: \(reason)",
+            var lines = [
+                cause.headline,
                 "Task: \(taskId) (\(task.title))",
                 "Session: \(sessionId) (attempt \(session.attempt))",
                 stranded
                     ? "The task is back in ready; dispatch it again if you want it retried."
                     : "The task stayed in \(task.column.rawValue).",
-            ].joined(separator: "\n")
+            ]
+            if let detail = cause.detail {
+                lines.append("Where the worker stopped and what remains:\n\(detail)")
+            }
             return try ReportStore.insert(
-                db, projectId: session.projectId, taskId: taskId, sessionId: sessionId, kind: .failed, body: body
+                db, projectId: session.projectId, taskId: taskId, sessionId: sessionId,
+                kind: cause.reportKind, body: lines.joined(separator: "\n")
             )
         }
     }
@@ -541,5 +598,20 @@ public struct NewEpicTask: Sendable, Equatable {
         self.model = model
         self.origin = origin
         self.dependsOn = dependsOn
+    }
+}
+
+
+public struct ShutdownAcknowledgement: Sendable, Equatable {
+    public var order: ShutdownOrder
+    public var delivery: ShutdownDelivery
+    public var projectId: String
+    public var taskId: String?
+
+    public init(order: ShutdownOrder, delivery: ShutdownDelivery, projectId: String, taskId: String?) {
+        self.order = order
+        self.delivery = delivery
+        self.projectId = projectId
+        self.taskId = taskId
     }
 }
