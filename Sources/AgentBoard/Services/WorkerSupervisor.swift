@@ -8,6 +8,7 @@ import Observation
 enum SupervisorError: LocalizedError {
     case notAGitRepository(String)
     case projectNotFound(String)
+    case epicNotFound(String)
     case taskNotFound(String)
     case sessionNotFound(String)
     case sessionHasNoShortId(String)
@@ -22,6 +23,7 @@ enum SupervisorError: LocalizedError {
         case .approvalNotFound(let id): return "approval \(id) not found"
         case .notAGitRepository(let path): return "\(path) is not a git repository"
         case .projectNotFound(let id): return "project \(id) not found"
+        case .epicNotFound(let id): return "epic \(id) not found"
         case .taskNotFound(let id): return "task \(id) not found"
         case .sessionNotFound(let id): return "session \(id) not found"
         case .sessionHasNoShortId(let id): return "session \(id) has no claude short id yet; reconcile first"
@@ -44,14 +46,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let runtime: any AgentRuntime
     @ObservationIgnored private let server: BoardServer
     @ObservationIgnored private let appSupportDir: URL
+    @ObservationIgnored private let projectsRoot: URL
     @ObservationIgnored private let projects: ProjectStore
     @ObservationIgnored private let tasks: TaskStore
     @ObservationIgnored private let sessions: SessionStore
     @ObservationIgnored private let grants: TokenGrantStore
     @ObservationIgnored private let hookEvents: HookEventStore
     @ObservationIgnored private let approvals: ApprovalStore
-    @ObservationIgnored private let notes: NoteStore
     @ObservationIgnored private let epics: EpicStore
+    @ObservationIgnored private let notes: NoteStore
     @ObservationIgnored private let board: Board
     @ObservationIgnored private var meteringTask: _Concurrency.Task<Void, Never>?
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
@@ -63,19 +66,26 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Sessions that ended this recently still get one more transcript read so final spend lands.
     static let finalSpendWindowMillis: Int64 = 15_000
 
-    init(db: AppDatabase, runtime: any AgentRuntime, server: BoardServer, appSupportDir: URL) {
+    init(
+        db: AppDatabase,
+        runtime: any AgentRuntime,
+        server: BoardServer,
+        appSupportDir: URL,
+        projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot
+    ) {
         self.db = db
         self.runtime = runtime
         self.server = server
         self.appSupportDir = appSupportDir
+        self.projectsRoot = projectsRoot
         projects = ProjectStore(db)
         tasks = TaskStore(db)
         sessions = SessionStore(db)
         grants = TokenGrantStore(db)
         hookEvents = HookEventStore(db)
         approvals = ApprovalStore(db)
-        notes = NoteStore(db)
         epics = EpicStore(db)
+        notes = NoteStore(db)
         board = Board(db)
     }
 
@@ -172,52 +182,151 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
 
         do {
-            let memoryDir = URL(fileURLWithPath: project.memoryDir ?? ClaudeProjectPaths.memoryDir(forPath: project.repoPath).path)
-            _ = try ClaudeProjectPaths.linkMemory(worktreePath: worktree.path, to: memoryDir)
-
-            let grant = try grants.issue(projectId: project.id, scope: .worker, taskId: taskId)
-            let configFiles = try SessionConfigWriter.write(
-                configDir: sessionConfigDir,
-                configId: Self.configId(taskId: taskId, attempt: attempt),
-                port: port,
-                token: grant.token,
-                autoModeJSON: project.settings.autoModeJSON,
-                extraMcpServers: nil
-            )
-            let request = SpawnRequest(
-                cwd: worktree,
-                name: Self.sessionName(for: task),
-                prompt: Self.openingPrompt(
-                    task: task, branch: branch, attempt: attempt, epicGoal: epic?.goal,
-                    notes: try notes.notesForSpawn(
-                        projectId: project.id, taskId: taskId, epicId: task.epicId
-                    )
+            let recorded = try await launch(
+                LaunchPlan(
+                    project: project,
+                    taskId: taskId,
+                    worktree: worktree,
+                    branch: branch,
+                    configId: Self.configId(taskId: taskId, attempt: attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: Self.openingPrompt(
+                        task: task, branch: branch, attempt: attempt, epicGoal: epic?.goal,
+                        notes: try notes.notesForSpawn(
+                            projectId: project.id, taskId: taskId, epicId: task.epicId
+                        )
+                    ),
+                    model: task.model ?? project.settings.defaultModel,
+                    attempt: attempt
                 ),
-                configFiles: configFiles,
-                model: task.model ?? project.settings.defaultModel
+                port: port
             )
-            let spawned = try await runtime.spawn(request)
-            try? grants.bind(token: grant.token, sessionId: spawned.sessionId)
-
-            let session = AgentSession(
-                sessionId: spawned.sessionId,
-                shortId: spawned.shortId,
-                projectId: project.id,
-                taskId: taskId,
-                role: .worker,
-                worktreePath: worktree.path,
-                branch: branch,
-                cwd: worktree.path,
-                startedAt: .nowMillis,
-                attempt: attempt
-            )
-            let recorded = try board.assign(taskId: taskId, session: session)
             if let epic, epic.state == .planning {
                 try epics.setState(epic.id, .active)
             }
-            try replayEarlyHooks(sessionId: spawned.sessionId)
             return recorded
         } catch {
+            throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
+        }
+    }
+
+    private struct LaunchPlan {
+        var project: Project
+        var taskId: String
+        var worktree: URL
+        var branch: String
+        var configId: String
+        var name: String
+        var prompt: String
+        var model: String?
+        var attempt: Int
+    }
+
+    /// §3.1 steps 3-8, shared by task workers and the epic integrator: memory symlink, generated
+    /// settings and MCP config, a worker-scoped token bound to the session, and the board row.
+    private func launch(_ plan: LaunchPlan, port: Int) async throws -> AgentSession {
+        let project = plan.project
+        let memoryDir = URL(fileURLWithPath: project.memoryDir
+            ?? ClaudeProjectPaths.memoryDir(forPath: project.repoPath, projectsRoot: projectsRoot).path)
+        _ = try ClaudeProjectPaths.linkMemory(worktreePath: plan.worktree.path, to: memoryDir, projectsRoot: projectsRoot)
+
+        let grant = try grants.issue(projectId: project.id, scope: .worker, taskId: plan.taskId)
+        let configFiles = try SessionConfigWriter.write(
+            configDir: sessionConfigDir,
+            configId: plan.configId,
+            port: port,
+            token: grant.token,
+            autoModeJSON: project.settings.autoModeJSON,
+            extraMcpServers: nil
+        )
+        let request = SpawnRequest(
+            cwd: plan.worktree,
+            name: plan.name,
+            prompt: plan.prompt,
+            configFiles: configFiles,
+            model: plan.model
+        )
+        let spawned = try await runtime.spawn(request)
+        let session = AgentSession(
+            sessionId: spawned.sessionId,
+            shortId: spawned.shortId,
+            projectId: project.id,
+            taskId: plan.taskId,
+            role: .worker,
+            worktreePath: plan.worktree.path,
+            branch: plan.branch,
+            cwd: plan.worktree.path,
+            startedAt: .nowMillis,
+            attempt: plan.attempt
+        )
+        let recorded = try board.assign(taskId: plan.taskId, session: session)
+        // §3.1 step 8: the grant binds after the session row exists, or the foreign key rejects it.
+        try grants.bind(token: grant.token, sessionId: spawned.sessionId)
+        try replayEarlyHooks(sessionId: spawned.sessionId)
+        return recorded
+    }
+
+    /// §5.2 step 3. The integrator is an ordinary worker on a worktree checked out on the epic
+    /// branch, bound to a synthetic task so its token scope, report channel and board card are real.
+    @discardableResult
+    private func spawnIntegrator(epicId: String) async throws -> AgentSession {
+        guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
+        guard let project = try projects.get(epic.projectId) else {
+            throw SupervisorError.projectNotFound(epic.projectId)
+        }
+        guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
+            throw SupervisorError.capRefused(reason)
+        }
+
+        let manager = WorktreeManager(
+            repoPath: URL(fileURLWithPath: project.repoPath),
+            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
+        )
+        let worktreeName = "epic-\(epicId)"
+        let epicBranch = epic.branch
+        let worktree = try await offMain {
+            try Self.existingWorktree(manager, name: worktreeName)
+                ?? manager.createForBranch(name: worktreeName, branch: epicBranch)
+        }
+
+        let members = try tasks.list(projectId: project.id, epicId: epicId)
+            .filter { $0.origin != .integration }
+        var deps: [String: [String]] = [:]
+        for member in members {
+            deps[member.id] = try tasks.deps(of: member.id)
+        }
+        let ordered = IntegrationPlan.order(members, deps: deps)
+        let branchNames = ordered.map { IntegrationPlan.branchName(taskId: $0.id) }
+        let repoState = try await offMain { () -> (merged: [String: Bool], exists: Set<String>) in
+            let merged = try manager.mergeStatus(worktree: worktree, branches: branchNames)
+            let exists = try branchNames.filter { try manager.branchExists($0) }
+            return (merged, Set(exists))
+        }
+        let branches = IntegrationPlan.classify(ordered, merged: repoState.merged, exists: repoState.exists)
+
+        let task = try board.createIntegrationTask(epicId: epicId)
+        var recorded: AgentSession?
+        do {
+            let session = try await launch(
+                LaunchPlan(
+                    project: project,
+                    taskId: task.id,
+                    worktree: worktree,
+                    branch: epicBranch,
+                    configId: Self.configId(taskId: task.id, attempt: 1),
+                    name: Self.sessionName(for: task),
+                    prompt: IntegrationPlan.compose(epic: epic, baseBranch: project.baseBranch, branches: branches),
+                    model: project.settings.defaultModel,
+                    attempt: 1
+                ),
+                port: port
+            )
+            recorded = session
+            try epics.setState(epicId, .integrating)
+            return session
+        } catch {
+            if recorded == nil { try? tasks.delete(task.id) }
             throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
         }
     }
@@ -592,8 +701,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let approval = try approvals.get(approvalId) else { throw SupervisorError.approvalNotFound(approvalId) }
             try board.resolveApproval(approvalId, approved: true, by: "human")
             announceReports(projectId: approval.projectId)
-            if approval.kind == .spawn, let taskId = approval.taskId {
-                try await spawn(taskId: taskId)
+            switch approval.kind {
+            case .spawn:
+                if let taskId = approval.taskId { try await spawn(taskId: taskId) }
+            case .integration:
+                if let epicId = approval.epicId { try await spawnIntegrator(epicId: epicId) }
             }
         }
     }

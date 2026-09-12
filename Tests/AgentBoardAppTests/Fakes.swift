@@ -41,6 +41,11 @@ struct SupervisorFixture {
     let runtime: FakeRuntime
     let resolver: StoreTokenResolver
     let supportDir: URL
+    let repo: URL
+
+    var epics: EpicStore { EpicStore(db) }
+    var approvals: ApprovalStore { ApprovalStore(db) }
+    var board: Board { Board(db) }
 
     var tasks: TaskStore { TaskStore(db) }
     var sessions: SessionStore { SessionStore(db) }
@@ -62,7 +67,7 @@ struct SupervisorFixture {
             repoPath: repo.path,
             baseBranch: "main",
             worktreeRoot: supportDir.appendingPathComponent("worktrees").path,
-            memoryDir: gitRepo ? supportDir.appendingPathComponent("memory").path : nil
+            memoryDir: supportDir.appendingPathComponent("memory").path
         )
         let sink = LateBoundSink()
         let server = BoardServer(
@@ -74,11 +79,14 @@ struct SupervisorFixture {
             )
         )
         let runtime = FakeRuntime()
-        let supervisor = WorkerSupervisor(db: db, runtime: runtime, server: server, appSupportDir: supportDir)
+        let supervisor = WorkerSupervisor(
+            db: db, runtime: runtime, server: server, appSupportDir: supportDir,
+            projectsRoot: supportDir.appendingPathComponent("claude-projects")
+        )
         sink.target = supervisor
         return SupervisorFixture(
             db: db, project: project, supervisor: supervisor, runtime: runtime,
-            resolver: StoreTokenResolver(db: db), supportDir: supportDir
+            resolver: StoreTokenResolver(db: db), supportDir: supportDir, repo: repo
         )
     }
 
@@ -102,7 +110,8 @@ struct SupervisorFixture {
     static func git(_ args: [String], cwd: URL) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: WorktreeManager.gitPath)
-        process.arguments = args
+        process.arguments = ["-c", "user.email=test@example.com", "-c", "user.name=Test",
+                             "-c", "commit.gpgsign=false"] + args
         process.currentDirectoryURL = cwd
         let stdout = Pipe()
         let stderr = Pipe()
@@ -162,6 +171,49 @@ struct SupervisorFixture {
 
     /// Spawn writes a `~/.claude/projects/<worktree-slug>/memory` symlink outside the sandbox,
     /// so every worktree this fixture created has to be unlinked by path, not just deleted.
+
+    func git(_ args: [String], cwd: URL? = nil) throws -> String {
+        try Self.git(args, cwd: cwd ?? repo)
+    }
+
+    /// An epic with `titles` as its tasks, each already in `done` with a real branch carrying one
+    /// commit — the state §5.2 step 1 requires before integration is requested.
+    func epicReadyForIntegration(
+        _ titles: [String],
+        dependsOn: [Int: [Int]] = [:],
+        goal: String? = "make it fast"
+    ) throws -> (epic: Epic, tasks: [BoardTask]) {
+        let specs = titles.enumerated().map { NewEpicTask(title: $0.element, dependsOn: dependsOn[$0.offset] ?? []) }
+        let (epic, created) = try board.createEpic(projectId: project.id, title: "Ship search", goal: goal, tasks: specs)
+        try git(["branch", epic.branch, "main"])
+        for task in created {
+            let branch = "agentboard/\(task.id)"
+            try git(["branch", branch, epic.branch])
+            try commitOn(branch: branch, message: "Work on \(task.title)")
+            try TaskStore(db).move(task.id, to: .done)
+        }
+        try epics.setState(epic.id, .active)
+        return (epic, created)
+    }
+
+    /// A commit with the branch's existing tree, so the branch diverges from the epic branch
+    /// without any worktree checkout.
+    func commitOn(branch: String, message: String) throws {
+        let tree = try trimmed(git(["rev-parse", "\(branch)^{tree}"]))
+        let parent = try trimmed(git(["rev-parse", branch]))
+        let commit = try trimmed(git(["commit-tree", tree, "-p", parent, "-m", message]))
+        try git(["branch", "-f", branch, commit])
+    }
+
+    /// Fast-forwards the epic branch onto `branch`, the state a previous integration run leaves behind.
+    func markMerged(epic: Epic, branch: String) throws {
+        try git(["branch", "-f", epic.branch, branch])
+    }
+
+    private func trimmed(_ output: String) -> String {
+        output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     func cleanUp() {
         let worktreeRoot = URL(fileURLWithPath: project.worktreeRoot)
         let names = (try? FileManager.default.contentsOfDirectory(atPath: worktreeRoot.path)) ?? []
