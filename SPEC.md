@@ -237,14 +237,19 @@ CREATE TABLE agent_session (
   cache_read     INTEGER NOT NULL DEFAULT 0,
   cache_write    INTEGER NOT NULL DEFAULT 0,
   est_cost_usd   REAL NOT NULL DEFAULT 0,
-  attempt        INTEGER NOT NULL DEFAULT 1
+  attempt        INTEGER NOT NULL DEFAULT 1,
+  model          TEXT,
+  last_tool      TEXT,
+  stop_reason    TEXT
 );
 
 CREATE TABLE token_grant (
   token       TEXT PRIMARY KEY,      -- random, per session
-  session_id  TEXT NOT NULL REFERENCES agent_session(session_id),
+  session_id  TEXT REFERENCES agent_session(session_id),  -- NULL until `claude --bg` returns the id
+  project_id  TEXT NOT NULL REFERENCES project(id),
   scope       TEXT NOT NULL,         -- orchestrator | worker
   task_id     TEXT,                  -- worker: the only task it may mutate
+  created_at  INTEGER NOT NULL,
   revoked_at  INTEGER
 );
 
@@ -301,6 +306,11 @@ CREATE TABLE hook_event (
   at          INTEGER NOT NULL
 );
 ```
+
+The token is issued before spawn (it has to be in the generated config files)
+and bound to the session afterwards; the SessionStart hook may arrive first and
+bind it itself. `est_cost_usd` is a list-price estimate from transcript usage,
+never a billed amount.
 
 Notes are sectioned rather than a single body specifically so three concurrent
 workers appending to one note do not silently lose each other's writes. Whole-
@@ -526,7 +536,7 @@ question before any SwiftUI is written. **Nothing else is built until this
 passes.** Written in Swift specifically so (3) is a real test rather than a
 deferred assumption.
 
-**M1 — board.** Project registration, SQLite store, Task Board, Status,
+**M1 — board. DONE 2026-09-11 (headless E2E: assign → report_complete → accept, 16/16 checks).** Project registration, SQLite store, Task Board, Status,
 worktree creation with the `memory` symlink, manual assignment, spend metering,
 caps. Useful without any orchestrator.
 

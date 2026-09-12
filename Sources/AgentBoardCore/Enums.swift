@@ -1,0 +1,85 @@
+import GRDB
+
+public enum TaskColumn: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case proposed
+    case backlog
+    case ready
+    case running
+    case review
+    case done
+
+    public var index: Int { Self.allCases.firstIndex(of: self)! }
+
+    public var next: TaskColumn? {
+        let all = Self.allCases
+        let i = index + 1
+        return i < all.count ? all[i] : nil
+    }
+
+    public var previous: TaskColumn? {
+        let i = index - 1
+        return i >= 0 ? Self.allCases[i] : nil
+    }
+
+    static var orderingSQL: String {
+        let whens = allCases.map { "WHEN '\($0.rawValue)' THEN \($0.index)" }.joined(separator: " ")
+        return "CASE column_name \(whens) ELSE \(allCases.count) END"
+    }
+}
+
+public enum EpicState: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case planning
+    case active
+    case integrating
+    case done
+    case abandoned
+}
+
+public enum SessionState: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case starting
+    case running
+    case idle
+    case blocked
+    case stopped
+    case failed
+    case completed
+
+    public var isActive: Bool {
+        switch self {
+        case .starting, .running, .idle, .blocked: return true
+        case .stopped, .failed, .completed: return false
+        }
+    }
+
+    public static var activeStates: [SessionState] { allCases.filter(\.isActive) }
+}
+
+public enum SessionRole: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case orchestrator
+    case worker
+}
+
+public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case human
+    case orchestrator
+    case workerProposal = "worker_proposal"
+}
+
+public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case complete
+    case failed
+    case blocked
+    case proposal
+}
+
+public enum ProgressKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case note
+    case status
+    case error
+    case tool
+}
+
+public enum TokenScope: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case orchestrator
+    case worker
+}

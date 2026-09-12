@@ -1,0 +1,36 @@
+# Agent Board
+
+Native macOS app that manages work for Claude Code agents. See `SPEC.md` for the
+design and `IDEA.md` for the origin. Status: M0 and M1 complete.
+
+## Layout
+
+| Target | Role |
+|---|---|
+| `AgentBoardCore` | GRDB store: schema (SPEC §4), records, stores, `Board` lifecycle facade |
+| `AgentBoardRuntime` | `AgentRuntime` protocol + `BackgroundSessionRuntime` (`claude --bg`), config writer, worktrees, memory symlink, transcript meter, pricing, caps |
+| `AgentBoardServer` | Hummingbird localhost server: `/hooks` and `/mcp`, bearer-scoped tools |
+| `AgentBoard` | SwiftUI app: Task Board, Status, terminal attach window, supervisor glue |
+| `spike/` | M0 runtime spike, kept as the reference for the proven runtime facts |
+
+## Build and run
+
+```
+swift build
+swift test
+Scripts/bundle.sh            # wraps the binary in .build/AgentBoard.app (bundle id needed for notifications)
+open .build/AgentBoard.app
+```
+
+Environment overrides: `AGENTBOARD_DB` (sqlite path), `AGENTBOARD_SUPPORT_DIR`
+(worktrees, session configs). Default is `~/Library/Application Support/AgentBoard`.
+
+## Headless end-to-end check
+
+Spawns one real worker in a git repo, waits for `report_complete`, accepts, and
+verifies the worktree is removed and the branch kept:
+
+```
+AGENTBOARD_SUPPORT_DIR=/tmp/ab AGENTBOARD_DB=/tmp/ab/agentboard.sqlite \
+AGENTBOARD_E2E_REPO=/path/to/fixture-repo .build/debug/AgentBoard
+```

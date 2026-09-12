@@ -1,0 +1,46 @@
+import AgentBoardCore
+import Foundation
+
+@MainActor
+enum AppComposition {
+    static func make() -> AppEnvironment {
+        let url = ProcessInfo.processInfo.environment["AGENTBOARD_DB"].map { URL(fileURLWithPath: $0) }
+            ?? Wiring.appSupportDir.appendingPathComponent("agentboard.sqlite")
+        do {
+            let db = try AppDatabase.open(at: url)
+            let supervisor = Wiring.makeSupervisor(db: db)
+            _Concurrency.Task { await supervisor.start() }
+            return AppEnvironment(db: db, supervisor: supervisor)
+        } catch {
+            fatalError("Agent Board could not open its database at \(url.path): \(error)")
+        }
+    }
+}
+
+enum StubError: LocalizedError {
+    case notWired
+
+    var errorDescription: String? {
+        "The worker supervisor is not wired up yet."
+    }
+}
+
+@MainActor
+final class StubSupervisor: WorkerSupervising {
+    var serverPort: Int? { nil }
+    var lastError: String? { nil }
+
+    func registerProject(repoPath: URL, name: String?, baseBranch: String?) async throws -> Project {
+        throw StubError.notWired
+    }
+
+    func assign(taskId: String) async throws { throw StubError.notWired }
+    func stop(sessionId: String) async throws { throw StubError.notWired }
+    func resume(sessionId: String) async throws { throw StubError.notWired }
+    func pauseAll(projectId: String) async throws { throw StubError.notWired }
+    func accept(taskId: String) async throws { throw StubError.notWired }
+    func reopen(taskId: String) async throws { throw StubError.notWired }
+    func reconcile(projectId: String) async {}
+    func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? { nil }
+    func worktreeDiffstat(taskId: String) async -> String? { nil }
+}

@@ -1,0 +1,58 @@
+import Foundation
+import GRDB
+
+public struct ReportStore: Sendable {
+    let db: AppDatabase
+
+    public init(_ db: AppDatabase) {
+        self.db = db
+    }
+
+    @discardableResult
+    public func insert(projectId: String, taskId: String?, sessionId: String?, kind: ReportKind, body: String) throws -> Report {
+        try db.writer.write { db in
+            try Self.insert(db, projectId: projectId, taskId: taskId, sessionId: sessionId, kind: kind, body: body)
+        }
+    }
+
+    static func insert(_ db: Database, projectId: String, taskId: String?, sessionId: String?, kind: ReportKind, body: String) throws -> Report {
+        var report = Report(projectId: projectId, taskId: taskId, sessionId: sessionId, kind: kind, body: body, createdAt: .nowMillis)
+        try report.insert(db)
+        return report
+    }
+
+    public func unconsumed(projectId: String) throws -> [Report] {
+        try db.reader.read { db in
+            try Self.unconsumed(db, projectId: projectId)
+        }
+    }
+
+    static func unconsumed(_ db: Database, projectId: String) throws -> [Report] {
+        try Report.fetchAll(
+            db,
+            sql: "SELECT * FROM report WHERE project_id = ? AND consumed_at IS NULL ORDER BY created_at, id",
+            arguments: [projectId]
+        )
+    }
+
+    public func get(_ id: Int64) throws -> Report? {
+        try db.reader.read { db in try Report.fetchOne(db, key: id) }
+    }
+
+    public func consume(ids: [Int64]) throws {
+        guard !ids.isEmpty else { return }
+        try db.writer.write { db in
+            let placeholders = databaseQuestionMarks(count: ids.count)
+            try db.execute(
+                sql: "UPDATE report SET consumed_at = ? WHERE consumed_at IS NULL AND id IN (\(placeholders))",
+                arguments: [Int64.nowMillis] + StatementArguments(ids)
+            )
+        }
+    }
+
+    public func observeUnconsumed(projectId: String) -> ValueObservation<ValueReducers.Fetch<[Report]>> {
+        ValueObservation.tracking { db in
+            try Self.unconsumed(db, projectId: projectId)
+        }
+    }
+}

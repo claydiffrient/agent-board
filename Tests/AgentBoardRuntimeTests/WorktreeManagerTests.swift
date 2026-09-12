@@ -1,0 +1,172 @@
+import XCTest
+@testable import AgentBoardRuntime
+
+final class WorktreeManagerTests: XCTestCase {
+    private var sandbox: URL!
+    private var repo: URL!
+    private var worktrees: URL!
+    private var hookSettings: URL!
+    private var manager: WorktreeManager!
+
+    override func setUpWithError() throws {
+        sandbox = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agent-board-wt-\(UUID().uuidString)")
+            .resolvingSymlinksInPath()
+        repo = sandbox.appendingPathComponent("repo")
+        worktrees = sandbox.appendingPathComponent("worktrees")
+        hookSettings = sandbox.appendingPathComponent("settings.json")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+
+        try git(["init", "-q", "-b", "main"], cwd: repo)
+        try "hello\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try git(["add", "."], cwd: repo)
+        try commit("Initial commit", cwd: repo)
+
+        manager = WorktreeManager(repoPath: repo, worktreeRoot: worktrees, hookSettingsURL: hookSettings)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: sandbox)
+    }
+
+    @discardableResult
+    private func git(_ args: [String], cwd: URL) throws -> String {
+        let result = try ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/git"), arguments: args, cwd: cwd)
+        guard result.status == 0 else {
+            throw AgentRuntimeError("git \(args) failed: \(result.stderr)")
+        }
+        return result.stdout
+    }
+
+    private func commit(_ message: String, cwd: URL) throws {
+        try git(["-c", "user.email=test@example.com", "-c", "user.name=Test", "-c", "commit.gpgsign=false", "commit", "-q", "-m", message], cwd: cwd)
+    }
+
+    func testCreateListDiffstatAndRemove() throws {
+        let path = try manager.create(name: "task-1", branch: "agentboard/task-1", base: "main")
+        XCTAssertEqual(path.path, worktrees.appendingPathComponent("task-1").path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.appendingPathComponent("README.md").path))
+
+        let listed = try manager.list()
+        XCTAssertEqual(listed.count, 2)
+        let entry = try XCTUnwrap(listed.first { WorktreeManager.samePath($0.path, path) })
+        XCTAssertEqual(entry.branch, "agentboard/task-1")
+        XCTAssertEqual(entry.head?.count, 40)
+        XCTAssertEqual(try manager.headCommit(worktree: path), entry.head)
+
+        XCTAssertFalse(try manager.hasUncommittedChanges(worktree: path))
+        try "line\n".write(to: path.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(try manager.hasUncommittedChanges(worktree: path))
+        XCTAssertEqual(try manager.diffstat(worktree: path, against: "main"), "")
+
+        try git(["add", "."], cwd: path)
+        try commit("Add new file", cwd: path)
+        XCTAssertFalse(try manager.hasUncommittedChanges(worktree: path))
+        let stat = try manager.diffstat(worktree: path, against: "main")
+        XCTAssertTrue(stat.contains("new.txt"), stat)
+        XCTAssertTrue(stat.contains("1 file changed"), stat)
+        XCTAssertNotEqual(try manager.headCommit(worktree: path), entry.head)
+
+        let report = try manager.remove(path: path, deleteBranch: true)
+        XCTAssertEqual(report.deletedBranch, "agentboard/task-1")
+        XCTAssertEqual(report.hookDiagnostics, [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        XCTAssertEqual(try manager.list().count, 1)
+        XCTAssertFalse(try manager.branchExists("agentboard/task-1"))
+    }
+
+    func testRetryReusesExistingBranch() throws {
+        let first = try manager.create(name: "attempt-1", branch: "agentboard/task-2", base: "main")
+        try "wip\n".write(to: first.appendingPathComponent("wip.txt"), atomically: true, encoding: .utf8)
+        try git(["add", "."], cwd: first)
+        try commit("Work in progress", cwd: first)
+        let wipHead = try manager.headCommit(worktree: first)
+        try manager.remove(path: first, deleteBranch: false)
+        XCTAssertTrue(try manager.branchExists("agentboard/task-2"))
+
+        let second = try manager.create(name: "attempt-2", branch: "agentboard/task-2", base: "main")
+        XCTAssertEqual(try manager.headCommit(worktree: second), wipHead)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.appendingPathComponent("wip.txt").path))
+    }
+
+    func testEnsureBranchIsIdempotent() throws {
+        XCTAssertFalse(try manager.branchExists("agentboard/epic-1"))
+        try manager.ensureBranch("agentboard/epic-1", from: "main")
+        XCTAssertTrue(try manager.branchExists("agentboard/epic-1"))
+        try manager.ensureBranch("agentboard/epic-1", from: "main")
+        XCTAssertEqual(try git(["rev-parse", "agentboard/epic-1"], cwd: repo), try git(["rev-parse", "main"], cwd: repo))
+    }
+
+    func testCreateFailsForMissingBase() {
+        XCTAssertThrowsError(try manager.create(name: "x", branch: "agentboard/x", base: "no-such-branch"))
+    }
+
+    func testParsePorcelain() {
+        let output = """
+        worktree /repo
+        HEAD 0123456789abcdef0123456789abcdef01234567
+        branch refs/heads/main
+
+        worktree /repo/.claude/worktrees/t1
+        HEAD fedcba9876543210fedcba9876543210fedcba98
+        branch refs/heads/agentboard/t1
+        locked
+
+        worktree /repo/detached
+        HEAD 1111111111111111111111111111111111111111
+        detached
+
+        """
+        let infos = WorktreeManager.parsePorcelain(output)
+        XCTAssertEqual(infos.count, 3)
+        XCTAssertEqual(infos[0].branch, "main")
+        XCTAssertEqual(infos[1].path.path, "/repo/.claude/worktrees/t1")
+        XCTAssertEqual(infos[1].branch, "agentboard/t1")
+        XCTAssertTrue(infos[2].isDetached)
+        XCTAssertNil(infos[2].branch)
+    }
+
+    func testWorktreeRemoveHooksReceivePayloadAndFailuresAreCollected() throws {
+        let capture = sandbox.appendingPathComponent("hook-stdin.json")
+        let settings: [String: Any] = [
+            "hooks": [
+                "WorktreeRemove": [
+                    ["hooks": [
+                        ["type": "command", "command": "cat > '\(capture.path)'"],
+                        ["type": "http", "url": "http://127.0.0.1:1/ignored"],
+                        ["type": "command", "command": "echo boom >&2; exit 3"],
+                    ]],
+                ],
+            ],
+        ]
+        try JSONSerialization.data(withJSONObject: settings).write(to: hookSettings)
+
+        XCTAssertEqual(WorktreeManager.worktreeRemoveHooks(settingsAt: hookSettings).map(\.command), ["cat > '\(capture.path)'", "echo boom >&2; exit 3"])
+
+        let path = try manager.create(name: "hooked", branch: "agentboard/hooked", base: "main")
+        let report = try manager.remove(path: path, deleteBranch: true)
+
+        XCTAssertEqual(report.hookDiagnostics.count, 1)
+        XCTAssertTrue(report.hookDiagnostics[0].contains("exited 3"))
+        XCTAssertTrue(report.hookDiagnostics[0].contains("boom"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: capture)) as? [String: String])
+        XCTAssertEqual(payload["hook_event_name"], "WorktreeRemove")
+        XCTAssertEqual(payload["worktree_path"], path.path)
+        XCTAssertEqual(payload["cwd"], repo.path)
+    }
+
+    func testMissingHookSettingsRunsNoHooks() throws {
+        XCTAssertEqual(WorktreeManager.worktreeRemoveHooks(settingsAt: sandbox.appendingPathComponent("nope.json")), [])
+        let path = try manager.create(name: "plain", branch: "agentboard/plain", base: "main")
+        XCTAssertEqual(try manager.remove(path: path, deleteBranch: false).hookDiagnostics, [])
+    }
+
+    func testExpandTilde() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        XCTAssertEqual(WorktreeManager.expandTilde("~/bin/hook.sh --flag"), "\(home)/bin/hook.sh --flag")
+        XCTAssertEqual(WorktreeManager.expandTilde("echo ~"), "echo ~")
+        XCTAssertEqual(WorktreeManager.expandTilde("~user/x"), "~user/x")
+    }
+}
