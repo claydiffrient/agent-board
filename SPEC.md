@@ -19,7 +19,7 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D2 | PTY for interaction, hooks + transcript for state | Terminal gives full Claude Code fidelity; hooks make Status honest | Headless `-p` only |
 | D3 | Agent Board owns tasks in its own store | Self-contained; no coupling to `repo-tasks` file format | `repo-tasks` as backing store |
 | D4 | Tiered authority enforced at the token | Prompts are not a permission system | Flat authority |
-| D5 | Budgeted autonomy with caps | Pinned session ids make cap-kills non-destructive | Manual gate on every spawn |
+| D5 | Budgeted autonomy with caps | Recorded session ids + `--resume` make cap-kills non-destructive | Manual gate on every spawn |
 | D6 | Worktree per task, branch bound to task id | A retry sees what the previous attempt built | Worktree per agent session |
 | D7 | Fixed columns: Proposed → Backlog → Ready → Running → Review → Done | The orchestrator must be told which column is assignable | User-defined columns |
 | D8 | Workers commit and stop. They never push | Nothing reaches a shared remote unattended | Worker opens a draft PR |
@@ -46,18 +46,39 @@ Pivots named at decision time, to be designed for but not built:
 
 ## 2. Platform facts this spec depends on
 
-Verified against Claude Code **2.1.268** on macOS.
+Verified against Claude Code **2.1.269** on macOS. Items marked *M0* were
+proven by the runtime spike in `spike/` on 2026-09-11.
 
 - `claude --bg` backgrounds a session and prints a short id. `claude agents`,
   `attach`, `logs`, `stop`, `rm`, `respawn` manage them. The supervisor is a
   per-cwd daemon with a control socket at `/tmp/cc-daemon-<uid>/<hash>/control.sock`.
 - `claude agents --json --all` returns `{id, cwd, kind, startedAt, sessionId,
   name, status|state}` per session — interactive and background.
-- `--bg` accepts `--settings`, `--mcp-config`, `--permission-mode`, and `-n`
-  together. **Verified: flags parse. Not verified: a healthy background session
-  honors an injected hooks config.** This is M0's job.
-- `--session-id <uuid>` lets the caller assign the session id. `--resume <uuid>`
-  restores it. Therefore killing an agent is recoverable.
+- *M0:* `--bg` with `--settings`, `--mcp-config`, `--strict-mcp-config`,
+  `--permission-mode auto`, `--disallowedTools` and `-n` together starts a
+  healthy session that honors the injected hooks and MCP config. Stdout is
+  `backgrounded · <short-id> · <name>`; the short id is the first 8 hex chars of
+  the session uuid, and `claude agents --json` lists the full uuid immediately.
+- *M0:* **`--bg` ignores `--session-id`** (`warning: --bg manages the session
+  id`). The id is therefore recorded after spawn, not assigned before it.
+  `claude --bg --resume <uuid>` wakes a stopped session under the same id and
+  **reuses its saved options** (`-n`, `--permission-mode`, `--strict-mcp-config`,
+  `--mcp-config`, `--settings`, `--disallowedTools`, `--model`) by path. The
+  per-session config files must stay at their original paths and be rewritten
+  with the current server port before a resume, or the woken worker talks to a
+  dead port.
+- *M0:* Hooks of `type: "http"` fire from a background session for
+  `PostToolUse`, `Notification`, `Stop` and `SessionEnd`. **`SessionStart`
+  silently skips `http` hooks** (foreground and background); a `command` hook
+  that pipes stdin to `curl` fires and is the workaround.
+- *M0:* The MCP client sends a non-standard `server/discover` request before
+  `initialize`; answering it with JSON-RPC `-32601` is fine. `tools/list` is
+  fetched at startup and the tool is callable in the first turn.
+- *M0:* `claude attach <id>` renders the full TUI inside a SwiftTerm
+  `LocalProcessTerminalView` (truecolor, layout, status line). Closing the
+  window sends SIGTERM to the attach client (exit 143); the background session
+  is still listed afterwards. SwiftTerm logs unhandled DECSET 2031 (theme
+  change queries), harmless.
 - MCP supports `--transport http` with per-server `--header`, so one server can
   identify callers by bearer token.
 - Permission mode `auto` runs a classifier: 17 allow rules, 70 soft-deny
@@ -118,19 +139,25 @@ For a task `T` in project `P`:
    `<base>` is the epic branch, or the project base branch for a standalone task.
 3. Symlink `~/.claude/projects/<worktree-slug>/memory` → the canonical project
    memory dir. **Skipping this makes every worker amnesiac.**
-4. Generate `settings-<session>.json`: hook definitions pointing at
-   `/hooks?token=…`, plus the project's `autoMode` block.
+4. Generate `settings-<session>.json`: `http` hook definitions pointing at
+   `/hooks?token=…` (a `command` + `curl` hook for `SessionStart`, see §2), plus
+   the project's `autoMode` block. On resume, rewrite this file and the MCP
+   config in place with the current port; `--bg --resume` reuses the paths.
 5. Generate `mcp-<session>.json`: one HTTP server entry for `/mcp` with
    `Authorization: Bearer <token>`, where the token carries scope `worker` and
    is bound to `(session, task)`.
 6. Compose the opening prompt: task title, body, acceptance criteria, epic goal,
    pinned notes in full, attached notes in full, and the completion protocol
    (commit, do not push, call `report_complete`).
-7. `claude --bg --session-id <uuid> -n <task-slug> --permission-mode auto
+7. `claude "<prompt>" --bg -n <task-slug> --permission-mode auto
    --strict-mcp-config --mcp-config <file> --settings <file>
    --disallowedTools "Bash(git push*)" "Bash(gh pr create*)" "Bash(gh pr merge*)"`
-   with cwd set to the worktree.
-8. Record the session id, short id, worktree path, branch, and token in SQLite.
+   with cwd set to the worktree. The prompt goes first because
+   `--disallowedTools` is variadic and would swallow a trailing positional.
+8. Parse the short id from stdout, look up the session uuid in
+   `claude agents --json`, and record it with the worktree path, branch, and
+   token in SQLite. The token grant is bound to the session at this point, not
+   before spawn.
 
 `--strict-mcp-config` is deliberate: without it a worker sees `repo-tasks`,
 `solo`, and the other globally configured servers, and has two contradictory
@@ -484,7 +511,7 @@ section.
 
 ## 11. Milestones
 
-**M0 — runtime spike. Swift, no UI.** A throwaway Swift package — Hummingbird
+**M0 — runtime spike. Swift, no UI. PASSED 2026-09-11, see `spike/`.** A throwaway Swift package — Hummingbird
 server, SwiftTerm, no SwiftUI — that spawns `claude --bg` with a generated
 `--settings` (hooks → localhost) and `--mcp-config` (one tool, bearer token),
 and proves three things:
@@ -519,8 +546,13 @@ from knowing how the agents actually behave first.
 
 ## 12. Open items
 
-- **Unverified:** that a healthy `claude --bg` session honors an injected hooks
-  config, MCP config, and `autoMode` block. M0's entire purpose.
+- **Verified by M0:** a healthy `claude --bg` session honors injected hooks and
+  MCP config. Still unverified: that the `autoMode` block from `--settings` is
+  applied (the spike ran with the shipped defaults).
+- **Unresolved:** the localhost port is ephemeral per app launch, but
+  `--bg --resume` reuses the saved `--settings`/`--mcp-config` paths. Either
+  rewrite both files before every resume (current plan) or pick a stable
+  per-project port.
 - **Unresolved:** which globally configured MCP servers should be allowlisted
   back into workers past `--strict-mcp-config`. Starting position: none.
 - **Unresolved:** whether the `PostToolUse` round trip is cheap enough to leave
