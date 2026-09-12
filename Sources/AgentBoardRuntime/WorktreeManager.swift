@@ -17,9 +17,14 @@ public struct WorktreeInfo: Sendable, Equatable {
 }
 
 public struct WorktreeRemovalReport: Sendable, Equatable {
-    public var deletedBranch: String?
     /// Stderr from `WorktreeRemove` hooks that exited non-zero; hook failures never abort removal.
     public var hookDiagnostics: [String]
+}
+
+public enum BranchDeletion: Sendable, Equatable {
+    case deleted(String)
+    case kept(branch: String, reason: String)
+    case noSuchBranch(String)
 }
 
 public struct WorktreeManager: Sendable {
@@ -73,17 +78,37 @@ public struct WorktreeManager: Sendable {
         return result.status == 0
     }
 
+    /// Never forced: git refuses the removal rather than destroying uncommitted work.
     @discardableResult
-    public func remove(path: URL, deleteBranch: Bool) throws -> WorktreeRemovalReport {
-        let branch = try list().first { Self.samePath($0.path, path) }?.branch
+    public func remove(path: URL) throws -> WorktreeRemovalReport {
         let diagnostics = runWorktreeRemoveHooks(worktreePath: path)
-        try git(["worktree", "remove", "--force", path.path])
-        var deleted: String?
-        if deleteBranch, let branch {
-            try git(["branch", "-D", branch])
-            deleted = branch
+        try git(["worktree", "remove", path.path])
+        return WorktreeRemovalReport(hookDiagnostics: diagnostics)
+    }
+
+    /// `git branch -d` measures merged against the current checkout's HEAD, which is rarely one of
+    /// `bases`, so ancestry is checked here and the ref is then dropped directly.
+    public func deleteBranchIfMerged(_ branch: String, into bases: [String]) throws -> BranchDeletion {
+        guard try branchExists(branch) else { return .noSuchBranch(branch) }
+        if let holder = try list().first(where: { $0.branch == branch }) {
+            return .kept(branch: branch, reason: "it is still checked out at \(holder.path.path)")
         }
-        return WorktreeRemovalReport(deletedBranch: deleted, hookDiagnostics: diagnostics)
+        let known = try bases.filter { try commitExists($0) }
+        guard !known.isEmpty else {
+            return .kept(branch: branch, reason: "none of \(bases.joined(separator: ", ")) exist in this repository")
+        }
+        guard try known.contains(where: { try isAncestor("refs/heads/\(branch)", of: $0) }) else {
+            return .kept(branch: branch, reason: "it is not merged into \(known.joined(separator: " or "))")
+        }
+        try git(["update-ref", "-d", "refs/heads/\(branch)"])
+        return .deleted(branch)
+    }
+
+    public func localBranches(withPrefix prefix: String) throws -> [String] {
+        try git(["for-each-ref", "--format=%(refname:short)", "refs/heads"]).stdout
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix(prefix) }
     }
 
     public func list() throws -> [WorktreeInfo] {
@@ -109,6 +134,27 @@ public struct WorktreeManager: Sendable {
                 .filter { !$0.isEmpty }
         )
         return branches.reduce(into: [:]) { $0[$1] = merged.contains($1) }
+    }
+
+    /// True when the worktree's HEAD is reachable from none of the `bases` that exist.
+    public func hasUnmergedCommits(worktree: URL, bases: [String]) throws -> Bool {
+        let known = try bases.filter { try commitExists($0) }
+        guard !known.isEmpty else { return true }
+        return try !known.contains { try isAncestor("HEAD", of: $0, cwd: worktree) }
+    }
+
+    public func commitExists(_ rev: String) throws -> Bool {
+        try gitRaw(["rev-parse", "--verify", "--quiet", "\(rev)^{commit}"], cwd: repoPath).status == 0
+    }
+
+    private func isAncestor(_ ref: String, of other: String, cwd: URL? = nil) throws -> Bool {
+        let result = try gitRaw(["merge-base", "--is-ancestor", ref, other], cwd: cwd ?? repoPath)
+        switch result.status {
+        case 0: return true
+        case 1: return false
+        default:
+            throw AgentRuntimeError("git merge-base --is-ancestor \(ref) \(other) exited \(result.status): \(result.stderr)")
+        }
     }
 
     public func hasUncommittedChanges(worktree: URL) throws -> Bool {

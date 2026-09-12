@@ -28,8 +28,8 @@ Environment overrides: `AGENTBOARD_DB` (sqlite path), `AGENTBOARD_SUPPORT_DIR`
 
 ## Headless end-to-end check
 
-Spawns one real worker in a git repo, waits for `report_complete`, accepts, and
-verifies the worktree is removed and the branch kept:
+Spawns one real worker in a git repo, waits for `report_complete`, merges the
+task branch, accepts, and verifies the worktree and the merged branch are gone:
 
 ```
 AGENTBOARD_SUPPORT_DIR=/tmp/ab AGENTBOARD_DB=/tmp/ab/agentboard.sqlite \

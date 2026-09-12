@@ -67,12 +67,15 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertTrue(stat.contains("1 file changed"), stat)
         XCTAssertNotEqual(try manager.headCommit(worktree: path), entry.head)
 
-        let report = try manager.remove(path: path, deleteBranch: true)
-        XCTAssertEqual(report.deletedBranch, "agentboard/task-1")
+        let report = try manager.remove(path: path)
         XCTAssertEqual(report.hookDiagnostics, [])
         XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
         XCTAssertEqual(try manager.list().count, 1)
-        XCTAssertFalse(try manager.branchExists("agentboard/task-1"))
+        XCTAssertEqual(
+            try manager.deleteBranchIfMerged("agentboard/task-1", into: ["main"]),
+            .kept(branch: "agentboard/task-1", reason: "it is not merged into main")
+        )
+        XCTAssertTrue(try manager.branchExists("agentboard/task-1"))
     }
 
     func testRetryReusesExistingBranch() throws {
@@ -81,7 +84,7 @@ final class WorktreeManagerTests: XCTestCase {
         try git(["add", "."], cwd: first)
         try commit("Work in progress", cwd: first)
         let wipHead = try manager.headCommit(worktree: first)
-        try manager.remove(path: first, deleteBranch: false)
+        try manager.remove(path: first)
         XCTAssertTrue(try manager.branchExists("agentboard/task-2"))
 
         let second = try manager.create(name: "attempt-2", branch: "agentboard/task-2", base: "main")
@@ -190,7 +193,7 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(WorktreeManager.worktreeRemoveHooks(settingsAt: hookSettings).map(\.command), ["cat > '\(capture.path)'", "echo boom >&2; exit 3"])
 
         let path = try manager.create(name: "hooked", branch: "agentboard/hooked", base: "main")
-        let report = try manager.remove(path: path, deleteBranch: true)
+        let report = try manager.remove(path: path)
 
         XCTAssertEqual(report.hookDiagnostics.count, 1)
         XCTAssertTrue(report.hookDiagnostics[0].contains("exited 3"))
@@ -206,7 +209,7 @@ final class WorktreeManagerTests: XCTestCase {
     func testMissingHookSettingsRunsNoHooks() throws {
         XCTAssertEqual(WorktreeManager.worktreeRemoveHooks(settingsAt: sandbox.appendingPathComponent("nope.json")), [])
         let path = try manager.create(name: "plain", branch: "agentboard/plain", base: "main")
-        XCTAssertEqual(try manager.remove(path: path, deleteBranch: false).hookDiagnostics, [])
+        XCTAssertEqual(try manager.remove(path: path).hookDiagnostics, [])
     }
 
     func testExpandTilde() {

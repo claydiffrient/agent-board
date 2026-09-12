@@ -357,9 +357,16 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
   the next `PostToolUse`. The card keeps its position and shows why.
 - `review` — worker has committed on `agentboard/<task-id>` and called
   `report_complete`. The worktree is retained.
-- `done` — you accept it. The worktree is removed (firing the existing
-  `WorktreeRemove` hook, which reclaims Bazel `output_base` on Derivita). The
-  branch is kept until its epic is integrated.
+- `done` — you accept it. Every attempt's worktree is removed (firing the
+  existing `WorktreeRemove` hook, which reclaims Bazel `output_base` on
+  Derivita), and `agentboard/<task-id>` is deleted once it is merged into the
+  base or epic branch. An unmerged branch, or a worktree with uncommitted
+  changes, is kept and the reason surfaced in the status bar.
+
+Reconcile also reaps worktrees under the project's worktree root that no active
+session owns, and deletes merged `agentboard/*` branches that no longer have a
+worktree. Anything dirty or unmerged is left alone and reported. Epic
+integration worktrees and `agentboard/epic-*` branches are out of scope.
 
 ### 5.1 Completion protocol
 

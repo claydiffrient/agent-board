@@ -79,11 +79,20 @@ enum E2E {
         check("diffstat mentions hello.txt", diff?.contains("hello.txt") == true)
 
         await supervisor.reconcile(projectId: project.id)
+        let merge = try run(
+            "/usr/bin/git",
+            ["-c", "user.email=e2e@example.com", "-c", "user.name=E2E", "-c", "commit.gpgsign=false",
+             "merge", "--no-ff", "-m", "Merge task", "agentboard/\(task.id)"],
+            cwd: repo
+        )
+        print("merge:\n\(merge)")
         try await supervisor.accept(taskId: task.id)
         check("task done", try tasks.get(task.id)?.column == .done)
         check("worktree removed", !FileManager.default.fileExists(atPath: session.worktreePath ?? "/nonexistent"))
+        let worktrees = try run("/usr/bin/git", ["worktree", "list"], cwd: repo)
+        check("worktree unregistered", !worktrees.contains(session.worktreePath ?? "/nonexistent"))
         let branches = try run("/usr/bin/git", ["branch", "--list", "agentboard/\(task.id)"], cwd: repo)
-        check("branch kept", branches.contains("agentboard/"))
+        check("merged branch deleted", branches.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         if let shortId = finalSession.shortId {
             _ = try? run("/opt/homebrew/bin/claude", ["stop", shortId], cwd: repo)
             _ = try? run("/opt/homebrew/bin/claude", ["rm", shortId], cwd: repo)
