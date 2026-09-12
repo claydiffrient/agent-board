@@ -51,6 +51,12 @@ public struct CapCheck: Sendable {
     }
 }
 
+public enum SpawnGate: Sendable, Equatable {
+    case proceed
+    case approvalPending(Approval)
+    case refused(reason: String)
+}
+
 public struct Board: Sendable {
     let db: AppDatabase
 
@@ -60,6 +66,60 @@ public struct Board: Sendable {
 
     public func canSpawn(projectId: String) throws -> CapDecision {
         try CapCheck(db).canSpawn(projectId: projectId)
+    }
+
+    /// Orchestrator-initiated spawn: only `ready` tasks; caps via CapCheck; autonomy off yields a pending approval (one per task).
+    public func requestSpawn(taskId: String, requestedBy: String) throws -> SpawnGate {
+        try db.writer.write { db in
+            guard let task = try Task.fetchOne(db, key: taskId) else {
+                return .refused(reason: "task \(taskId) not found")
+            }
+            guard task.column == .ready else {
+                return .refused(reason: "task \(taskId) is in \(task.column.rawValue), only ready tasks can be spawned")
+            }
+            if case .refused(let reason) = try CapCheck.canSpawn(db, projectId: task.projectId) {
+                return .refused(reason: reason)
+            }
+            guard let project = try Project.fetchOne(db, key: task.projectId) else {
+                throw BoardError.projectNotFound(task.projectId)
+            }
+            if project.settings.autonomyEnabled {
+                return .proceed
+            }
+            if let existing = try ApprovalStore.pendingSpawn(db, taskId: taskId) {
+                return .approvalPending(existing)
+            }
+            let approval = try ApprovalStore.insert(
+                db, projectId: task.projectId, kind: .spawn, taskId: taskId, epicId: task.epicId,
+                requestedBy: requestedBy, reason: nil
+            )
+            return .approvalPending(approval)
+        }
+    }
+
+    /// Resolves the approval and queues a `decision` report so the orchestrator learns the outcome on its next pull.
+    @discardableResult
+    public func resolveApproval(_ id: String, approved: Bool, by: String, reason: String? = nil) throws -> Approval {
+        try db.writer.write { db in
+            let approval = try ApprovalStore.resolve(db, id, approved ? .approved : .denied)
+            var body = "\(approval.kind.rawValue) \(approved ? "approved" : "denied")"
+            if let taskId = approval.taskId {
+                body += " for task \(taskId)"
+                if let task = try Task.fetchOne(db, key: taskId) {
+                    body += " (\(task.title))"
+                }
+            } else if let epicId = approval.epicId {
+                body += " for epic \(epicId)"
+            }
+            if let reason, !reason.isEmpty {
+                body += ": \(reason)"
+            }
+            body += "\n\nResolved by: \(by)"
+            _ = try ReportStore.insert(
+                db, projectId: approval.projectId, taskId: approval.taskId, sessionId: nil, kind: .decision, body: body
+            )
+            return approval
+        }
     }
 
     @discardableResult

@@ -144,8 +144,25 @@ enum Schema {
     CREATE INDEX hook_event_session_at ON hook_event(session_id, at);
     """
 
+    static let approval = """
+    CREATE TABLE approval (
+      id           TEXT PRIMARY KEY,
+      project_id   TEXT NOT NULL REFERENCES project(id),
+      kind         TEXT NOT NULL,
+      task_id      TEXT REFERENCES task(id),
+      epic_id      TEXT REFERENCES epic(id),
+      requested_by TEXT NOT NULL,
+      reason       TEXT,
+      created_at   INTEGER NOT NULL,
+      resolved_at  INTEGER,
+      resolution   TEXT
+    );
+    CREATE INDEX approval_pending ON approval(project_id, resolved_at);
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
+        "approval",
     ]
 }

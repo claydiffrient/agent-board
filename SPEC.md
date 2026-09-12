@@ -269,11 +269,25 @@ CREATE TABLE report (
   project_id  TEXT NOT NULL REFERENCES project(id),
   task_id     TEXT REFERENCES task(id),
   session_id  TEXT REFERENCES agent_session(session_id),
-  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal
+  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision
   body        TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
   consumed_at INTEGER               -- set when the orchestrator pulls it
 );
+
+CREATE TABLE approval (
+  id           TEXT PRIMARY KEY,
+  project_id   TEXT NOT NULL REFERENCES project(id),
+  kind         TEXT NOT NULL,            -- spawn | integration
+  task_id      TEXT REFERENCES task(id),
+  epic_id      TEXT REFERENCES epic(id),
+  requested_by TEXT NOT NULL,            -- session_id of the requester, or 'human'
+  reason       TEXT,
+  created_at   INTEGER NOT NULL,
+  resolved_at  INTEGER,
+  resolution   TEXT                      -- approved | denied
+);
+CREATE INDEX approval_pending ON approval(project_id, resolved_at);
 
 CREATE TABLE note (
   id          TEXT PRIMARY KEY,

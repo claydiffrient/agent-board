@@ -17,6 +17,8 @@ public protocol WorkerSupervising: AnyObject {
     /// Task → done, worktree removed (chaining the user's WorktreeRemove hook), branch kept.
     func accept(taskId: String) async throws
     func reopen(taskId: String) async throws
+    /// Stops any active worker, removes the worktree (branch kept), deletes the task and its progress.
+    func discard(taskId: String) async throws
     /// Joins `claude agents --json --all` against agent_session so dead sessions show as dead.
     func reconcile(projectId: String) async
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])?

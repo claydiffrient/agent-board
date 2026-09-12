@@ -13,6 +13,7 @@ struct TaskBoardView: View {
     @State private var showNewTask = false
     @State private var busyMessage: String?
     @State private var errorMessage: String?
+    @State private var taskPendingDelete: BoardTask?
 
     private let columnWidth: CGFloat = 250
 
@@ -109,6 +110,7 @@ struct TaskBoardView: View {
                 .inspectorColumnWidth(min: 300, ideal: 360)
             }
         }
+        .background(deleteConfirmation)
         .overlay {
             if let busyMessage {
                 ZStack {
@@ -202,6 +204,8 @@ struct TaskBoardView: View {
                             Button(target.title) { _ = drop(taskId: task.id, onto: target) }
                         }
                     }
+                    Divider()
+                    Button("Delete Task…", role: .destructive) { taskPendingDelete = task }
                 }
             }
         }
@@ -242,6 +246,22 @@ struct TaskBoardView: View {
 
     private func assign(_ taskId: String) {
         runSupervised("Spawning worker…") { try await env.supervisor.assign(taskId: taskId) }
+    }
+
+    private var deleteConfirmation: some View {
+        EmptyView()
+            .confirmationDialog(
+                "Delete \"\(taskPendingDelete?.title ?? "")\"?",
+                isPresented: Binding(get: { taskPendingDelete != nil }, set: { if !$0 { taskPendingDelete = nil } }),
+                presenting: taskPendingDelete
+            ) { task in
+                Button("Delete", role: .destructive) {
+                    if selectedTaskId == task.id { selectedTaskId = nil }
+                    runSupervised("Deleting…") { try await env.supervisor.discard(taskId: task.id) }
+                }
+            } message: { _ in
+                Text("Stops any running worker and removes its worktree. The branch is kept.")
+            }
     }
 
     private func accept(_ taskId: String) {

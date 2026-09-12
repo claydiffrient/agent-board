@@ -26,6 +26,16 @@ public struct SessionStore: Sendable {
         }
     }
 
+    public func orchestrator(projectId: String) throws -> AgentSession? {
+        try db.reader.read { db in
+            try AgentSession.fetchOne(
+                db,
+                sql: "SELECT * FROM agent_session WHERE project_id = ? AND role = 'orchestrator' ORDER BY started_at DESC LIMIT 1",
+                arguments: [projectId]
+            )
+        }
+    }
+
     public func active(projectId: String) throws -> [AgentSession] {
         try db.reader.read { db in
             try Self.active(db, projectId: projectId)

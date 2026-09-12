@@ -280,6 +280,36 @@ final class WorkerSupervisor: WorkerSupervising {
         try await recording { try board.reopen(taskId: taskId) }
     }
 
+    func discard(taskId: String) async throws {
+        try await recording {
+            guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
+            guard let project = try projects.get(task.projectId) else {
+                throw SupervisorError.projectNotFound(task.projectId)
+            }
+            let taskSessions = try sessions.forTask(taskId)
+            for session in taskSessions where session.state.isActive {
+                if let shortId = session.shortId {
+                    try? await runtime.stop(shortId: shortId)
+                }
+                try sessions.setState(session.sessionId, .stopped, endedAt: .nowMillis)
+            }
+            if let worktreePath = taskSessions.first?.worktreePath,
+               FileManager.default.fileExists(atPath: worktreePath) {
+                let manager = WorktreeManager(
+                    repoPath: URL(fileURLWithPath: project.repoPath),
+                    worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
+                )
+                let report = try await offMain {
+                    try manager.remove(path: URL(fileURLWithPath: worktreePath), deleteBranch: false)
+                }
+                if !report.hookDiagnostics.isEmpty {
+                    lastError = report.hookDiagnostics.joined(separator: "\n")
+                }
+            }
+            try tasks.delete(taskId)
+        }
+    }
+
     func reconcile(projectId: String) async {
         let listed: [AgentInfo]
         do {

@@ -383,6 +383,57 @@ public struct Report: Codable, FetchableRecord, MutablePersistableRecord, Identi
     public var isConsumed: Bool { consumedAt != nil }
 }
 
+public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
+    public static let databaseTableName = "approval"
+
+    public var id: String
+    public var projectId: String
+    public var kind: ApprovalKind
+    public var taskId: String?
+    public var epicId: String?
+    public var requestedBy: String
+    public var reason: String?
+    public var createdAt: Int64
+    public var resolvedAt: Int64?
+    public var resolution: ApprovalResolution?
+
+    public enum CodingKeys: String, CodingKey {
+        case id
+        case projectId = "project_id"
+        case kind
+        case taskId = "task_id"
+        case epicId = "epic_id"
+        case requestedBy = "requested_by"
+        case reason
+        case createdAt = "created_at"
+        case resolvedAt = "resolved_at"
+        case resolution
+    }
+
+    public init(
+        id: String, projectId: String, kind: ApprovalKind, taskId: String?, epicId: String?,
+        requestedBy: String, reason: String?, createdAt: Int64, resolvedAt: Int64? = nil,
+        resolution: ApprovalResolution? = nil
+    ) {
+        self.id = id
+        self.projectId = projectId
+        self.kind = kind
+        self.taskId = taskId
+        self.epicId = epicId
+        self.requestedBy = requestedBy
+        self.reason = reason
+        self.createdAt = createdAt
+        self.resolvedAt = resolvedAt
+        self.resolution = resolution
+    }
+
+    public static func newId() -> String { BoardId.new() }
+
+    public var isPending: Bool { resolvedAt == nil }
+    public var createdDate: Date { createdAt.asDate }
+    public var resolvedDate: Date? { resolvedAt?.asDate }
+}
+
 public struct Note: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
     public static let databaseTableName = "note"
 

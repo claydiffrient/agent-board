@@ -228,4 +228,6 @@ public enum BoardError: Error, Equatable, Sendable {
     case projectNotFound(String)
     case tokenNotFound(String)
     case invalidTransition(taskId: String, from: TaskColumn, to: TaskColumn)
+    case approvalNotFound(String)
+    case approvalAlreadyResolved(String)
 }

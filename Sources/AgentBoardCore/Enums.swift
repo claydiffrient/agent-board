@@ -70,6 +70,17 @@ public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, Data
     case failed
     case blocked
     case proposal
+    case decision
+}
+
+public enum ApprovalKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case spawn
+    case integration
+}
+
+public enum ApprovalResolution: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case approved
+    case denied
 }
 
 public enum ProgressKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {

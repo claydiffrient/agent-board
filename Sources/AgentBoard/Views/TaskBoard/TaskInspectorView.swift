@@ -15,6 +15,7 @@ struct TaskInspectorView: View {
     @State private var deps = Observed<[String]>([])
     @State private var progress = Observed<[ProgressEntry]>([])
     @State private var errorMessage: String?
+    @State private var confirmDelete = false
 
     private var otherTasks: [BoardTask] {
         allTasks.filter { $0.id != task.id }
@@ -42,6 +43,17 @@ struct TaskInspectorView: View {
                 dependencies
                 sessionList
                 progressLog
+                HStack {
+                    Spacer()
+                    Button("Delete Task…", role: .destructive) { confirmDelete = true }
+                }
+                .confirmationDialog("Delete \"\(task.title)\"?", isPresented: $confirmDelete) {
+                    Button("Delete", role: .destructive) {
+                        run { try await env.supervisor.discard(taskId: task.id) }
+                    }
+                } message: {
+                    Text("Stops any running worker and removes its worktree. The branch is kept.")
+                }
             }
             .padding()
         }

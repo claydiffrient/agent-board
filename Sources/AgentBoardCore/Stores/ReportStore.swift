@@ -50,6 +50,29 @@ public struct ReportStore: Sendable {
         }
     }
 
+    @discardableResult
+    public func consumeAll(projectId: String) throws -> [Report] {
+        try db.writer.write { db in
+            let pending = try Self.unconsumed(db, projectId: projectId)
+            guard !pending.isEmpty else { return [] }
+            try db.execute(
+                sql: "UPDATE report SET consumed_at = ? WHERE project_id = ? AND consumed_at IS NULL",
+                arguments: [Int64.nowMillis, projectId]
+            )
+            return pending
+        }
+    }
+
+    public func unconsumedCount(projectId: String) throws -> Int {
+        try db.reader.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM report WHERE project_id = ? AND consumed_at IS NULL",
+                arguments: [projectId]
+            ) ?? 0
+        }
+    }
+
     public func observeUnconsumed(projectId: String) -> ValueObservation<ValueReducers.Fetch<[Report]>> {
         ValueObservation.tracking { db in
             try Self.unconsumed(db, projectId: projectId)
