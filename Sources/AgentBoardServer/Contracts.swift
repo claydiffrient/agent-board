@@ -31,6 +31,7 @@ public struct HookEvent: Sendable {
     public var transcriptPath: String?
     public var cwd: String?
     public var toolName: String?
+    public var toolCommand: String?
     public var notificationType: String?
     public var notificationMessage: String?
     public var lastAssistantMessage: String?
@@ -38,13 +39,14 @@ public struct HookEvent: Sendable {
     public var receivedAt: Date
 
     public init(name: String, sessionId: String, transcriptPath: String? = nil, cwd: String? = nil, toolName: String? = nil,
-                notificationType: String? = nil, notificationMessage: String? = nil, lastAssistantMessage: String? = nil,
-                rawJSON: String, receivedAt: Date = Date()) {
+                toolCommand: String? = nil, notificationType: String? = nil, notificationMessage: String? = nil,
+                lastAssistantMessage: String? = nil, rawJSON: String, receivedAt: Date = Date()) {
         self.name = name
         self.sessionId = sessionId
         self.transcriptPath = transcriptPath
         self.cwd = cwd
         self.toolName = toolName
+        self.toolCommand = toolCommand
         self.notificationType = notificationType
         self.notificationMessage = notificationMessage
         self.lastAssistantMessage = lastAssistantMessage
@@ -53,9 +55,39 @@ public struct HookEvent: Sendable {
     }
 }
 
+/// A `PreToolUse` verdict. Agent Board decides this in its own process, so it holds under any
+/// `--permission-mode`; see §8.
+public struct HookDecision: Sendable, Equatable {
+    public var permissionDecision: String
+    public var reason: String
+
+    public init(permissionDecision: String, reason: String) {
+        self.permissionDecision = permissionDecision
+        self.reason = reason
+    }
+
+    public static func deny(_ reason: String) -> HookDecision {
+        HookDecision(permissionDecision: "deny", reason: reason)
+    }
+
+    /// Both the current `hookSpecificOutput` shape and the legacy `decision`/`reason` pair, so the
+    /// deny lands whichever one the installed CLI reads.
+    public func responseBody(hookEventName: String) -> [String: Any] {
+        [
+            "hookSpecificOutput": [
+                "hookEventName": hookEventName,
+                "permissionDecision": permissionDecision,
+                "permissionDecisionReason": reason,
+            ],
+            "decision": permissionDecision == "deny" ? "block" : "approve",
+            "reason": reason,
+        ]
+    }
+}
+
 /// Must return fast; PostToolUse fires on every tool call and the agent waits on the response.
 public protocol HookSink: Sendable {
-    func handle(_ event: HookEvent, identity: TokenIdentity) async
+    func handle(_ event: HookEvent, identity: TokenIdentity) async -> HookDecision?
 }
 
 public indirect enum JSONValue: Sendable, Equatable, Codable {

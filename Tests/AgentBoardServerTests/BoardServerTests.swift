@@ -117,6 +117,41 @@ final class BoardServerTests: XCTestCase {
         XCTAssertEqual(events[0].1.scope, .orchestrator)
     }
 
+    func testHooksReturnsTheSinkDenyDecision() async throws {
+        await hooks.setDecision(.deny("no pushing"))
+        let body: [String: Any] = [
+            "hook_event_name": "PreToolUse",
+            "session_id": "abc-123",
+            "tool_name": "Bash",
+            "tool_input": ["command": "git push origin main"],
+        ]
+        let (status, json) = try await post("/hooks?token=\(Self.workerToken)", headers: [:], body: body)
+        XCTAssertEqual(status, 200)
+        let object = try XCTUnwrap(json as? [String: Any])
+        let specific = try XCTUnwrap(object["hookSpecificOutput"] as? [String: Any])
+        XCTAssertEqual(specific["hookEventName"] as? String, "PreToolUse")
+        XCTAssertEqual(specific["permissionDecision"] as? String, "deny")
+        XCTAssertEqual(specific["permissionDecisionReason"] as? String, "no pushing")
+        XCTAssertEqual(object["decision"] as? String, "block")
+
+        let events = await hooks.events
+        XCTAssertEqual(events[0].0.toolCommand, "git push origin main")
+    }
+
+    func testHooksReturnsAnEmptyBodyWhenTheSinkAllows() async throws {
+        let body: [String: Any] = [
+            "hook_event_name": "PreToolUse",
+            "session_id": "abc-123",
+            "tool_name": "Bash",
+            "tool_input": ["command": "swift test"],
+        ]
+        let (status, json) = try await post("/hooks?token=\(Self.workerToken)", headers: [:], body: body)
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual((json as? [String: Any])?.count, 0)
+        let events = await hooks.events
+        XCTAssertEqual(events[0].0.toolCommand, "swift test")
+    }
+
     func testHooksRejectsMalformedJSON() async throws {
         let (status, _) = try await postRaw("/hooks?token=\(Self.workerToken)", headers: [:], body: Data("{not json".utf8))
         XCTAssertEqual(status, 400)

@@ -26,6 +26,20 @@ final class SessionConfigTests: XCTestCase {
         return try XCTUnwrap(groups[0]["hooks"] as? [[String: Any]])
     }
 
+    func testPreToolUseHookIsRegisteredForBash() throws {
+        let files = try SessionConfigWriter.write(configDir: dir, configId: "abc", port: 4321, token: "tok")
+        let settings = try readJSON(files.settingsURL)
+        let hooks = try XCTUnwrap(settings["hooks"] as? [String: Any])
+        let groups = try XCTUnwrap(hooks["PreToolUse"] as? [[String: Any]])
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups[0]["matcher"] as? String, "Bash")
+        let hookList = try XCTUnwrap(groups[0]["hooks"] as? [[String: Any]])
+        XCTAssertEqual(hookList.count, 1)
+        XCTAssertEqual(hookList[0]["type"] as? String, "http")
+        XCTAssertEqual(hookList[0]["url"] as? String, "http://127.0.0.1:4321/hooks?token=tok")
+        XCTAssertEqual(hookList[0]["timeout"] as? Int, 5)
+    }
+
     func testFileNamesAndShape() throws {
         let files = try SessionConfigWriter.write(configDir: dir, configId: "abc", port: 4321, token: "tok")
         XCTAssertEqual(files.settingsURL.lastPathComponent, "settings-abc.json")

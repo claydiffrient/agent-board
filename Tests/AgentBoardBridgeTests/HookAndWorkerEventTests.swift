@@ -42,7 +42,7 @@ final class HookAndWorkerEventTests: XCTestCase {
             name: "Notification", sessionId: "w1", notificationType: "permission_prompt",
             notificationMessage: "May I run rm?", rawJSON: "{}"
         )
-        await f.hooks.handle(event, identity: f.workerIdentity(sessionId: "w1", taskId: task.id))
+        _ = await f.hooks.handle(event, identity: f.workerIdentity(sessionId: "w1", taskId: task.id))
 
         let events = await f.events.events
         XCTAssertEqual(events, [.notify(title: "Agent needs input", body: "May I run rm?")])

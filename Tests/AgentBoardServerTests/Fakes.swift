@@ -3,9 +3,19 @@ import Foundation
 
 actor RecordingHookSink: HookSink {
     private(set) var events: [(HookEvent, TokenIdentity)] = []
+    var decision: HookDecision?
 
-    func handle(_ event: HookEvent, identity: TokenIdentity) async {
+    init(decision: HookDecision? = nil) {
+        self.decision = decision
+    }
+
+    func setDecision(_ decision: HookDecision?) {
+        self.decision = decision
+    }
+
+    func handle(_ event: HookEvent, identity: TokenIdentity) async -> HookDecision? {
         events.append((event, identity))
+        return decision
     }
 }
 

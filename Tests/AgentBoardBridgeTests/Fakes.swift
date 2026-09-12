@@ -55,6 +55,7 @@ struct BridgeFixture {
     var sessions: SessionStore { SessionStore(db) }
     var reports: ReportStore { ReportStore(db) }
     var approvals: ApprovalStore { ApprovalStore(db) }
+    var progress: ProgressStore { ProgressStore(db) }
     var board: Board { Board(db) }
 
     var orchestratorIdentity: TokenIdentity {
@@ -130,9 +131,15 @@ struct BridgeFixture {
         return try JSONDecoder().decode(JSONValue.self, from: Data(result.text.utf8))
     }
 
-    func hook(_ name: String, sessionId: String, identity: TokenIdentity, lastAssistantMessage: String? = nil) async {
+    @discardableResult
+    func hook(_ name: String, sessionId: String, identity: TokenIdentity, lastAssistantMessage: String? = nil) async -> HookDecision? {
         let event = HookEvent(name: name, sessionId: sessionId, lastAssistantMessage: lastAssistantMessage, rawJSON: "{}")
-        await hooks.handle(event, identity: identity)
+        return await hooks.handle(event, identity: identity)
+    }
+
+    func preToolUse(_ command: String, sessionId: String, identity: TokenIdentity, tool: String = "Bash") async -> HookDecision? {
+        let event = HookEvent(name: "PreToolUse", sessionId: sessionId, toolName: tool, toolCommand: command, rawJSON: "{}")
+        return await hooks.handle(event, identity: identity)
     }
 }
 

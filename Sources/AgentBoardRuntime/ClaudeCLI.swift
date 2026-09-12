@@ -85,13 +85,30 @@ public enum ClaudeCLI {
     }
 
     /// Parses `backgrounded · <hex> · <name>`; the name segment is optional.
+    /// The CLI colorizes the id even when stdout is a pipe, so escape sequences are stripped first.
     public static func parseShortId(from stdout: String) -> String? {
-        for line in stdout.split(whereSeparator: \.isNewline) where line.hasPrefix("backgrounded") {
+        for line in stripANSI(stdout).split(whereSeparator: \.isNewline) where line.hasPrefix("backgrounded") {
             let fields = line.split(separator: "·").map { $0.trimmingCharacters(in: .whitespaces) }
             if fields.count >= 2, !fields[1].isEmpty, fields[1].allSatisfy(\.isHexDigit) {
                 return fields[1]
             }
         }
         return nil
+    }
+
+    static func stripANSI(_ text: String) -> String {
+        var out = ""
+        var rest = Substring(text)
+        while let escape = rest.firstIndex(of: "\u{1B}") {
+            out += rest[rest.startIndex..<escape]
+            let tail = rest[rest.index(after: escape)...]
+            guard tail.first == "[", let end = tail.firstIndex(where: { ("@"..."~").contains($0) && $0 != "[" }) else {
+                out.append(rest[escape])
+                rest = tail
+                continue
+            }
+            rest = tail[tail.index(after: end)...]
+        }
+        return out + rest
     }
 }

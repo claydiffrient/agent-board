@@ -34,6 +34,9 @@ public struct JSONObjectString: Sendable, Equatable, ExpressibleByStringLiteral 
 
 public enum SessionConfigWriter {
     public static let httpHookEvents = ["UserPromptSubmit", "PostToolUse", "Notification", "Stop", "SessionEnd"]
+    /// `PreToolUse` is the app-side half of the push/PR block (§8). Matched to `Bash` so the
+    /// round trip is not paid on every tool call.
+    public static let guardedPreToolUseMatcher = "Bash"
 
     public static func settingsURL(configDir: URL, configId: String) -> URL {
         configDir.appendingPathComponent("settings-\(configId).json")
@@ -82,7 +85,10 @@ public enum SessionConfigWriter {
             "command": "curl -s -m 5 -X POST -H 'Content-Type: application/json' --data-binary @- '\(url)' >/dev/null",
         ]
 
-        var hooks: [String: Any] = ["SessionStart": [["hooks": [curlHook]]]]
+        var hooks: [String: Any] = [
+            "SessionStart": [["hooks": [curlHook]]],
+            "PreToolUse": [["matcher": guardedPreToolUseMatcher, "hooks": [httpHook]]],
+        ]
         for event in httpHookEvents {
             hooks[event] = [["hooks": [httpHook]]]
         }
