@@ -54,6 +54,13 @@ struct TaskInspectorView: View {
                 sessionList
                 progressLog
                 HStack {
+                    if task.isArchived {
+                        Button("Unarchive") { unarchive() }
+                            .help("Put this task back on the board")
+                    } else if task.column == .done {
+                        Button("Archive") { archive() }
+                            .help("Hide this task from the board. Nothing is deleted.")
+                    }
                     Spacer()
                     Button("Delete Task…", role: .destructive) { confirmDelete = true }
                 }
@@ -111,6 +118,9 @@ struct TaskInspectorView: View {
                 Text(task.origin.rawValue)
                 if task.blocked { FlagBadge(text: "blocked") }
                 if task.failed { FlagBadge(text: "failed") }
+                if let archived = task.archivedDate {
+                    Label("archived \(Format.relative(archived))", systemImage: "archivebox")
+                }
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -285,6 +295,22 @@ struct TaskInspectorView: View {
         do {
             try TaskStore(env.db).update(updated)
             drafts.clear(task.id)
+        } catch {
+            errorMessage = errorText(error)
+        }
+    }
+
+    private func archive() {
+        do {
+            try TaskStore(env.db).archive(task.id)
+        } catch {
+            errorMessage = errorText(error)
+        }
+    }
+
+    private func unarchive() {
+        do {
+            try TaskStore(env.db).unarchive(task.id)
         } catch {
             errorMessage = errorText(error)
         }

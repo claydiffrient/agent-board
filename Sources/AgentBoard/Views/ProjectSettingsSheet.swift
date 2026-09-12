@@ -13,6 +13,8 @@ struct ProjectSettingsSheet: View {
     @State private var worktreeRoot: String
     @State private var autoModeJSON: String
     @State private var extraServers: String
+    @State private var archiveMode: ArchivePolicyMode
+    @State private var archiveDays: Int
     @State private var confirmDelete = false
     @State private var errorMessage: String?
 
@@ -25,6 +27,8 @@ struct ProjectSettingsSheet: View {
         _worktreeRoot = State(initialValue: project.worktreeRoot)
         _autoModeJSON = State(initialValue: settings.autoModeJSON ?? "")
         _extraServers = State(initialValue: settings.extraMcpServers.joined(separator: ", "))
+        _archiveMode = State(initialValue: settings.archivePolicy.mode)
+        _archiveDays = State(initialValue: settings.archivePolicy.days ?? ArchivePolicy.defaultDays)
     }
 
     private var autoModeJSONIsValid: Bool {
@@ -63,6 +67,20 @@ struct ProjectSettingsSheet: View {
                         .frame(minHeight: 80)
                     }
                     Text("Read by the orchestrator when it picks a model per task, e.g. \"Sonnet 5 for docs and tests, Opus 5 for features.\" A task's own model overrides the default.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Archive") {
+                    Picker("Archive done tasks", selection: $archiveMode) {
+                        ForEach(ArchivePolicyMode.allCases, id: \.self) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    TextField("Days in done", value: $archiveDays, format: .number)
+                        .disabled(archiveMode != .afterDays)
+                        .foregroundStyle(archiveMode == .afterDays ? .primary : .secondary)
+                    Text("Archived tasks are hidden from the board, never deleted. The Task Board's Archive button works under every mode; turn on Show Archived there to bring them back into view.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -124,6 +142,7 @@ struct ProjectSettingsSheet: View {
 
     private func save() {
         var updated = settings
+        updated.archivePolicy = ArchivePolicy.make(mode: archiveMode, days: archiveDays)
         let trimmedJSON = autoModeJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.autoModeJSON = trimmedJSON.isEmpty ? nil : trimmedJSON
         updated.extraMcpServers = extraServers

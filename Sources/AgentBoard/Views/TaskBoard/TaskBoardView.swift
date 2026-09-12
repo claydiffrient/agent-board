@@ -17,6 +17,8 @@ struct TaskBoardView: View {
     @State private var errorMessage: String?
     @State private var taskPendingDelete: BoardTask?
     @State private var drafts = TaskDraftCache()
+    @State private var showArchived = false
+    @State private var confirmArchive = false
 
     private let columnWidth: CGFloat = 250
 
@@ -31,9 +33,35 @@ struct TaskBoardView: View {
         }
     }
 
+    private var partition: ArchivePartition {
+        TaskArchive.partition(tasks.value, showArchived: showArchived)
+    }
+
+    private var visibleTasks: [BoardTask] {
+        partition.visible
+    }
+
+    /// Archived tasks the board is not drawing, per lane and column, so a cell can say so rather
+    /// than letting the work disappear silently. Keyed by column too, because unarchiving is allowed
+    /// from anywhere and an archived task can be moved back out of `done`.
+    private var hiddenByEpicAndColumn: [Key: Int] {
+        partition.hidden.reduce(into: [:]) { counts, task in
+            counts[Key(epicId: task.epicId, column: task.column), default: 0] += 1
+        }
+    }
+
+    private struct Key: Hashable {
+        let epicId: String?
+        let column: TaskColumn
+    }
+
+    private var archivableTasks: [BoardTask] {
+        TaskArchive.archivable(tasks.value)
+    }
+
     private var lanes: [Lane] {
         var byEpic: [String?: [BoardTask]] = [:]
-        for task in tasks.value {
+        for task in visibleTasks {
             byEpic[task.epicId, default: []].append(task)
         }
         var result = [Lane(id: "no-epic", title: "No epic", epic: nil, tasks: byEpic[nil] ?? [])]
@@ -86,12 +114,12 @@ struct TaskBoardView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .onExitCommand { selectedTaskId = nil }
-        .onChange(of: tasks.value) { _, updated in
+        .onChange(of: visibleTasks) { _, updated in
             let reconciled = TaskSelection.reconciled(current: selectedTaskId, availableIds: updated.lazy.map(\.id))
             if reconciled != selectedTaskId { selectedTaskId = reconciled }
         }
         .task(id: project.id) {
-            await tasks.run(TaskStore(env.db).observe(projectId: project.id), in: env.db.reader)
+            await tasks.run(TaskStore(env.db).observe(projectId: project.id, includeArchived: true), in: env.db.reader)
         }
         .task(id: project.id) {
             await sessions.run(SessionStore(env.db).observe(projectId: project.id), in: env.db.reader)
@@ -127,6 +155,21 @@ struct TaskBoardView: View {
                 }
                 .help("Create a task")
             }
+            ToolbarItem {
+                Button {
+                    confirmArchive = true
+                } label: {
+                    Label(TaskArchive.buttonTitle(count: archivableTasks.count), systemImage: "archivebox")
+                }
+                .disabled(archivableTasks.isEmpty)
+                .help("Hide every done task from the board. Nothing is deleted.")
+            }
+            ToolbarItem {
+                Toggle(isOn: $showArchived) {
+                    Label("Show Archived", systemImage: showArchived ? "eye" : "eye.slash")
+                }
+                .help("Draw archived tasks back into their columns, dimmed and labelled")
+            }
         }
         .sheet(isPresented: $showNewTask) {
             NewTaskSheet(projectId: project.id)
@@ -135,10 +178,10 @@ struct TaskBoardView: View {
             NewEpicSheet(projectId: project.id)
         }
         .inspector(isPresented: inspectorShown) {
-            if let task = tasks.value.first(where: { $0.id == selectedTaskId }) {
+            if let task = visibleTasks.first(where: { $0.id == selectedTaskId }) {
                 TaskInspectorView(
                     task: task,
-                    allTasks: tasks.value,
+                    allTasks: visibleTasks,
                     sessions: sessionsByTask[task.id] ?? [],
                     drafts: drafts,
                     onClose: { selectedTaskId = nil }
@@ -147,6 +190,7 @@ struct TaskBoardView: View {
             }
         }
         .background(deleteConfirmation)
+        .background(archiveConfirmation)
         .overlay {
             if let busyMessage {
                 ZStack {
@@ -170,7 +214,7 @@ struct TaskBoardView: View {
     private var columnHeaders: some View {
         HStack(alignment: .top, spacing: 12) {
             ForEach(TaskColumn.allCases, id: \.self) { column in
-                columnHeader(column, count: tasks.value.filter { $0.column == column }.count)
+                columnHeader(column, count: visibleTasks.filter { $0.column == column }.count)
             }
         }
     }
@@ -188,6 +232,12 @@ struct TaskBoardView: View {
             if column == .ready {
                 Image(systemName: "info.circle")
                     .foregroundStyle(.secondary)
+            }
+            if let notice = TaskArchive.hiddenNotice(count: partition.hidden.count { $0.column == column }) {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help("Hidden from the board, not deleted. Turn on Show Archived to see them.")
             }
             Spacer()
         }
@@ -228,6 +278,17 @@ struct TaskBoardView: View {
 
     private func columnCell(lane: Lane, column: TaskColumn) -> some View {
         VStack(spacing: 8) {
+            let hidden = hiddenByEpicAndColumn[Key(epicId: lane.epic?.id, column: column)] ?? 0
+            if let notice = TaskArchive.hiddenNotice(count: hidden) {
+                HStack(spacing: 4) {
+                    Image(systemName: "archivebox")
+                    Text(notice)
+                    Spacer()
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .help("Hidden from the board, not deleted. Turn on Show Archived to see them.")
+            }
             ForEach(lane.tasks(in: column)) { task in
                 let taskSessions = sessionsByTask[task.id] ?? []
                 TaskCardView(
@@ -249,6 +310,11 @@ struct TaskBoardView: View {
                         }
                     }
                     Divider()
+                    if task.isArchived {
+                        Button("Unarchive") { unarchive(task.id) }
+                    } else if task.column == .done {
+                        Button("Archive") { archive([task.id]) }
+                    }
                     Button("Delete Task…", role: .destructive) { taskPendingDelete = task }
                 }
             }
@@ -270,7 +336,7 @@ struct TaskBoardView: View {
     }
 
     private func drop(taskId: String, onto column: TaskColumn) -> Bool {
-        guard let task = tasks.value.first(where: { $0.id == taskId }), task.column != column else {
+        guard let task = visibleTasks.first(where: { $0.id == taskId }), task.column != column else {
             return false
         }
         switch column {
@@ -316,6 +382,36 @@ struct TaskBoardView: View {
             } message: { _ in
                 Text("Stops any running worker and removes its worktree. The branch is kept.")
             }
+    }
+
+    private var archiveConfirmation: some View {
+        EmptyView()
+            .confirmationDialog(
+                TaskArchive.confirmationTitle(count: archivableTasks.count),
+                isPresented: $confirmArchive,
+                titleVisibility: .visible
+            ) {
+                Button("Archive") { archive(archivableTasks.map(\.id)) }
+            } message: {
+                Text("They leave the board but are never deleted — branches, worktrees and reports are untouched. Turn on Show Archived to bring them back into view, or unarchive one from its card.")
+            }
+    }
+
+    private func archive(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        do {
+            try TaskStore(env.db).archive(ids: ids)
+        } catch {
+            errorMessage = errorText(error)
+        }
+    }
+
+    private func unarchive(_ taskId: String) {
+        do {
+            try TaskStore(env.db).unarchive(taskId)
+        } catch {
+            errorMessage = errorText(error)
+        }
     }
 
     private func accept(_ taskId: String) {
