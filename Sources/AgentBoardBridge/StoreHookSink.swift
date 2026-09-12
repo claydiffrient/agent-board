@@ -8,6 +8,8 @@ public final class StoreHookSink: HookSink {
     private let sessions: SessionStore
     private let tasks: TaskStore
     private let progress: ProgressStore
+    private let shutdowns: ShutdownOrderStore
+    private let deliveries: ShutdownDeliveryStore
     private let board: Board
     private let events: any BoardEventSink
     private let queue = DispatchQueue(label: "agent-board.hooks")
@@ -35,6 +37,8 @@ public final class StoreHookSink: HookSink {
         sessions = SessionStore(db)
         tasks = TaskStore(db)
         progress = ProgressStore(db)
+        shutdowns = ShutdownOrderStore(db)
+        deliveries = ShutdownDeliveryStore(db)
         board = Board(db)
         self.events = events
     }
@@ -58,26 +62,49 @@ public final class StoreHookSink: HookSink {
         return outcome.decision
     }
 
+    /// SPEC §12: denying `PreToolUse` is the only way into a busy `--bg` worker mid-turn. It fires
+    /// once per session — the claim is what makes it once — so the worker's following calls go
+    /// through and it can actually commit before it acknowledges.
+    private func windDownToDeliver(sessionId: String, identity: TokenIdentity) -> ShutdownOrder? {
+        guard identity.scope == .worker, !sessionId.isEmpty else { return nil }
+        guard let order = (try? shutdowns.outstanding(projectId: identity.projectId)) ?? nil else { return nil }
+        let taskId = (try? sessions.get(sessionId))?.taskId ?? identity.taskId
+        let claimed = (try? deliveries.claimDelivery(
+            orderId: order.id, sessionId: sessionId, taskId: taskId, via: .hook
+        )) ?? false
+        guard claimed else { return nil }
+        if let taskId {
+            _ = try? progress.append(
+                taskId: taskId, sessionId: sessionId, kind: .status,
+                text: "Wind-down order delivered; waiting for acknowledge_shutdown."
+            )
+        }
+        return order
+    }
+
     private func process(_ event: HookEvent, identity: TokenIdentity) -> Outcome {
         let sessionId = event.sessionId
         _ = try? hookEvents.append(sessionId: sessionId, event: event.name, payload: event.rawJSON)
 
         if event.name == "PreToolUse" {
-            guard let violation = IntegrationGuard.violation(toolName: event.toolName, command: event.toolCommand) else {
-                return .none
+            if let violation = IntegrationGuard.violation(toolName: event.toolName, command: event.toolCommand) {
+                // The deny is decided before any lookup; the row is best-effort so an unrecognized
+                // session can never turn a block into a pass.
+                let session = try? sessions.get(sessionId)
+                if let taskId = session?.taskId ?? identity.taskId {
+                    _ = try? progress.append(
+                        taskId: taskId,
+                        sessionId: session?.sessionId,
+                        kind: .error,
+                        text: "Blocked \(violation.rawValue): \(event.toolCommand ?? "")"
+                    )
+                }
+                return .deny(.deny(violation.reason))
             }
-            // The deny is decided before any lookup; the row is best-effort so an unrecognized
-            // session can never turn a block into a pass.
-            let session = try? sessions.get(sessionId)
-            if let taskId = session?.taskId ?? identity.taskId {
-                _ = try? progress.append(
-                    taskId: taskId,
-                    sessionId: session?.sessionId,
-                    kind: .error,
-                    text: "Blocked \(violation.rawValue): \(event.toolCommand ?? "")"
-                )
+            if let order = windDownToDeliver(sessionId: sessionId, identity: identity) {
+                return .deny(.deny(ShutdownOrder.windDownOrder(reason: order.reason, via: .hook)))
             }
-            return .deny(.deny(violation.reason))
+            return .none
         }
 
         guard !sessionId.isEmpty else { return .none }

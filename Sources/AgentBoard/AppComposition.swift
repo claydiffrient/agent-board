@@ -52,4 +52,11 @@ final class StubSupervisor: WorkerSupervising {
     func promote(taskId: String) async throws { throw StubError.notWired }
     func requestIntegration(epicId: String) async throws { throw StubError.notWired }
     func openPullRequest(epicId: String) async throws -> PullRequestOutcome { throw StubError.notWired }
+    func requestShutdown(projectId: String, requestedBy: String, reason: String?) async throws -> ShutdownOrder {
+        throw StubError.notWired
+    }
+    func cancelShutdown(projectId: String, by: String) async throws -> ShutdownOrder? { throw StubError.notWired }
+    func isShuttingDown(projectId: String) -> Bool { false }
+    func deliverShutdownOrder(projectId: String) async throws -> ShutdownProgress { throw StubError.notWired }
+    var shutdownProgress: [String: ShutdownProgress] { [:] }
 }

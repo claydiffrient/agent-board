@@ -353,6 +353,16 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
   eligible when every row in `task_dep` points at a task in `done`.
 - `running` — an `agent_session` row holds it. The board shows the agent, its
   spend, and elapsed time.
+- **Wound down** — a task whose worker was told to wind down (the shutdown
+  order, §8) and answered `acknowledge_shutdown` goes back to `ready` with a
+  resume note on the queued report, **never to `review`**: the work is
+  unfinished, not accepted. This is a third termination cause alongside a cap
+  kill and a human stop, and it is deliberately shaped differently from both —
+  the task is **not** flagged `failed`, and the report queued for the
+  orchestrator is a `decision` (carrying the worker's note under "Where the
+  worker stopped and what remains"), not a `failed` report. A worker that
+  vanishes or is cap-killed still gets the old `failed` shape; only an
+  acknowledged wind-down gets this one.
 - `blocked` — a flag, not a column. Set by the `Notification` hook, cleared on
   the next `PostToolUse`. The card keeps its position and shows why.
 - `review` — worker has committed on `agentboard/<task-id>` and called
@@ -417,6 +427,7 @@ error, because the tool list is rendered per scope.
 | `propose_task(title, body, rationale)` | Inserts into `proposed` |
 | `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review` |
 | `report_blocked(reason)` | Inserts a `report`; sets `blocked` |
+| `acknowledge_shutdown(note)` | Answers a wind-down order (§8). Records `note` against the delivery and the task, then Agent Board stops the session. The task goes back to `ready`, never `review` (§5) — this is not `report_complete` |
 
 A worker may not read other tasks, reassign, create a non-proposal task, or
 spawn anything.
@@ -433,12 +444,21 @@ Everything in worker scope over any task in the project, plus:
 | `create_epic(title, goal, tasks[])` | Records a decomposition; cuts the epic branch |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
 | `pin_note(note_id, pinned)` | Every future agent sees it in full |
-| `spawn_worker(task_id)` | Subject to §8 caps and the autonomy setting |
+| `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting |
 | `stop_worker(session_id)` | `claude stop` |
 | `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Always creates a human approval row |
+
+While a shutdown order is outstanding (§8), `spawn_worker` refuses immediately
+— before caps are even checked — with the fixed string `"shutdown in progress;
+no new workers"`, and a pending spawn or integration approval cannot be
+approved until the order is cancelled (a refused approval is still pending
+once it is, not silently granted). The board itself is untouched: `create_task`,
+`update_task`, `move_task`, `set_deps`, `promote_proposal` and the note tools
+all keep working, and workers already running are not stopped by raising the
+order — only delivering it (§8) reaches them.
 
 ---
 
@@ -545,6 +565,35 @@ Per project, overridable:
   exfiltration) has real boundaries to work with. Rule sets are run through
   `claude auto-mode critique` before shipping.
 
+### 8.1 Shutdown order
+
+A standing, project-wide order raised by **Stop All** (§10), not a per-worker
+action. While one is outstanding: `spawn_worker` refuses (§6) before caps are
+even checked, and a pending spawn or integration approval cannot be approved.
+Raising and cancelling each queue a `decision` report so the orchestrator is
+told rather than left to read the refusals as transient (§9.1). Raising the
+order alone touches nothing else — no worker is stopped or signalled; the
+board keeps working normally.
+
+**Delivery** is a separate step: every worker still active is enrolled, then
+handed the same wind-down text — commit what's in the worktree, call
+`acknowledge_shutdown(note)`, then stop; do not call `report_complete`. A busy
+worker gets it by having its next `PreToolUse` denied with the text, claimed
+once per session so its following calls pass and it can actually commit; an
+idle worker, which may never make another tool call, gets the same text as a
+`--resume` prompt instead (§12). The integration guard (workers never push,
+above) is checked first, so a push still gets denied and does not consume the
+delivery claim.
+
+Acknowledging carries `caps.shutdownGraceSeconds` (default 120s), but the
+clock **starts at `delivered_at`, never `ordered_at`** — a worker that is
+enrolled but has not yet been reached (still mid-turn, no `PreToolUse` fired
+yet) has not failed to answer; it was never asked, so it is not counted as
+unresponsive. Only a worker that was actually handed the order and then stayed
+silent past the grace period counts as overdue. An overdue worker is
+**reported, not killed** — stopping it, like any worker, is the human's call
+from the progress sheet (§10).
+
 ---
 
 ## 9. Orchestrator
@@ -646,6 +695,33 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
 A blocked worker was previously invisible here: it sat in `running`, burned its
 idle cap, and died with the only evidence being a `last_tool` that had stopped
 moving on the Status screen.
+
+**Stop All** — a destructive button beside Nudge/Restart/Stop in the console
+footer. Confirms first, naming how many workers are running and that each is
+told to commit its worktree and stop with its task going back to `ready` with
+a resume note — nothing is lost. Confirming raises the shutdown order (§8),
+delivers it to every running worker, and opens a modal progress sheet reading
+"Closing X/Y agents" (all row-state and count logic lives in
+`AgentBoardCore.ShutdownSheetModel`, unit-tested apart from SwiftUI). Each row
+reads as one of:
+
+- **ordered** — enrolled, not yet reached; its grace clock has not started.
+- **closing** — handed the order, inside its grace period.
+- **acknowledged** — answered `acknowledge_shutdown`.
+- **not responding** — handed the order, then silent past the grace period
+  (§8). Gets a Stop button; stopping it still returns its task to `ready`.
+- **waiting on you** — sitting on a permission prompt. Nothing can reach it —
+  no hook fires and no resume lands — so it gets **Attach** (D15) rather than
+  being called unresponsive; the human answering the prompt is what unsticks
+  it, in seconds rather than a kill.
+- A session that ends on its own while enrolled reads **closed**, so a worker
+  that dies mid-shutdown cannot hold the sheet at X/Y forever.
+
+When every row is closed the header reads "Y/Y agents closed" and a **Quit
+Agent Board** button appears, stopping the orchestrator console and
+terminating the app. **Cancel Shutdown** lifts the standing refusal so
+spawning resumes; it restarts nothing — workers that already acknowledged
+stay stopped, their tasks sitting in `ready` with their resume notes.
 
 **Task Board** — columns from §5, swimlanes by epic. A card shows title, epic,
 assigned agent, elapsed, spend, and its `blocked`/`failed` flag. Drag between
@@ -788,6 +864,30 @@ from knowing how the agents actually behave first.
   `error: Blocked push: git push -u origin HEAD 2>&1; echo "exit=$?"`. The
   unrelated Bash call in the same session (the `hello.txt` commit) was allowed
   through and completed.
+- **Not verified live: the shutdown delivery mechanism.** The wind-down order
+  (§8) reaches a worker by one of two paths — a busy `--bg` worker only by
+  denying its next `PreToolUse`, an idle one only by `--resume` with a prompt
+  — and **neither was exercised against a real spawned worker.** Both are
+  unit-tested only, against fixtures: `AgentBoardBridgeTests/ShutdownWindDownTests`
+  drives the `PreToolUse` deny path through a `BridgeFixture`, and
+  `AgentBoardAppTests/ShutdownDeliveryTests` drives the resume path against a
+  stub runtime. The progress sheet (§10) fares no better: it was mounted
+  offscreen via `NSHostingView` and proven to re-render off the database, but
+  its rendered text could not be read back on this machine at all —
+  `AXIsProcessTrusted()` is false here, so the accessibility tree comes back
+  empty — and the human click-through steps its own report wrote out (open
+  the console, click Stop All, watch rows move `ordered` → `closing` →
+  `acknowledged`, let one go overdue, attach to a blocked one, quit) were
+  explicitly never run. Unlike the M3 push-block verification above, which
+  ran a real worker against a real bare remote, no part of the shutdown
+  feature has been seen working end to end.
+- **Known gap: a `blocked` worker is enrolled and counted but never receives
+  the order.** `deliverShutdownOrder` resumes only sessions in `idle`; nothing
+  can reach a session sitting on a permission prompt — no hook fires, and
+  resuming into a pending prompt is untested behavior nobody wanted to rely
+  on. It shows as **waiting on you** in the progress sheet (§10), never
+  miscounted as unresponsive, and the fix is a human answering the prompt (or
+  Attach), not automatic delivery.
 - **Fixed during M3:** `claude --bg` colorizes the `backgrounded · <id>` line
   even when stdout is a pipe, so `ClaudeCLI.parseShortId` rejected the hex id
   and every spawn failed with "exited 0 but no short id was found" while the

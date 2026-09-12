@@ -39,4 +39,17 @@ protocol WorkerSupervising: AnyObject {
     /// Opens the prefilled compare page for the epic branch; never creates the PR itself.
     @discardableResult
     func openPullRequest(epicId: String) async throws -> PullRequestOutcome
+    /// Raises the standing order that refuses every new worker. Stops nothing that is already running.
+    @discardableResult
+    func requestShutdown(projectId: String, requestedBy: String, reason: String?) async throws -> ShutdownOrder
+    /// Nil when no order was outstanding.
+    @discardableResult
+    func cancelShutdown(projectId: String, by: String) async throws -> ShutdownOrder?
+    func isShuttingDown(projectId: String) -> Bool
+    /// Hands the outstanding order to every running worker and starts collecting acknowledgments.
+    /// Stops nothing: a worker ends its own session by calling `acknowledge_shutdown`.
+    @discardableResult
+    func deliverShutdownOrder(projectId: String) async throws -> ShutdownProgress
+    /// Wind-down counts per project id, so the progress sheet observes rather than polls.
+    var shutdownProgress: [String: ShutdownProgress] { get }
 }

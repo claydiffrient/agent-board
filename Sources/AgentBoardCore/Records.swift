@@ -545,3 +545,140 @@ public struct HookEventRecord: Codable, FetchableRecord, MutablePersistableRecor
 
     public var date: Date { at.asDate }
 }
+
+/// A standing order that no new worker may be spawned on the project. Outstanding while
+/// `resolvedAt` is nil; cancelling resolves it and restores normal dispatch.
+public struct ShutdownOrder: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
+    public static let databaseTableName = "shutdown_order"
+
+    public var id: String
+    public var projectId: String
+    public var requestedBy: String
+    public var reason: String?
+    public var requestedAt: Int64
+    public var resolvedAt: Int64?
+    public var resolvedBy: String?
+
+    public enum CodingKeys: String, CodingKey {
+        case id
+        case projectId = "project_id"
+        case requestedBy = "requested_by"
+        case reason
+        case requestedAt = "requested_at"
+        case resolvedAt = "resolved_at"
+        case resolvedBy = "resolved_by"
+    }
+
+    public init(
+        id: String, projectId: String, requestedBy: String, reason: String?, requestedAt: Int64,
+        resolvedAt: Int64? = nil, resolvedBy: String? = nil
+    ) {
+        self.id = id
+        self.projectId = projectId
+        self.requestedBy = requestedBy
+        self.reason = reason
+        self.requestedAt = requestedAt
+        self.resolvedAt = resolvedAt
+        self.resolvedBy = resolvedBy
+    }
+
+    public static func newId() -> String { BoardId.new() }
+
+    /// What every refused dispatch path says, so the orchestrator can tell a shutdown from a cap breach.
+    public static let refusal = "shutdown in progress; no new workers"
+
+    /// How a worker was handed the order. A busy session can only be reached by denying its next
+    /// `PreToolUse`; an idle one may never make that call, so it gets the same text as a prompt.
+    public enum Delivery: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+        case hook
+        case resume
+    }
+
+    /// The one wind-down text, so a worker reached by the hook and a worker reached by a resume are
+    /// told to do exactly the same thing.
+    public static func windDownOrder(reason: String?, via: Delivery) -> String {
+        var lines = [
+            "Agent Board is winding down all work on this project. Stop your task now and leave it resumable.",
+        ]
+        if let reason, !reason.isEmpty {
+            lines.append("Reason: \(reason)")
+        }
+        lines.append("""
+        Do this, in order:
+        1. Commit whatever is in your worktree on the current branch. Do not push.
+        2. Call acknowledge_shutdown with a note saying where you stopped and what still remains.
+        3. Stop. Do not call report_complete: the task is unfinished and goes back to ready, not review.
+        """)
+        if via == .hook {
+            lines.append("This one tool call was blocked to hand you the order. Your next calls go through, so commit first, then acknowledge.")
+        }
+        return lines.joined(separator: "\n\n")
+    }
+
+    public var isOutstanding: Bool { resolvedAt == nil }
+    public var requestedDate: Date { requestedAt.asDate }
+    public var resolvedDate: Date? { resolvedAt?.asDate }
+}
+
+/// One worker's leg of a shutdown order: enrolled when the order reaches it, `deliveredAt` set by
+/// whichever path handed it the text, `acknowledgedAt` and `note` set when it answers.
+public struct ShutdownDelivery: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
+    public static let databaseTableName = "shutdown_delivery"
+
+    public var orderId: String
+    public var sessionId: String
+    public var taskId: String?
+    public var orderedAt: Int64
+    public var deliveredAt: Int64?
+    public var deliveredVia: ShutdownOrder.Delivery?
+    public var acknowledgedAt: Int64?
+    public var note: String?
+
+    public enum CodingKeys: String, CodingKey {
+        case orderId = "order_id"
+        case sessionId = "session_id"
+        case taskId = "task_id"
+        case orderedAt = "ordered_at"
+        case deliveredAt = "delivered_at"
+        case deliveredVia = "delivered_via"
+        case acknowledgedAt = "acknowledged_at"
+        case note
+    }
+
+    public init(
+        orderId: String, sessionId: String, taskId: String? = nil, orderedAt: Int64,
+        deliveredAt: Int64? = nil, deliveredVia: ShutdownOrder.Delivery? = nil,
+        acknowledgedAt: Int64? = nil, note: String? = nil
+    ) {
+        self.orderId = orderId
+        self.sessionId = sessionId
+        self.taskId = taskId
+        self.orderedAt = orderedAt
+        self.deliveredAt = deliveredAt
+        self.deliveredVia = deliveredVia
+        self.acknowledgedAt = acknowledgedAt
+        self.note = note
+    }
+
+    public var isDelivered: Bool { deliveredAt != nil }
+    public var isAcknowledged: Bool { acknowledgedAt != nil }
+}
+
+/// What the progress sheet reads while an order is being collected.
+public struct ShutdownProgress: Sendable, Equatable {
+    public var orderId: String
+    public var total: Int
+    public var acknowledged: Int
+    /// Ordered, past the grace period, and still silent. Counted, never killed — that is the human's call.
+    public var overdue: [String]
+
+    public init(orderId: String, total: Int, acknowledged: Int, overdue: [String] = []) {
+        self.orderId = orderId
+        self.total = total
+        self.acknowledged = acknowledged
+        self.overdue = overdue
+    }
+
+    public var unacknowledged: Int { total - acknowledged }
+    public var isComplete: Bool { total > 0 && acknowledged == total }
+}

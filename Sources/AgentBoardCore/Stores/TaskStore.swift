@@ -237,4 +237,5 @@ public enum BoardError: Error, Equatable, Sendable {
     case epicNotFound(String)
     /// `createEpic` was handed a `dependsOn` index that is out of range or points at the task itself.
     case invalidEpicDependency(taskIndex: Int, dependsOn: Int)
+    case noShutdownOrder(String)
 }

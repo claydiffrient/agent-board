@@ -15,6 +15,8 @@ enum SupervisorError: LocalizedError {
     case sessionHasNoShortId(String)
     case taskNotAssignable(title: String, column: TaskColumn)
     case capRefused(String)
+    case shutdownOrdered
+    case noShutdownOrder
     case serverNotRunning
     case spawnFailed(worktree: String, underlying: String)
     case approvalNotFound(String)
@@ -30,6 +32,8 @@ enum SupervisorError: LocalizedError {
         case .sessionHasNoShortId(let id): return "session \(id) has no claude short id yet; reconcile first"
         case .taskNotAssignable(let title, let column): return "\"\(title)\" is in \(column.rawValue) and cannot be assigned"
         case .capRefused(let reason): return "spawn refused: \(reason)"
+        case .shutdownOrdered: return ShutdownOrder.refusal
+        case .noShutdownOrder: return "no shutdown order is outstanding on this project"
         case .serverNotRunning: return "the Agent Board server is not running"
         case .spawnFailed(let worktree, let underlying):
             return "spawn failed; worktree kept at \(worktree) for retry.\n\(underlying)"
@@ -42,6 +46,9 @@ enum SupervisorError: LocalizedError {
 final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private(set) var serverPort: Int?
     private(set) var lastError: String?
+    /// Wind-down progress per project id, refreshed on every delivery, every acknowledgment and
+    /// every metering tick, so the progress sheet reads it instead of polling.
+    private(set) var shutdownProgress: [String: ShutdownProgress] = [:]
 
     @ObservationIgnored private let db: AppDatabase
     @ObservationIgnored private let runtime: any AgentRuntime
@@ -54,6 +61,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let grants: TokenGrantStore
     @ObservationIgnored private let hookEvents: HookEventStore
     @ObservationIgnored private let approvals: ApprovalStore
+    @ObservationIgnored private let shutdowns: ShutdownOrderStore
+    @ObservationIgnored private let deliveries: ShutdownDeliveryStore
     @ObservationIgnored private let epics: EpicStore
     @ObservationIgnored private let notes: NoteStore
     @ObservationIgnored private let board: Board
@@ -85,6 +94,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         grants = TokenGrantStore(db)
         hookEvents = HookEventStore(db)
         approvals = ApprovalStore(db)
+        shutdowns = ShutdownOrderStore(db)
+        deliveries = ShutdownDeliveryStore(db)
         epics = EpicStore(db)
         notes = NoteStore(db)
         board = Board(db)
@@ -158,6 +169,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.projectNotFound(task.projectId)
         }
         guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        try requireNoShutdown(projectId: project.id)
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
         }
@@ -276,6 +288,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.projectNotFound(epic.projectId)
         }
         guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        try requireNoShutdown(projectId: project.id)
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
         }
@@ -346,6 +359,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func resume(sessionId: String) async throws {
         try await recording {
             let session = try requireSession(sessionId)
+            try await resume(session, prompt: Self.resumePrompt(previousStop: session.stopReason))
+        }
+    }
+
+    private func resume(_ session: AgentSession, prompt: String) async throws {
+        do {
+            let sessionId = session.sessionId
             guard let port = serverPort else { throw SupervisorError.serverNotRunning }
             guard let taskId = session.taskId else { throw SupervisorError.taskNotFound("(none for session \(sessionId))") }
             guard let project = try projects.get(session.projectId) else {
@@ -370,7 +390,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let resumed = try await runtime.resume(
                 sessionId: sessionId,
                 cwd: URL(fileURLWithPath: session.cwd),
-                prompt: Self.resumePrompt(previousStop: session.stopReason)
+                prompt: prompt
             )
             if resumed.shortId != session.shortId {
                 try sessions.setShortId(sessionId, resumed.shortId)
@@ -380,6 +400,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 if task.failed { try tasks.setFailed(taskId, false, reason: nil) }
                 if task.column != .running { try tasks.move(taskId, to: .running) }
             }
+        } catch {
+            lastError = describe(error)
+            throw error
         }
     }
 
@@ -700,6 +723,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func approve(approvalId: String) async throws {
         try await recording {
             guard let approval = try approvals.get(approvalId) else { throw SupervisorError.approvalNotFound(approvalId) }
+            // Before the resolve, so a refused approval is still pending once the order is cancelled.
+            try requireNoShutdown(projectId: approval.projectId)
             try board.resolveApproval(approvalId, approved: true, by: "human")
             announceReports(projectId: approval.projectId)
             switch approval.kind {
@@ -758,6 +783,86 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    // MARK: - Shutdown
+
+    /// Raises the order and tells the orchestrator. Stops and signals nothing: workers already
+    /// running keep going, and `pauseAll` remains the blunt path that kills them.
+    @discardableResult
+    func requestShutdown(projectId: String, requestedBy: String = "human", reason: String? = nil) async throws -> ShutdownOrder {
+        try await recording {
+            let order = try board.requestShutdown(projectId: projectId, requestedBy: requestedBy, reason: reason)
+            announceReports(projectId: projectId)
+            return order
+        }
+    }
+
+    @discardableResult
+    func cancelShutdown(projectId: String, by: String = "human") async throws -> ShutdownOrder? {
+        try await recording {
+            let order = try board.cancelShutdown(projectId: projectId, by: by)
+            if order != nil {
+                shutdownProgress[projectId] = nil
+                announceReports(projectId: projectId)
+            }
+            return order
+        }
+    }
+
+    /// Hands the outstanding order to every worker still running. A busy session is left to the
+    /// `PreToolUse` deny, which is the only way in mid-turn; an idle one may never make that call,
+    /// so it gets the same text as a resume prompt. Nothing is stopped here: a worker stops itself
+    /// by calling `acknowledge_shutdown`, and one that never answers is counted, not killed.
+    @discardableResult
+    func deliverShutdownOrder(projectId: String) async throws -> ShutdownProgress {
+        try await recording {
+            guard let order = try shutdowns.outstanding(projectId: projectId) else {
+                throw SupervisorError.noShutdownOrder
+            }
+            let workers = try sessions.active(projectId: projectId).filter { $0.role == .worker }
+            for worker in workers {
+                try deliveries.enroll(orderId: order.id, sessionId: worker.sessionId, taskId: worker.taskId)
+            }
+            for worker in workers where worker.state == .idle {
+                await deliverByResume(order: order, to: worker)
+            }
+            return refreshShutdownProgress(projectId: projectId, order: order)
+        }
+    }
+
+    /// Claimed before the resume runs, so a hook firing at the same moment cannot deliver the order
+    /// twice. A resume that fails releases the claim for the next hook to carry.
+    private func deliverByResume(order: ShutdownOrder, to session: AgentSession) async {
+        let claimed = (try? deliveries.claimDelivery(
+            orderId: order.id, sessionId: session.sessionId, taskId: session.taskId, via: .resume
+        )) ?? false
+        guard claimed else { return }
+        do {
+            try await resume(session, prompt: ShutdownOrder.windDownOrder(reason: order.reason, via: .resume))
+        } catch {
+            try? deliveries.releaseDelivery(orderId: order.id, sessionId: session.sessionId)
+        }
+    }
+
+    @discardableResult
+    private func refreshShutdownProgress(projectId: String, order: ShutdownOrder) -> ShutdownProgress {
+        let grace = (try? projects.get(projectId))??.settings.caps.shutdownGraceSeconds
+            ?? ShutdownDeliveryStore.defaultGraceSeconds
+        let progress = (try? deliveries.progress(orderId: order.id, graceSeconds: grace))
+            ?? ShutdownProgress(orderId: order.id, total: 0, acknowledged: 0)
+        shutdownProgress[projectId] = progress
+        return progress
+    }
+
+    func isShuttingDown(projectId: String) -> Bool {
+        (try? shutdowns.isShuttingDown(projectId: projectId)) ?? false
+    }
+
+    private func requireNoShutdown(projectId: String) throws {
+        if try shutdowns.outstanding(projectId: projectId) != nil {
+            throw SupervisorError.shutdownOrdered
+        }
+    }
+
     // MARK: - WorkerControl
 
     func spawnWorker(taskId: String) async throws -> String {
@@ -782,6 +887,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         announceReports(projectId: projectId)
     }
 
+    /// The worker has committed and recorded its note; this is the orderly end of its session. The
+    /// cause is neither a human kill nor a cap kill, and `terminate` puts the unfinished task back
+    /// in `ready` with the note attached to the report.
+    func workerAcknowledgedShutdown(projectId: String, sessionId: String) async {
+        guard let session = try? sessions.get(sessionId) else { return }
+        let note = try? shutdowns.outstanding(projectId: projectId)
+            .flatMap { try deliveries.get(orderId: $0.id, sessionId: sessionId)?.note }
+        if let shortId = session.shortId {
+            try? await runtime.stop(shortId: shortId)
+        }
+        _ = try? board.terminate(sessionId: sessionId, cause: .shutdownAcknowledged(note: note ?? nil))
+        try? grants.revokeAll(sessionId: sessionId)
+        announceReports(projectId: projectId)
+        if let order = try? shutdowns.outstanding(projectId: projectId) {
+            refreshShutdownProgress(projectId: projectId, order: order)
+        }
+    }
+
     /// The orchestrator only learns of a queued report through the console notice.
     private func announceReports(projectId: String) {
         consoles[projectId]?.reportsChanged()
@@ -804,6 +927,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard let all = try? projects.list() else { return }
         let now = Int64.nowMillis
         for project in all {
+            refreshShutdownProgressIfOrdered(projectId: project.id)
             let limits = Self.capLimits(project.settings.caps)
             guard let projectSessions = try? sessions.all(projectId: project.id) else { continue }
             let stallSeconds = project.settings.caps.stallSeconds
@@ -811,6 +935,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 await meter(session, limits: limits, stallSeconds: stallSeconds)
             }
         }
+    }
+
+    /// The tick is what moves a silent worker into `overdue` once its grace period expires. It only
+    /// counts: nothing on this path stops a session.
+    private func refreshShutdownProgressIfOrdered(projectId: String) {
+        guard let order = try? shutdowns.outstanding(projectId: projectId) else {
+            shutdownProgress[projectId] = nil
+            return
+        }
+        refreshShutdownProgress(projectId: projectId, order: order)
     }
 
     private static func shouldMeter(_ session: AgentSession, now: Int64) -> Bool {

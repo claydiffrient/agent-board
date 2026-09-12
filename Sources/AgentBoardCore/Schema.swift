@@ -160,9 +160,37 @@ enum Schema {
     CREATE INDEX approval_pending ON approval(project_id, resolved_at);
     """
 
+    static let shutdownOrder = """
+    CREATE TABLE shutdown_order (
+      id           TEXT PRIMARY KEY,
+      project_id   TEXT NOT NULL REFERENCES project(id),
+      requested_by TEXT NOT NULL,
+      reason       TEXT,
+      requested_at INTEGER NOT NULL,
+      resolved_at  INTEGER,
+      resolved_by  TEXT
+    );
+    CREATE INDEX shutdown_order_outstanding ON shutdown_order(project_id, resolved_at);
+    """
+
+    static let shutdownDelivery = """
+    CREATE TABLE shutdown_delivery (
+      order_id        TEXT NOT NULL REFERENCES shutdown_order(id),
+      session_id      TEXT NOT NULL,
+      task_id         TEXT,
+      ordered_at      INTEGER NOT NULL,
+      delivered_at    INTEGER,
+      delivered_via   TEXT,
+      acknowledged_at INTEGER,
+      note            TEXT,
+      PRIMARY KEY (order_id, session_id)
+    );
+    CREATE INDEX shutdown_delivery_session ON shutdown_delivery(session_id);
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
-        "approval",
+        "approval", "shutdown_order", "shutdown_delivery",
     ]
 }

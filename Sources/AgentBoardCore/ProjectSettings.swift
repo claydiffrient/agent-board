@@ -9,6 +9,9 @@ public struct Caps: Codable, Sendable, Equatable {
     /// How long a running worker may go without a hook before the orchestrator sidebar calls it
     /// stalled. Deliberately below `maxIdleSeconds` so a wedge surfaces before the cap kills it.
     public var stallSeconds: Int = 120
+    /// How long a worker has to answer a wind-down order before the progress sheet calls it
+    /// unacknowledged. Expiry only counts it; killing it stays a human decision.
+    public var shutdownGraceSeconds: Int = 120
 
     public init(
         maxConcurrentWorkers: Int = 3,
@@ -16,7 +19,8 @@ public struct Caps: Codable, Sendable, Equatable {
         maxWallClockSeconds: Int = 1800,
         maxIdleSeconds: Int = 300,
         sessionCeiling: Int? = nil,
-        stallSeconds: Int = 120
+        stallSeconds: Int = 120,
+        shutdownGraceSeconds: Int = 120
     ) {
         self.maxConcurrentWorkers = maxConcurrentWorkers
         self.maxTokensPerAgent = maxTokensPerAgent
@@ -24,6 +28,7 @@ public struct Caps: Codable, Sendable, Equatable {
         self.maxIdleSeconds = maxIdleSeconds
         self.sessionCeiling = sessionCeiling
         self.stallSeconds = stallSeconds
+        self.shutdownGraceSeconds = shutdownGraceSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -35,6 +40,7 @@ public struct Caps: Codable, Sendable, Equatable {
         maxIdleSeconds = try c.decodeIfPresent(Int.self, forKey: .maxIdleSeconds) ?? defaults.maxIdleSeconds
         sessionCeiling = try c.decodeIfPresent(Int.self, forKey: .sessionCeiling)
         stallSeconds = try c.decodeIfPresent(Int.self, forKey: .stallSeconds) ?? defaults.stallSeconds
+        shutdownGraceSeconds = try c.decodeIfPresent(Int.self, forKey: .shutdownGraceSeconds) ?? defaults.shutdownGraceSeconds
     }
 }
 
