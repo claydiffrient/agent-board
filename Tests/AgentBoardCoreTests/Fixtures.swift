@@ -13,6 +13,7 @@ struct Fixture {
     var progress: ProgressStore { ProgressStore(db) }
     var reports: ReportStore { ReportStore(db) }
     var hooks: HookEventStore { HookEventStore(db) }
+    var notes: NoteStore { NoteStore(db) }
     var board: Board { Board(db) }
 
     static func make() throws -> Fixture {

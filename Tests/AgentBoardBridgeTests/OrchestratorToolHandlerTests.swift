@@ -21,7 +21,15 @@ final class OrchestratorToolHandlerTests: XCTestCase {
         XCTAssertTrue(workerTools.contains("report_complete"))
         XCTAssertFalse(workerTools.contains("spawn_worker"))
 
+        XCTAssertTrue(workerTools.contains("search_notes"))
+        XCTAssertTrue(workerTools.contains("create_note"))
+        XCTAssertFalse(workerTools.contains("attach_note"))
+        XCTAssertFalse(workerTools.contains("pin_note"))
+
         XCTAssertTrue(orchestratorTools.contains("spawn_worker"))
+        XCTAssertTrue(orchestratorTools.contains("attach_note"))
+        XCTAssertTrue(orchestratorTools.contains("pin_note"))
+        XCTAssertTrue(orchestratorTools.contains("search_notes"))
         XCTAssertTrue(orchestratorTools.contains("list_reports"))
         XCTAssertFalse(orchestratorTools.contains("get_my_task"))
         XCTAssertFalse(orchestratorTools.contains("report_complete"))
@@ -248,5 +256,140 @@ final class OrchestratorToolHandlerTests: XCTestCase {
         XCTAssertEqual(pending.first?.epicId, epic.id)
 
         await XCTAssertToolError(try await f.call("request_integration", ["epic_id": .string("nope")]), containing: "not in this project")
+    }
+
+    // MARK: Notes
+
+    func testOrchestratorHasEveryWorkerNoteToolPlusAttachAndPin() async {
+        let names = await f.orchestrator.tools(for: f.orchestratorIdentity).map(\.name)
+        for tool in ["search_notes", "read_note", "append_section", "replace_section", "create_note", "attach_note", "pin_note"] {
+            XCTAssertTrue(names.contains(tool), "orchestrator scope is missing \(tool)")
+        }
+        XCTAssertEqual(Set(names).count, names.count, "duplicate tool name in the orchestrator list")
+    }
+
+    func testOrchestratorNoteWritesRoundTrip() async throws {
+        let created = try await f.callJSON("create_note", [
+            "title": .string("Integration order"),
+            "sections": .array([.object(["heading": .string("Order"), "body": .string("Bridge before UI.")])]),
+        ])
+        let id = try XCTUnwrap(created["id"]?.stringValue)
+
+        _ = try await f.call("append_section", [
+            "note_id": .string(id), "heading": .string("Order"), "body": .string("Then docs."), "if_version": .number(1),
+        ])
+        _ = try await f.call("replace_section", [
+            "note_id": .string(id), "heading": .string("Risk"), "body": .string("FTS index is hand-maintained."), "if_version": .number(2),
+        ])
+
+        let note = try await f.callJSON("read_note", ["id": .string(id)])
+        XCTAssertEqual(note["version"], .number(3))
+        let sections = try XCTUnwrap(note["sections"]?.arrayValue)
+        XCTAssertEqual(sections.map { $0["heading"] }, [.string("Order"), .string("Risk")])
+        XCTAssertEqual(sections.first?["body"], .string("Bridge before UI.\n\nThen docs."))
+
+        let found = try await f.callJSON("search_notes", ["query": .string("hand-maintained")]).arrayValue ?? []
+        XCTAssertEqual(found.map { $0["id"] }, [.string(id)])
+    }
+
+    func testOrchestratorIfVersionConflictNamesTheCurrentVersionAndWritesNothing() async throws {
+        let note = try f.note("Constraints", sections: [(heading: "DB", body: "One writer.")])
+        try f.notes.appendSection(noteId: note.id, heading: "DB", body: "A worker got here first.")
+
+        await XCTAssertToolError(
+            try await f.call("replace_section", [
+                "note_id": .string(note.id), "heading": .string("DB"), "body": .string("Stale."), "if_version": .number(1),
+            ]),
+            containing: "now at version 2"
+        )
+        XCTAssertEqual(try f.notes.get(note.id)?.version, 2)
+        XCTAssertEqual(try f.notes.read(note.id)?.1.first?.body, "One writer.\n\nA worker got here first.")
+    }
+
+    func testPinNoteTogglesPinning() async throws {
+        let note = try f.note("Always true")
+
+        let pinned = try await f.call("pin_note", ["note_id": .string(note.id), "pinned": .bool(true)])
+        XCTAssertTrue(pinned.text.contains("Always true"), pinned.text)
+        XCTAssertEqual(try f.notes.pinned(projectId: f.project.id).map(\.id), [note.id])
+
+        _ = try await f.call("pin_note", ["note_id": .string(note.id), "pinned": .bool(false)])
+        XCTAssertEqual(try f.notes.pinned(projectId: f.project.id).count, 0)
+    }
+
+    func testPinNoteRequiresABoolean() async throws {
+        let note = try f.note("Always true")
+        await XCTAssertToolError(
+            try await f.call("pin_note", ["note_id": .string(note.id), "pinned": .string("yes")]),
+            containing: "true or false"
+        )
+    }
+
+    func testAttachNoteToTaskAndEpic() async throws {
+        let note = try f.note("Shared constraint")
+        let task = try f.task("t")
+        let epic = try f.epic("E")
+
+        _ = try await f.call("attach_note", ["note_id": .string(note.id), "task_id": .string(task.id)])
+        _ = try await f.call("attach_note", ["note_id": .string(note.id), "epic_id": .string(epic.id)])
+
+        XCTAssertEqual(try f.notes.notes(forTask: task.id).map(\.id), [note.id])
+        XCTAssertEqual(try f.notes.notes(forEpic: epic.id).map(\.id), [note.id])
+    }
+
+    func testAttachNoteIsIdempotent() async throws {
+        let note = try f.note("Shared constraint")
+        let task = try f.task("t")
+
+        _ = try await f.call("attach_note", ["note_id": .string(note.id), "task_id": .string(task.id)])
+        _ = try await f.call("attach_note", ["note_id": .string(note.id), "task_id": .string(task.id)])
+
+        XCTAssertEqual(try f.notes.links(noteId: note.id).count, 1)
+    }
+
+    func testAttachNoteNeedsExactlyOneTarget() async throws {
+        let note = try f.note("Shared constraint")
+        let task = try f.task("t")
+        let epic = try f.epic("E")
+
+        await XCTAssertToolError(try await f.call("attach_note", ["note_id": .string(note.id)]), containing: "has to be attached")
+        await XCTAssertToolError(
+            try await f.call("attach_note", [
+                "note_id": .string(note.id), "task_id": .string(task.id), "epic_id": .string(epic.id),
+            ]),
+            containing: "not both"
+        )
+        XCTAssertEqual(try f.notes.links(noteId: note.id).count, 0)
+    }
+
+    func testOrchestratorCannotReachAnotherProjectsNotesOrTargets() async throws {
+        let other = try f.otherProject()
+        let foreignNote = try f.note("Theirs", in: other.id)
+        let foreignTask = try f.task("theirs", in: other.id)
+        let ourNote = try f.note("Ours")
+
+        await XCTAssertToolError(try await f.call("read_note", ["id": .string(foreignNote.id)]), containing: "not in this project")
+        await XCTAssertToolError(
+            try await f.call("pin_note", ["note_id": .string(foreignNote.id), "pinned": .bool(true)]),
+            containing: "not in this project"
+        )
+        await XCTAssertToolError(
+            try await f.call("attach_note", ["note_id": .string(foreignNote.id), "task_id": .string(foreignTask.id)]),
+            containing: "not in this project"
+        )
+        await XCTAssertToolError(
+            try await f.call("attach_note", ["note_id": .string(ourNote.id), "task_id": .string(foreignTask.id)]),
+            containing: "not in this project"
+        )
+        await XCTAssertToolError(
+            try await f.call("attach_note", ["note_id": .string(ourNote.id), "epic_id": .string("nope")]),
+            containing: "not in this project"
+        )
+
+        XCTAssertEqual(try f.notes.get(foreignNote.id)?.pinned, false)
+        XCTAssertEqual(try f.notes.links(noteId: ourNote.id).count, 0)
+
+        let search = try await f.callJSON("search_notes", ["query": .string("Theirs")]).arrayValue ?? []
+        XCTAssertEqual(search.count, 0)
     }
 }

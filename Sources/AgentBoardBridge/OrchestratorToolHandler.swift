@@ -12,6 +12,7 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let reports: ReportStore
     private let approvals: ApprovalStore
     private let board: Board
+    private let notes: NoteTools
     private let control: any WorkerControl
     private let events: any BoardEventSink
 
@@ -24,6 +25,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         reports = ReportStore(db)
         approvals = ApprovalStore(db)
         board = Board(db)
+        notes = NoteTools(db: db)
         self.control = control
         self.events = events
     }
@@ -172,13 +174,16 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "approval regardless of the autonomy setting; you will learn the decision through list_reports.",
             inputSchema: ToolSchema.object(properties: ["epic_id": ToolSchema.string()], required: ["epic_id"])
         ),
-    ]
+    ] + NoteTools.orchestratorDescriptors
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
         Self.descriptors
     }
 
     public func call(_ name: String, arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+        if Self.noteToolNames.contains(name) {
+            return try notes.call(name, arguments: arguments, identity: identity)
+        }
         switch name {
         case "list_tasks": return try listTasks(arguments, identity: identity)
         case "get_task": return try getTask(arguments, identity: identity)
@@ -198,6 +203,8 @@ public final class OrchestratorToolHandler: ToolHandler {
         default: throw ToolError("Unknown tool: \(name)")
         }
     }
+
+    static let noteToolNames = Set(NoteTools.orchestratorDescriptors.map(\.name))
 
     // MARK: Tasks
 
