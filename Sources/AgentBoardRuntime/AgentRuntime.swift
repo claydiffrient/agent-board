@@ -87,8 +87,11 @@ public struct BackgroundSessionRuntime: AgentRuntime {
     public func spawn(_ request: SpawnRequest) async throws -> SpawnedAgent {
         let timeout = registrationTimeout
         return try await offMain {
+            let launchedAt = Date()
             let result = try ClaudeCLI.run(Self.arguments(for: request), cwd: request.cwd)
-            return try Self.registered(from: result, timeout: timeout)
+            return try Self.registered(from: result, timeout: timeout) { agents in
+                ClaudeCLI.recoveredAgent(from: agents, cwd: request.cwd, name: request.name, launchedAt: launchedAt)
+            }
         }
     }
 
@@ -96,7 +99,9 @@ public struct BackgroundSessionRuntime: AgentRuntime {
         let timeout = registrationTimeout
         return try await offMain {
             let result = try ClaudeCLI.run([prompt, "--bg", "--resume", sessionId], cwd: cwd)
-            return try Self.registered(from: result, timeout: timeout)
+            return try Self.registered(from: result, timeout: timeout) { agents in
+                agents.first { $0.sessionId == sessionId && $0.id != nil }
+            }
         }
     }
 
@@ -117,16 +122,27 @@ public struct BackgroundSessionRuntime: AgentRuntime {
         return (invocation.executable, invocation.prefix + ["attach", shortId])
     }
 
-    private static func registered(from result: CommandResult, timeout: TimeInterval) throws -> SpawnedAgent {
-        guard let shortId = ClaudeCLI.parseShortId(from: result.stdout) else {
-            throw AgentRuntimeError(
-                "claude --bg exited 0 but no short id was found.\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)"
-            )
+    /// A process that exited 0 has a live session whether or not its stdout parsed, so an unparseable
+    /// stdout falls back to `claude agents --json` rather than leaving that session orphaned.
+    private static func registered(
+        from result: CommandResult,
+        timeout: TimeInterval,
+        recovering select: ([AgentInfo]) -> AgentInfo?
+    ) throws -> SpawnedAgent {
+        if let shortId = ClaudeCLI.parseShortId(from: result.stdout) {
+            guard let sessionId = try ClaudeCLI.waitForAgent(shortId: shortId, timeout: timeout)?.sessionId else {
+                throw AgentRuntimeError("claude agents --json never listed short id \(shortId) within \(timeout)s")
+            }
+            return SpawnedAgent(shortId: shortId, sessionId: sessionId)
         }
-        guard let sessionId = try ClaudeCLI.waitForAgent(shortId: shortId, timeout: timeout)?.sessionId else {
-            throw AgentRuntimeError("claude agents --json never listed short id \(shortId) within \(timeout)s")
+        if let recovered = try ClaudeCLI.waitForAgent(timeout: timeout, select: select),
+           let shortId = recovered.id, let sessionId = recovered.sessionId {
+            return SpawnedAgent(shortId: shortId, sessionId: sessionId)
         }
-        return SpawnedAgent(shortId: shortId, sessionId: sessionId)
+        throw AgentRuntimeError(
+            "claude --bg exited 0 but no short id was found, and no matching session was listed within "
+                + "\(timeout)s.\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)"
+        )
     }
 
     private func offMain<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
