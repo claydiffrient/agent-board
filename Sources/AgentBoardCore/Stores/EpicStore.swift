@@ -30,7 +30,9 @@ public struct EpicStore: Sendable {
         return epic
     }
 
-    public static func branchName(for id: String) -> String { "agentboard/epic-\(id)" }
+    public static let branchPrefix = "agentboard/epic-"
+
+    public static func branchName(for id: String) -> String { branchPrefix + id }
 
     public func get(_ id: String) throws -> Epic? {
         try db.reader.read { db in try Epic.fetchOne(db, key: id) }

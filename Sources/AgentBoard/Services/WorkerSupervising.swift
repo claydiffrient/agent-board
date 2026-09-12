@@ -15,12 +15,15 @@ protocol WorkerSupervising: AnyObject {
     /// Rewrites the session's config files with the current port, then `claude --bg --resume`.
     func resume(sessionId: String) async throws
     func pauseAll(projectId: String) async throws
-    /// Task → done, worktree removed (chaining the user's WorktreeRemove hook), branch kept.
+    /// Task → done, every attempt's worktree removed (chaining the user's WorktreeRemove hook),
+    /// and the task branch deleted once it is merged into the base or epic branch.
     func accept(taskId: String) async throws
     func reopen(taskId: String) async throws
-    /// Stops any active worker, removes the worktree (branch kept), deletes the task and its progress.
+    /// Stops any active worker, removes every attempt's worktree, deletes the task and its progress.
+    /// The branch survives unless it is already merged.
     func discard(taskId: String) async throws
-    /// Joins `claude agents --json --all` against agent_session so dead sessions show as dead.
+    /// Joins `claude agents --json --all` against agent_session so dead sessions show as dead,
+    /// then reaps worktrees under the project's root that no active session owns.
     func reconcile(projectId: String) async
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])?
     func worktreeDiffstat(taskId: String) async -> String?

@@ -58,6 +58,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var stallNotified: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
 
+    nonisolated static let taskBranchPrefix = "agentboard/"
     static let meteringInterval: Duration = .seconds(5)
     /// Sessions that ended this recently still get one more transcript read so final spend lands.
     static let finalSpendWindowMillis: Int64 = 15_000
@@ -151,7 +152,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
 
         let attempt = try sessions.forTask(taskId).count + 1
-        let branch = "agentboard/\(taskId)"
+        let branch = Self.taskBranchPrefix + taskId
         let manager = WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
@@ -301,19 +302,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try grants.revokeAll(sessionId: session.sessionId)
             }
             announceReports(projectId: task.projectId)
-            guard let worktreePath = taskSessions.first?.worktreePath,
-                  FileManager.default.fileExists(atPath: worktreePath)
-            else { return }
-            let manager = WorktreeManager(
-                repoPath: URL(fileURLWithPath: project.repoPath),
-                worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
-            )
-            let report = try await offMain {
-                try manager.remove(path: URL(fileURLWithPath: worktreePath), deleteBranch: false)
-            }
-            if !report.hookDiagnostics.isEmpty {
-                lastError = report.hookDiagnostics.joined(separator: "\n")
-            }
+            await tearDownWorktrees(of: taskSessions, task: task, project: project)
         }
     }
 
@@ -340,19 +329,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             for session in taskSessions {
                 try grants.revokeAll(sessionId: session.sessionId)
             }
-            if let worktreePath = taskSessions.first?.worktreePath,
-               FileManager.default.fileExists(atPath: worktreePath) {
-                let manager = WorktreeManager(
-                    repoPath: URL(fileURLWithPath: project.repoPath),
-                    worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
-                )
-                let report = try await offMain {
-                    try manager.remove(path: URL(fileURLWithPath: worktreePath), deleteBranch: false)
-                }
-                if !report.hookDiagnostics.isEmpty {
-                    lastError = report.hookDiagnostics.joined(separator: "\n")
-                }
-            }
+            await tearDownWorktrees(of: taskSessions, task: task, project: project)
             try board.discard(taskId: taskId)
             announceReports(projectId: project.id)
         }
@@ -367,6 +344,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             return
         }
         guard let ours = try? sessions.all(projectId: projectId) else { return }
+        /// Snapshotted before the terminate pass so a session this reconcile just declared vanished
+        /// keeps its worktree for one more cycle.
+        let liveWorktrees = Set(ours.filter { $0.state.isActive }.compactMap(\.worktreePath))
         var byId: [String: AgentInfo] = [:]
         for info in listed {
             if let sessionId = info.sessionId, byId[sessionId] == nil { byId[sessionId] = info }
@@ -404,6 +384,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
         }
         if queuedReport { announceReports(projectId: projectId) }
+        await reapOrphanedWorktrees(projectId: projectId, keeping: liveWorktrees)
     }
 
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? {
@@ -428,13 +409,167 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func diffContext(taskId: String) -> (manager: WorktreeManager, worktree: URL, base: String)? {
         guard let task = try? tasks.get(taskId),
               let project = try? projects.get(task.projectId),
-              let worktreePath = try? sessions.forTask(taskId).first?.worktreePath
+              let worktreePath = try? sessions.forTask(taskId)
+                  .compactMap(\.worktreePath)
+                  .first(where: { FileManager.default.fileExists(atPath: $0) })
         else { return nil }
         let manager = WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
         )
         return (manager, URL(fileURLWithPath: worktreePath), project.baseBranch)
+    }
+
+    // MARK: - Worktree and branch cleanup
+
+    /// A retried task has one worktree per attempt, so every session is torn down, not just the newest.
+    private func tearDownWorktrees(of taskSessions: [AgentSession], task: BoardTask, project: Project) async {
+        let paths = taskSessions.compactMap(\.worktreePath).reduce(into: [String]()) { unique, path in
+            if !unique.contains(path) { unique.append(path) }
+        }
+        let manager = Self.worktreeManager(for: project)
+        let branch = Self.taskBranchPrefix + task.id
+        let bases = mergeTargets(for: task, project: project)
+        let notices = await offMainNotices {
+            Self.tearDown(manager: manager, paths: paths, branch: branch, bases: bases)
+        }
+        report(notices)
+    }
+
+    /// Sessions that failed or were stopped on a task nobody accepted or discarded leave their
+    /// worktree behind, as do sessions whose task record is already gone.
+    private func reapOrphanedWorktrees(projectId: String, keeping live: Set<String>) async {
+        guard let project = try? projects.get(projectId) else { return }
+        let manager = Self.worktreeManager(for: project)
+        let bases = [project.baseBranch] + ((try? epics.list(projectId: projectId)) ?? []).map(\.branch)
+        let notices = await offMainNotices {
+            Self.reap(manager: manager, keeping: live, bases: bases)
+        }
+        report(notices)
+    }
+
+    private func mergeTargets(for task: BoardTask, project: Project) -> [String] {
+        guard let epicId = task.epicId, let epic = try? epics.get(epicId) else { return [project.baseBranch] }
+        return [project.baseBranch, epic.branch]
+    }
+
+    private static func worktreeManager(for project: Project) -> WorktreeManager {
+        WorktreeManager(
+            repoPath: URL(fileURLWithPath: project.repoPath),
+            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
+        )
+    }
+
+    private nonisolated static func tearDown(
+        manager: WorktreeManager, paths: [String], branch: String, bases: [String]
+    ) -> [String] {
+        var notices: [String] = []
+        var removedEvery = true
+        for path in paths where FileManager.default.fileExists(atPath: path) {
+            switch removeIfClean(manager, at: URL(fileURLWithPath: path)) {
+            case .removed(let diagnostics):
+                notices.append(contentsOf: diagnostics)
+            case .kept(let reason):
+                notices.append(reason)
+                removedEvery = false
+            }
+        }
+        guard removedEvery else { return notices }
+        notices.append(contentsOf: deleteBranch(manager, branch, bases: bases))
+        return notices
+    }
+
+    private nonisolated static func reap(
+        manager: WorktreeManager, keeping live: Set<String>, bases: [String]
+    ) -> [String] {
+        guard let listed = try? manager.list() else { return [] }
+        let root = resolved(manager.worktreeRoot.path)
+        let liveRoots = Set(live.map(resolved))
+        var notices: [String] = []
+        for info in listed where !info.isBare {
+            let path = resolved(info.path.path)
+            guard path.hasPrefix(root + "/"), !liveRoots.contains(path) else { continue }
+            if info.branch?.hasPrefix(EpicStore.branchPrefix) == true { continue }
+            do {
+                if try manager.hasUnmergedCommits(worktree: info.path, bases: bases) {
+                    notices.append("kept orphaned worktree \(path): it has commits that are not in \(bases.joined(separator: " or "))")
+                    continue
+                }
+            } catch {
+                notices.append("kept orphaned worktree \(path): its merge status could not be read (\(error))")
+                continue
+            }
+            switch removeIfClean(manager, at: info.path) {
+            case .removed(let diagnostics):
+                notices.append(contentsOf: diagnostics)
+                if let branch = info.branch {
+                    notices.append(contentsOf: deleteBranch(manager, branch, bases: bases))
+                }
+            case .kept(let reason):
+                notices.append(reason)
+            }
+        }
+        notices.append(contentsOf: sweepMergedBranches(manager, bases: bases))
+        return notices
+    }
+
+    /// Task branches outlive their worktree: every accepted task before this swept them up leaves one
+    /// behind. Only failures are reported, since an unmerged branch is the normal in-flight state.
+    private nonisolated static func sweepMergedBranches(_ manager: WorktreeManager, bases: [String]) -> [String] {
+        guard let branches = try? manager.localBranches(withPrefix: taskBranchPrefix) else { return [] }
+        return branches
+            .filter { !$0.hasPrefix(EpicStore.branchPrefix) }
+            .flatMap { branch -> [String] in
+                do {
+                    _ = try manager.deleteBranchIfMerged(branch, into: bases)
+                    return []
+                } catch {
+                    return ["could not delete branch \(branch): \(error)"]
+                }
+            }
+    }
+
+    private enum WorktreeTeardown {
+        case removed([String])
+        case kept(String)
+    }
+
+    private nonisolated static func removeIfClean(_ manager: WorktreeManager, at path: URL) -> WorktreeTeardown {
+        do {
+            if try manager.hasUncommittedChanges(worktree: path) {
+                return .kept("kept worktree \(path.path): it has uncommitted changes")
+            }
+            return .removed(try manager.remove(path: path).hookDiagnostics)
+        } catch {
+            return .kept("could not remove worktree \(path.path): \(error)")
+        }
+    }
+
+    private nonisolated static func deleteBranch(
+        _ manager: WorktreeManager, _ branch: String, bases: [String]
+    ) -> [String] {
+        do {
+            if case .kept(let branch, let reason) = try manager.deleteBranchIfMerged(branch, into: bases) {
+                return ["kept branch \(branch): \(reason)"]
+            }
+            return []
+        } catch {
+            return ["could not delete branch \(branch): \(error)"]
+        }
+    }
+
+    private nonisolated static func resolved(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    private func offMainNotices(_ body: @escaping @Sendable () -> [String]) async -> [String] {
+        await _Concurrency.Task.detached(priority: .userInitiated) { body() }.value
+    }
+
+    /// Cleanup notices share the status bar's error slot; nothing else surfaces them to the human.
+    private func report(_ notices: [String]) {
+        guard !notices.isEmpty else { return }
+        lastError = notices.joined(separator: "\n")
     }
 
     // MARK: - Orchestrator and approvals
