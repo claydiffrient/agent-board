@@ -142,8 +142,18 @@ public final class OrchestratorToolHandler: ToolHandler {
         ),
         ToolDescriptor(
             name: "list_agents",
-            description: "Every agent session on this project, newest first, with its task, state, and spend so far.",
-            inputSchema: ToolSchema.object(properties: [:], required: [])
+            description: "Agent sessions on this project, newest first, with task, state, and spend so far. Sessions "
+                + "that have ended — stopped, failed, or completed more than \(SessionVisibility.endedGraceDescription) "
+                + "ago — are left out: a worker missing from this list has finished, it has not vanished. Pass "
+                + "include_ended to get the whole roster, including sessions that ended long ago.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "include_ended": ToolSchema.boolean(
+                        "Include sessions that ended more than \(SessionVisibility.endedGraceDescription) ago. Defaults to false."
+                    ),
+                ],
+                required: []
+            )
         ),
         ToolDescriptor(
             name: "list_reports",
@@ -237,7 +247,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "log_progress": return try logProgress(arguments, identity: identity)
         case "spawn_worker": return try await spawnWorker(arguments, identity: identity)
         case "stop_worker": return try await stopWorker(arguments, identity: identity)
-        case "list_agents": return try listAgents(identity: identity)
+        case "list_agents": return try listAgents(arguments, identity: identity)
         case "list_reports": return try listReports(identity: identity)
         case "get_report": return try getReport(arguments, identity: identity)
         case "list_approvals": return try listApprovals(identity: identity)
@@ -403,9 +413,11 @@ public final class OrchestratorToolHandler: ToolHandler {
         return ToolResult(text: "stopped session \(sessionId)")
     }
 
-    private func listAgents(identity: TokenIdentity) throws -> ToolResult {
+    private func listAgents(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let includeEnded = ToolArguments.optionalBool("include_ended", in: arguments) ?? false
         let all = try sessions.all(projectId: identity.projectId)
-        return .json(.array(all.map { session in
+        let roster = SessionVisibility.roster(all, now: Date(), includeEnded: includeEnded)
+        return .json(.array(roster.visible.map { session in
             .object([
                 "session_id": .string(session.sessionId),
                 "short_id": .optional(session.shortId),

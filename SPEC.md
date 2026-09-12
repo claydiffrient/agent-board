@@ -435,7 +435,7 @@ Everything in worker scope over any task in the project, plus:
 | `pin_note(note_id, pinned)` | Every future agent sees it in full |
 | `spawn_worker(task_id)` | Subject to §8 caps and the autonomy setting |
 | `stop_worker(session_id)` | `claude stop` |
-| `list_agents()` | Roster with state and spend |
+| `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Always creates a human approval row |
