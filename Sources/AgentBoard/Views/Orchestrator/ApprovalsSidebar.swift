@@ -7,6 +7,7 @@ struct ApprovalsSidebar: View {
     @Environment(AppEnvironment.self) private var env
     @State private var approvals = Observed<[Approval]>([])
     @State private var tasks = Observed<[BoardTask]>([])
+    @State private var sessions = Observed<[AgentSession]>([])
     @State private var reports = Observed<[Report]>([])
     @State private var denying: Approval?
     @State private var denyReason = ""
@@ -20,6 +21,19 @@ struct ApprovalsSidebar: View {
         tasks.value.filter { $0.column == .proposed }
     }
 
+    private var reviews: [BoardTask] {
+        BoardTask.pendingReview(in: tasks.value)
+    }
+
+    private var latestSessionByTask: [String: AgentSession] {
+        var result: [String: AgentSession] = [:]
+        for session in sessions.value {
+            guard let taskId = session.taskId, result[taskId] == nil else { continue }
+            result[taskId] = session
+        }
+        return result
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             List {
@@ -30,6 +44,20 @@ struct ApprovalsSidebar: View {
                     }
                     ForEach(approvals.value) { approval in
                         approvalRow(approval)
+                    }
+                }
+                Section("Pending reviews") {
+                    if reviews.isEmpty {
+                        Text("Nothing waiting for review.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(reviews) { task in
+                        ReviewRow(
+                            task: task,
+                            session: latestSessionByTask[task.id],
+                            accept: { run { try await env.supervisor.accept(taskId: task.id) } },
+                            reopen: { run { try await env.supervisor.reopen(taskId: task.id) } }
+                        )
                     }
                 }
                 Section("Proposals") {
@@ -51,6 +79,9 @@ struct ApprovalsSidebar: View {
         }
         .task(id: project.id) {
             await tasks.run(TaskStore(env.db).observe(projectId: project.id), in: env.db.reader)
+        }
+        .task(id: project.id) {
+            await sessions.run(SessionStore(env.db).observe(projectId: project.id), in: env.db.reader)
         }
         .task(id: project.id) {
             await reports.run(ReportStore(env.db).observeUnconsumed(projectId: project.id), in: env.db.reader)
@@ -177,6 +208,60 @@ struct ApprovalsSidebar: View {
             } catch {
                 errorMessage = errorText(error)
             }
+        }
+    }
+}
+
+private struct ReviewRow: View {
+    let task: BoardTask
+    let session: AgentSession?
+    let accept: () -> Void
+    let reopen: () -> Void
+
+    @Environment(AppEnvironment.self) private var env
+    @State private var diffstat: String?
+    @State private var summary: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(task.title)
+                .fontWeight(.medium)
+                .lineLimit(2)
+            VStack(alignment: .leading, spacing: 2) {
+                Label(session?.branch ?? "agentboard/\(task.id)", systemImage: "arrow.triangle.branch")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let worktree = session?.worktreePath {
+                    Label(worktree, systemImage: "folder")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(worktree)
+                }
+                if let diffstat {
+                    Text(diffstat)
+                        .font(.caption.monospaced())
+                        .lineLimit(4)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            if let summary, !summary.isEmpty {
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            HStack {
+                Button("Accept", action: accept)
+                    .buttonStyle(.borderedProminent)
+                Button("Reopen", action: reopen)
+            }
+            .controlSize(.small)
+        }
+        .padding(.vertical, 4)
+        .task(id: task.id) {
+            summary = try? ReportStore(env.db).latest(taskId: task.id)?.body
+            diffstat = await env.supervisor.worktreeDiffstat(taskId: task.id)
         }
     }
 }

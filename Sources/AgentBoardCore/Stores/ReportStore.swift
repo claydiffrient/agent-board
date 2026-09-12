@@ -39,6 +39,16 @@ public struct ReportStore: Sendable {
         try db.reader.read { db in try Report.fetchOne(db, key: id) }
     }
 
+    public func latest(taskId: String) throws -> Report? {
+        try db.reader.read { db in
+            try Report.fetchOne(
+                db,
+                sql: "SELECT * FROM report WHERE task_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                arguments: [taskId]
+            )
+        }
+    }
+
     public func consume(ids: [Int64]) throws {
         guard !ids.isEmpty else { return }
         try db.writer.write { db in
