@@ -38,6 +38,46 @@ public struct Caps: Codable, Sendable, Equatable {
     }
 }
 
+/// When a done task leaves the board. Encoded as `{"mode":...}` with `days` only for `afterDays`.
+public enum ArchivePolicy: Codable, Sendable, Equatable {
+    case manual
+    case afterDays(Int)
+    case afterEpicMerge
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case days
+    }
+
+    enum Mode: String, Codable {
+        case manual
+        case afterDays
+        case afterEpicMerge
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(Mode.self, forKey: .mode) {
+        case .manual: self = .manual
+        case .afterDays: self = .afterDays(try c.decode(Int.self, forKey: .days))
+        case .afterEpicMerge: self = .afterEpicMerge
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .manual:
+            try c.encode(Mode.manual, forKey: .mode)
+        case .afterDays(let days):
+            try c.encode(Mode.afterDays, forKey: .mode)
+            try c.encode(days, forKey: .days)
+        case .afterEpicMerge:
+            try c.encode(Mode.afterEpicMerge, forKey: .mode)
+        }
+    }
+}
+
 public struct ProjectSettings: Codable, Sendable, Equatable {
     public var caps: Caps = Caps()
     public var autonomyEnabled: Bool = false
@@ -47,6 +87,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var defaultModel: String? = nil
     /// Free text the orchestrator reads when choosing a model per task.
     public var modelGuidance: String? = nil
+    public var archivePolicy: ArchivePolicy = .afterEpicMerge
 
     public init(
         caps: Caps = Caps(),
@@ -54,7 +95,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         autoModeJSON: String? = nil,
         extraMcpServers: [String] = [],
         defaultModel: String? = nil,
-        modelGuidance: String? = nil
+        modelGuidance: String? = nil,
+        archivePolicy: ArchivePolicy = .afterEpicMerge
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -62,6 +104,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.extraMcpServers = extraMcpServers
         self.defaultModel = defaultModel
         self.modelGuidance = modelGuidance
+        self.archivePolicy = archivePolicy
     }
 
     public init(from decoder: Decoder) throws {
@@ -72,6 +115,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         extraMcpServers = try c.decodeIfPresent([String].self, forKey: .extraMcpServers) ?? []
         defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
         modelGuidance = try c.decodeIfPresent(String.self, forKey: .modelGuidance)
+        archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge
     }
 
     public static func decode(_ json: String) -> ProjectSettings {

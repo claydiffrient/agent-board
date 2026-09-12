@@ -180,7 +180,7 @@ CREATE TABLE project (
   worktree_root   TEXT NOT NULL,
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
-  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance
+  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance, archivePolicy
   created_at      INTEGER NOT NULL
 );
 
@@ -211,8 +211,10 @@ CREATE TABLE task (
   origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
-  model          TEXT              -- overrides project settings.defaultModel for this task's worker
+  model          TEXT,             -- overrides project settings.defaultModel for this task's worker
+  archived_at    INTEGER           -- non-null = archived: hidden from the board, never deleted
 );
+CREATE INDEX task_project_archived ON task(project_id, archived_at);
 
 CREATE TABLE task_dep (
   task_id     TEXT NOT NULL REFERENCES task(id),
@@ -331,6 +333,15 @@ never a billed amount.
 Notes are sectioned rather than a single body specifically so three concurrent
 workers appending to one note do not silently lose each other's writes. Whole-
 document replace is not offered.
+
+`archived_at` is a flag on a task, not a seventh column — D7 fixes the six, and
+`blocked`/`failed` are the precedent. Only a task in `done` may be archived;
+unarchiving is always allowed. Archiving hides a task from the default board
+query and does nothing else: no branch, worktree, session row, report or
+progress row is removed or altered by it. `settings_json.archivePolicy` says
+when a done task is archived automatically — `{"mode":"manual"}`,
+`{"mode":"afterDays","days":N}`, or `{"mode":"afterEpicMerge"}`, the default for
+a project with no archive key stored.
 
 ---
 

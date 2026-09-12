@@ -49,15 +49,22 @@ public struct TaskStore: Sendable {
         try db.reader.read { db in try Task.fetchOne(db, key: id) }
     }
 
-    public func list(projectId: String, column: TaskColumn? = nil, epicId: String? = nil) throws -> [Task] {
+    public func list(
+        projectId: String, column: TaskColumn? = nil, epicId: String? = nil, includeArchived: Bool = false
+    ) throws -> [Task] {
         try db.reader.read { db in
-            try Self.list(db, projectId: projectId, column: column, epicId: epicId)
+            try Self.list(db, projectId: projectId, column: column, epicId: epicId, includeArchived: includeArchived)
         }
     }
 
-    static func list(_ db: Database, projectId: String, column: TaskColumn?, epicId: String?) throws -> [Task] {
+    static func list(
+        _ db: Database, projectId: String, column: TaskColumn?, epicId: String?, includeArchived: Bool = false
+    ) throws -> [Task] {
         var sql = "SELECT * FROM task WHERE project_id = ?"
         var arguments: StatementArguments = [projectId]
+        if !includeArchived {
+            sql += " AND archived_at IS NULL"
+        }
         if let column {
             sql += " AND column_name = ?"
             arguments += [column]
@@ -203,6 +210,49 @@ public struct TaskStore: Sendable {
         )
     }
 
+    /// Hides a done task from the board by stamping `archived_at`. Nothing else changes:
+    /// the task's branch, worktree, sessions, reports and progress rows are all left in place —
+    /// archiving is a view filter, not cleanup, and reaping those belongs elsewhere.
+    /// Throws `BoardError.archiveRequiresDone` for a task outside `done`.
+    public func archive(_ id: String) throws {
+        try archive(ids: [id])
+    }
+
+    /// Archives every task in one transaction; if any is not in `done`, none are archived.
+    public func archive(ids: [String]) throws {
+        try db.writer.write { db in
+            let at = Int64.nowMillis
+            for id in ids {
+                try Self.archive(db, id, at: at)
+            }
+        }
+    }
+
+    static func archive(_ db: Database, _ id: String, at: Int64) throws {
+        guard let task = try Task.fetchOne(db, key: id) else {
+            throw BoardError.taskNotFound(id)
+        }
+        guard task.column == .done else {
+            throw BoardError.archiveRequiresDone(taskId: id, column: task.column)
+        }
+        guard task.archivedAt == nil else { return }
+        try db.execute(
+            sql: "UPDATE task SET archived_at = ?, updated_at = ? WHERE id = ?",
+            arguments: [at, at, id]
+        )
+    }
+
+    /// Clears `archived_at`. Always allowed, whatever column the task now sits in.
+    public func unarchive(_ id: String) throws {
+        try db.writer.write { db in
+            guard try Task.exists(db, key: id) else { throw BoardError.taskNotFound(id) }
+            try db.execute(
+                sql: "UPDATE task SET archived_at = NULL, updated_at = ? WHERE id = ?",
+                arguments: [Int64.nowMillis, id]
+            )
+        }
+    }
+
     public func delete(_ id: String) throws {
         try db.writer.write { db in
             try Self.delete(db, id)
@@ -219,9 +269,11 @@ public struct TaskStore: Sendable {
         try db.execute(sql: "DELETE FROM task WHERE id = ?", arguments: [id])
     }
 
-    public func observe(projectId: String) -> ValueObservation<ValueReducers.Fetch<[Task]>> {
+    public func observe(
+        projectId: String, includeArchived: Bool = false
+    ) -> ValueObservation<ValueReducers.Fetch<[Task]>> {
         ValueObservation.tracking { db in
-            try Self.list(db, projectId: projectId, column: nil, epicId: nil)
+            try Self.list(db, projectId: projectId, column: nil, epicId: nil, includeArchived: includeArchived)
         }
     }
 }
@@ -237,4 +289,6 @@ public enum BoardError: Error, Equatable, Sendable {
     case epicNotFound(String)
     /// `createEpic` was handed a `dependsOn` index that is out of range or points at the task itself.
     case invalidEpicDependency(taskIndex: Int, dependsOn: Int)
+    /// Only a task in `done` may be archived; archiving live work would hide it from the board.
+    case archiveRequiresDone(taskId: String, column: TaskColumn)
 }
