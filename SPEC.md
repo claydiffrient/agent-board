@@ -208,7 +208,7 @@ CREATE TABLE task (
   failed         INTEGER NOT NULL DEFAULT 0,
   failure_reason TEXT,
   ordering       REAL NOT NULL,
-  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal
+  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT              -- overrides project settings.defaultModel for this task's worker
@@ -303,6 +303,7 @@ CREATE TABLE note_section (
   heading     TEXT NOT NULL,
   body        TEXT NOT NULL,
   ordering    REAL NOT NULL,
+  written_by  TEXT,             -- session_id of the agent that last wrote it; NULL if a human wrote it in the app
   PRIMARY KEY (note_id, heading)
 );
 
@@ -381,18 +382,54 @@ A worker's closing instructions, injected at spawn:
 
 ### 5.2 Epic integration
 
-Integration is the orchestrator's job and is gated on your approval regardless
-of the autonomy setting.
+Integration is gated on your approval regardless of the autonomy setting, and
+can be requested two ways that land on the same row: the orchestrator's
+`request_integration(epic_id)` tool, or the epic lane's **Request integration**
+button. The tool refuses until `epicReadyForIntegration` holds — the epic is
+non-empty and every task in it is `done` — naming how many tasks remain; the
+button only appears once that is already true, so neither path can jump the
+gate. Either call reaches `Board.requestIntegration`; a repeat request while
+one is already pending returns the existing approval rather than queuing a
+second.
 
-1. All tasks in the epic reach `done`.
-2. Orchestrator calls `request_integration(epic_id)`. This creates an approval
-   row and a macOS notification. Nothing proceeds until you approve.
-3. On approval, Agent Board creates an integration worktree on
-   `agentboard/epic-<id>` and spawns an integrator worker whose job is to merge
-   each `agentboard/<task-id>` into the epic branch, resolve conflicts, and get
-   the build green.
-4. The integrator reports. The PR from `agentboard/epic-<id>` → base is opened
-   **by you**, from a button on the epic — not by an agent.
+1. Every task in the epic reaches `done`.
+2. The request creates an `integration` approval row and a macOS notification.
+   Nothing proceeds until you approve it in the approvals sidebar.
+3. On approval, `spawnIntegrator` runs the same launch path as any task worker
+   (§3.1 steps 3-8: memory symlink, generated `--settings`/`--mcp-config`,
+   a worker-scoped token, `--permission-mode auto`, `--strict-mcp-config`, the
+   push/PR `--disallowedTools`), bound to the epic instead of a task:
+   - The worktree is `<worktree-root>/epic-<epic-id>`, checked out on the
+     already-existing `agentboard/epic-<id>` branch
+     (`WorktreeManager.createForBranch`; reused if a previous attempt already
+     created it) rather than cut fresh.
+   - The epic's tasks (excluding any earlier integration task) are ordered so
+     each is listed after every task it depends on, then each task's branch
+     `agentboard/<task-id>` is classified against the worktree's git state as
+     to merge, already merged into the epic branch, or missing (no branch was
+     ever created for it).
+   - A synthetic task — title `Integrate epic <title>`, `origin = integration`
+     — is created and the session is assigned to it, so the integrator gets a
+     real board card, token scope, and report channel like any worker.
+   - The opening prompt carries the epic goal; the branches to merge, in
+     order, with the instruction to `git merge --no-ff <branch>` each one and
+     resolve every conflict itself; the already-merged branches to skip; the
+     missing branches to name rather than merge; the instruction to run
+     `swift build` then `swift test` until both are green; and the same
+     closing protocol as any worker (commit, no push, no PR, `report_complete`
+     naming what was merged, skipped, and the build/test result).
+   - The epic moves `active` → `integrating` only once the session actually
+     launches; if the spawn fails (a cap refusal, for instance) the synthetic
+     task is deleted and the epic is left where it was.
+4. The integrator calls `report_complete` like any worker — no push, no PR
+   (`IntegrationGuard`, D8). `Board.complete` moves its task to `review` and,
+   in the same transaction, flips the epic from `integrating` to `done`, so
+   the epic cannot land in `done` without the report that caused it. The epic
+   lane's **Open PR** button appears only once the epic reaches `done`; it
+   runs `gh pr create --web` for `agentboard/epic-<id>` → the project's base
+   branch, falling back to opening the equivalent GitHub compare URL in the
+   browser if `gh` is missing or fails. Neither path pushes or creates the PR
+   through Agent Board's own process — you finish it in the browser.
 
 ---
 
@@ -430,7 +467,9 @@ Everything in worker scope over any task in the project, plus:
 | `list_tasks(column, epic_id)` | Board query |
 | `create_task(...)`, `update_task(...)`, `move_task(id, column)` | Board mutation |
 | `set_deps(task_id, depends_on[])` | Dependency graph |
-| `create_epic(title, goal, tasks[])` | Records a decomposition; cuts the epic branch |
+| `create_epic(title, goal, tasks[])` | One transaction: the epic (state `planning`) plus every task in `tasks`. Each task's `depends_on` is a zero-based index into this same array, validated before anything is written |
+| `list_epics()` | Every epic on the project with its state, branch, and done/total task count |
+| `get_epic(id)` | One epic in full: goal, branch, its tasks grouped by column, and whether it is ready for integration |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
 | `pin_note(note_id, pinned)` | Every future agent sees it in full |
 | `spawn_worker(task_id)` | Subject to §8 caps and the autonomy setting |
@@ -438,7 +477,7 @@ Everything in worker scope over any task in the project, plus:
 | `list_agents()` | Roster with state and spend |
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
 | `promote_proposal(task_id)` | Only when autonomy is on |
-| `request_integration(epic_id)` | Always creates a human approval row |
+| `request_integration(epic_id)` | Refused unless every task in the epic is `done` (names how many remain); otherwise creates a human approval row, or returns the one already pending |
 
 ---
 
@@ -665,8 +704,19 @@ caps. Useful without any orchestrator.
 **M2 — orchestrator. DONE 2026-09-11 (report channel verified live: Stop → notice → `list_reports` → consumed).** Orchestrator PTY, per-scope MCP tokens, `spawn_worker`,
 the report channel, approvals sidebar, autonomy toggle.
 
-**M3 — epics and integration.** Epic entity, epic branches, task branching from
-epic branches, integration worktree and integrator, human-opened PR.
+**M3 — epics and integration. DONE 2026-09-12 (418/418 tests pass; the
+approve → spawn → merge → report → PR flow verified in `EpicIntegrationTests`
+against a fixture runtime — real worktrees and git operations, a fake
+`claude --bg` process): approving an integration request spawns exactly one
+integrator on the epic branch with the standard worker guards
+(`--permission-mode auto`, `--strict-mcp-config`, the push/PR
+`--disallowedTools`); its prompt lists task branches in dependency order and
+skips ones already merged into the epic branch; the epic moves `active` →
+`integrating` on spawn and to `done` in the same transaction as its
+`report_complete`; and nothing on the path pushes or opens a PR).** Epic
+entity, epic branches cut lazily at first task spawn into them, task
+branches from the epic branch, integration worktree and integrator, human-
+opened PR.
 
 **M4 — notes.** Note store, section ops, FTS, pinning, attachment, spawn-time
 injection.
@@ -770,6 +820,12 @@ from knowing how the agents actually behave first.
   even when stdout is a pipe, so `ClaudeCLI.parseShortId` rejected the hex id
   and every spawn failed with "exited 0 but no short id was found" while the
   session kept running orphaned. ANSI escapes are now stripped before parsing.
+- **Specified but not built: abandoning an epic.** `EpicState.abandoned` and
+  its badge color have existed since M3's schema landed, but nothing in the
+  app ever writes it — there is no action that moves an epic there. A
+  decomposition that turns out wrong currently has no path except letting its
+  tasks sit unfinished forever; an epic can only ever reach `done`, via
+  integration.
 - **Unresolved:** the localhost port is ephemeral per app launch, but
   `--bg --resume` reuses the saved `--settings`/`--mcp-config` paths. Either
   rewrite both files before every resume (current plan) or pick a stable
