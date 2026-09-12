@@ -37,12 +37,21 @@ public final class BoardServer: Sendable {
         get async { await runState.port }
     }
 
-    public func start() async throws -> Int {
+    /// Running sessions hold config files pointing at the last port, so a stable port survives an app relaunch.
+    /// Falls back to an ephemeral port when the preferred one is taken.
+    public func start(preferredPort: Int? = nil) async throws -> Int {
+        if let preferredPort, preferredPort > 0 {
+            do { return try await bind(port: preferredPort) } catch BoardServerError.failedToBind {}
+        }
+        return try await bind(port: 0)
+    }
+
+    private func bind(port requestedPort: Int) async throws -> Int {
         guard await runState.task == nil else { throw BoardServerError.alreadyRunning }
         let (ports, portSink) = AsyncStream.makeStream(of: Int.self)
         let app = Application(
             router: buildRouter(),
-            configuration: .init(address: .hostname("127.0.0.1", port: 0), serverName: "agent-board"),
+            configuration: .init(address: .hostname("127.0.0.1", port: requestedPort), serverName: "agent-board"),
             onServerRunning: { channel in
                 portSink.yield(channel.localAddress?.port ?? 0)
                 portSink.finish()

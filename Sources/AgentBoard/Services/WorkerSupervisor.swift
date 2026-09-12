@@ -70,7 +70,12 @@ final class WorkerSupervisor: WorkerSupervising {
 
     func start() async {
         do {
-            serverPort = try await server.start()
+            let portFile = appSupportDir.appendingPathComponent("server-port")
+            let saved = (try? String(contentsOf: portFile, encoding: .utf8)).flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            let port = try await server.start(preferredPort: saved)
+            serverPort = port
+            try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+            try? "\(port)".write(to: portFile, atomically: true, encoding: .utf8)
         } catch {
             lastError = describe(error)
         }
@@ -219,8 +224,7 @@ final class WorkerSupervisor: WorkerSupervising {
             if resumed.shortId != session.shortId {
                 try sessions.setShortId(sessionId, resumed.shortId)
             }
-            try sessions.setState(sessionId, .running)
-            try sessions.setStopReason(sessionId, nil)
+            try sessions.markResumed(sessionId)
             if let task = try tasks.get(taskId) {
                 if task.failed { try tasks.setFailed(taskId, false, reason: nil) }
                 if task.column != .running { try tasks.move(taskId, to: .running) }

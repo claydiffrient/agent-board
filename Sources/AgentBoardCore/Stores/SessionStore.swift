@@ -64,6 +64,16 @@ public struct SessionStore: Sendable {
         }
     }
 
+    /// A resumed session restarts its wall clock; the previous run's end and stop reason are cleared.
+    public func markResumed(_ sessionId: String, at: Int64 = .nowMillis) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE agent_session SET state = 'running', started_at = ?, ended_at = NULL, stop_reason = NULL WHERE session_id = ?",
+                arguments: [at, sessionId]
+            )
+        }
+    }
+
     static func setState(_ db: Database, _ sessionId: String, _ state: SessionState, endedAt: Int64?) throws {
         if let endedAt {
             try db.execute(
