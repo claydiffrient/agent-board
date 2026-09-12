@@ -71,6 +71,15 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   `PostToolUse`, `Notification`, `Stop` and `SessionEnd`. **`SessionStart`
   silently skips `http` hooks** (foreground and background); a `command` hook
   that pipes stdin to `curl` fires and is the workaround.
+- **`/clear` forks the session under a new id.** The old id gets `SessionEnd`,
+  and ~18s later a new id gets `SessionStart` with `"source": "fork"`. The fork
+  payload does not name its parent — no parent session id anywhere in it — so
+  the hook token grant is the only link back. `StoreHookSink` treats an unknown
+  payload `session_id` on a live grant bound to a known session as the fork
+  signal: it inserts a row for the new id, rebinds the grant, and re-pins
+  `project.orch_session_id` for an orchestrator grant. The old row keeps its
+  terminal state and its spend — the fork writes its own transcript, and
+  metering reads transcripts.
 - *M0:* The MCP client sends a non-standard `server/discover` request before
   `initialize`; answering it with JSON-RPC `-32601` is fine. `tools/list` is
   fetched at startup and the tool is callable in the first turn.
