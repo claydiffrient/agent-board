@@ -54,6 +54,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let epics: EpicStore
     @ObservationIgnored private let board: Board
     @ObservationIgnored private var meteringTask: _Concurrency.Task<Void, Never>?
+    /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
+    @ObservationIgnored private var stallNotified: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
 
     static let meteringInterval: Duration = .seconds(5)
@@ -516,8 +518,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         for project in all {
             let limits = Self.capLimits(project.settings.caps)
             guard let projectSessions = try? sessions.all(projectId: project.id) else { continue }
+            let stallSeconds = project.settings.caps.stallSeconds
             for session in projectSessions where Self.shouldMeter(session, now: now) {
-                await meter(session, limits: limits)
+                await meter(session, limits: limits, stallSeconds: stallSeconds)
             }
         }
     }
@@ -528,7 +531,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return now - endedAt < finalSpendWindowMillis
     }
 
-    private func meter(_ session: AgentSession, limits: CapLimits) async {
+    private func meter(_ session: AgentSession, limits: CapLimits, stallSeconds: Int) async {
         var totals = UsageTotals(
             inputTokens: session.tokensIn,
             outputTokens: session.tokensOut,
@@ -558,7 +561,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
         }
 
-        guard let current = try? sessions.get(session.sessionId), current.state.isActive, current.role == .worker else { return }
+        guard let current = try? sessions.get(session.sessionId), current.state.isActive, current.role == .worker else {
+            stallNotified.remove(session.sessionId)
+            return
+        }
+        noteStall(current, lastActivity: lastActivity, stallSeconds: stallSeconds)
         guard let breach = CapEvaluator.evaluate(
             totals: totals,
             startedAt: current.startedDate,
@@ -568,6 +575,28 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         ) else { return }
         if case .idle = breach, current.state == .blocked { return }
         await enforce(breach, on: current)
+    }
+
+    /// SPEC §12 case 2: a grandchild process waiting on stdin fires no hook, so a `running` worker whose
+    /// activity clock has frozen is only surfaced — never killed. The idle cap still decides that.
+    private func noteStall(_ session: AgentSession, lastActivity: Date?, stallSeconds: Int) {
+        let stalled = session.state == .running && AttentionSelection.isStalled(
+            lastActivity: lastActivity,
+            startedAt: session.startedDate,
+            now: Date(),
+            threshold: TimeInterval(stallSeconds)
+        )
+        guard stalled else {
+            stallNotified.remove(session.sessionId)
+            return
+        }
+        guard stallNotified.insert(session.sessionId).inserted else { return }
+        var title: String?
+        if let taskId = session.taskId { title = try? tasks.get(taskId)?.title }
+        MacNotifier.post(
+            title: "Worker may be stuck",
+            body: "\(session.displayShortId) has made no tool call in \(stallSeconds)s — \(title ?? "no task"). Attach to check."
+        )
     }
 
     private func enforce(_ breach: CapBreach, on session: AgentSession) async {

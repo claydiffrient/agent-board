@@ -5,10 +5,12 @@ struct ApprovalsSidebar: View {
     let project: Project
 
     @Environment(AppEnvironment.self) private var env
+    @Environment(\.openWindow) private var openWindow
     @State private var approvals = Observed<[Approval]>([])
     @State private var tasks = Observed<[BoardTask]>([])
     @State private var sessions = Observed<[AgentSession]>([])
     @State private var reports = Observed<[Report]>([])
+    @State private var now = Date.now
     @State private var denying: Approval?
     @State private var denyReason = ""
     @State private var errorMessage: String?
@@ -19,6 +21,15 @@ struct ApprovalsSidebar: View {
 
     private var proposals: [BoardTask] {
         tasks.value.filter { $0.column == .proposed }
+    }
+
+    private var attention: [AttentionItem] {
+        AttentionSelection.needingAttention(
+            tasks: tasks.value,
+            sessions: sessions.value,
+            now: now,
+            stallThreshold: TimeInterval(project.settings.caps.stallSeconds)
+        )
     }
 
     private var reviews: [BoardTask] {
@@ -37,6 +48,15 @@ struct ApprovalsSidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             List {
+                Section("Blocked") {
+                    if attention.isEmpty {
+                        Text("No worker is waiting on you.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(attention) { item in
+                        attentionRow(item)
+                    }
+                }
                 Section("Pending approvals") {
                     if approvals.value.isEmpty {
                         Text("Nothing waiting on you.")
@@ -86,6 +106,12 @@ struct ApprovalsSidebar: View {
         .task(id: project.id) {
             await reports.run(ReportStore(env.db).observeUnconsumed(projectId: project.id), in: env.db.reader)
         }
+        .task {
+            while !_Concurrency.Task.isCancelled {
+                now = .now
+                do { try await _Concurrency.Task.sleep(for: .seconds(15)) } catch { break }
+            }
+        }
         .alert("Deny request?", isPresented: denyPresented, presenting: denying) { approval in
             TextField("Reason (optional)", text: $denyReason)
             Button("Deny", role: .destructive) {
@@ -97,6 +123,58 @@ struct ApprovalsSidebar: View {
             Text("The orchestrator is told the decision, and the reason if you give one, through list_reports.\n\n\(describe(approval))")
         }
         .errorAlert($errorMessage)
+    }
+
+    @ViewBuilder
+    private func attentionRow(_ item: AttentionItem) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(item.task.title)
+                .fontWeight(.medium)
+                .lineLimit(2)
+            HStack(spacing: 6) {
+                Text(item.kind.rawValue)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(.quaternary, in: Capsule())
+                if let session = item.session {
+                    Text(session.displayShortId)
+                        .monospaced()
+                }
+                Text(Format.elapsed(from: item.since, to: now))
+            }
+            .font(.caption)
+            .foregroundStyle(item.kind == .blocked ? .orange : .secondary)
+            Text(detail(item))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+            HStack {
+                Button("Attach") {
+                    if let session = item.session { openWindow(id: "terminal", value: session.sessionId) }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(item.session == nil)
+                Button("Stop") {
+                    guard let session = item.session else { return }
+                    run { try await env.supervisor.stop(sessionId: session.sessionId) }
+                }
+                .disabled(item.session == nil)
+            }
+            .controlSize(.small)
+        }
+        .padding(.vertical, 4)
+    }
+
+    /// D15: the row says enough to decide whether to attach; the prompt itself is read in the terminal.
+    private func detail(_ item: AttentionItem) -> String {
+        if let reason = item.reason, !reason.isEmpty { return reason }
+        switch item.kind {
+        case .blocked:
+            return "Blocked with no reason recorded. Attach to see what it is asking."
+        case .stalled:
+            let tool = item.session?.lastTool.map { "since \($0)" } ?? "at all"
+            return "No hook activity \(tool). It may be waiting on a child process's stdin, which fires no hook."
+        }
     }
 
     private func approvalRow(_ approval: Approval) -> some View {
