@@ -1,4 +1,5 @@
 import AgentBoardCore
+import AgentBoardRuntime
 import Foundation
 
 @MainActor
@@ -44,6 +45,7 @@ final class StubSupervisor: WorkerSupervising {
     func reconcile(projectId: String) async {}
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? { nil }
     func worktreeDiffstat(taskId: String) async -> String? { nil }
+    func worktreeDiffSummary(taskId: String) async -> DiffSummary? { nil }
     func orchestratorConsole(projectId: String) throws -> OrchestratorConsole { throw StubError.notWired }
     func approve(approvalId: String) async throws { throw StubError.notWired }
     func deny(approvalId: String, reason: String?) async throws { throw StubError.notWired }

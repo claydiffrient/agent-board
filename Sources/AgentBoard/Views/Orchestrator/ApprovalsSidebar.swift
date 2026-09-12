@@ -1,4 +1,5 @@
 import AgentBoardCore
+import AgentBoardRuntime
 import SwiftUI
 
 struct ApprovalsSidebar: View {
@@ -297,7 +298,7 @@ private struct ReviewRow: View {
     let reopen: () -> Void
 
     @Environment(AppEnvironment.self) private var env
-    @State private var diffstat: String?
+    @State private var changes: DiffSummary?
     @State private var summary: String?
 
     var body: some View {
@@ -305,24 +306,14 @@ private struct ReviewRow: View {
             Text(task.title)
                 .fontWeight(.medium)
                 .lineLimit(2)
-            VStack(alignment: .leading, spacing: 2) {
-                Label(session?.branch ?? "agentboard/\(task.id)", systemImage: "arrow.triangle.branch")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if let worktree = session?.worktreePath {
-                    Label(worktree, systemImage: "folder")
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(worktree)
-                }
-                if let diffstat {
-                    Text(diffstat)
-                        .font(.caption.monospaced())
-                        .lineLimit(4)
-                }
+            Label(session?.branch ?? "agentboard/\(task.id)", systemImage: "arrow.triangle.branch")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let changes, !changes.isEmpty {
+                changeSize(changes)
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
             if let summary, !summary.isEmpty {
                 Text(summary)
                     .font(.caption)
@@ -337,9 +328,25 @@ private struct ReviewRow: View {
             .controlSize(.small)
         }
         .padding(.vertical, 4)
+        .help(session?.worktreePath ?? "")
         .task(id: task.id) {
-            summary = try? ReportStore(env.db).latest(taskId: task.id)?.body
-            diffstat = await env.supervisor.worktreeDiffstat(taskId: task.id)
+            summary = (try? ReportStore(env.db).latest(taskId: task.id)?.body)
+                .flatMap { $0 }
+                .map { WorkerReport.summaryText(body: $0) }
+            changes = await env.supervisor.worktreeDiffSummary(taskId: task.id)
         }
+    }
+
+    private func changeSize(_ changes: DiffSummary) -> some View {
+        HStack(spacing: 6) {
+            Text(changes.filesChanged == 1 ? "1 file" : "\(changes.filesChanged) files")
+            Text("+\(changes.insertions)")
+                .foregroundStyle(.green)
+            Text("\u{2212}\(changes.deletions)")
+                .foregroundStyle(.red)
+        }
+        .font(.caption.monospacedDigit())
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
     }
 }

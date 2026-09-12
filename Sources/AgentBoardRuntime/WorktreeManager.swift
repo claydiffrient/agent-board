@@ -22,6 +22,23 @@ public struct WorktreeRemovalReport: Sendable, Equatable {
     public var hookDiagnostics: [String]
 }
 
+public struct DiffSummary: Sendable, Equatable {
+    public var filesChanged: Int
+    public var insertions: Int
+    public var deletions: Int
+    /// Counted in `filesChanged`; git reports no line counts for them.
+    public var binaryFiles: Int
+
+    public init(filesChanged: Int = 0, insertions: Int = 0, deletions: Int = 0, binaryFiles: Int = 0) {
+        self.filesChanged = filesChanged
+        self.insertions = insertions
+        self.deletions = deletions
+        self.binaryFiles = binaryFiles
+    }
+
+    public var isEmpty: Bool { filesChanged == 0 }
+}
+
 public struct WorktreeManager: Sendable {
     public static let gitPath = "/usr/bin/git"
 
@@ -95,6 +112,11 @@ public struct WorktreeManager: Sendable {
         try gitChecked(["diff", "--stat", "\(base)...HEAD"], cwd: worktree).stdout
     }
 
+    public func diffSummary(worktree: URL, against base: String) throws -> DiffSummary {
+        let output = try gitChecked(["diff", "--numstat", "\(base)...HEAD"], cwd: worktree).stdout
+        return Self.parseNumstat(output)
+    }
+
     public func headCommit(worktree: URL) throws -> String {
         try gitChecked(["rev-parse", "HEAD"], cwd: worktree).stdout
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -114,6 +136,24 @@ public struct WorktreeManager: Sendable {
     public func hasUncommittedChanges(worktree: URL) throws -> Bool {
         let status = try gitChecked(["status", "--porcelain"], cwd: worktree).stdout
         return !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// `--numstat` lines are `<added>\t<deleted>\t<path>`, with `-` for both counts on a binary file.
+    /// A rename is one line whose path is a `{old => new}` spec.
+    static func parseNumstat(_ output: String) -> DiffSummary {
+        var summary = DiffSummary()
+        for rawLine in output.split(separator: "\n") {
+            let fields = rawLine.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+            guard fields.count == 3, !fields[2].isEmpty else { continue }
+            summary.filesChanged += 1
+            if let added = Int(fields[0]), let deleted = Int(fields[1]) {
+                summary.insertions += added
+                summary.deletions += deleted
+            } else {
+                summary.binaryFiles += 1
+            }
+        }
+        return summary
     }
 
     static func parsePorcelain(_ output: String) -> [WorktreeInfo] {

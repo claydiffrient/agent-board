@@ -412,6 +412,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func worktreeDiffstat(taskId: String) async -> String? {
+        guard let context = diffContext(taskId: taskId) else { return nil }
+        return try? await offMain {
+            try context.manager.diffstat(worktree: context.worktree, against: context.base)
+        }
+    }
+
+    func worktreeDiffSummary(taskId: String) async -> DiffSummary? {
+        guard let context = diffContext(taskId: taskId) else { return nil }
+        return try? await offMain {
+            try context.manager.diffSummary(worktree: context.worktree, against: context.base)
+        }
+    }
+
+    private func diffContext(taskId: String) -> (manager: WorktreeManager, worktree: URL, base: String)? {
         guard let task = try? tasks.get(taskId),
               let project = try? projects.get(task.projectId),
               let worktreePath = try? sessions.forTask(taskId).first?.worktreePath
@@ -420,10 +434,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             repoPath: URL(fileURLWithPath: project.repoPath),
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
         )
-        let base = project.baseBranch
-        return try? await offMain {
-            try manager.diffstat(worktree: URL(fileURLWithPath: worktreePath), against: base)
-        }
+        return (manager, URL(fileURLWithPath: worktreePath), project.baseBranch)
     }
 
     // MARK: - Orchestrator and approvals
