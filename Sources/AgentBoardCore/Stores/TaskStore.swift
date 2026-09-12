@@ -46,8 +46,11 @@ public struct TaskStore: Sendable {
         return task
     }
 
-    public func get(_ id: String) throws -> Task? {
-        try db.reader.read { db in try Task.fetchOne(db, key: id) }
+    public func get(_ id: String, includeArchived: Bool = true) throws -> Task? {
+        try db.reader.read { db in
+            guard let task = try Task.fetchOne(db, key: id) else { return nil }
+            return includeArchived || !task.isArchived ? task : nil
+        }
     }
 
     public func list(
@@ -57,6 +60,7 @@ public struct TaskStore: Sendable {
             try Self.list(db, projectId: projectId, column: column, epicId: epicId, includeArchived: includeArchived)
         }
     }
+
 
     static func list(
         _ db: Database, projectId: String, column: TaskColumn?, epicId: String?, includeArchived: Bool = false
@@ -73,6 +77,9 @@ public struct TaskStore: Sendable {
         if let epicId {
             sql += " AND epic_id = ?"
             arguments += [epicId]
+        }
+        if !includeArchived {
+            sql += " AND archived_at IS NULL"
         }
         sql += " ORDER BY \(TaskColumn.orderingSQL), ordering, created_at"
         return try Task.fetchAll(db, sql: sql, arguments: arguments)

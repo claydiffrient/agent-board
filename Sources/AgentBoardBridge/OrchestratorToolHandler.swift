@@ -39,11 +39,14 @@ public final class OrchestratorToolHandler: ToolHandler {
             name: "list_tasks",
             description: "List the tasks on this project's board, optionally filtered by column or epic. Each entry carries "
                 + "its dependencies and the active worker session if one is assigned. Only `ready` tasks can be given "
-                + "to a worker; `backlog` tasks have unmet dependencies or have not been groomed yet.",
+                + "to a worker; `backlog` tasks have unmet dependencies or have not been groomed yet. Archived tasks "
+                + "are hidden by default: they are still on the board and still readable through get_task, so a task "
+                + "missing from this list has been archived, not deleted. Pass `include_archived` to see them.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "column": ToolSchema.enumeration(columnNames, "Restrict to one board column."),
                     "epic_id": ToolSchema.string("Restrict to tasks in this epic."),
+                    "include_archived": ToolSchema.boolean("Include archived tasks; they are omitted by default."),
                 ],
                 required: []
             )
@@ -51,7 +54,8 @@ public final class OrchestratorToolHandler: ToolHandler {
         ToolDescriptor(
             name: "get_task",
             description: "Full detail for one task: body, acceptance criteria, flags, dependencies, and the most recent "
-                + "worker report on it if any.",
+                + "worker report on it if any. Archived tasks are returned too, carrying `archived: true` and the "
+                + "`archived_at` timestamp.",
             inputSchema: ToolSchema.object(properties: ["id": ToolSchema.string()], required: ["id"])
         ),
         ToolDescriptor(
@@ -93,7 +97,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             name: "move_task",
             description: "Move a task to another column. `running` is entered only through spawn_worker and `done` only "
                 + "when a human accepts the work, so those two are refused. Moving into `backlog` or `ready` is "
-                + "subject to the dependency check, and the response tells you where the task actually ended up.",
+                + "subject to the dependency check, and the response tells you where the task actually ended up. "
+                + "Moving an archived task out of `done` unarchives it, so it does not sit hidden in a live column.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "id": ToolSchema.string(),
@@ -217,6 +222,17 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "through list_reports.",
             inputSchema: ToolSchema.object(properties: ["epic_id": ToolSchema.string()], required: ["epic_id"])
         ),
+        ToolDescriptor(
+            name: "archive_task",
+            description: "Hide a `done` task from the board without deleting it. Archived tasks stay readable through "
+                + "get_task and reappear in list_tasks with `include_archived`. Only `done` tasks can be archived.",
+            inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
+        ),
+        ToolDescriptor(
+            name: "unarchive_task",
+            description: "Put an archived task back on the visible board. It returns to the column it was archived from.",
+            inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
+        ),
     ] + NoteTools.orchestratorDescriptors
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
@@ -234,6 +250,8 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "update_task": return try updateTask(arguments, identity: identity)
         case "move_task": return try moveTask(arguments, identity: identity)
         case "set_deps": return try setDeps(arguments, identity: identity)
+        case "archive_task": return try archiveTask(arguments, identity: identity)
+        case "unarchive_task": return try unarchiveTask(arguments, identity: identity)
         case "log_progress": return try logProgress(arguments, identity: identity)
         case "spawn_worker": return try await spawnWorker(arguments, identity: identity)
         case "stop_worker": return try await stopWorker(arguments, identity: identity)
@@ -257,14 +275,17 @@ public final class OrchestratorToolHandler: ToolHandler {
     private func listTasks(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
         let column = try ToolArguments.optionalString("column", in: arguments).map(parseColumn)
         let epicId = ToolArguments.optionalString("epic_id", in: arguments)
-        let list = try tasks.list(projectId: identity.projectId, column: column, epicId: epicId)
+        let includeArchived = arguments["include_archived"]?.boolValue ?? false
+        let list = try tasks.list(
+            projectId: identity.projectId, column: column, epicId: epicId, includeArchived: includeArchived
+        )
         return .json(.array(try list.map(renderTaskSummary)))
     }
 
     private func getTask(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
         let task = try projectTask(try ToolArguments.requiredString("id", in: arguments), identity: identity)
         let deps: [JSONValue] = try tasks.deps(of: task.id).compactMap { depId in
-            guard let dep = try tasks.get(depId) else { return nil }
+            guard let dep = try tasks.get(depId, includeArchived: true) else { return nil }
             return .object(["id": .string(dep.id), "title": .string(dep.title), "column": .string(dep.column.rawValue)])
         }
         let latestReport = try db.reader.read { db in
@@ -290,6 +311,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             "failure_reason": .optional(task.failureReason),
             "created_at": .millis(task.createdAt),
             "updated_at": .millis(task.updatedAt),
+            "archived": .bool(task.isArchived),
+            "archived_at": .millis(task.archivedAt),
             "deps": .array(deps),
             "active_session": try activeSession(for: task.id),
             "latest_report": .null,
@@ -343,14 +366,20 @@ public final class OrchestratorToolHandler: ToolHandler {
         let column = try parseColumn(try ToolArguments.requiredString("column", in: arguments))
         try refuseTerminalColumns(column, verb: "move a task into")
         try tasks.move(task.id, to: column)
+        if task.isArchived {
+            try tasks.unarchive(task.id)
+        }
         if column == .backlog || column == .ready {
             try tasks.refreshReadiness(projectId: identity.projectId)
         }
-        let final = try tasks.get(task.id)?.column ?? column
+        let final = try tasks.get(task.id, includeArchived: true)?.column ?? column
+        let unarchived = task.isArchived ? " It is no longer archived." : ""
         if final != column {
-            return ToolResult(text: "Task \(task.id) is in \(final.rawValue), not \(column.rawValue): its dependencies decide readiness.")
+            return ToolResult(
+                text: "Task \(task.id) is in \(final.rawValue), not \(column.rawValue): its dependencies decide readiness.\(unarchived)"
+            )
         }
-        return ToolResult(text: "Task \(task.id) is now in \(final.rawValue).")
+        return ToolResult(text: "Task \(task.id) is now in \(final.rawValue).\(unarchived)")
     }
 
     private func setDeps(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
@@ -364,7 +393,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         }
         try tasks.setDeps(task.id, dependsOn: dependsOn)
         try tasks.refreshReadiness(projectId: identity.projectId)
-        let final = try tasks.get(task.id)?.column ?? task.column
+        let final = try tasks.get(task.id, includeArchived: true)?.column ?? task.column
         return ToolResult(text: "Task \(task.id) now depends on \(dependsOn.count) task(s) and is in \(final.rawValue).")
     }
 
@@ -373,6 +402,27 @@ public final class OrchestratorToolHandler: ToolHandler {
         let text = try ToolArguments.requiredString("text", in: arguments)
         try progress.append(taskId: task.id, sessionId: identity.sessionId, kind: .note, text: text)
         return ToolResult(text: "Logged.")
+    }
+
+    private func archiveTask(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let task = try projectTask(try ToolArguments.requiredString("task_id", in: arguments), identity: identity)
+        if task.isArchived {
+            return ToolResult(text: "Task \(task.id) is already archived.")
+        }
+        guard task.column == .done else {
+            throw ToolError("Task \(task.id) is in \(task.column.rawValue), not done: only done tasks can be archived.")
+        }
+        try tasks.archive(task.id)
+        return ToolResult(text: "Task \(task.id) archived. It is hidden from list_tasks but still readable with get_task.")
+    }
+
+    private func unarchiveTask(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let task = try projectTask(try ToolArguments.requiredString("task_id", in: arguments), identity: identity)
+        guard task.isArchived else {
+            return ToolResult(text: "Task \(task.id) is not archived.")
+        }
+        try tasks.unarchive(task.id)
+        return ToolResult(text: "Task \(task.id) is back on the board in \(task.column.rawValue).")
     }
 
     // MARK: Workers
@@ -529,7 +579,7 @@ public final class OrchestratorToolHandler: ToolHandler {
 
     private func getEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
         let epic = try projectEpic(try ToolArguments.requiredString("id", in: arguments), identity: identity)
-        let epicTasks = try tasks.list(projectId: identity.projectId, epicId: epic.id)
+        let epicTasks = try tasks.list(projectId: identity.projectId, epicId: epic.id, includeArchived: true)
         var columns: [String: JSONValue] = [:]
         for column in TaskColumn.allCases {
             columns[column.rawValue] = .array(try epicTasks.filter { $0.column == column }.map(renderTaskSummary))
@@ -578,12 +628,12 @@ public final class OrchestratorToolHandler: ToolHandler {
     }
 
     private func taskCounts(_ epic: Epic) throws -> (done: Int, total: Int) {
-        let list = try tasks.list(projectId: epic.projectId, epicId: epic.id)
+        let list = try tasks.list(projectId: epic.projectId, epicId: epic.id, includeArchived: true)
         return (done: list.filter { $0.column == .done }.count, total: list.count)
     }
 
     private func projectTask(_ id: String, identity: TokenIdentity) throws -> BoardTask {
-        guard let task = try tasks.get(id), task.projectId == identity.projectId else {
+        guard let task = try tasks.get(id, includeArchived: true), task.projectId == identity.projectId else {
             throw ToolError("Task \(id) is not in this project.")
         }
         return task
@@ -625,6 +675,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             "model": .optional(task.model),
             "blocked": .bool(task.blocked),
             "failed": .bool(task.failed),
+            "archived": .bool(task.isArchived),
+            "archived_at": .millis(task.archivedAt),
             "epic_id": .optional(task.epicId),
             "deps": .array(try tasks.deps(of: task.id).map(JSONValue.string)),
             "active_session": try activeSession(for: task.id),

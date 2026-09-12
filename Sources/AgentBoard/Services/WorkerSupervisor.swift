@@ -299,7 +299,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 ?? manager.createForBranch(name: worktreeName, branch: epicBranch)
         }
 
-        let members = try tasks.list(projectId: project.id, epicId: epicId)
+        let members = try tasks.list(projectId: project.id, epicId: epicId, includeArchived: true)
             .filter { $0.origin != .integration }
         var deps: [String: [String]] = [:]
         for member in members {
