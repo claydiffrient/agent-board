@@ -11,6 +11,7 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let progress: ProgressStore
     private let reports: ReportStore
     private let approvals: ApprovalStore
+    private let epics: EpicStore
     private let board: Board
     private let notes: NoteTools
     private let control: any WorkerControl
@@ -24,6 +25,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         progress = ProgressStore(db)
         reports = ReportStore(db)
         approvals = ApprovalStore(db)
+        epics = EpicStore(db)
         board = Board(db)
         notes = NoteTools(db: db)
         self.control = control
@@ -169,9 +171,50 @@ public final class OrchestratorToolHandler: ToolHandler {
             inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
         ),
         ToolDescriptor(
+            name: "create_epic",
+            description: "Record a decomposition: one epic plus the tasks that make it up, created together. The epic "
+                + "owns the integration branch `agentboard/epic-<id>` and every task in it branches from that branch "
+                + "rather than from the project's base branch, so group work that has to land as one change. Tasks "
+                + "land in `backlog` and those without dependencies become `ready` immediately. Inside `depends_on`, "
+                + "refer to sibling tasks by their zero-based position in this call's `tasks` array.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "title": ToolSchema.string("Short name for the epic."),
+                    "goal": ToolSchema.string("What the epic has to achieve; every worker in it is shown this."),
+                    "tasks": ToolSchema.objectArray(
+                        properties: [
+                            "title": ToolSchema.string("Short imperative title."),
+                            "body": ToolSchema.string("What to do and where; context the worker will not otherwise have."),
+                            "acceptance": ToolSchema.string("How the reviewer will know it is done."),
+                            "priority": ToolSchema.string("Free text, e.g. high, normal, low."),
+                            "model": ToolSchema.string("Claude model id for the worker on this task; omit for the project default."),
+                            "depends_on": ToolSchema.integerArray(
+                                "Zero-based indices of earlier tasks in this same array that must be done first."
+                            ),
+                        ],
+                        required: ["title"],
+                        description: "The tasks of the epic, in the order you want them on the board."
+                    ),
+                ],
+                required: ["title", "tasks"]
+            )
+        ),
+        ToolDescriptor(
+            name: "list_epics",
+            description: "Every epic on this project with its state, integration branch, and how many of its tasks are done.",
+            inputSchema: ToolSchema.object(properties: [:], required: [])
+        ),
+        ToolDescriptor(
+            name: "get_epic",
+            description: "One epic in full: its goal, integration branch, its tasks grouped by column, and whether it is "
+                + "ready for integration.",
+            inputSchema: ToolSchema.object(properties: ["id": ToolSchema.string()], required: ["id"])
+        ),
+        ToolDescriptor(
             name: "request_integration",
-            description: "Ask the human to integrate an epic whose tasks are all done. Integration always requires human "
-                + "approval regardless of the autonomy setting; you will learn the decision through list_reports.",
+            description: "Ask the human to integrate an epic. Refused until every task in the epic is `done`. Integration "
+                + "always requires human approval regardless of the autonomy setting; you will learn the decision "
+                + "through list_reports.",
             inputSchema: ToolSchema.object(properties: ["epic_id": ToolSchema.string()], required: ["epic_id"])
         ),
     ] + NoteTools.orchestratorDescriptors
@@ -199,6 +242,9 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "get_report": return try getReport(arguments, identity: identity)
         case "list_approvals": return try listApprovals(identity: identity)
         case "promote_proposal": return try promoteProposal(arguments, identity: identity)
+        case "create_epic": return try createEpic(arguments, identity: identity)
+        case "list_epics": return try listEpics(identity: identity)
+        case "get_epic": return try getEpic(arguments, identity: identity)
         case "request_integration": return try requestIntegration(arguments, identity: identity)
         default: throw ToolError("Unknown tool: \(name)")
         }
@@ -412,19 +458,114 @@ public final class OrchestratorToolHandler: ToolHandler {
         return ToolResult(text: "Task \(task.id) promoted to \(final.rawValue).")
     }
 
-    private func requestIntegration(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
-        let epicId = try ToolArguments.requiredString("epic_id", in: arguments)
-        let epicProject = try db.reader.read { db in
-            try String.fetchOne(db, sql: "SELECT project_id FROM epic WHERE id = ?", arguments: [epicId])
+    // MARK: Epics
+
+    private func createEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let title = try ToolArguments.requiredString("title", in: arguments)
+        guard let rawTasks = arguments["tasks"]?.arrayValue, !rawTasks.isEmpty else {
+            throw ToolError("An epic needs at least one task in `tasks`.")
         }
-        guard epicProject == identity.projectId else {
-            throw ToolError("Epic \(epicId) is not in this project.")
+        let specs: [NewEpicTask] = try rawTasks.enumerated().map { index, raw in
+            guard let taskTitle = raw["title"]?.stringValue, !taskTitle.isEmpty else {
+                throw ToolError("tasks[\(index)] needs a non-empty title.")
+            }
+            let dependsOn = try ToolArguments.integerArray("depends_on", in: raw) ?? []
+            for dependency in dependsOn {
+                guard rawTasks.indices.contains(dependency) else {
+                    throw ToolError(
+                        "tasks[\(index)].depends_on refers to \(dependency), which is not a task in this call: "
+                            + "use zero-based indices from 0 to \(rawTasks.count - 1)."
+                    )
+                }
+                guard dependency != index else {
+                    throw ToolError("tasks[\(index)].depends_on refers to itself.")
+                }
+            }
+            return NewEpicTask(
+                title: taskTitle,
+                body: ToolArguments.optionalString("body", in: raw),
+                acceptance: ToolArguments.optionalString("acceptance", in: raw),
+                priority: ToolArguments.optionalString("priority", in: raw),
+                model: ToolArguments.optionalString("model", in: raw),
+                origin: .orchestrator,
+                dependsOn: dependsOn
+            )
+        }
+        let (epic, created) = try board.createEpic(
+            projectId: identity.projectId,
+            title: title,
+            goal: ToolArguments.optionalString("goal", in: arguments),
+            tasks: specs
+        )
+        return .json(.object([
+            "epic_id": .string(epic.id),
+            "branch": .string(epic.branch),
+            "state": .string(epic.state.rawValue),
+            "task_ids": .array(created.map { .string($0.id) }),
+            "tasks": .array(created.map { task in
+                .object([
+                    "id": .string(task.id),
+                    "title": .string(task.title),
+                    "column": .string(task.column.rawValue),
+                ])
+            }),
+        ]))
+    }
+
+    private func listEpics(identity: TokenIdentity) throws -> ToolResult {
+        let all = try epics.list(projectId: identity.projectId)
+        return .json(.array(try all.map { epic in
+            let counts = try taskCounts(epic)
+            return .object([
+                "id": .string(epic.id),
+                "title": .string(epic.title),
+                "state": .string(epic.state.rawValue),
+                "branch": .string(epic.branch),
+                "done_tasks": .number(Double(counts.done)),
+                "total_tasks": .number(Double(counts.total)),
+            ])
+        }))
+    }
+
+    private func getEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let epic = try projectEpic(try ToolArguments.requiredString("id", in: arguments), identity: identity)
+        let epicTasks = try tasks.list(projectId: identity.projectId, epicId: epic.id)
+        var columns: [String: JSONValue] = [:]
+        for column in TaskColumn.allCases {
+            columns[column.rawValue] = .array(try epicTasks.filter { $0.column == column }.map(renderTaskSummary))
+        }
+        let counts = try taskCounts(epic)
+        return .json(.object([
+            "id": .string(epic.id),
+            "title": .string(epic.title),
+            "goal": .optional(epic.goal),
+            "state": .string(epic.state.rawValue),
+            "branch": .string(epic.branch),
+            "created_at": .millis(epic.createdAt),
+            "done_tasks": .number(Double(counts.done)),
+            "total_tasks": .number(Double(counts.total)),
+            "ready_for_integration": .bool(try board.epicReadyForIntegration(epicId: epic.id)),
+            "columns": .object(columns),
+        ]))
+    }
+
+    private func requestIntegration(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let epic = try projectEpic(try ToolArguments.requiredString("epic_id", in: arguments), identity: identity)
+        guard try board.epicReadyForIntegration(epicId: epic.id) else {
+            let counts = try taskCounts(epic)
+            guard counts.total > 0 else {
+                throw ToolError("Epic \(epic.id) has no tasks, so there is nothing to integrate.")
+            }
+            let unfinished = counts.total - counts.done
+            throw ToolError(
+                "Epic \(epic.id) is not ready for integration: \(unfinished) of \(counts.total) task(s) are not done yet."
+            )
         }
         let approval = try approvals.create(
             projectId: identity.projectId,
             kind: .integration,
             taskId: nil,
-            epicId: epicId,
+            epicId: epic.id,
             requestedBy: identity.sessionId ?? "orchestrator",
             reason: nil
         )
@@ -432,6 +573,18 @@ public final class OrchestratorToolHandler: ToolHandler {
     }
 
     // MARK: Helpers
+
+    private func projectEpic(_ id: String, identity: TokenIdentity) throws -> Epic {
+        guard let epic = try epics.get(id), epic.projectId == identity.projectId else {
+            throw ToolError("Epic \(id) is not in this project.")
+        }
+        return epic
+    }
+
+    private func taskCounts(_ epic: Epic) throws -> (done: Int, total: Int) {
+        let list = try tasks.list(projectId: epic.projectId, epicId: epic.id)
+        return (done: list.filter { $0.column == .done }.count, total: list.count)
+    }
 
     private func projectTask(_ id: String, identity: TokenIdentity) throws -> BoardTask {
         guard let task = try tasks.get(id), task.projectId == identity.projectId else {

@@ -45,6 +45,12 @@ enum ToolSchema {
         return .object(fields)
     }
 
+    static func integerArray(_ description: String? = nil) -> JSONValue {
+        var fields: [String: JSONValue] = ["type": .string("array"), "items": .object(["type": .string("integer")])]
+        if let description { fields["description"] = .string(description) }
+        return .object(fields)
+    }
+
     static func stringArray(_ description: String? = nil) -> JSONValue {
         var fields: [String: JSONValue] = ["type": .string("array"), "items": .object(["type": .string("string")])]
         if let description { fields["description"] = .string(description) }
@@ -77,6 +83,18 @@ enum ToolArguments {
         if let number = value.numberValue { return Int64(number) }
         if let parsed = value.stringValue.flatMap(Int64.init) { return parsed }
         throw ToolError("Argument \(key) must be an integer")
+    }
+
+    static func integerArray(_ key: String, in arguments: JSONValue) throws -> [Int]? {
+        guard let value = arguments[key], value != .null else { return nil }
+        guard let items = value.arrayValue else {
+            throw ToolError("Argument \(key) must be an array of integers")
+        }
+        return try items.map { item in
+            if let number = item.numberValue { return Int(number) }
+            if let parsed = item.stringValue.flatMap(Int.init) { return parsed }
+            throw ToolError("Argument \(key) must be an array of integers")
+        }
     }
 
     static func stringArray(_ key: String, in arguments: JSONValue) throws -> [String]? {
