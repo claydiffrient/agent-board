@@ -5,6 +5,8 @@ struct EpicLaneHeader: View {
     let epic: Epic
     let count: EpicTaskCount
     let integrationPending: Bool
+    let isCollapsed: Bool
+    let onToggleCollapse: () -> Void
     let onRequestIntegration: () -> Void
     let onOpenPullRequest: () -> Void
 
@@ -14,6 +16,15 @@ struct EpicLaneHeader: View {
 
     var body: some View {
         HStack(spacing: 10) {
+            Button(action: onToggleCollapse) {
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 12)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isCollapsed ? "Expand \(epic.title)" : "Collapse \(epic.title)")
+            .help(isCollapsed ? "Expand this epic's lane" : "Collapse this epic's lane")
             Text(epic.title)
                 .font(.subheadline.weight(.semibold))
             EpicStateBadge(state: epic.state)

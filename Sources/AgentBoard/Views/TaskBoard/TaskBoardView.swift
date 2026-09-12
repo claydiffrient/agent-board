@@ -17,8 +17,11 @@ struct TaskBoardView: View {
     @State private var errorMessage: String?
     @State private var taskPendingDelete: BoardTask?
     @State private var drafts = TaskDraftCache()
+    @State private var collapseChoices: [String: Bool] = [:]
 
     private let columnWidth: CGFloat = 250
+    private let jumpRailWidth: CGFloat = 190
+    private let collapseStore = EpicCollapseStore()
 
     private struct Lane: Identifiable {
         let id: String
@@ -36,11 +39,26 @@ struct TaskBoardView: View {
         for task in tasks.value {
             byEpic[task.epicId, default: []].append(task)
         }
-        var result = [Lane(id: "no-epic", title: "No epic", epic: nil, tasks: byEpic[nil] ?? [])]
-        for epic in epics.value {
+        var result = [Lane(id: EpicLaneOrder.noEpicLaneId, title: "No epic", epic: nil, tasks: byEpic[nil] ?? [])]
+        for epic in EpicLaneOrder.sorted(epics.value) {
             result.append(Lane(id: epic.id, title: epic.title, epic: epic, tasks: byEpic[epic.id] ?? []))
         }
         return result
+    }
+
+    private var epicLanes: [Lane] { lanes.filter { $0.epic != nil } }
+
+    private func isCollapsed(_ epic: Epic) -> Bool {
+        EpicLaneCollapse.isCollapsed(
+            state: epic.state,
+            userChoice: collapseChoices[epic.id] ?? collapseStore.userChoice(epicId: epic.id)
+        )
+    }
+
+    private func toggleCollapse(_ epic: Epic) {
+        let collapsed = !isCollapsed(epic)
+        collapseChoices[epic.id] = collapsed
+        collapseStore.setUserChoice(collapsed, epicId: epic.id)
     }
 
     private var sessionsByTask: [String: [AgentSession]] {
@@ -61,22 +79,13 @@ struct TaskBoardView: View {
     }
 
     var body: some View {
-        ScrollView(.horizontal) {
-            VStack(alignment: .leading, spacing: 0) {
-                columnHeaders
-                    .padding(.horizontal)
-                    .padding(.top, 12)
-                Divider()
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        ForEach(lanes) { lane in
-                            laneView(lane)
-                        }
-                    }
-                    .padding()
-                    .contentShape(Rectangle())
-                    .onTapGesture { selectedTaskId = nil }
+        ScrollViewReader { proxy in
+            HStack(spacing: 0) {
+                if !epicLanes.isEmpty {
+                    epicJumpRail(proxy)
+                    Divider()
                 }
+                board
             }
         }
         .background {
@@ -160,6 +169,83 @@ struct TaskBoardView: View {
         .errorAlert($errorMessage)
     }
 
+    private var board: some View {
+        ScrollView(.horizontal) {
+            VStack(alignment: .leading, spacing: 0) {
+                columnHeaders
+                    .padding(.horizontal)
+                    .padding(.top, 12)
+                Divider()
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(lanes) { lane in
+                            laneView(lane)
+                        }
+                    }
+                    .padding()
+                    .contentShape(Rectangle())
+                    .onTapGesture { selectedTaskId = nil }
+                }
+            }
+        }
+    }
+
+    private func epicJumpRail(_ proxy: ScrollViewProxy) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Epics")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+            Divider()
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Button("No epic") {
+                        withAnimation { proxy.scrollTo(EpicLaneOrder.noEpicLaneId, anchor: .top) }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    ForEach(epicLanes) { lane in
+                        if let epic = lane.epic {
+                            jumpRailEntry(epic: epic, lane: lane, proxy: proxy)
+                        }
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+        }
+        .frame(width: jumpRailWidth)
+        .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
+    private func jumpRailEntry(epic: Epic, lane: Lane, proxy: ScrollViewProxy) -> some View {
+        Button {
+            withAnimation { proxy.scrollTo(lane.id, anchor: .top) }
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(epic.title)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                HStack(spacing: 6) {
+                    EpicStateBadge(state: epic.state)
+                    Text(EpicLane.taskCount(columns: lane.tasks.lazy.map(\.column)).label)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Scroll to \(epic.title)")
+    }
+
     private var inspectorShown: Binding<Bool> {
         Binding(
             get: { selectedTaskId != nil },
@@ -204,12 +290,15 @@ struct TaskBoardView: View {
 
     @ViewBuilder
     private func laneView(_ lane: Lane) -> some View {
+        let collapsed = lane.epic.map(isCollapsed) ?? false
         VStack(alignment: .leading, spacing: 8) {
             if let epic = lane.epic {
                 EpicLaneHeader(
                     epic: epic,
                     count: EpicLane.taskCount(columns: lane.tasks.lazy.map(\.column)),
                     integrationPending: epicsAwaitingIntegrationApproval.contains(epic.id),
+                    isCollapsed: collapsed,
+                    onToggleCollapse: { toggleCollapse(epic) },
                     onRequestIntegration: { requestIntegration(epic) },
                     onOpenPullRequest: { openPullRequest(epic) }
                 )
@@ -218,12 +307,15 @@ struct TaskBoardView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
-            HStack(alignment: .top, spacing: 12) {
-                ForEach(TaskColumn.allCases, id: \.self) { column in
-                    columnCell(lane: lane, column: column)
+            if !collapsed {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(TaskColumn.allCases, id: \.self) { column in
+                        columnCell(lane: lane, column: column)
+                    }
                 }
             }
         }
+        .id(lane.id)
     }
 
     private func columnCell(lane: Lane, column: TaskColumn) -> some View {
