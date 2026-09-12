@@ -51,6 +51,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let hookEvents: HookEventStore
     @ObservationIgnored private let approvals: ApprovalStore
     @ObservationIgnored private let notes: NoteStore
+    @ObservationIgnored private let epics: EpicStore
     @ObservationIgnored private let board: Board
     @ObservationIgnored private var meteringTask: _Concurrency.Task<Void, Never>?
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
@@ -71,6 +72,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         hookEvents = HookEventStore(db)
         approvals = ApprovalStore(db)
         notes = NoteStore(db)
+        epics = EpicStore(db)
         board = Board(db)
     }
 
@@ -152,7 +154,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             repoPath: URL(fileURLWithPath: project.repoPath),
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
         )
-        let base = project.baseBranch
+        let epic = try task.epicId.flatMap { try epics.get($0) }
+        let base: String
+        if let epic {
+            let epicBranch = epic.branch
+            let projectBase = project.baseBranch
+            try await offMain { try manager.ensureBranch(epicBranch, from: projectBase) }
+            base = epicBranch
+        } else {
+            base = project.baseBranch
+        }
         let worktree = try await offMain {
             try Self.existingWorktree(manager, name: taskId) ?? manager.create(name: taskId, branch: branch, base: base)
         }
@@ -174,7 +185,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 cwd: worktree,
                 name: Self.sessionName(for: task),
                 prompt: Self.openingPrompt(
-                    task: task, branch: branch, attempt: attempt,
+                    task: task, branch: branch, attempt: attempt, epicGoal: epic?.goal,
                     notes: try notes.notesForSpawn(
                         projectId: project.id, taskId: taskId, epicId: task.epicId
                     )
@@ -198,6 +209,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 attempt: attempt
             )
             let recorded = try board.assign(taskId: taskId, session: session)
+            if let epic, epic.state == .planning {
+                try epics.setState(epic.id, .active)
+            }
             try replayEarlyHooks(sessionId: spawned.sessionId)
             return recorded
         } catch {
@@ -647,8 +661,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return String(slug.prefix(40)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    static func openingPrompt(task: BoardTask, branch: String, attempt: Int, notes: [InjectedNote] = []) -> String {
-        OpeningPrompt.compose(task: task, branch: branch, attempt: attempt, notes: notes)
+    static func openingPrompt(
+        task: BoardTask, branch: String, attempt: Int, epicGoal: String? = nil, notes: [InjectedNote] = []
+    ) -> String {
+        OpeningPrompt.compose(task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes)
     }
 
     private nonisolated static func defaultBranch(repo: URL) -> String? {
