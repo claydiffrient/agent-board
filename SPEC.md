@@ -367,9 +367,9 @@ A worker's closing instructions, injected at spawn:
 
 1. Commit on the current branch. Message in imperative mood, no conventional
    commit prefix.
-2. **Do not push. Do not open a PR.** Both are denied at the tool layer and by
-   a project `autoMode` soft-deny rule; the instruction exists so the agent
-   does not waste a turn discovering that.
+2. **Do not push. Do not open a PR.** Both are denied at the tool layer
+   (`--disallowedTools`, §8); the instruction exists so the agent does not
+   waste a turn discovering that.
 3. Call `report_complete(summary, files_changed, tests_run, caveats)`.
 
 ### 5.2 Epic integration
@@ -481,8 +481,25 @@ Per project, overridable:
   a capped agent resumes exactly where it stopped.
 - **Pause All** stops every managed session in the project via `claude stop`.
 - **Integration always requires human approval**, autonomy setting regardless.
-- Workers never push. Enforced twice: `--disallowedTools` and a project
-  `autoMode` soft-deny rule.
+- Workers never push. Enforced by `--disallowedTools` at spawn time — that is
+  the only control that actually blocks the call. A project `autoMode`
+  `soft_deny` rule reaches a worker's effective config but does not stop or
+  pause it under `--permission-mode auto` (there is no user to ask); see §12,
+  "Verified by M3, with a known limitation." The push/PR `soft_deny` rules
+  shipped in the default `autoMode` block document intent and cost nothing,
+  but are not a working second layer today.
+- Recommendation for a real second layer, given D14 (`--permission-mode
+  auto`): add a `PreToolUse` hook that denies matching calls on the app side,
+  using the hook contract already owned end-to-end in §7. Unlike a classifier
+  rule, Agent Board controls the response and can return an actual deny
+  regardless of permission mode. The alternative of relying on
+  `--disallowedTools` alone is honest and requires no new code, but leaves no
+  defense-in-depth if a spawn-time flag is ever dropped or misconfigured;
+  `hard_deny` might also turn out to force a real stop instead of soft_deny's
+  ask-that-nobody-answers, but M3 only exercised `soft_deny` (see §12) —
+  `hard_deny` is untested and should not be assumed to work differently
+  without a matching canary run. A `PreToolUse` hook is the recommended path
+  since it does not depend on that unverified behavior.
 - `autoMode.environment` is populated per project — repo visibility, trust
   boundary, org CLIs — so the classifier's single hard-deny rule (data
   exfiltration) has real boundaries to work with. Rule sets are run through
