@@ -2,35 +2,37 @@ import AgentBoardCore
 import AgentBoardServer
 import Foundation
 
-final class WorkerToolHandler: ToolHandler {
+public final class WorkerToolHandler: ToolHandler {
     private let tasks: TaskStore
     private let sessions: SessionStore
     private let progress: ProgressStore
     private let board: Board
+    private let events: any BoardEventSink
 
-    init(db: AppDatabase) {
+    public init(db: AppDatabase, events: any BoardEventSink) {
         tasks = TaskStore(db)
         sessions = SessionStore(db)
         progress = ProgressStore(db)
         board = Board(db)
+        self.events = events
     }
 
-    static let descriptors: [ToolDescriptor] = [
+    public static let descriptors: [ToolDescriptor] = [
         ToolDescriptor(
             name: "get_my_task",
             description: "Return the task assigned to you: id, title, body, acceptance criteria, priority, board column, "
                 + "the tasks it depends on, and which attempt this is. Call it first if anything about the assignment is unclear.",
-            inputSchema: schema(properties: [:], required: [])
+            inputSchema: ToolSchema.object(properties: [:], required: [])
         ),
         ToolDescriptor(
             name: "update_status",
             description: "Record a status change on your task. `working` is informational. `blocked` flags the task as "
                 + "waiting on something you cannot resolve; `unblocked` clears that flag. `failed` marks the task as "
                 + "not completable by you. Always include a short detail explaining the state.",
-            inputSchema: schema(
+            inputSchema: ToolSchema.object(
                 properties: [
-                    "state": .object(["type": .string("string"), "enum": .array(["working", "blocked", "failed", "unblocked"].map(JSONValue.string))]),
-                    "detail": .object(["type": .string("string"), "description": .string("One or two sentences of context.")]),
+                    "state": ToolSchema.enumeration(["working", "blocked", "failed", "unblocked"]),
+                    "detail": ToolSchema.string("One or two sentences of context."),
                 ],
                 required: ["state", "detail"]
             )
@@ -39,8 +41,8 @@ final class WorkerToolHandler: ToolHandler {
             name: "log_progress",
             description: "Append a short progress note visible on the task card. Use sparingly: at meaningful milestones, "
                 + "not after every step.",
-            inputSchema: schema(
-                properties: ["text": .object(["type": .string("string"), "maxLength": .number(4000)])],
+            inputSchema: ToolSchema.object(
+                properties: ["text": ToolSchema.string(maxLength: 4000)],
                 required: ["text"]
             )
         ),
@@ -48,11 +50,11 @@ final class WorkerToolHandler: ToolHandler {
             name: "propose_task",
             description: "Propose follow-up work you discovered but should not do as part of your task. It lands in the "
                 + "Proposed column for a human to review; it is not assigned to you.",
-            inputSchema: schema(
+            inputSchema: ToolSchema.object(
                 properties: [
-                    "title": .object(["type": .string("string")]),
-                    "body": .object(["type": .string("string"), "description": .string("What needs to be done and where.")]),
-                    "rationale": .object(["type": .string("string"), "description": .string("Why this is worth doing.")]),
+                    "title": ToolSchema.string(),
+                    "body": ToolSchema.string("What needs to be done and where."),
+                    "rationale": ToolSchema.string("Why this is worth doing."),
                 ],
                 required: ["title"]
             )
@@ -61,12 +63,12 @@ final class WorkerToolHandler: ToolHandler {
             name: "report_complete",
             description: "Finish your task. Call this only after your work is committed on the current branch. Moves the "
                 + "task to Review and ends your session; you will not be able to do more work afterwards.",
-            inputSchema: schema(
+            inputSchema: ToolSchema.object(
                 properties: [
-                    "summary": .object(["type": .string("string"), "description": .string("What you did and how it meets the acceptance criteria.")]),
-                    "files_changed": .object(["type": .string("array"), "items": .object(["type": .string("string")])]),
-                    "tests_run": .object(["type": .string("string"), "description": .string("Commands run and their results.")]),
-                    "caveats": .object(["type": .string("string"), "description": .string("Anything the reviewer should know: skipped work, risks, open questions.")]),
+                    "summary": ToolSchema.string("What you did and how it meets the acceptance criteria."),
+                    "files_changed": ToolSchema.stringArray(),
+                    "tests_run": ToolSchema.string("Commands run and their results."),
+                    "caveats": ToolSchema.string("Anything the reviewer should know: skipped work, risks, open questions."),
                 ],
                 required: ["summary", "files_changed", "tests_run", "caveats"]
             )
@@ -75,27 +77,18 @@ final class WorkerToolHandler: ToolHandler {
             name: "report_blocked",
             description: "Declare that you cannot make progress without a human decision or information you do not have. "
                 + "State exactly what you need. The task is flagged blocked and a person is notified.",
-            inputSchema: schema(
-                properties: ["reason": .object(["type": .string("string")])],
+            inputSchema: ToolSchema.object(
+                properties: ["reason": ToolSchema.string()],
                 required: ["reason"]
             )
         ),
     ]
 
-    private static func schema(properties: [String: JSONValue], required: [String]) -> JSONValue {
-        .object([
-            "type": .string("object"),
-            "properties": .object(properties),
-            "required": .array(required.map(JSONValue.string)),
-            "additionalProperties": .bool(false),
-        ])
-    }
-
-    func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
+    public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
         Self.descriptors
     }
 
-    func call(_ name: String, arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+    public func call(_ name: String, arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
         let task = try ownedTask(identity)
         switch name {
         case "get_my_task":
@@ -103,11 +96,11 @@ final class WorkerToolHandler: ToolHandler {
         case "update_status":
             return try updateStatus(task, arguments: arguments, identity: identity)
         case "log_progress":
-            let text = try requiredString("text", in: arguments)
+            let text = try ToolArguments.requiredString("text", in: arguments)
             try progress.append(taskId: task.id, sessionId: identity.sessionId, kind: .note, text: text)
             return ToolResult(text: "Logged.")
         case "propose_task":
-            let title = try requiredString("title", in: arguments)
+            let title = try ToolArguments.requiredString("title", in: arguments)
             let proposed = try board.propose(
                 projectId: identity.projectId,
                 title: title,
@@ -115,13 +108,17 @@ final class WorkerToolHandler: ToolHandler {
                 rationale: arguments["rationale"]?.stringValue,
                 sessionId: identity.sessionId
             )
+            await events.reportQueued(projectId: identity.projectId)
             return .json(.object(["id": .string(proposed.id), "column": .string(proposed.column.rawValue)]))
         case "report_complete":
-            return try reportComplete(task, arguments: arguments, identity: identity)
+            let result = try reportComplete(task, arguments: arguments, identity: identity)
+            await events.reportQueued(projectId: identity.projectId)
+            return result
         case "report_blocked":
-            let reason = try requiredString("reason", in: arguments)
+            let reason = try ToolArguments.requiredString("reason", in: arguments)
             try board.block(taskId: task.id, sessionId: try requiredSession(identity), reason: reason)
-            MacNotifier.post(title: "Worker blocked: \(task.title)", body: reason)
+            await events.notify(title: "Worker blocked: \(task.title)", body: reason)
+            await events.reportQueued(projectId: identity.projectId)
             return ToolResult(text: "Task flagged blocked. A person has been notified; wait for direction.")
         default:
             throw ToolError("Unknown tool: \(name)")
@@ -145,13 +142,6 @@ final class WorkerToolHandler: ToolHandler {
         return sessionId
     }
 
-    private func requiredString(_ key: String, in arguments: JSONValue) throws -> String {
-        guard let value = arguments[key]?.stringValue, !value.isEmpty else {
-            throw ToolError("Missing required argument: \(key)")
-        }
-        return value
-    }
-
     private func getMyTask(_ task: BoardTask, identity: TokenIdentity) throws -> ToolResult {
         let dependencies: [JSONValue] = try tasks.deps(of: task.id).compactMap { depId in
             guard let dep = try tasks.get(depId) else { return nil }
@@ -166,9 +156,9 @@ final class WorkerToolHandler: ToolHandler {
         return .json(.object([
             "id": .string(task.id),
             "title": .string(task.title),
-            "body": task.body.map(JSONValue.string) ?? .null,
-            "acceptance": task.acceptance.map(JSONValue.string) ?? .null,
-            "priority": task.priority.map(JSONValue.string) ?? .null,
+            "body": .optional(task.body),
+            "acceptance": .optional(task.acceptance),
+            "priority": .optional(task.priority),
             "column": .string(task.column.rawValue),
             "epic_goal": .null,
             "dependencies": .array(dependencies),
@@ -177,7 +167,7 @@ final class WorkerToolHandler: ToolHandler {
     }
 
     private func updateStatus(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
-        let state = try requiredString("state", in: arguments)
+        let state = try ToolArguments.requiredString("state", in: arguments)
         let detail = arguments["detail"]?.stringValue ?? ""
         let sessionId = identity.sessionId
         switch state {
@@ -204,7 +194,7 @@ final class WorkerToolHandler: ToolHandler {
     }
 
     private func reportComplete(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
-        let summary = try requiredString("summary", in: arguments)
+        let summary = try ToolArguments.requiredString("summary", in: arguments)
         let files = arguments["files_changed"]?.arrayValue ?? []
         let body: JSONValue = .object([
             "summary": .string(summary),

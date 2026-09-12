@@ -1,3 +1,4 @@
+import AgentBoardBridge
 import AgentBoardCore
 import AgentBoardRuntime
 import AgentBoardServer
@@ -14,10 +15,11 @@ enum Wiring {
     }
 
     static func makeSupervisor(db: AppDatabase) -> WorkerSupervisor {
+        let events = ClosureBoardEventSink(notify: { title, body in MacNotifier.post(title: title, body: body) })
         let server = BoardServer(
             tokens: StoreTokenResolver(db: db),
-            hooks: StoreHookSink(db: db),
-            tools: WorkerToolHandler(db: db)
+            hooks: StoreHookSink(db: db, events: events),
+            tools: WorkerToolHandler(db: db, events: events)
         )
         return WorkerSupervisor(
             db: db,

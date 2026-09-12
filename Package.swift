@@ -25,17 +25,27 @@ let package = Package(
             name: "AgentBoardServer",
             dependencies: [.product(name: "Hummingbird", package: "hummingbird")]
         ),
+        .target(
+            name: "AgentBoardBridge",
+            dependencies: [
+                "AgentBoardCore",
+                "AgentBoardServer",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ]
+        ),
         .executableTarget(
             name: "AgentBoard",
             dependencies: [
                 "AgentBoardCore",
                 "AgentBoardRuntime",
                 "AgentBoardServer",
+                "AgentBoardBridge",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ]
         ),
         .testTarget(name: "AgentBoardCoreTests", dependencies: ["AgentBoardCore"]),
         .testTarget(name: "AgentBoardRuntimeTests", dependencies: ["AgentBoardRuntime"]),
         .testTarget(name: "AgentBoardServerTests", dependencies: ["AgentBoardServer"]),
+        .testTarget(name: "AgentBoardBridgeTests", dependencies: ["AgentBoardBridge"]),
     ]
 )

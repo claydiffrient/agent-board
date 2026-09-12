@@ -2,14 +2,14 @@ import AgentBoardCore
 import AgentBoardServer
 import Foundation
 
-struct StoreTokenResolver: TokenResolver {
+public struct StoreTokenResolver: TokenResolver {
     private let grants: TokenGrantStore
 
-    init(db: AppDatabase) {
+    public init(db: AppDatabase) {
         grants = TokenGrantStore(db)
     }
 
-    func resolve(token: String) async -> TokenIdentity? {
+    public func resolve(token: String) async -> TokenIdentity? {
         guard let grant = try? grants.resolve(token: token),
               let scope = AgentBoardServer.TokenScope(rawValue: grant.scope.rawValue)
         else { return nil }

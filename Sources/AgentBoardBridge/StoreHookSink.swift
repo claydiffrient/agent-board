@@ -2,44 +2,58 @@ import AgentBoardCore
 import AgentBoardServer
 import Foundation
 
-final class StoreHookSink: HookSink {
+public final class StoreHookSink: HookSink {
     private let hookEvents: HookEventStore
     private let grants: TokenGrantStore
     private let sessions: SessionStore
     private let tasks: TaskStore
     private let progress: ProgressStore
     private let board: Board
+    private let events: any BoardEventSink
     private let queue = DispatchQueue(label: "agent-board.hooks")
 
-    static let blockingNotificationTypes: Set<String> = ["permission_prompt", "agent_needs_input"]
+    public static let blockingNotificationTypes: Set<String> = ["permission_prompt", "agent_needs_input"]
 
-    init(db: AppDatabase) {
+    private enum FollowUp {
+        case notify(title: String, body: String)
+        case orchestratorTurnEnded(projectId: String, sessionId: String)
+    }
+
+    public init(db: AppDatabase, events: any BoardEventSink) {
         hookEvents = HookEventStore(db)
         grants = TokenGrantStore(db)
         sessions = SessionStore(db)
         tasks = TaskStore(db)
         progress = ProgressStore(db)
         board = Board(db)
+        self.events = events
     }
 
-    func handle(_ event: HookEvent, identity: TokenIdentity) async {
-        await withCheckedContinuation { continuation in
+    public func handle(_ event: HookEvent, identity: TokenIdentity) async {
+        let followUp: FollowUp? = await withCheckedContinuation { continuation in
             queue.async {
-                self.process(event, identity: identity)
-                continuation.resume()
+                continuation.resume(returning: self.process(event, identity: identity))
             }
+        }
+        switch followUp {
+        case .notify(let title, let body):
+            await events.notify(title: title, body: body)
+        case .orchestratorTurnEnded(let projectId, let sessionId):
+            await events.orchestratorTurnEnded(projectId: projectId, sessionId: sessionId)
+        case nil:
+            break
         }
     }
 
-    private func process(_ event: HookEvent, identity: TokenIdentity) {
+    private func process(_ event: HookEvent, identity: TokenIdentity) -> FollowUp? {
         let sessionId = event.sessionId
         _ = try? hookEvents.append(sessionId: sessionId, event: event.name, payload: event.rawJSON)
-        guard !sessionId.isEmpty else { return }
+        guard !sessionId.isEmpty else { return nil }
 
         if identity.sessionId == nil {
             try? grants.bind(token: identity.token, sessionId: sessionId)
         }
-        guard let session = try? sessions.get(sessionId) else { return }
+        guard let session = try? sessions.get(sessionId) else { return nil }
         let taskId = session.taskId ?? identity.taskId
 
         switch event.name {
@@ -64,7 +78,7 @@ final class StoreHookSink: HookSink {
             }
 
         case "Notification":
-            guard let type = event.notificationType else { return }
+            guard let type = event.notificationType else { return nil }
             if Self.blockingNotificationTypes.contains(type) || type.hasPrefix("elicitation") {
                 let reason = event.notificationMessage ?? type
                 if let taskId {
@@ -72,12 +86,15 @@ final class StoreHookSink: HookSink {
                 } else {
                     try? sessions.setState(sessionId, .blocked)
                 }
-                MacNotifier.post(title: "Agent needs input", body: reason)
+                return .notify(title: "Agent needs input", body: reason)
             } else if type == "idle_prompt", session.state.isActive {
                 try? sessions.setState(sessionId, .idle)
             }
 
         case "Stop":
+            if session.role == .orchestrator {
+                return .orchestratorTurnEnded(projectId: session.projectId, sessionId: sessionId)
+            }
             if session.state.isActive {
                 try? sessions.setState(sessionId, .idle)
             }
@@ -93,5 +110,6 @@ final class StoreHookSink: HookSink {
         default:
             break
         }
+        return nil
     }
 }
