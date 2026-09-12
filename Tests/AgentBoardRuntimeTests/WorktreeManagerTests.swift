@@ -97,6 +97,52 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(try git(["rev-parse", "agentboard/epic-1"], cwd: repo), try git(["rev-parse", "main"], cwd: repo))
     }
 
+    func testCreateForBranchChecksOutExistingBranch() throws {
+        try manager.ensureBranch("agentboard/epic-7", from: "main")
+        let before = try git(["branch", "--format=%(refname:short)"], cwd: repo)
+
+        let path = try manager.createForBranch(name: "epic-7", branch: "agentboard/epic-7")
+        XCTAssertEqual(path.path, worktrees.appendingPathComponent("epic-7").path)
+        XCTAssertEqual(
+            try git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: path).trimmingCharacters(in: .whitespacesAndNewlines),
+            "agentboard/epic-7"
+        )
+        XCTAssertEqual(try git(["branch", "--format=%(refname:short)"], cwd: repo), before)
+    }
+
+    func testCreateForBranchFailsForMissingBranch() {
+        XCTAssertThrowsError(try manager.createForBranch(name: "epic-none", branch: "agentboard/epic-none")) { error in
+            XCTAssertTrue("\(error)".contains("agentboard/epic-none"), "\(error)")
+        }
+    }
+
+    func testMergeStatusReportsMergedUnmergedAndMissingBranches() throws {
+        try manager.ensureBranch("agentboard/epic-8", from: "main")
+
+        let merged = try manager.create(name: "merged", branch: "agentboard/task-merged", base: "main")
+        try "merged\n".write(to: merged.appendingPathComponent("merged.txt"), atomically: true, encoding: .utf8)
+        try git(["add", "."], cwd: merged)
+        try commit("Add merged work", cwd: merged)
+
+        let unmerged = try manager.create(name: "unmerged", branch: "agentboard/task-unmerged", base: "main")
+        try "unmerged\n".write(to: unmerged.appendingPathComponent("unmerged.txt"), atomically: true, encoding: .utf8)
+        try git(["add", "."], cwd: unmerged)
+        try commit("Add unmerged work", cwd: unmerged)
+
+        let epic = try manager.createForBranch(name: "epic-8", branch: "agentboard/epic-8")
+        try git(["-c", "user.email=test@example.com", "-c", "user.name=Test", "-c", "commit.gpgsign=false", "merge", "--no-ff", "-q", "-m", "Merge task", "agentboard/task-merged"], cwd: epic)
+
+        let status = try manager.mergeStatus(
+            worktree: epic,
+            branches: ["agentboard/task-merged", "agentboard/task-unmerged", "agentboard/task-ghost"]
+        )
+        XCTAssertEqual(status, [
+            "agentboard/task-merged": true,
+            "agentboard/task-unmerged": false,
+            "agentboard/task-ghost": false,
+        ])
+    }
+
     func testCreateFailsForMissingBase() {
         XCTAssertThrowsError(try manager.create(name: "x", branch: "agentboard/x", base: "no-such-branch"))
     }
