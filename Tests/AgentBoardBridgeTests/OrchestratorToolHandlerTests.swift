@@ -287,20 +287,195 @@ final class OrchestratorToolHandlerTests: XCTestCase {
         XCTAssertEqual(list.first?["task_id"], .string(task.id))
     }
 
-    func testRequestIntegrationCreatesApprovalForEpicInProject() async throws {
-        let epic = Epic(id: Epic.newId(), projectId: f.project.id, title: "E", goal: nil, branch: "epic/e", state: .active, createdAt: .nowMillis)
-        try await f.db.writer.write { db in try epic.insert(db) }
+    func testRequestIntegrationRefusesUntilEveryTaskIsDone() async throws {
+        let (epicId, taskIds) = try await createEpic(tasks: 2)
 
-        let result = try await f.call("request_integration", ["epic_id": .string(epic.id)])
+        await XCTAssertToolError(
+            try await f.call("request_integration", ["epic_id": .string(epicId)]),
+            containing: "2 of 2 task(s) are not done yet"
+        )
+
+        try f.board.accept(taskId: taskIds[0])
+        await XCTAssertToolError(
+            try await f.call("request_integration", ["epic_id": .string(epicId)]),
+            containing: "1 of 2 task(s) are not done yet"
+        )
+        XCTAssertEqual(try f.approvals.pending(projectId: f.project.id).count, 0, "a refused request must not leave an approval behind")
+
+        try f.board.accept(taskId: taskIds[1])
+        let result = try await f.call("request_integration", ["epic_id": .string(epicId)])
         XCTAssertTrue(result.text.hasPrefix("integration approval "), result.text)
         XCTAssertTrue(result.text.hasSuffix(" pending"))
 
         let pending = try f.approvals.pending(projectId: f.project.id)
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(pending.first?.kind, .integration)
-        XCTAssertEqual(pending.first?.epicId, epic.id)
+        XCTAssertEqual(pending.first?.epicId, epicId)
+    }
 
+    func testRequestIntegrationRefusesEmptyOrForeignEpic() async throws {
+        let empty = try f.epic("Empty")
+        await XCTAssertToolError(
+            try await f.call("request_integration", ["epic_id": .string(empty.id)]),
+            containing: "has no tasks"
+        )
         await XCTAssertToolError(try await f.call("request_integration", ["epic_id": .string("nope")]), containing: "not in this project")
+    }
+
+    // MARK: Epics
+
+    /// Creates an epic through the tool with `tasks` tasks, each depending on the one before it.
+    private func createEpic(tasks count: Int, title: String = "Ship it") async throws -> (epicId: String, taskIds: [String]) {
+        let specs: [JSONValue] = (0..<count).map { index in
+            var spec: [String: JSONValue] = [
+                "title": .string("step \(index)"),
+                "body": .string("do step \(index)"),
+                "acceptance": .string("step \(index) works"),
+            ]
+            if index > 0 { spec["depends_on"] = .array([.number(Double(index - 1))]) }
+            return .object(spec)
+        }
+        let result = try await f.callJSON("create_epic", [
+            "title": .string(title), "goal": .string("all of it"), "tasks": .array(specs),
+        ])
+        let epicId = try XCTUnwrap(result["epic_id"]?.stringValue)
+        let taskIds = try XCTUnwrap(result["task_ids"]?.arrayValue).compactMap(\.stringValue)
+        XCTAssertEqual(taskIds.count, count)
+        return (epicId, taskIds)
+    }
+
+    func testCreateEpicCreatesEpicAndTasksWithSiblingDependencies() async throws {
+        let result = try await f.callJSON("create_epic", [
+            "title": .string("Ship it"),
+            "goal": .string("all of it"),
+            "tasks": .array([
+                .object(["title": .string("schema"), "acceptance": .string("migrates")]),
+                .object([
+                    "title": .string("api"), "body": .string("on top of the schema"),
+                    "priority": .string("high"), "model": .string("claude-opus-5"),
+                    "depends_on": .array([.number(0)]),
+                ]),
+            ]),
+        ])
+
+        let epicId = try XCTUnwrap(result["epic_id"]?.stringValue)
+        let epic = try XCTUnwrap(EpicStore(f.db).get(epicId))
+        XCTAssertEqual(epic.projectId, f.project.id)
+        XCTAssertEqual(epic.title, "Ship it")
+        XCTAssertEqual(epic.goal, "all of it")
+        XCTAssertEqual(epic.state, .planning)
+        XCTAssertEqual(result["branch"], .string("agentboard/epic-\(epicId)"))
+        XCTAssertEqual(epic.branch, "agentboard/epic-\(epicId)")
+
+        let taskIds = try XCTUnwrap(result["task_ids"]?.arrayValue).compactMap(\.stringValue)
+        XCTAssertEqual(taskIds.count, 2)
+
+        let schema = try XCTUnwrap(f.tasks.get(taskIds[0]))
+        let api = try XCTUnwrap(f.tasks.get(taskIds[1]))
+        XCTAssertEqual(schema.title, "schema", "task_ids are in the order they were passed")
+        XCTAssertEqual(api.title, "api")
+        XCTAssertEqual(schema.epicId, epicId)
+        XCTAssertEqual(api.epicId, epicId)
+        XCTAssertEqual(api.origin, .orchestrator)
+        XCTAssertEqual(api.model, "claude-opus-5")
+        XCTAssertEqual(api.priority, "high")
+
+        XCTAssertEqual(try f.tasks.deps(of: api.id), [schema.id], "depends_on indices resolve to sibling task ids")
+        XCTAssertEqual(try f.tasks.deps(of: schema.id), [])
+        XCTAssertEqual(schema.column, .ready, "a dependency-free epic task becomes ready immediately")
+        XCTAssertEqual(api.column, .backlog)
+    }
+
+    func testCreateEpicRejectsBadDependencyIndexAndCreatesNothing() async throws {
+        await XCTAssertToolError(
+            try await f.call("create_epic", [
+                "title": .string("Bad"),
+                "tasks": .array([.object(["title": .string("a"), "depends_on": .array([.number(3)])])]),
+            ]),
+            containing: "not a task in this call"
+        )
+        await XCTAssertToolError(
+            try await f.call("create_epic", [
+                "title": .string("Bad"),
+                "tasks": .array([.object(["title": .string("a"), "depends_on": .array([.number(0)])])]),
+            ]),
+            containing: "refers to itself"
+        )
+        await XCTAssertToolError(
+            try await f.call("create_epic", ["title": .string("Bad"), "tasks": .array([])]),
+            containing: "at least one task"
+        )
+
+        XCTAssertEqual(try f.tasks.list(projectId: f.project.id).count, 0)
+        XCTAssertEqual(try EpicStore(f.db).list(projectId: f.project.id).count, 0)
+    }
+
+    func testListEpicsReportsStateBranchAndDoneCounts() async throws {
+        let (epicId, taskIds) = try await createEpic(tasks: 3)
+        try f.board.accept(taskId: taskIds[0])
+
+        let list = try await f.callJSON("list_epics").arrayValue ?? []
+        XCTAssertEqual(list.count, 1)
+        let entry = try XCTUnwrap(list.first)
+        XCTAssertEqual(entry["id"], .string(epicId))
+        XCTAssertEqual(entry["title"], .string("Ship it"))
+        XCTAssertEqual(entry["branch"], .string("agentboard/epic-\(epicId)"))
+        XCTAssertEqual(entry["state"], .string("active"), "accepting the first task moves the epic out of planning")
+        XCTAssertEqual(entry["done_tasks"], .number(1))
+        XCTAssertEqual(entry["total_tasks"], .number(3))
+    }
+
+    func testListEpicsIsScopedToTheTokensProject() async throws {
+        let other = try f.otherProject()
+        _ = try f.board.createEpic(projectId: other.id, title: "Theirs", goal: nil, tasks: [NewEpicTask(title: "x")])
+        let (epicId, _) = try await createEpic(tasks: 1)
+
+        let list = try await f.callJSON("list_epics").arrayValue ?? []
+        XCTAssertEqual(list.compactMap { $0["id"]?.stringValue }, [epicId])
+    }
+
+    func testGetEpicGroupsTasksByColumnAndReportsReadiness() async throws {
+        let (epicId, taskIds) = try await createEpic(tasks: 2)
+
+        var epic = try await f.callJSON("get_epic", ["id": .string(epicId)])
+        XCTAssertEqual(epic["goal"], .string("all of it"))
+        XCTAssertEqual(epic["branch"], .string("agentboard/epic-\(epicId)"))
+        XCTAssertEqual(epic["ready_for_integration"], .bool(false))
+        XCTAssertEqual(epic["done_tasks"], .number(0))
+        XCTAssertEqual(epic["total_tasks"], .number(2))
+        XCTAssertEqual(epic["columns"]?["ready"]?.arrayValue?.compactMap { $0["id"]?.stringValue }, [taskIds[0]])
+        XCTAssertEqual(epic["columns"]?["backlog"]?.arrayValue?.compactMap { $0["id"]?.stringValue }, [taskIds[1]])
+        XCTAssertEqual(epic["columns"]?["done"]?.arrayValue?.count, 0)
+
+        try f.board.accept(taskId: taskIds[0])
+        try f.board.accept(taskId: taskIds[1])
+
+        epic = try await f.callJSON("get_epic", ["id": .string(epicId)])
+        XCTAssertEqual(epic["ready_for_integration"], .bool(true))
+        XCTAssertEqual(epic["done_tasks"], .number(2))
+        XCTAssertEqual(epic["columns"]?["done"]?.arrayValue?.compactMap { $0["id"]?.stringValue }, taskIds)
+        XCTAssertEqual(epic["columns"]?["ready"]?.arrayValue?.count, 0)
+    }
+
+    func testGetEpicRefusesAnotherProjectsEpic() async throws {
+        let other = try f.otherProject()
+        let (foreign, _) = try f.board.createEpic(projectId: other.id, title: "Theirs", goal: nil, tasks: [NewEpicTask(title: "x")])
+        await XCTAssertToolError(try await f.call("get_epic", ["id": .string(foreign.id)]), containing: "not in this project")
+        await XCTAssertToolError(try await f.call("get_epic", ["id": .string("nope")]), containing: "not in this project")
+    }
+
+    func testWorkerScopeSeesNoEpicTools() async throws {
+        let task = try f.task("t")
+        try f.session("s1", taskId: task.id)
+        let identity = f.workerIdentity(sessionId: "s1", taskId: task.id)
+        let workerTools = await f.scoped.tools(for: identity).map(\.name)
+        let orchestratorTools = await f.scoped.tools(for: f.orchestratorIdentity).map(\.name)
+
+        for tool in ["create_epic", "list_epics", "get_epic"] {
+            XCTAssertFalse(workerTools.contains(tool), tool)
+            XCTAssertTrue(orchestratorTools.contains(tool), tool)
+            await XCTAssertToolError(try await f.call(tool, [:], as: identity), containing: "Unknown tool")
+        }
     }
 
     // MARK: Notes
