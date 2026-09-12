@@ -235,6 +235,7 @@ public enum BoardError: Error, Equatable, Sendable {
     case approvalNotFound(String)
     case approvalAlreadyResolved(String)
     case epicNotFound(String)
+    case workspaceNotFound(String)
     /// `createEpic` was handed a `dependsOn` index that is out of range or points at the task itself.
     case invalidEpicDependency(taskIndex: Int, dependsOn: Int)
 }

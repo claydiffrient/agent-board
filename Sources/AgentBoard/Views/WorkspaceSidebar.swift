@@ -1,0 +1,72 @@
+import AgentBoardCore
+import Foundation
+import SwiftUI
+
+/// Identifies the sheet that names a workspace: `workspace` nil means "create".
+struct WorkspaceEdit: Identifiable {
+    let workspace: Workspace?
+
+    var id: String { workspace?.id ?? "new" }
+
+    static let create = WorkspaceEdit(workspace: nil)
+
+    static func rename(_ workspace: Workspace) -> WorkspaceEdit {
+        WorkspaceEdit(workspace: workspace)
+    }
+}
+
+struct WorkspaceNameSheet: View {
+    let edit: WorkspaceEdit
+    let onCommit: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+
+    init(edit: WorkspaceEdit, onCommit: @escaping (String) -> Void) {
+        self.edit = edit
+        self.onCommit = onCommit
+        _name = State(initialValue: edit.workspace?.name ?? "")
+    }
+
+    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(edit.workspace == nil ? "New Workspace" : "Rename Workspace")
+                .font(.headline)
+            TextField("Name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { commit() }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(edit.workspace == nil ? "Create" : "Rename") { commit() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmed.isEmpty)
+            }
+        }
+        .padding()
+        .frame(minWidth: 320)
+    }
+
+    private func commit() {
+        guard !trimmed.isEmpty else { return }
+        onCommit(trimmed)
+        dismiss()
+    }
+}
+
+/// Which sidebar sections the viewer has collapsed. Per-viewer convenience, so it
+/// lives in `UserDefaults` rather than the board database.
+enum SidebarCollapseState {
+    static let key = "sidebar.collapsedWorkspaces"
+
+    static func load() -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+    }
+
+    static func save(_ collapsed: Set<String>) {
+        UserDefaults.standard.set(Array(collapsed).sorted(), forKey: key)
+    }
+}

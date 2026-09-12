@@ -172,6 +172,13 @@ merge back in (`mdn`, `caniuse`) is a project setting.
 SQLite, GRDB. Language-neutral by intent (see §1 pivots).
 
 ```sql
+CREATE TABLE workspace (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  ordering   REAL NOT NULL,    -- sidebar order
+  created_at INTEGER NOT NULL
+);
+
 CREATE TABLE project (
   id              TEXT PRIMARY KEY,
   name            TEXT NOT NULL,
@@ -181,7 +188,8 @@ CREATE TABLE project (
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance
-  created_at      INTEGER NOT NULL
+  created_at      INTEGER NOT NULL,
+  workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
 );
 
 CREATE TABLE epic (
@@ -638,6 +646,21 @@ how permission prompts get answered (D15).
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
 section.
+
+**Project sidebar** — projects grouped into workspaces. Each workspace is a
+collapsible section in `workspace.ordering` order holding the projects whose
+`workspace_id` names it; projects with no workspace (or one that has since been
+deleted) fall into a trailing **Ungrouped** section, which is hidden when empty
+and loses its header entirely when no workspaces exist. An empty workspace still
+shows, so it can be dragged into. Grouping is optional — an ungrouped project
+works end to end.
+
+Workspaces are created, renamed, reordered and deleted from a menu beside
+**Add Project…**; deleting one never deletes its projects, they become
+ungrouped. A project is assigned from its settings sheet (a picker of the
+workspaces plus **None**) or by dragging its row onto a section header. Which
+sections the viewer has collapsed is a per-viewer convenience and lives in
+`UserDefaults`, not the database.
 
 ---
 
