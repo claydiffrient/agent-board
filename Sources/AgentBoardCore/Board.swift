@@ -107,6 +107,9 @@ public struct Board: Sendable {
             guard task.column == .ready else {
                 return .refused(reason: "task \(taskId) is in \(task.column.rawValue), only ready tasks can be spawned")
             }
+            if try ShutdownOrderStore.outstanding(db, projectId: task.projectId) != nil {
+                return .refused(reason: ShutdownOrder.refusal)
+            }
             if case .refused(let reason) = try CapCheck.canSpawn(db, projectId: task.projectId) {
                 return .refused(reason: reason)
             }
@@ -124,6 +127,56 @@ public struct Board: Sendable {
                 requestedBy: requestedBy, reason: nil
             )
             return .approvalPending(approval)
+        }
+    }
+
+    /// Raises the shutdown order and queues a `decision` report, because an orchestrator that is
+    /// not told keeps calling `spawn_worker` and reading the refusals as transient. Re-raising an
+    /// outstanding order returns it without a second report.
+    @discardableResult
+    public func requestShutdown(projectId: String, requestedBy: String, reason: String? = nil) throws -> ShutdownOrder {
+        try db.writer.write { db in
+            let (order, isNew) = try ShutdownOrderStore.request(
+                db, projectId: projectId, requestedBy: requestedBy, reason: reason
+            )
+            guard isNew else { return order }
+            var body = """
+            A shutdown order is active on this project. No further spawns will succeed: spawn_worker \
+            is refused, and a pending spawn or integration approval cannot be approved, until the \
+            order is cancelled.
+
+            The board itself is untouched. Keep grooming, promoting proposals, and editing tasks; \
+            workers already running are not affected by this order.
+            """
+            if let reason, !reason.isEmpty {
+                body += "\n\nReason: \(reason)"
+            }
+            body += "\n\nRequested by: \(requestedBy)"
+            _ = try ReportStore.insert(
+                db, projectId: projectId, taskId: nil, sessionId: nil, kind: .decision, body: body
+            )
+            return order
+        }
+    }
+
+    /// Cancels the outstanding order and queues the matching `decision` report; nil when there was
+    /// none, in which case nothing is written. Touches no task, session or approval.
+    @discardableResult
+    public func cancelShutdown(projectId: String, by: String) throws -> ShutdownOrder? {
+        try db.writer.write { db in
+            guard let order = try ShutdownOrderStore.cancel(db, projectId: projectId, by: by) else {
+                return nil
+            }
+            _ = try ReportStore.insert(
+                db, projectId: projectId, taskId: nil, sessionId: nil, kind: .decision,
+                body: """
+                The shutdown order on this project was cancelled. Spawning workers is allowed again; \
+                dispatch as normal.
+
+                Cancelled by: \(by)
+                """
+            )
+            return order
         }
     }
 

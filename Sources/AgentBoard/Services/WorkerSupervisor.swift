@@ -15,6 +15,7 @@ enum SupervisorError: LocalizedError {
     case sessionHasNoShortId(String)
     case taskNotAssignable(title: String, column: TaskColumn)
     case capRefused(String)
+    case shutdownOrdered
     case serverNotRunning
     case spawnFailed(worktree: String, underlying: String)
     case approvalNotFound(String)
@@ -30,6 +31,7 @@ enum SupervisorError: LocalizedError {
         case .sessionHasNoShortId(let id): return "session \(id) has no claude short id yet; reconcile first"
         case .taskNotAssignable(let title, let column): return "\"\(title)\" is in \(column.rawValue) and cannot be assigned"
         case .capRefused(let reason): return "spawn refused: \(reason)"
+        case .shutdownOrdered: return ShutdownOrder.refusal
         case .serverNotRunning: return "the Agent Board server is not running"
         case .spawnFailed(let worktree, let underlying):
             return "spawn failed; worktree kept at \(worktree) for retry.\n\(underlying)"
@@ -54,6 +56,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let grants: TokenGrantStore
     @ObservationIgnored private let hookEvents: HookEventStore
     @ObservationIgnored private let approvals: ApprovalStore
+    @ObservationIgnored private let shutdowns: ShutdownOrderStore
     @ObservationIgnored private let epics: EpicStore
     @ObservationIgnored private let notes: NoteStore
     @ObservationIgnored private let board: Board
@@ -85,6 +88,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         grants = TokenGrantStore(db)
         hookEvents = HookEventStore(db)
         approvals = ApprovalStore(db)
+        shutdowns = ShutdownOrderStore(db)
         epics = EpicStore(db)
         notes = NoteStore(db)
         board = Board(db)
@@ -158,6 +162,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.projectNotFound(task.projectId)
         }
         guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        try requireNoShutdown(projectId: project.id)
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
         }
@@ -276,6 +281,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.projectNotFound(epic.projectId)
         }
         guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        try requireNoShutdown(projectId: project.id)
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
         }
@@ -700,6 +706,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func approve(approvalId: String) async throws {
         try await recording {
             guard let approval = try approvals.get(approvalId) else { throw SupervisorError.approvalNotFound(approvalId) }
+            // Before the resolve, so a refused approval is still pending once the order is cancelled.
+            try requireNoShutdown(projectId: approval.projectId)
             try board.resolveApproval(approvalId, approved: true, by: "human")
             announceReports(projectId: approval.projectId)
             switch approval.kind {
@@ -755,6 +763,38 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
             try board.promote(taskId: taskId)
             announceReports(projectId: task.projectId)
+        }
+    }
+
+    // MARK: - Shutdown
+
+    /// Raises the order and tells the orchestrator. Stops and signals nothing: workers already
+    /// running keep going, and `pauseAll` remains the blunt path that kills them.
+    @discardableResult
+    func requestShutdown(projectId: String, requestedBy: String = "human", reason: String? = nil) async throws -> ShutdownOrder {
+        try await recording {
+            let order = try board.requestShutdown(projectId: projectId, requestedBy: requestedBy, reason: reason)
+            announceReports(projectId: projectId)
+            return order
+        }
+    }
+
+    @discardableResult
+    func cancelShutdown(projectId: String, by: String = "human") async throws -> ShutdownOrder? {
+        try await recording {
+            let order = try board.cancelShutdown(projectId: projectId, by: by)
+            if order != nil { announceReports(projectId: projectId) }
+            return order
+        }
+    }
+
+    func isShuttingDown(projectId: String) -> Bool {
+        (try? shutdowns.isShuttingDown(projectId: projectId)) ?? false
+    }
+
+    private func requireNoShutdown(projectId: String) throws {
+        if try shutdowns.outstanding(projectId: projectId) != nil {
+            throw SupervisorError.shutdownOrdered
         }
     }
 

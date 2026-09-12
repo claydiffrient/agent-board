@@ -160,9 +160,22 @@ enum Schema {
     CREATE INDEX approval_pending ON approval(project_id, resolved_at);
     """
 
+    static let shutdownOrder = """
+    CREATE TABLE shutdown_order (
+      id           TEXT PRIMARY KEY,
+      project_id   TEXT NOT NULL REFERENCES project(id),
+      requested_by TEXT NOT NULL,
+      reason       TEXT,
+      requested_at INTEGER NOT NULL,
+      resolved_at  INTEGER,
+      resolved_by  TEXT
+    );
+    CREATE INDEX shutdown_order_outstanding ON shutdown_order(project_id, resolved_at);
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
-        "approval",
+        "approval", "shutdown_order",
     ]
 }

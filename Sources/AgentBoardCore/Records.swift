@@ -545,3 +545,49 @@ public struct HookEventRecord: Codable, FetchableRecord, MutablePersistableRecor
 
     public var date: Date { at.asDate }
 }
+
+/// A standing order that no new worker may be spawned on the project. Outstanding while
+/// `resolvedAt` is nil; cancelling resolves it and restores normal dispatch.
+public struct ShutdownOrder: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
+    public static let databaseTableName = "shutdown_order"
+
+    public var id: String
+    public var projectId: String
+    public var requestedBy: String
+    public var reason: String?
+    public var requestedAt: Int64
+    public var resolvedAt: Int64?
+    public var resolvedBy: String?
+
+    public enum CodingKeys: String, CodingKey {
+        case id
+        case projectId = "project_id"
+        case requestedBy = "requested_by"
+        case reason
+        case requestedAt = "requested_at"
+        case resolvedAt = "resolved_at"
+        case resolvedBy = "resolved_by"
+    }
+
+    public init(
+        id: String, projectId: String, requestedBy: String, reason: String?, requestedAt: Int64,
+        resolvedAt: Int64? = nil, resolvedBy: String? = nil
+    ) {
+        self.id = id
+        self.projectId = projectId
+        self.requestedBy = requestedBy
+        self.reason = reason
+        self.requestedAt = requestedAt
+        self.resolvedAt = resolvedAt
+        self.resolvedBy = resolvedBy
+    }
+
+    public static func newId() -> String { BoardId.new() }
+
+    /// What every refused dispatch path says, so the orchestrator can tell a shutdown from a cap breach.
+    public static let refusal = "shutdown in progress; no new workers"
+
+    public var isOutstanding: Bool { resolvedAt == nil }
+    public var requestedDate: Date { requestedAt.asDate }
+    public var resolvedDate: Date? { resolvedAt?.asDate }
+}
