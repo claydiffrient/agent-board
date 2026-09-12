@@ -263,8 +263,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     public var endedDate: Date? { endedAt?.asDate }
     public var lastActivityDate: Date? { lastActivity?.asDate }
     public var totalTokens: Int { tokensIn + tokensOut + cacheRead + cacheWrite }
-    /// What the token cap meters: cache reads are excluded (see CapEvaluator).
-    public var countedTokens: Int { tokensIn + tokensOut + cacheWrite }
+    /// What the token cap meters: uncached input plus output (see CapEvaluator).
+    public var countedTokens: Int { tokensIn + tokensOut }
 }
 
 public struct TokenGrant: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {

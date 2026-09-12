@@ -2,14 +2,14 @@ import Foundation
 
 public struct Caps: Codable, Sendable, Equatable {
     public var maxConcurrentWorkers: Int = 3
-    public var maxTokensPerAgent: Int = 150_000
+    public var maxTokensPerAgent: Int? = nil
     public var maxWallClockSeconds: Int = 1800
     public var maxIdleSeconds: Int = 300
     public var sessionCeiling: Int? = nil
 
     public init(
         maxConcurrentWorkers: Int = 3,
-        maxTokensPerAgent: Int = 150_000,
+        maxTokensPerAgent: Int? = nil,
         maxWallClockSeconds: Int = 1800,
         maxIdleSeconds: Int = 300,
         sessionCeiling: Int? = nil
@@ -25,7 +25,7 @@ public struct Caps: Codable, Sendable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = Caps()
         maxConcurrentWorkers = try c.decodeIfPresent(Int.self, forKey: .maxConcurrentWorkers) ?? defaults.maxConcurrentWorkers
-        maxTokensPerAgent = try c.decodeIfPresent(Int.self, forKey: .maxTokensPerAgent) ?? defaults.maxTokensPerAgent
+        maxTokensPerAgent = try c.decodeIfPresent(Int.self, forKey: .maxTokensPerAgent)
         maxWallClockSeconds = try c.decodeIfPresent(Int.self, forKey: .maxWallClockSeconds) ?? defaults.maxWallClockSeconds
         maxIdleSeconds = try c.decodeIfPresent(Int.self, forKey: .maxIdleSeconds) ?? defaults.maxIdleSeconds
         sessionCeiling = try c.decodeIfPresent(Int.self, forKey: .sessionCeiling)

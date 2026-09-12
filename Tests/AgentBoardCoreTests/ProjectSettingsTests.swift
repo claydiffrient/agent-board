@@ -7,7 +7,7 @@ final class ProjectSettingsTests: XCTestCase {
         let settings = try JSONDecoder().decode(ProjectSettings.self, from: Data("{}".utf8))
         XCTAssertEqual(settings, ProjectSettings())
         XCTAssertEqual(settings.caps.maxConcurrentWorkers, 3)
-        XCTAssertEqual(settings.caps.maxTokensPerAgent, 150_000)
+        XCTAssertNil(settings.caps.maxTokensPerAgent)
         XCTAssertEqual(settings.caps.maxWallClockSeconds, 1800)
         XCTAssertEqual(settings.caps.maxIdleSeconds, 300)
         XCTAssertNil(settings.caps.sessionCeiling)
@@ -21,7 +21,7 @@ final class ProjectSettingsTests: XCTestCase {
         let settings = try JSONDecoder().decode(ProjectSettings.self, from: Data(json.utf8))
         XCTAssertEqual(settings.caps.maxConcurrentWorkers, 1)
         XCTAssertEqual(settings.caps.sessionCeiling, 10)
-        XCTAssertEqual(settings.caps.maxTokensPerAgent, 150_000)
+        XCTAssertNil(settings.caps.maxTokensPerAgent)
         XCTAssertTrue(settings.autonomyEnabled)
     }
 

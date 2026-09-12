@@ -16,8 +16,8 @@ struct StatusView: View {
         Dictionary(uniqueKeysWithValues: tasks.value.map { ($0.id, $0.title) })
     }
 
-    private var tokenCap: Int {
-        max(project.settings.caps.maxTokensPerAgent, 1)
+    private var tokenCap: Int? {
+        project.settings.caps.maxTokensPerAgent.map { max($0, 1) }
     }
 
     var body: some View {
@@ -96,11 +96,17 @@ struct StatusView: View {
 
             TableColumn("Spend") { session in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(Format.cost(session.estCostUSD)) · \(Format.tokens(session.countedTokens)) / \(Format.tokens(tokenCap)) · \(Format.tokens(session.cacheRead)) cached")
-                        .font(.caption)
-                        .monospacedDigit()
-                    ProgressView(value: Double(min(session.countedTokens, tokenCap)), total: Double(tokenCap))
-                        .tint(session.countedTokens >= tokenCap ? .red : .accentColor)
+                    if let tokenCap {
+                        Text("\(Format.cost(session.estCostUSD)) · \(Format.tokens(session.countedTokens)) / \(Format.tokens(tokenCap)) · \(Format.tokens(session.cacheRead)) cached")
+                            .font(.caption)
+                            .monospacedDigit()
+                        ProgressView(value: Double(min(session.countedTokens, tokenCap)), total: Double(tokenCap))
+                            .tint(session.countedTokens >= tokenCap ? .red : .accentColor)
+                    } else {
+                        Text("\(Format.cost(session.estCostUSD)) · \(Format.tokens(session.countedTokens)) · \(Format.tokens(session.cacheRead)) cached")
+                            .font(.caption)
+                            .monospacedDigit()
+                    }
                 }
             }
             .width(min: 140, ideal: 180)

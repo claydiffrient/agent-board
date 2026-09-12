@@ -449,11 +449,16 @@ Per project, overridable:
 | Cap | Default | On breach |
 |---|---|---|
 | Concurrent workers | 3 (lower for large repos — Derivita) | Spawn refused; orchestrator told why |
-| Tokens per agent | 150,000 | Agent stopped, task flagged, Resume offered |
+| Tokens per agent (uncached input + output) | off until set | Agent stopped, task flagged, Resume offered |
 | Wall clock per agent | 30 min | Agent stopped, task flagged, Resume offered |
 | Idle (no tool use, no output) | 5 min | Agent stopped, task flagged |
 | Project session ceiling | configurable | Spawn refused |
 
+- The token cap counts uncached input plus output only. Cache reads recur every
+  turn and cache writes re-cache the whole context on every resume (measured:
+  200k+ per resume on an M2-sized worker), so neither is a measure of work done.
+  Counting cache writes killed the first M2 worker twice in ten minutes; the cap
+  is therefore off until a project sets it.
 - **Autonomy is off on first run.** Every `spawn_worker` creates a pending
   approval until you turn it on. This is a setting, not a rebuild.
 - **Stopping is not destructive.** Every session has a pinned `--session-id`, so

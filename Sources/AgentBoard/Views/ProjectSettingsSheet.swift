@@ -45,7 +45,7 @@ struct ProjectSettingsSheet: View {
 
                 Section("Caps") {
                     TextField("Concurrent workers", value: $settings.caps.maxConcurrentWorkers, format: .number)
-                    TextField("Tokens per agent", value: $settings.caps.maxTokensPerAgent, format: .number)
+                    TextField("Tokens per agent", value: $settings.caps.maxTokensPerAgent, format: .number, prompt: Text("Unlimited"))
                     TextField("Wall clock per agent (seconds)", value: $settings.caps.maxWallClockSeconds, format: .number)
                     TextField("Idle limit (seconds)", value: $settings.caps.maxIdleSeconds, format: .number)
                     TextField("Project session ceiling", value: $settings.caps.sessionCeiling, format: .number, prompt: Text("Unlimited"))

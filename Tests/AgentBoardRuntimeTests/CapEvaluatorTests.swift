@@ -12,13 +12,19 @@ final class CapEvaluatorTests: XCTestCase {
     }
 
     func testCacheReadsAreNotCounted() {
-        XCTAssertEqual(CapEvaluator.countedTokens(UsageTotals(inputTokens: 1, outputTokens: 2, cacheReadTokens: 1_000_000, cacheWrite5mTokens: 3, cacheWrite1hTokens: 4)), 10)
+        XCTAssertEqual(CapEvaluator.countedTokens(UsageTotals(inputTokens: 1, outputTokens: 2, cacheReadTokens: 1_000_000, cacheWrite5mTokens: 3, cacheWrite1hTokens: 4)), 3)
     }
 
     func testTokenBreach() {
-        let totals = UsageTotals(inputTokens: 500, outputTokens: 400, cacheWrite1hTokens: 100)
+        let totals = UsageTotals(inputTokens: 600, outputTokens: 400, cacheWrite1hTokens: 100_000)
         let breach = CapEvaluator.evaluate(totals: totals, startedAt: start, lastActivity: start, now: start.addingTimeInterval(1), limits: limits)
         XCTAssertEqual(breach, .tokens(used: 1000, limit: 1000))
+    }
+
+    func testNoTokenLimitNeverBreachesOnTokens() {
+        let unlimited = CapLimits(maxTokens: nil, maxWallClockSeconds: 600, maxIdleSeconds: 60)
+        let totals = UsageTotals(inputTokens: 5_000_000, outputTokens: 5_000_000)
+        XCTAssertNil(CapEvaluator.evaluate(totals: totals, startedAt: start, lastActivity: start, now: start.addingTimeInterval(1), limits: unlimited))
     }
 
     func testTokenBreachTakesPrecedence() {
@@ -47,6 +53,6 @@ final class CapEvaluatorTests: XCTestCase {
     }
 
     func testDefaultsMatchSpec() {
-        XCTAssertEqual(CapLimits.default, CapLimits(maxTokens: 150_000, maxWallClockSeconds: 1800, maxIdleSeconds: 300))
+        XCTAssertEqual(CapLimits.default, CapLimits(maxTokens: nil, maxWallClockSeconds: 1800, maxIdleSeconds: 300))
     }
 }
