@@ -51,6 +51,36 @@ public struct CapCheck: Sendable {
     }
 }
 
+/// Why Agent Board, rather than the worker itself, is ending a session.
+public enum SessionTermination: Sendable, Equatable {
+    case capBreach(String)
+    case stoppedByHuman
+    /// `reconcile` found the process gone without Agent Board having stopped it.
+    case vanished
+
+    var sessionState: SessionState {
+        switch self {
+        case .capBreach: return .failed
+        case .stoppedByHuman, .vanished: return .stopped
+        }
+    }
+
+    var flagsTaskFailed: Bool {
+        switch self {
+        case .capBreach, .vanished: return true
+        case .stoppedByHuman: return false
+        }
+    }
+
+    var reason: String {
+        switch self {
+        case .capBreach(let breach): return breach
+        case .stoppedByHuman: return "stopped from Agent Board by a human"
+        case .vanished: return "the session is no longer running and Agent Board did not stop it"
+        }
+    }
+}
+
 public enum SpawnGate: Sendable, Equatable {
     case proceed
     case approvalPending(Approval)
@@ -199,6 +229,8 @@ public struct Board: Sendable {
         }
     }
 
+    /// Accepts into `done` and queues a `decision` report; the newly-ready ids are the orchestrator's
+    /// only signal that the dependency graph moved.
     @discardableResult
     public func accept(taskId: String) throws -> [String] {
         try db.writer.write { db in
@@ -209,16 +241,79 @@ public struct Board: Sendable {
             if let epicId = task.epicId, try Epic.fetchOne(db, key: epicId)?.state == .planning {
                 try EpicStore.setState(db, epicId, .active)
             }
-            return try Self.newlyReady(db, projectId: task.projectId)
+            let ready = try Self.newlyReady(db, projectId: task.projectId)
+            var body = "Task \(taskId) (\(task.title)) was accepted into done by a human."
+            body += "\n\n" + (try Self.describeNewlyReady(db, ready))
+            _ = try ReportStore.insert(
+                db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision, body: body
+            )
+            return ready
         }
     }
 
-    public func reopen(taskId: String) throws {
+    @discardableResult
+    public func reopen(taskId: String) throws -> Report {
         try db.writer.write { db in
-            _ = try Self.requireTask(db, taskId)
+            let task = try Self.requireTask(db, taskId)
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             try TaskStore.setFailed(db, taskId, false, reason: nil)
             try TaskStore.move(db, taskId, to: .ready, before: nil)
+            return try ReportStore.insert(
+                db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision,
+                body: "Task \(taskId) (\(task.title)) was reopened by a human and is back in ready."
+            )
+        }
+    }
+
+    /// Deletes the task and leaves a `decision` report behind, so an orchestrator holding the id
+    /// learns it is gone rather than dispatching it.
+    @discardableResult
+    public func discard(taskId: String) throws -> Report {
+        try db.writer.write { db in
+            let task = try Self.requireTask(db, taskId)
+            let report = try ReportStore.insert(
+                db, projectId: task.projectId, taskId: nil, sessionId: nil, kind: .decision,
+                body: "Task \(taskId) (\(task.title)) was discarded by a human and removed from the board. Do not dispatch it."
+            )
+            try TaskStore.delete(db, taskId)
+            return report
+        }
+    }
+
+    /// Ends a worker session that will not report for itself and queues a `failed` report, so the
+    /// orchestrator stops believing the worker is running. A task stranded in `running` returns to `ready`.
+    @discardableResult
+    public func terminate(sessionId: String, cause: SessionTermination) throws -> Report? {
+        try db.writer.write { db in
+            guard let session = try AgentSession.fetchOne(db, key: sessionId), session.state.isActive else {
+                return nil
+            }
+            let reason = cause.reason
+            try SessionStore.setState(db, sessionId, cause.sessionState, endedAt: .nowMillis)
+            try SessionStore.setStopReason(db, sessionId, reason)
+            guard session.role == .worker, let taskId = session.taskId,
+                  let task = try Task.fetchOne(db, key: taskId)
+            else { return nil }
+
+            try TaskStore.setBlocked(db, taskId, false, reason: nil)
+            if cause.flagsTaskFailed {
+                try TaskStore.setFailed(db, taskId, true, reason: reason)
+            }
+            let stranded = task.column == .running
+            if stranded {
+                try TaskStore.move(db, taskId, to: .ready, before: nil)
+            }
+            let body = [
+                "Worker session ended without reporting: \(reason)",
+                "Task: \(taskId) (\(task.title))",
+                "Session: \(sessionId) (attempt \(session.attempt))",
+                stranded
+                    ? "The task is back in ready; dispatch it again if you want it retried."
+                    : "The task stayed in \(task.column.rawValue).",
+            ].joined(separator: "\n")
+            return try ReportStore.insert(
+                db, projectId: session.projectId, taskId: taskId, sessionId: sessionId, kind: .failed, body: body
+            )
         }
     }
 
@@ -248,7 +343,14 @@ public struct Board: Sendable {
                 throw BoardError.invalidTransition(taskId: taskId, from: task.column, to: .backlog)
             }
             try TaskStore.move(db, taskId, to: .backlog, before: nil)
-            return try Self.newlyReady(db, projectId: task.projectId)
+            let ready = try Self.newlyReady(db, projectId: task.projectId)
+            let landed = try Task.fetchOne(db, key: taskId)?.column ?? .backlog
+            var body = "Proposal \(taskId) (\(task.title)) was promoted to \(landed.rawValue)."
+            body += "\n\n" + (try Self.describeNewlyReady(db, ready))
+            _ = try ReportStore.insert(
+                db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision, body: body
+            )
+            return ready
         }
     }
 
@@ -304,6 +406,15 @@ public struct Board: Sendable {
             throw BoardError.taskNotFound(taskId)
         }
         return task
+    }
+
+    static func describeNewlyReady(_ db: Database, _ ids: [String]) throws -> String {
+        guard !ids.isEmpty else { return "No other task became ready as a result." }
+        let described = try ids.map { id -> String in
+            guard let title = try Task.fetchOne(db, key: id)?.title else { return id }
+            return "\(id) (\(title))"
+        }
+        return "Now ready to dispatch:\n" + described.map { "- \($0)" }.joined(separator: "\n")
     }
 
     static func newlyReady(_ db: Database, projectId: String) throws -> [String] {

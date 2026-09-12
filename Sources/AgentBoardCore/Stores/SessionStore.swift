@@ -144,11 +144,15 @@ public struct SessionStore: Sendable {
 
     public func setStopReason(_ sessionId: String, _ reason: String?) throws {
         try db.writer.write { db in
-            try db.execute(
-                sql: "UPDATE agent_session SET stop_reason = ? WHERE session_id = ?",
-                arguments: [reason, sessionId]
-            )
+            try Self.setStopReason(db, sessionId, reason)
         }
+    }
+
+    static func setStopReason(_ db: Database, _ sessionId: String, _ reason: String?) throws {
+        try db.execute(
+            sql: "UPDATE agent_session SET stop_reason = ? WHERE session_id = ?",
+            arguments: [reason, sessionId]
+        )
     }
 
     public func observe(projectId: String) -> ValueObservation<ValueReducers.Fetch<[AgentSession]>> {

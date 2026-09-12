@@ -211,6 +211,51 @@ final class OrchestratorToolHandlerTests: XCTestCase {
         XCTAssertEqual(again["body"], .string("done"))
     }
 
+    func testAcceptedTaskReachesTheOrchestratorThroughListReports() async throws {
+        let accepted = try f.task("build the parser", column: .review)
+        let dependent = try f.task("use the parser")
+        try f.tasks.setDeps(dependent.id, dependsOn: [accepted.id])
+        try f.tasks.refreshReadiness(projectId: f.project.id)
+
+        try f.board.accept(taskId: accepted.id)
+
+        let delivered = try await f.callJSON("list_reports").arrayValue ?? []
+        XCTAssertEqual(delivered.count, 1)
+        let report = try XCTUnwrap(delivered.first)
+        XCTAssertEqual(report["kind"], .string("decision"))
+        XCTAssertEqual(report["task_id"], .string(accepted.id))
+        let body = try XCTUnwrap(report["body"]?.stringValue)
+        XCTAssertTrue(body.contains(dependent.id), body)
+
+        let second = try await f.callJSON("list_reports").arrayValue ?? []
+        XCTAssertEqual(second, [])
+        XCTAssertEqual(try f.reports.unconsumedCount(projectId: f.project.id), 0)
+    }
+
+    func testCapKilledWorkerReachesTheOrchestratorThroughListReports() async throws {
+        let task = try f.task("critical path", column: .running)
+        try f.session("w1", taskId: task.id)
+        let breach = "idle cap reached: no activity for 5 minutes (limit 5)"
+
+        try f.board.terminate(sessionId: "w1", cause: .capBreach(breach))
+
+        let delivered = try await f.callJSON("list_reports").arrayValue ?? []
+        XCTAssertEqual(delivered.count, 1)
+        let report = try XCTUnwrap(delivered.first)
+        XCTAssertEqual(report["kind"], .string("failed"))
+        XCTAssertEqual(report["task_id"], .string(task.id))
+        XCTAssertEqual(report["session_id"], .string("w1"))
+        let body = try XCTUnwrap(report["body"]?.stringValue)
+        XCTAssertTrue(body.contains(breach), body)
+
+        let second = try await f.callJSON("list_reports").arrayValue ?? []
+        XCTAssertEqual(second, [])
+        XCTAssertEqual(try f.reports.unconsumedCount(projectId: f.project.id), 0)
+
+        let after = try await f.callJSON("get_task", ["id": .string(task.id)])
+        XCTAssertEqual(after["column"], .string("ready"))
+    }
+
     func testGetTaskIncludesLatestReportBody() async throws {
         let task = try f.task("t", column: .running)
         try f.session("w1", taskId: task.id)

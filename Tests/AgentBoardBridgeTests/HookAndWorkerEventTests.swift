@@ -45,7 +45,10 @@ final class HookAndWorkerEventTests: XCTestCase {
         _ = await f.hooks.handle(event, identity: f.workerIdentity(sessionId: "w1", taskId: task.id))
 
         let events = await f.events.events
-        XCTAssertEqual(events, [.notify(title: "Agent needs input", body: "May I run rm?")])
+        XCTAssertEqual(events, [
+            .notify(title: "Agent needs input", body: "May I run rm?"),
+            .reportQueued(projectId: f.project.id),
+        ])
         XCTAssertEqual(try f.tasks.get(task.id)?.blocked, true)
     }
 

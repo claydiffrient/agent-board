@@ -205,14 +205,18 @@ public struct TaskStore: Sendable {
 
     public func delete(_ id: String) throws {
         try db.writer.write { db in
-            try db.execute(sql: "DELETE FROM task_dep WHERE task_id = ? OR depends_on = ?", arguments: [id, id])
-            try db.execute(sql: "DELETE FROM progress WHERE task_id = ?", arguments: [id])
-            try db.execute(sql: "UPDATE report SET task_id = NULL WHERE task_id = ?", arguments: [id])
-            try db.execute(sql: "UPDATE agent_session SET task_id = NULL WHERE task_id = ?", arguments: [id])
-            try db.execute(sql: "UPDATE token_grant SET task_id = NULL WHERE task_id = ?", arguments: [id])
-            try db.execute(sql: "DELETE FROM note_link WHERE task_id = ?", arguments: [id])
-            try db.execute(sql: "DELETE FROM task WHERE id = ?", arguments: [id])
+            try Self.delete(db, id)
         }
+    }
+
+    static func delete(_ db: Database, _ id: String) throws {
+        try db.execute(sql: "DELETE FROM task_dep WHERE task_id = ? OR depends_on = ?", arguments: [id, id])
+        try db.execute(sql: "DELETE FROM progress WHERE task_id = ?", arguments: [id])
+        try db.execute(sql: "UPDATE report SET task_id = NULL WHERE task_id = ?", arguments: [id])
+        try db.execute(sql: "UPDATE agent_session SET task_id = NULL WHERE task_id = ?", arguments: [id])
+        try db.execute(sql: "UPDATE token_grant SET task_id = NULL WHERE task_id = ?", arguments: [id])
+        try db.execute(sql: "DELETE FROM note_link WHERE task_id = ?", arguments: [id])
+        try db.execute(sql: "DELETE FROM task WHERE id = ?", arguments: [id])
     }
 
     public func observe(projectId: String) -> ValueObservation<ValueReducers.Fetch<[Task]>> {

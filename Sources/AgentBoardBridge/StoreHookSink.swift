@@ -17,14 +17,15 @@ public final class StoreHookSink: HookSink {
     private enum FollowUp {
         case notify(title: String, body: String)
         case orchestratorTurnEnded(projectId: String, sessionId: String)
+        case reportQueued(projectId: String)
     }
 
     private struct Outcome {
-        var followUp: FollowUp?
+        var followUps: [FollowUp] = []
         var decision: HookDecision?
 
         static let none = Outcome()
-        static func follow(_ followUp: FollowUp) -> Outcome { Outcome(followUp: followUp) }
+        static func follow(_ followUps: [FollowUp]) -> Outcome { Outcome(followUps: followUps) }
         static func deny(_ decision: HookDecision) -> Outcome { Outcome(decision: decision) }
     }
 
@@ -44,13 +45,15 @@ public final class StoreHookSink: HookSink {
                 continuation.resume(returning: self.process(event, identity: identity))
             }
         }
-        switch outcome.followUp {
-        case .notify(let title, let body):
-            await events.notify(title: title, body: body)
-        case .orchestratorTurnEnded(let projectId, let sessionId):
-            await events.orchestratorTurnEnded(projectId: projectId, sessionId: sessionId)
-        case nil:
-            break
+        for followUp in outcome.followUps {
+            switch followUp {
+            case .notify(let title, let body):
+                await events.notify(title: title, body: body)
+            case .orchestratorTurnEnded(let projectId, let sessionId):
+                await events.orchestratorTurnEnded(projectId: projectId, sessionId: sessionId)
+            case .reportQueued(let projectId):
+                await events.reportQueued(projectId: projectId)
+            }
         }
         return outcome.decision
     }
@@ -110,19 +113,22 @@ public final class StoreHookSink: HookSink {
             guard let type = event.notificationType else { return .none }
             if Self.blockingNotificationTypes.contains(type) || type.hasPrefix("elicitation") {
                 let reason = event.notificationMessage ?? type
+                var followUps: [FollowUp] = [.notify(title: "Agent needs input", body: reason)]
                 if let taskId {
-                    _ = try? board.block(taskId: taskId, sessionId: sessionId, reason: reason)
+                    if (try? board.block(taskId: taskId, sessionId: sessionId, reason: reason)) != nil {
+                        followUps.append(.reportQueued(projectId: session.projectId))
+                    }
                 } else {
                     try? sessions.setState(sessionId, .blocked)
                 }
-                return .follow(.notify(title: "Agent needs input", body: reason))
+                return .follow(followUps)
             } else if type == "idle_prompt", session.state.isActive {
                 try? sessions.setState(sessionId, .idle)
             }
 
         case "Stop":
             if session.role == .orchestrator {
-                return .follow(.orchestratorTurnEnded(projectId: session.projectId, sessionId: sessionId))
+                return .follow([.orchestratorTurnEnded(projectId: session.projectId, sessionId: sessionId)])
             }
             if session.state.isActive {
                 try? sessions.setState(sessionId, .idle)
