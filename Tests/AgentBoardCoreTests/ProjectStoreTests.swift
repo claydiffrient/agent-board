@@ -7,7 +7,7 @@ final class ProjectStoreTests: XCTestCase {
         let f = try Fixture.make()
         let fetched = try f.projects.byRepoPath(f.project.repoPath)
         XCTAssertEqual(fetched, f.project)
-        XCTAssertEqual(fetched?.settings, ProjectSettings())
+        XCTAssertEqual(fetched?.settings, ProjectSettings.forNewProject())
         XCTAssertEqual(fetched?.baseBranch, "main")
         XCTAssertNil(fetched?.orchSessionId)
         XCTAssertEqual(try f.projects.get(f.project.id), f.project)
