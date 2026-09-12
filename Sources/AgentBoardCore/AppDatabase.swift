@@ -42,6 +42,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("note_section_written_by") { db in
             try db.execute(sql: "ALTER TABLE note_section ADD COLUMN written_by TEXT")
         }
+        migrator.registerMigration("task_archived_at") { db in
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN archived_at INTEGER")
+        }
         return migrator
     }
 }

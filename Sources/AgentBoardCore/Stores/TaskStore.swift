@@ -45,17 +45,24 @@ public struct TaskStore: Sendable {
         return task
     }
 
-    public func get(_ id: String) throws -> Task? {
-        try db.reader.read { db in try Task.fetchOne(db, key: id) }
-    }
-
-    public func list(projectId: String, column: TaskColumn? = nil, epicId: String? = nil) throws -> [Task] {
+    public func get(_ id: String, includeArchived: Bool = false) throws -> Task? {
         try db.reader.read { db in
-            try Self.list(db, projectId: projectId, column: column, epicId: epicId)
+            guard let task = try Task.fetchOne(db, key: id) else { return nil }
+            return includeArchived || !task.isArchived ? task : nil
         }
     }
 
-    static func list(_ db: Database, projectId: String, column: TaskColumn?, epicId: String?) throws -> [Task] {
+    public func list(
+        projectId: String, column: TaskColumn? = nil, epicId: String? = nil, includeArchived: Bool = false
+    ) throws -> [Task] {
+        try db.reader.read { db in
+            try Self.list(db, projectId: projectId, column: column, epicId: epicId, includeArchived: includeArchived)
+        }
+    }
+
+    static func list(
+        _ db: Database, projectId: String, column: TaskColumn?, epicId: String?, includeArchived: Bool = false
+    ) throws -> [Task] {
         var sql = "SELECT * FROM task WHERE project_id = ?"
         var arguments: StatementArguments = [projectId]
         if let column {
@@ -65,6 +72,9 @@ public struct TaskStore: Sendable {
         if let epicId {
             sql += " AND epic_id = ?"
             arguments += [epicId]
+        }
+        if !includeArchived {
+            sql += " AND archived_at IS NULL"
         }
         sql += " ORDER BY \(TaskColumn.orderingSQL), ordering, created_at"
         return try Task.fetchAll(db, sql: sql, arguments: arguments)
@@ -203,6 +213,29 @@ public struct TaskStore: Sendable {
         )
     }
 
+    /// Archiving is only meaningful for a `done` task; the caller decides whether to enforce that.
+    public func archive(_ id: String, at when: Int64 = .nowMillis) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE task SET archived_at = ?, updated_at = ? WHERE id = ?",
+                arguments: [when, Int64.nowMillis, id]
+            )
+        }
+    }
+
+    public func unarchive(_ id: String) throws {
+        try db.writer.write { db in
+            try Self.unarchive(db, id)
+        }
+    }
+
+    static func unarchive(_ db: Database, _ id: String) throws {
+        try db.execute(
+            sql: "UPDATE task SET archived_at = NULL, updated_at = ? WHERE id = ?",
+            arguments: [Int64.nowMillis, id]
+        )
+    }
+
     public func delete(_ id: String) throws {
         try db.writer.write { db in
             try Self.delete(db, id)
@@ -219,9 +252,9 @@ public struct TaskStore: Sendable {
         try db.execute(sql: "DELETE FROM task WHERE id = ?", arguments: [id])
     }
 
-    public func observe(projectId: String) -> ValueObservation<ValueReducers.Fetch<[Task]>> {
+    public func observe(projectId: String, includeArchived: Bool = true) -> ValueObservation<ValueReducers.Fetch<[Task]>> {
         ValueObservation.tracking { db in
-            try Self.list(db, projectId: projectId, column: nil, epicId: nil)
+            try Self.list(db, projectId: projectId, column: nil, epicId: nil, includeArchived: includeArchived)
         }
     }
 }

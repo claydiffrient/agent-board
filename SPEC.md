@@ -211,7 +211,8 @@ CREATE TABLE task (
   origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
-  model          TEXT              -- overrides project settings.defaultModel for this task's worker
+  model          TEXT,             -- overrides project settings.defaultModel for this task's worker
+  archived_at    INTEGER           -- set when a done task was archived; hidden from the board, never deleted
 );
 
 CREATE TABLE task_dep (
@@ -427,8 +428,11 @@ Everything in worker scope over any task in the project, plus:
 
 | Tool | Effect |
 |---|---|
-| `list_tasks(column, epic_id)` | Board query |
-| `create_task(...)`, `update_task(...)`, `move_task(id, column)` | Board mutation |
+| `list_tasks(column, epic_id, include_archived)` | Board query; archived tasks are hidden unless `include_archived` is true |
+| `create_task(...)`, `update_task(...)`, `move_task(id, column)` | Board mutation; moving an archived task out of `done` unarchives it |
+| `get_task(id)` | Full detail, archived or not; an archived task carries `archived: true` and `archived_at` |
+| `archive_task(task_id)` | Hides a `done` task from the board; refused for any other column |
+| `unarchive_task(task_id)` | Returns the task to the visible board in the column it was archived from |
 | `set_deps(task_id, depends_on[])` | Dependency graph |
 | `create_epic(title, goal, tasks[])` | Records a decomposition; cuts the epic branch |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
@@ -439,6 +443,15 @@ Everything in worker scope over any task in the project, plus:
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Always creates a human approval row |
+
+Archiving is a flag, not a column. `list_tasks` is the only orchestrator read
+that hides archived tasks, and its description says so, so a task missing from
+the board reads as archived rather than deleted. Every by-id tool — `get_task`,
+`update_task`, `move_task`, `set_deps`, `log_progress` — reaches an archived
+task: it is hidden, not frozen. Epic views (`get_epic`, `list_epics`) count
+archived tasks, so integration readiness is unchanged by archiving. Workers get
+neither archive tool, and their own task can never be archived because archiving
+requires `done`.
 
 ---
 

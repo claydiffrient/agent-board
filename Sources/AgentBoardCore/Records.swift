@@ -108,6 +108,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var updatedAt: Int64
     /// Overrides the project's default model for the worker on this task.
     public var model: String?
+    /// Set when the task was archived; archived tasks are hidden from the board, never deleted.
+    public var archivedAt: Int64?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -127,15 +129,17 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case model
+        case archivedAt = "archived_at"
     }
 
     public init(
         id: String, projectId: String, epicId: String?, title: String, body: String?, acceptance: String?,
         priority: String?, column: TaskColumn, blocked: Bool = false, blockedReason: String? = nil,
         failed: Bool = false, failureReason: String? = nil, ordering: Double, origin: TaskOrigin,
-        createdAt: Int64, updatedAt: Int64, model: String? = nil
+        createdAt: Int64, updatedAt: Int64, model: String? = nil, archivedAt: Int64? = nil
     ) {
         self.model = model
+        self.archivedAt = archivedAt
         self.id = id
         self.projectId = projectId
         self.epicId = epicId
@@ -158,6 +162,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
 
     public var createdDate: Date { createdAt.asDate }
     public var updatedDate: Date { updatedAt.asDate }
+    public var isArchived: Bool { archivedAt != nil }
 }
 
 public typealias BoardTask = Task
