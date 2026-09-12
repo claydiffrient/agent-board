@@ -6,16 +6,24 @@ import Observation
 import SwiftTerm
 
 /// Every byte the user types reaches the child through `send(source:data:)`; the console's own
-/// notice goes through the same path, so it flags itself to keep the keystroke clock honest.
+/// notice goes through the same path, so it flags itself to stay out of its own bookkeeping.
 final class OrchestratorTerminalView: LocalProcessTerminalView {
-    private(set) var lastUserInputAt: Date?
+    private(set) var promptIsDirty = false
     var isInjecting = false
+    var promptDidClear: (() -> Void)?
 
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
-        if !isInjecting {
-            lastUserInputAt = Date()
-        }
         super.send(source: source, data: data)
+        guard !isInjecting else { return }
+        switch PromptInputClassifier.classify(data) {
+        case .dirties:
+            promptIsDirty = true
+        case .submits, .cancels:
+            promptIsDirty = false
+            promptDidClear?()
+        case .neutral:
+            break
+        }
     }
 }
 
@@ -29,8 +37,6 @@ final class OrchestratorConsole {
         case running
         case exited(Int32?)
     }
-
-    static let noticeQuietInterval: TimeInterval = 10
 
     let projectId: String
     private(set) var state: State = .idle
@@ -46,9 +52,8 @@ final class OrchestratorConsole {
     @ObservationIgnored private let sessionConfigDir: URL
     @ObservationIgnored private let currentPort: @MainActor () -> Int?
     @ObservationIgnored private let processObserver = ProcessObserver()
-    @ObservationIgnored private var lastAnnouncedReportId: Int64 = 0
-    @ObservationIgnored private var lastStopAt: Date?
     @ObservationIgnored private var restartAfterExit = false
+    @ObservationIgnored private var noticeGate: ReportNoticeGate!
 
     init(projectId: String, db: AppDatabase, sessionConfigDir: URL, currentPort: @escaping @MainActor () -> Int?) {
         self.projectId = projectId
@@ -64,6 +69,13 @@ final class OrchestratorConsole {
         terminal.caretColor = .systemGreen
         terminal.processDelegate = processObserver
         processObserver.console = self
+        noticeGate = ReportNoticeGate(
+            isRunning: { [weak self] in self?.isProcessRunning ?? false },
+            promptIsDirty: { [weak self] in self?.terminal.promptIsDirty ?? true },
+            pendingReports: { [weak self] in try? self?.pendingReports() },
+            deliver: { [weak self] count in self?.sendNotice(count: count) }
+        )
+        terminal.promptDidClear = { [weak self] in self?.noticeGate.promptCleared() }
     }
 
     var isProcessRunning: Bool {
@@ -153,7 +165,7 @@ final class OrchestratorConsole {
             model: project.settings.defaultModel,
             strictMcpConfig: false
         )
-        lastStopAt = nil
+        noticeGate.processRestarted()
         terminal.startProcess(
             executable: command.executable,
             args: command.arguments(),
@@ -177,29 +189,15 @@ final class OrchestratorConsole {
     // MARK: - Report notice (SPEC §9.1)
 
     func turnEnded() {
-        lastStopAt = Date()
-        maybeNotice(turnEnded: true)
+        noticeGate.turnEnded()
     }
 
     func reportsChanged() {
-        maybeNotice(turnEnded: false)
+        noticeGate.reportsChanged()
     }
 
     func nudge() {
-        guard isProcessRunning, let pending = try? pendingReports(), pending.count > 0 else { return }
-        sendNotice(count: pending.count, maxId: pending.maxId)
-    }
-
-    private func maybeNotice(turnEnded: Bool) {
-        guard isProcessRunning, let pending = try? pendingReports(), pending.count > 0 else { return }
-        guard pending.maxId > lastAnnouncedReportId else { return }
-        if !turnEnded {
-            guard let lastStopAt else { return }
-            if let typed = terminal.lastUserInputAt {
-                guard typed < lastStopAt, Date().timeIntervalSince(typed) >= Self.noticeQuietInterval else { return }
-            }
-        }
-        sendNotice(count: pending.count, maxId: pending.maxId)
+        noticeGate.nudge()
     }
 
     private func pendingReports() throws -> (count: Int, maxId: Int64) {
@@ -207,11 +205,10 @@ final class OrchestratorConsole {
         return (unconsumed.count, unconsumed.compactMap(\.id).max() ?? 0)
     }
 
-    private func sendNotice(count: Int, maxId: Int64) {
+    private func sendNotice(count: Int) {
         terminal.isInjecting = true
         terminal.send(txt: "[agent-board] \(count) worker reports pending. Call list_reports.\r")
         terminal.isInjecting = false
-        lastAnnouncedReportId = max(lastAnnouncedReportId, maxId)
         lastNoticeAt = Date()
     }
 
