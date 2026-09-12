@@ -32,7 +32,7 @@ enum ProcessRunner {
         process.executableURL = executable
         process.arguments = arguments
         process.currentDirectoryURL = cwd
-        process.environment = environment ?? ProcessInfo.processInfo.environment
+        process.environment = environment ?? ChildEnvironment.sanitized()
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

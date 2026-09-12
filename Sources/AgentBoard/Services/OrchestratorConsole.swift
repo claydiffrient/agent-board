@@ -118,19 +118,6 @@ final class OrchestratorConsole {
         }
         self.sessionId = sessionId
 
-        try grants.revokeAll(sessionId: sessionId)
-        let grant = try grants.issue(projectId: project.id, scope: .orchestrator, taskId: nil)
-        try grants.bind(token: grant.token, sessionId: sessionId)
-
-        let configFiles = try SessionConfigWriter.write(
-            configDir: sessionConfigDir,
-            configId: "orchestrator-\(project.id)",
-            port: port,
-            token: grant.token,
-            autoModeJSON: nil,
-            extraMcpServers: nil
-        )
-
         if try sessions.get(sessionId) == nil {
             try sessions.insert(AgentSession(
                 sessionId: sessionId,
@@ -144,6 +131,19 @@ final class OrchestratorConsole {
             try sessions.markResumed(sessionId)
             try sessions.setState(sessionId, .starting)
         }
+
+        try grants.revokeAll(sessionId: sessionId)
+        let grant = try grants.issue(projectId: project.id, scope: .orchestrator, taskId: nil)
+        try grants.bind(token: grant.token, sessionId: sessionId)
+
+        let configFiles = try SessionConfigWriter.write(
+            configDir: sessionConfigDir,
+            configId: "orchestrator-\(project.id)",
+            port: port,
+            token: grant.token,
+            autoModeJSON: nil,
+            extraMcpServers: nil
+        )
 
         let command = InteractiveSessionCommand(
             sessionId: sessionId,
@@ -209,7 +209,7 @@ final class OrchestratorConsole {
 
     private func sendNotice(count: Int, maxId: Int64) {
         terminal.isInjecting = true
-        terminal.send(txt: "[agent-board] \(count) worker reports pending. Call list_reports.\n")
+        terminal.send(txt: "[agent-board] \(count) worker reports pending. Call list_reports.\r")
         terminal.isInjecting = false
         lastAnnouncedReportId = max(lastAnnouncedReportId, maxId)
         lastNoticeAt = Date()

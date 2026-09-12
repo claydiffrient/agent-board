@@ -41,3 +41,16 @@ final class InteractiveSessionCommandTests: XCTestCase {
         XCTAssertNotNil(hooks["UserPromptSubmit"])
     }
 }
+
+final class ChildEnvironmentTests: XCTestCase {
+    func testStripsClaudeCodeMarkers() {
+        let env = ChildEnvironment.sanitized(["CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDECODE": "1", "CLAUDE_PID": "3", "PATH": "/bin", "HOME": "/h"])
+        XCTAssertEqual(env, ["PATH": "/bin", "HOME": "/h"])
+    }
+
+    func testTerminalEnvironmentForcesTerm() {
+        let lines = ChildEnvironment.forTerminal(["TERM": "dumb"])
+        XCTAssertTrue(lines.contains("TERM=xterm-256color"))
+        XCTAssertTrue(lines.contains("COLORTERM=truecolor"))
+    }
+}

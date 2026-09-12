@@ -514,7 +514,9 @@ Per project, overridable:
 2. The orchestrator's `Stop` hook fires when it finishes a turn.
 3. If unconsumed reports exist, Agent Board writes **one fixed, app-authored
    line** into the orchestrator PTY:
-   `[agent-board] N worker reports pending. Call list_reports.`
+   `[agent-board] N worker reports pending. Call list_reports.` terminated by
+   a carriage return (`\r`); Claude Code's TUI submits on Enter and treats
+   `\n` as a literal newline inside the prompt.
 4. The orchestrator pulls bodies through MCP, where they arrive as tool results.
 
 No agent-generated text is ever written into the orchestrator's user turn. The

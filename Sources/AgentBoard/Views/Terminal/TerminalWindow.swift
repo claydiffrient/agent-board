@@ -1,4 +1,5 @@
 import AgentBoardCore
+import AgentBoardRuntime
 import AppKit
 import SwiftTerm
 import SwiftUI
@@ -100,13 +101,7 @@ struct TerminalHostView: NSViewRepresentable {
     }
 
     static func childEnvironment() -> [String] {
-        var env = ProcessInfo.processInfo.environment
-        env["TERM"] = "xterm-256color"
-        env["COLORTERM"] = "truecolor"
-        if env["LANG"]?.isEmpty ?? true {
-            env["LANG"] = "en_US.UTF-8"
-        }
-        return env.map { "\($0.key)=\($0.value)" }
+        ChildEnvironment.forTerminal()
     }
 
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
