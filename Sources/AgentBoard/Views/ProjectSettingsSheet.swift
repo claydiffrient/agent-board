@@ -51,6 +51,21 @@ struct ProjectSettingsSheet: View {
                     TextField("Project session ceiling", value: $settings.caps.sessionCeiling, format: .number, prompt: Text("Unlimited"))
                 }
 
+                Section("Models") {
+                    ModelPicker(label: "Default model", inheritLabel: "Claude Code default", model: $settings.defaultModel)
+                    LabeledContent("Model guidance") {
+                        TextEditor(text: Binding(
+                            get: { settings.modelGuidance ?? "" },
+                            set: { settings.modelGuidance = $0.isEmpty ? nil : $0 }
+                        ))
+                        .font(.body)
+                        .frame(minHeight: 80)
+                    }
+                    Text("Read by the orchestrator when it picks a model per task, e.g. \"Sonnet 5 for docs and tests, Opus 5 for features.\" A task's own model overrides the default.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Autonomy") {
                     Toggle("Autonomy (spawn without approval)", isOn: $settings.autonomyEnabled)
                     Text("Off by default. While off, every orchestrator spawn waits for your approval.")

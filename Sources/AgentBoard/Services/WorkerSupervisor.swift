@@ -162,7 +162,8 @@ final class WorkerSupervisor: WorkerSupervising {
                     cwd: worktree,
                     name: Self.sessionName(for: task),
                     prompt: Self.openingPrompt(task: task, branch: branch, attempt: attempt),
-                    configFiles: configFiles
+                    configFiles: configFiles,
+                    model: task.model ?? project.settings.defaultModel
                 )
                 let spawned = try await runtime.spawn(request)
                 try? grants.bind(token: grant.token, sessionId: spawned.sessionId)
@@ -220,7 +221,11 @@ final class WorkerSupervisor: WorkerSupervising {
                 autoModeJSON: project.settings.autoModeJSON,
                 extraMcpServers: nil
             )
-            let resumed = try await runtime.resume(sessionId: sessionId, cwd: URL(fileURLWithPath: session.cwd))
+            let resumed = try await runtime.resume(
+                sessionId: sessionId,
+                cwd: URL(fileURLWithPath: session.cwd),
+                prompt: Self.resumePrompt(previousStop: session.stopReason)
+            )
             if resumed.shortId != session.shortId {
                 try sessions.setShortId(sessionId, resumed.shortId)
             }
@@ -473,6 +478,15 @@ final class WorkerSupervisor: WorkerSupervising {
         return try manager.list()
             .first { $0.path.standardizedFileURL.resolvingSymlinksInPath().path == expectedPath }?
             .path
+    }
+
+    static func resumePrompt(previousStop: String?) -> String {
+        var lines = ["Agent Board resumed this session. Continue your task from where you left off; check `git status` and `git log` first."]
+        if let previousStop, !previousStop.isEmpty {
+            lines.append("The previous run was stopped by Agent Board: \(previousStop).")
+        }
+        lines.append("When finished, follow the completion protocol from your original instructions (commit, do not push, call report_complete).")
+        return lines.joined(separator: " ")
     }
 
     static func configId(taskId: String, attempt: Int) -> String {

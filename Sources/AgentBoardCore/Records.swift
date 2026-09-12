@@ -106,6 +106,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var origin: TaskOrigin
     public var createdAt: Int64
     public var updatedAt: Int64
+    /// Overrides the project's default model for the worker on this task.
+    public var model: String?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -124,14 +126,16 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case origin
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case model
     }
 
     public init(
         id: String, projectId: String, epicId: String?, title: String, body: String?, acceptance: String?,
         priority: String?, column: TaskColumn, blocked: Bool = false, blockedReason: String? = nil,
         failed: Bool = false, failureReason: String? = nil, ordering: Double, origin: TaskOrigin,
-        createdAt: Int64, updatedAt: Int64
+        createdAt: Int64, updatedAt: Int64, model: String? = nil
     ) {
+        self.model = model
         self.id = id
         self.projectId = projectId
         self.epicId = epicId

@@ -47,3 +47,29 @@ final class ProjectSettingsTests: XCTestCase {
         XCTAssertEqual(TaskOrigin.workerProposal.rawValue, "worker_proposal")
     }
 }
+
+final class ModelSettingsTests: XCTestCase {
+    func testModelFieldsRoundTrip() {
+        var settings = ProjectSettings()
+        XCTAssertNil(settings.defaultModel)
+        settings.defaultModel = "claude-sonnet-5"
+        settings.modelGuidance = "Sonnet for docs"
+        let decoded = ProjectSettings.decode(settings.encoded())
+        XCTAssertEqual(decoded.defaultModel, "claude-sonnet-5")
+        XCTAssertEqual(decoded.modelGuidance, "Sonnet for docs")
+    }
+
+    func testTaskModelPersists() throws {
+        let db = try AppDatabase.inMemory()
+        let project = try ProjectStore(db).register(name: "p", repoPath: "/tmp/p", baseBranch: "main", worktreeRoot: "/tmp/w", memoryDir: nil)
+        let tasks = TaskStore(db)
+        let withModel = try tasks.create(projectId: project.id, title: "a", body: nil, acceptance: nil, priority: nil, column: .ready, origin: .human, epicId: nil, model: "claude-haiku-4-5")
+        let without = try tasks.create(projectId: project.id, title: "b", body: nil, acceptance: nil, priority: nil, column: .ready, origin: .human, epicId: nil)
+        XCTAssertEqual(try tasks.get(withModel.id)?.model, "claude-haiku-4-5")
+        XCTAssertNil(try tasks.get(without.id)?.model)
+        var updated = withModel
+        updated.model = nil
+        try tasks.update(updated)
+        XCTAssertNil(try tasks.get(withModel.id)?.model)
+    }
+}

@@ -11,19 +11,19 @@ public struct TaskStore: Sendable {
     @discardableResult
     public func create(
         projectId: String, title: String, body: String?, acceptance: String?, priority: String?,
-        column: TaskColumn, origin: TaskOrigin, epicId: String?
+        column: TaskColumn, origin: TaskOrigin, epicId: String?, model: String? = nil
     ) throws -> Task {
         try db.writer.write { db in
             try Self.insert(
                 db, projectId: projectId, title: title, body: body, acceptance: acceptance,
-                priority: priority, column: column, origin: origin, epicId: epicId
+                priority: priority, column: column, origin: origin, epicId: epicId, model: model
             )
         }
     }
 
     static func insert(
         _ db: Database, projectId: String, title: String, body: String?, acceptance: String?,
-        priority: String?, column: TaskColumn, origin: TaskOrigin, epicId: String?
+        priority: String?, column: TaskColumn, origin: TaskOrigin, epicId: String?, model: String? = nil
     ) throws -> Task {
         let now = Int64.nowMillis
         let task = Task(
@@ -38,7 +38,8 @@ public struct TaskStore: Sendable {
             ordering: try endOrdering(db, projectId: projectId, column: column, excluding: nil),
             origin: origin,
             createdAt: now,
-            updatedAt: now
+            updatedAt: now,
+            model: model
         )
         try task.insert(db)
         return task

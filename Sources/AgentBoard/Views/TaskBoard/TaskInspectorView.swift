@@ -11,6 +11,7 @@ struct TaskInspectorView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var draftBody = ""
     @State private var draftAcceptance = ""
+    @State private var draftModel: String?
     @State private var deps = Observed<[String]>([])
     @State private var progress = Observed<[ProgressEntry]>([])
     @State private var errorMessage: String?
@@ -29,6 +30,7 @@ struct TaskInspectorView: View {
                 header
                 editor("Body", text: $draftBody, minHeight: 120)
                 editor("Acceptance", text: $draftAcceptance, minHeight: 80)
+                ModelPicker(label: "Model", inheritLabel: "Project default", model: $draftModel)
                 HStack {
                     Spacer()
                     Button("Revert") { resetDrafts() }
@@ -70,6 +72,7 @@ struct TaskInspectorView: View {
                 if let priority = task.priority, !priority.isEmpty {
                     PriorityChip(priority: priority)
                 }
+                if let model = task.model { ModelChip(model: model) }
                 Text(task.origin.rawValue)
                 if task.blocked { FlagBadge(text: "blocked") }
                 if task.failed { FlagBadge(text: "failed") }
@@ -216,12 +219,14 @@ struct TaskInspectorView: View {
     private func resetDrafts() {
         draftBody = task.body ?? ""
         draftAcceptance = task.acceptance ?? ""
+        draftModel = task.model
     }
 
     private func save() {
         var updated = task
         updated.body = draftBody.isEmpty ? nil : draftBody
         updated.acceptance = draftAcceptance.isEmpty ? nil : draftAcceptance
+        updated.model = draftModel
         do {
             try TaskStore(env.db).update(updated)
         } catch {

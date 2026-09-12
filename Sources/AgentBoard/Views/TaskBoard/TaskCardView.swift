@@ -23,6 +23,7 @@ struct TaskCardView: View {
                 if let priority = task.priority, !priority.isEmpty {
                     PriorityChip(priority: priority)
                 }
+                if let model = task.model { ModelChip(model: model) }
             }
 
             if let epicTitle {

@@ -68,8 +68,8 @@ public struct SessionStore: Sendable {
     public func markResumed(_ sessionId: String, at: Int64 = .nowMillis) throws {
         try db.writer.write { db in
             try db.execute(
-                sql: "UPDATE agent_session SET state = 'running', started_at = ?, ended_at = NULL, stop_reason = NULL WHERE session_id = ?",
-                arguments: [at, sessionId]
+                sql: "UPDATE agent_session SET state = 'running', started_at = ?, last_activity = ?, ended_at = NULL, stop_reason = NULL WHERE session_id = ?",
+                arguments: [at, at, sessionId]
             )
         }
     }

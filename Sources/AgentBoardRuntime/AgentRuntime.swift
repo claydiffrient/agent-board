@@ -46,7 +46,8 @@ public struct SpawnedAgent: Sendable, Equatable {
 public protocol AgentRuntime: Sendable {
     func spawn(_ request: SpawnRequest) async throws -> SpawnedAgent
     /// The caller must have rewritten the session's config files for the current port first.
-    func resume(sessionId: String, cwd: URL) async throws -> SpawnedAgent
+    /// The prompt is sent as the first turn; without one a resumed background session waits for input forever.
+    func resume(sessionId: String, cwd: URL, prompt: String) async throws -> SpawnedAgent
     func stop(shortId: String) async throws
     func remove(shortId: String) async throws
     func listSessions() async throws -> [AgentInfo]
@@ -91,10 +92,10 @@ public struct BackgroundSessionRuntime: AgentRuntime {
         }
     }
 
-    public func resume(sessionId: String, cwd: URL) async throws -> SpawnedAgent {
+    public func resume(sessionId: String, cwd: URL, prompt: String) async throws -> SpawnedAgent {
         let timeout = registrationTimeout
         return try await offMain {
-            let result = try ClaudeCLI.run(["--bg", "--resume", sessionId], cwd: cwd)
+            let result = try ClaudeCLI.run([prompt, "--bg", "--resume", sessionId], cwd: cwd)
             return try Self.registered(from: result, timeout: timeout)
         }
     }

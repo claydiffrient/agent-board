@@ -11,6 +11,7 @@ struct NewTaskSheet: View {
     @State private var acceptance = ""
     @State private var priority = ""
     @State private var column: TaskColumn = .backlog
+    @State private var model: String?
     @State private var errorMessage: String?
 
     private static let priorities = ["", "high", "medium", "low"]
@@ -27,6 +28,7 @@ struct NewTaskSheet: View {
                 Picker("Column", selection: $column) {
                     ForEach(TaskColumn.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
+                ModelPicker(label: "Model", inheritLabel: "Project default", model: $model)
                 LabeledContent("Body") {
                     TextEditor(text: $body_)
                         .font(.body)
@@ -65,7 +67,8 @@ struct NewTaskSheet: View {
                 priority: priority.isEmpty ? nil : priority,
                 column: column,
                 origin: .human,
-                epicId: nil
+                epicId: nil,
+                model: model
             )
             dismiss()
         } catch {

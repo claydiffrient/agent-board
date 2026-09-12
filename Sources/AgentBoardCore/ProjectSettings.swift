@@ -37,17 +37,25 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var autonomyEnabled: Bool = false
     public var autoModeJSON: String? = nil
     public var extraMcpServers: [String] = []
+    /// Passed as `--model` to every session without its own; nil leaves Claude Code's default.
+    public var defaultModel: String? = nil
+    /// Free text the orchestrator reads when choosing a model per task.
+    public var modelGuidance: String? = nil
 
     public init(
         caps: Caps = Caps(),
         autonomyEnabled: Bool = false,
         autoModeJSON: String? = nil,
-        extraMcpServers: [String] = []
+        extraMcpServers: [String] = [],
+        defaultModel: String? = nil,
+        modelGuidance: String? = nil
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
         self.autoModeJSON = autoModeJSON
         self.extraMcpServers = extraMcpServers
+        self.defaultModel = defaultModel
+        self.modelGuidance = modelGuidance
     }
 
     public init(from decoder: Decoder) throws {
@@ -56,6 +64,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         autonomyEnabled = try c.decodeIfPresent(Bool.self, forKey: .autonomyEnabled) ?? false
         autoModeJSON = try c.decodeIfPresent(String.self, forKey: .autoModeJSON)
         extraMcpServers = try c.decodeIfPresent([String].self, forKey: .extraMcpServers) ?? []
+        defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
+        modelGuidance = try c.decodeIfPresent(String.self, forKey: .modelGuidance)
     }
 
     public static func decode(_ json: String) -> ProjectSettings {

@@ -33,6 +33,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("v1") { db in
             try db.execute(sql: Schema.v1)
         }
+        migrator.registerMigration("task_model") { db in
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN model TEXT")
+        }
         return migrator
     }
 }

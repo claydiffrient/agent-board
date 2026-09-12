@@ -151,6 +151,7 @@ For a task `T` in project `P`:
    (commit, do not push, call `report_complete`).
 7. `claude "<prompt>" --bg -n <task-slug> --permission-mode auto
    --strict-mcp-config --mcp-config <file> --settings <file>
+   [--model <task.model ?? settings.defaultModel>]
    --disallowedTools "Bash(git push*)" "Bash(gh pr create*)" "Bash(gh pr merge*)"`
    with cwd set to the worktree. The prompt goes first because
    `--disallowedTools` is variadic and would swallow a trailing positional.
@@ -179,7 +180,7 @@ CREATE TABLE project (
   worktree_root   TEXT NOT NULL,
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
-  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist
+  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance
   created_at      INTEGER NOT NULL
 );
 
@@ -209,7 +210,8 @@ CREATE TABLE task (
   ordering       REAL NOT NULL,
   origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal
   created_at     INTEGER NOT NULL,
-  updated_at     INTEGER NOT NULL
+  updated_at     INTEGER NOT NULL,
+  model          TEXT              -- overrides project settings.defaultModel for this task's worker
 );
 
 CREATE TABLE task_dep (
@@ -483,8 +485,13 @@ Per project, overridable:
   watching.
 - Its job description is injected with `--append-system-prompt`: the board
   vocabulary (project, epic, task, column), the rule that only `ready` is
-  assignable, the completion and integration protocols, and the instruction to
-  call `list_reports` when told to.
+  assignable, the completion and integration protocols, the instruction to
+  call `list_reports` when told to, and the project's `modelGuidance` text so
+  it can set `model` on the tasks it creates. The orchestrator itself runs on
+  `settings.defaultModel` when set.
+- Resume sends a fixed app-authored first turn ("Agent Board resumed this
+  session; continue from where you left off") because a resumed background
+  session otherwise waits for input until the idle cap stops it.
 
 ### 9.1 Report channel
 
