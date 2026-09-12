@@ -132,3 +132,133 @@ final class BoardTests: XCTestCase {
         XCTAssertEqual(try f.sessions.all(projectId: f.project.id).count, 0)
     }
 }
+
+final class BoardEpicTests: XCTestCase {
+    private func plannedEpic(_ f: Fixture) throws -> (Epic, [BoardTask]) {
+        try f.board.createEpic(
+            projectId: f.project.id,
+            title: "Search",
+            goal: "make search fast",
+            tasks: [
+                NewEpicTask(title: "index", body: "build the index", acceptance: "index exists", priority: "p1", model: "opus"),
+                NewEpicTask(title: "query", dependsOn: [0]),
+                NewEpicTask(title: "ui", dependsOn: [1]),
+            ]
+        )
+    }
+
+    func testCreateEpicWritesTasksAndDepsAndRunsReadiness() throws {
+        let f = try Fixture.make()
+        let (epic, tasks) = try plannedEpic(f)
+
+        XCTAssertEqual(epic.state, .planning)
+        XCTAssertEqual(epic.branch, "agentboard/epic-\(epic.id)")
+        XCTAssertEqual(tasks.map(\.title), ["index", "query", "ui"])
+        XCTAssertEqual(tasks.map(\.epicId), [epic.id, epic.id, epic.id])
+        XCTAssertEqual(tasks[0].body, "build the index")
+        XCTAssertEqual(tasks[0].acceptance, "index exists")
+        XCTAssertEqual(tasks[0].priority, "p1")
+        XCTAssertEqual(tasks[0].model, "opus")
+        XCTAssertEqual(tasks[0].origin, .orchestrator)
+
+        XCTAssertEqual(try f.tasks.deps(of: tasks[1].id), [tasks[0].id])
+        XCTAssertEqual(try f.tasks.deps(of: tasks[2].id), [tasks[1].id])
+        XCTAssertEqual(try f.tasks.deps(of: tasks[0].id), [])
+
+        XCTAssertEqual(tasks.map(\.column), [.ready, .backlog, .backlog])
+        XCTAssertEqual(Set(try f.tasks.list(projectId: f.project.id, epicId: epic.id).map(\.id)), Set(tasks.map(\.id)))
+    }
+
+    func testCreateEpicRollsBackEverythingWhenADependencyIndexIsBad() throws {
+        let f = try Fixture.make()
+        XCTAssertThrowsError(
+            try f.board.createEpic(
+                projectId: f.project.id, title: "Doomed", goal: nil,
+                tasks: [NewEpicTask(title: "a"), NewEpicTask(title: "b", dependsOn: [7])]
+            )
+        ) { error in
+            XCTAssertEqual(error as? BoardError, .invalidEpicDependency(taskIndex: 1, dependsOn: 7))
+        }
+
+        XCTAssertEqual(try f.epics.list(projectId: f.project.id), [])
+        XCTAssertEqual(try f.tasks.list(projectId: f.project.id), [])
+    }
+
+    func testCreateEpicRejectsSelfDependency() throws {
+        let f = try Fixture.make()
+        XCTAssertThrowsError(
+            try f.board.createEpic(
+                projectId: f.project.id, title: "Doomed", goal: nil,
+                tasks: [NewEpicTask(title: "a", dependsOn: [0])]
+            )
+        ) { error in
+            XCTAssertEqual(error as? BoardError, .invalidEpicDependency(taskIndex: 0, dependsOn: 0))
+        }
+        XCTAssertEqual(try f.epics.list(projectId: f.project.id), [])
+        XCTAssertEqual(try f.tasks.list(projectId: f.project.id), [])
+    }
+
+    func testEpicReadyForIntegrationOnlyWhenEveryTaskIsDone() throws {
+        let f = try Fixture.make()
+        let (epic, tasks) = try plannedEpic(f)
+        XCTAssertFalse(try f.board.epicReadyForIntegration(epicId: epic.id))
+
+        for task in tasks {
+            try f.tasks.move(task.id, to: .done)
+            try f.tasks.refreshReadiness(projectId: f.project.id)
+        }
+        XCTAssertTrue(try f.board.epicReadyForIntegration(epicId: epic.id))
+
+        try f.tasks.move(tasks[2].id, to: .review)
+        XCTAssertFalse(try f.board.epicReadyForIntegration(epicId: epic.id))
+    }
+
+    func testEmptyEpicIsNotReadyForIntegrationAndUnknownEpicThrows() throws {
+        let f = try Fixture.make()
+        let epic = try f.epics.create(projectId: f.project.id, title: "empty", goal: nil)
+        XCTAssertFalse(try f.board.epicReadyForIntegration(epicId: epic.id))
+
+        XCTAssertThrowsError(try f.board.epicReadyForIntegration(epicId: "missing")) { error in
+            XCTAssertEqual(error as? BoardError, .epicNotFound("missing"))
+        }
+    }
+
+    func testAcceptingAnEpicTaskMovesTheEpicFromPlanningToActive() throws {
+        let f = try Fixture.make()
+        let (epic, tasks) = try plannedEpic(f)
+
+        try f.board.assign(taskId: tasks[0].id, session: f.session("s1"))
+        try f.board.complete(taskId: tasks[0].id, sessionId: "s1", summary: "indexed")
+        XCTAssertEqual(try f.epics.get(epic.id)?.state, .planning)
+
+        let ready = try f.board.accept(taskId: tasks[0].id)
+        XCTAssertEqual(ready, [tasks[1].id])
+        XCTAssertEqual(try f.epics.get(epic.id)?.state, .active)
+    }
+
+    func testAcceptNeverPromotesAnEpicPastActive() throws {
+        let f = try Fixture.make()
+        let (epic, tasks) = try plannedEpic(f)
+        try f.epics.setState(epic.id, .integrating)
+
+        try f.tasks.move(tasks[0].id, to: .review)
+        try f.board.accept(taskId: tasks[0].id)
+        XCTAssertEqual(try f.epics.get(epic.id)?.state, .integrating)
+
+        try f.tasks.move(tasks[1].id, to: .review)
+        try f.board.accept(taskId: tasks[1].id)
+        try f.tasks.move(tasks[2].id, to: .review)
+        try f.board.accept(taskId: tasks[2].id)
+        XCTAssertEqual(try f.epics.get(epic.id)?.state, .integrating)
+        XCTAssertTrue(try f.board.epicReadyForIntegration(epicId: epic.id))
+    }
+
+    func testAcceptingATaskWithNoEpicTouchesNoEpicState() throws {
+        let f = try Fixture.make()
+        let epic = try f.epics.create(projectId: f.project.id, title: "untouched", goal: nil)
+        let loose = try f.task("loose", column: .review)
+
+        try f.board.accept(taskId: loose.id)
+        XCTAssertEqual(try f.epics.get(epic.id)?.state, .planning)
+    }
+}

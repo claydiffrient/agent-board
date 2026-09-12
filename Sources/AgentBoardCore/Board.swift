@@ -206,6 +206,9 @@ public struct Board: Sendable {
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             try TaskStore.setFailed(db, taskId, false, reason: nil)
             try TaskStore.move(db, taskId, to: .done, before: nil)
+            if let epicId = task.epicId, try Epic.fetchOne(db, key: epicId)?.state == .planning {
+                try EpicStore.setState(db, epicId, .active)
+            }
             return try Self.newlyReady(db, projectId: task.projectId)
         }
     }
@@ -249,6 +252,53 @@ public struct Board: Sendable {
         }
     }
 
+    /// Creates the epic and every task in `tasks` in one transaction, wiring `task_dep` rows from
+    /// `NewEpicTask.dependsOn`, then refreshes readiness so dependency-free tasks leave `backlog`.
+    /// `dependsOn` holds zero-based indices into the same `tasks` array; an index out of range or
+    /// pointing at its own task throws `BoardError.invalidEpicDependency` and rolls the whole batch back.
+    @discardableResult
+    public func createEpic(projectId: String, title: String, goal: String?, tasks: [NewEpicTask]) throws -> (Epic, [Task]) {
+        try db.writer.write { db in
+            let epic = try EpicStore.insert(db, projectId: projectId, title: title, goal: goal)
+            var created: [Task] = []
+            for spec in tasks {
+                created.append(try TaskStore.insert(
+                    db, projectId: projectId, title: spec.title, body: spec.body,
+                    acceptance: spec.acceptance, priority: spec.priority, column: .backlog,
+                    origin: spec.origin, epicId: epic.id, model: spec.model
+                ))
+            }
+            for (index, spec) in tasks.enumerated() {
+                for dependency in Set(spec.dependsOn) {
+                    guard created.indices.contains(dependency), dependency != index else {
+                        throw BoardError.invalidEpicDependency(taskIndex: index, dependsOn: dependency)
+                    }
+                    try TaskDep(taskId: created[index].id, dependsOn: created[dependency].id).insert(db)
+                }
+            }
+            _ = try Self.newlyReady(db, projectId: projectId)
+            let refreshed = try TaskStore.list(db, projectId: projectId, column: nil, epicId: epic.id)
+            let byId = Dictionary(uniqueKeysWithValues: refreshed.map { ($0.id, $0) })
+            return (epic, created.compactMap { byId[$0.id] })
+        }
+    }
+
+    /// True when the epic holds at least one task and every one of them is in `done`.
+    public func epicReadyForIntegration(epicId: String) throws -> Bool {
+        try db.reader.read { db in
+            guard try Epic.exists(db, key: epicId) else {
+                throw BoardError.epicNotFound(epicId)
+            }
+            let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM task WHERE epic_id = ?", arguments: [epicId]) ?? 0
+            let unfinished = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM task WHERE epic_id = ? AND column_name != 'done'",
+                arguments: [epicId]
+            ) ?? 0
+            return total > 0 && unfinished == 0
+        }
+    }
+
     static func requireTask(_ db: Database, _ taskId: String) throws -> Task {
         guard let task = try Task.fetchOne(db, key: taskId) else {
             throw BoardError.taskNotFound(taskId)
@@ -265,5 +315,29 @@ public struct Board: Sendable {
             sql: "SELECT id FROM task WHERE column_name = 'ready' AND id IN (\(placeholders)) ORDER BY ordering",
             arguments: StatementArguments(changed)
         )
+    }
+}
+
+/// One task in a `Board.createEpic` batch. `dependsOn` holds zero-based indices into the same batch.
+public struct NewEpicTask: Sendable, Equatable {
+    public var title: String
+    public var body: String?
+    public var acceptance: String?
+    public var priority: String?
+    public var model: String?
+    public var origin: TaskOrigin
+    public var dependsOn: [Int]
+
+    public init(
+        title: String, body: String? = nil, acceptance: String? = nil, priority: String? = nil,
+        model: String? = nil, origin: TaskOrigin = .orchestrator, dependsOn: [Int] = []
+    ) {
+        self.title = title
+        self.body = body
+        self.acceptance = acceptance
+        self.priority = priority
+        self.model = model
+        self.origin = origin
+        self.dependsOn = dependsOn
     }
 }
