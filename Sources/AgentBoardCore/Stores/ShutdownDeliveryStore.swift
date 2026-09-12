@@ -133,6 +133,10 @@ public struct ShutdownDeliveryStore: Sendable {
         )
     }
 
+    public func observeAll(orderId: String) -> ValueObservation<ValueReducers.Fetch<[ShutdownDelivery]>> {
+        ValueObservation.tracking { db in try Self.all(db, orderId: orderId) }
+    }
+
     public func observeProgress(
         orderId: String, graceSeconds: Int = defaultGraceSeconds
     ) -> ValueObservation<ValueReducers.Fetch<ShutdownProgress>> {
