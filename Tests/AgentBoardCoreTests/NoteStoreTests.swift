@@ -235,3 +235,42 @@ final class NoteStoreTests: XCTestCase {
         XCTAssertEqual(ids, [important.id, plain.id])
     }
 }
+
+final class NoteSectionWriterTests: XCTestCase {
+    func testEachSectionRecordsItsLastWriter() throws {
+        let f = try Fixture.make()
+        let note = try f.notes.create(
+            projectId: f.project.id, title: "N", sections: [("A", "one")], writtenBy: "session-1"
+        )
+        try f.notes.appendSection(noteId: note.id, heading: "B", body: "two", writtenBy: "session-2")
+        try f.notes.appendSection(noteId: note.id, heading: "A", body: "more", writtenBy: "session-3")
+
+        let (_, sections) = try XCTUnwrap(f.notes.read(note.id))
+        XCTAssertEqual(sections.map(\.heading), ["A", "B"])
+        XCTAssertEqual(sections.map(\.writtenBy), ["session-3", "session-2"])
+    }
+
+    func testAHumanEditClearsTheAgentWriter() throws {
+        let f = try Fixture.make()
+        let note = try f.notes.create(
+            projectId: f.project.id, title: "N", sections: [("A", "one")], writtenBy: "session-1"
+        )
+        try f.notes.replaceSection(noteId: note.id, heading: "A", body: "edited by hand", writtenBy: nil)
+        let (_, sections) = try XCTUnwrap(f.notes.read(note.id))
+        XCTAssertNil(sections[0].writtenBy)
+    }
+
+    func testDeleteSectionBumpsVersionAndDropsItFromSearch() throws {
+        let f = try Fixture.make()
+        let note = try f.notes.create(
+            projectId: f.project.id, title: "N", sections: [("Keep", "kept"), ("Drop", "zygomorphic")]
+        )
+        try f.notes.deleteSection(noteId: note.id, heading: "Drop")
+
+        let (after, sections) = try XCTUnwrap(f.notes.read(note.id))
+        XCTAssertEqual(after.version, 2)
+        XCTAssertEqual(sections.map(\.heading), ["Keep"])
+        XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "zygomorphic").count, 0)
+        XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "kept").count, 1)
+    }
+}

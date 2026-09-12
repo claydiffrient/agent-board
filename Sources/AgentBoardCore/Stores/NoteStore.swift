@@ -14,7 +14,12 @@ public struct NoteStore: Sendable {
     }
 
     @discardableResult
-    public func create(projectId: String, title: String, sections: [(heading: String, body: String)]) throws -> Note {
+    public func create(
+        projectId: String,
+        title: String,
+        sections: [(heading: String, body: String)],
+        writtenBy: String? = nil
+    ) throws -> Note {
         try db.writer.write { db in
             let note = Note(
                 id: Note.newId(), projectId: projectId, title: title,
@@ -23,8 +28,10 @@ public struct NoteStore: Sendable {
             try note.insert(db)
             var ordering = 1.0
             for section in sections {
-                try NoteSection(noteId: note.id, heading: section.heading, body: section.body, ordering: ordering)
-                    .insert(db)
+                try NoteSection(
+                    noteId: note.id, heading: section.heading, body: section.body,
+                    ordering: ordering, writtenBy: writtenBy
+                ).insert(db)
                 ordering += 1
             }
             try index(db, noteId: note.id)
@@ -69,19 +76,25 @@ public struct NoteStore: Sendable {
     /// `body` is appended to the existing section, separated by a blank line. Losing a
     /// concurrent worker's text is the one failure mode sectioned notes exist to prevent.
     @discardableResult
-    public func appendSection(noteId: String, heading: String, body: String, ifVersion: Int64? = nil) throws -> Note {
+    public func appendSection(
+        noteId: String,
+        heading: String,
+        body: String,
+        ifVersion: Int64? = nil,
+        writtenBy: String? = nil
+    ) throws -> Note {
         try db.writer.write { db in
             let note = try checkedNote(db, noteId, ifVersion)
             try unindex(db, noteId: noteId)
             if let existing = try NoteSection.fetchOne(db, key: ["note_id": noteId, "heading": heading]) {
                 try db.execute(
-                    sql: "UPDATE note_section SET body = ? WHERE note_id = ? AND heading = ?",
-                    arguments: [existing.body + "\n\n" + body, noteId, heading]
+                    sql: "UPDATE note_section SET body = ?, written_by = ? WHERE note_id = ? AND heading = ?",
+                    arguments: [existing.body + "\n\n" + body, writtenBy, noteId, heading]
                 )
             } else {
                 try NoteSection(
                     noteId: noteId, heading: heading, body: body,
-                    ordering: try endOrdering(db, noteId: noteId)
+                    ordering: try endOrdering(db, noteId: noteId), writtenBy: writtenBy
                 ).insert(db)
             }
             return try bumpVersion(db, note)
@@ -90,19 +103,25 @@ public struct NoteStore: Sendable {
 
     /// Replaces the body of `heading` outright, creating the section if it does not exist yet.
     @discardableResult
-    public func replaceSection(noteId: String, heading: String, body: String, ifVersion: Int64? = nil) throws -> Note {
+    public func replaceSection(
+        noteId: String,
+        heading: String,
+        body: String,
+        ifVersion: Int64? = nil,
+        writtenBy: String? = nil
+    ) throws -> Note {
         try db.writer.write { db in
             let note = try checkedNote(db, noteId, ifVersion)
             try unindex(db, noteId: noteId)
             if try NoteSection.fetchOne(db, key: ["note_id": noteId, "heading": heading]) != nil {
                 try db.execute(
-                    sql: "UPDATE note_section SET body = ? WHERE note_id = ? AND heading = ?",
-                    arguments: [body, noteId, heading]
+                    sql: "UPDATE note_section SET body = ?, written_by = ? WHERE note_id = ? AND heading = ?",
+                    arguments: [body, writtenBy, noteId, heading]
                 )
             } else {
                 try NoteSection(
                     noteId: noteId, heading: heading, body: body,
-                    ordering: try endOrdering(db, noteId: noteId)
+                    ordering: try endOrdering(db, noteId: noteId), writtenBy: writtenBy
                 ).insert(db)
             }
             return try bumpVersion(db, note)
@@ -115,6 +134,18 @@ public struct NoteStore: Sendable {
                 sql: "UPDATE note SET pinned = ? WHERE id = ?",
                 arguments: [pinned, id]
             )
+        }
+    }
+
+    public func deleteSection(noteId: String, heading: String) throws {
+        try db.writer.write { db in
+            guard let note = try Note.fetchOne(db, key: noteId) else { throw NoteError.noteNotFound(noteId) }
+            try unindex(db, noteId: noteId)
+            try db.execute(
+                sql: "DELETE FROM note_section WHERE note_id = ? AND heading = ?",
+                arguments: [noteId, heading]
+            )
+            _ = try bumpVersion(db, note)
         }
     }
 
@@ -204,10 +235,57 @@ public struct NoteStore: Sendable {
         )
     }
 
+    @discardableResult
+    public func rename(_ id: String, title: String) throws -> Note {
+        try db.writer.write { db in
+            guard var note = try Note.fetchOne(db, key: id) else { throw NoteError.noteNotFound(id) }
+            try unindex(db, noteId: id)
+            note.title = title
+            note.updatedAt = .nowMillis
+            try note.update(db)
+            try index(db, noteId: id)
+            return note
+        }
+    }
+
     public func observe(projectId: String) -> ValueObservation<ValueReducers.Fetch<[Note]>> {
         ValueObservation.tracking { db in
             try Self.list(db, projectId: projectId)
         }
+    }
+
+    /// One note with everything the editor renders: its sections and its task/epic attachments.
+    public func detail(noteId: String) throws -> NoteDetail? {
+        try db.reader.read { db in try Self.detail(db, noteId: noteId) }
+    }
+
+    public func observe(noteId: String) -> ValueObservation<ValueReducers.Fetch<NoteDetail?>> {
+        ValueObservation.tracking { db in try Self.detail(db, noteId: noteId) }
+    }
+
+    static func detail(_ db: Database, noteId: String) throws -> NoteDetail? {
+        guard let note = try Note.fetchOne(db, key: noteId) else { return nil }
+        return NoteDetail(
+            note: note,
+            sections: try Self.sections(db, noteId: noteId),
+            links: try NoteLink.fetchAll(
+                db,
+                sql: "SELECT * FROM note_link WHERE note_id = ? ORDER BY rowid",
+                arguments: [noteId]
+            )
+        )
+    }
+}
+
+public struct NoteDetail: Sendable, Equatable {
+    public let note: Note
+    public let sections: [NoteSection]
+    public let links: [NoteLink]
+
+    public init(note: Note, sections: [NoteSection], links: [NoteLink]) {
+        self.note = note
+        self.sections = sections
+        self.links = links
     }
 }
 

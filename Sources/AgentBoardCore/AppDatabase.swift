@@ -39,6 +39,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("approval") { db in
             try db.execute(sql: Schema.approval)
         }
+        migrator.registerMigration("note_section_written_by") { db in
+            try db.execute(sql: "ALTER TABLE note_section ADD COLUMN written_by TEXT")
+        }
         return migrator
     }
 }
