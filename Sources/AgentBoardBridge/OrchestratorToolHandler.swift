@@ -420,13 +420,9 @@ public final class OrchestratorToolHandler: ToolHandler {
         guard epicProject == identity.projectId else {
             throw ToolError("Epic \(epicId) is not in this project.")
         }
-        let approval = try approvals.create(
-            projectId: identity.projectId,
-            kind: .integration,
-            taskId: nil,
+        let approval = try board.requestIntegration(
             epicId: epicId,
-            requestedBy: identity.sessionId ?? "orchestrator",
-            reason: nil
+            requestedBy: identity.sessionId ?? "orchestrator"
         )
         return ToolResult(text: "integration approval \(approval.id) pending")
     }

@@ -1,4 +1,5 @@
 import AgentBoardCore
+import AgentBoardRuntime
 import Foundation
 
 @MainActor
@@ -48,4 +49,6 @@ final class StubSupervisor: WorkerSupervising {
     func approve(approvalId: String) async throws { throw StubError.notWired }
     func deny(approvalId: String, reason: String?) async throws { throw StubError.notWired }
     func promote(taskId: String) async throws { throw StubError.notWired }
+    func requestIntegration(epicId: String) async throws { throw StubError.notWired }
+    func openPullRequest(epicId: String) async throws -> PullRequestOutcome { throw StubError.notWired }
 }

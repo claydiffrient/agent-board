@@ -1,5 +1,6 @@
 import Foundation
 import AgentBoardCore
+import AgentBoardRuntime
 
 /// The UI's only entry point for anything that touches processes, git, or the network.
 @MainActor
@@ -29,4 +30,9 @@ protocol WorkerSupervising: AnyObject {
     func approve(approvalId: String) async throws
     func deny(approvalId: String, reason: String?) async throws
     func promote(taskId: String) async throws
+    /// Queues the human integration approval for the epic. Creates nothing else.
+    func requestIntegration(epicId: String) async throws
+    /// Opens the prefilled compare page for the epic branch; never creates the PR itself.
+    @discardableResult
+    func openPullRequest(epicId: String) async throws -> PullRequestOutcome
 }
