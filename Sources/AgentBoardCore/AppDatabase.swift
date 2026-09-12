@@ -60,6 +60,9 @@ public final class AppDatabase: Sendable {
             // every task already sitting in done would read as "entered done never" and outlive afterDays.
             try db.execute(sql: "UPDATE task SET done_at = updated_at WHERE column_name = 'done'")
         }
+        migrator.registerMigration("workspace") { db in
+            try db.execute(sql: Schema.workspace)
+        }
         return migrator
     }
 }

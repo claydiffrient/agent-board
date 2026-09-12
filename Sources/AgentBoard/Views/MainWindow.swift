@@ -5,8 +5,12 @@ import SwiftUI
 struct MainWindow: View {
     @Environment(AppEnvironment.self) private var env
     @State private var projects = Observed<[Project]>([])
+    @State private var workspaces = Observed<[Workspace]>([])
     @State private var selectedProjectId: String?
     @State private var settingsProject: Project?
+    @State private var workspaceEdit: WorkspaceEdit?
+    @State private var workspaceToDelete: Workspace?
+    @State private var collapsed = SidebarCollapseState.load()
     @State private var errorMessage: String?
 
     var body: some View {
@@ -27,45 +31,198 @@ struct MainWindow: View {
         .task {
             await projects.run(ProjectStore(env.db).observeAll(), in: env.db.reader)
         }
+        .task {
+            await workspaces.run(WorkspaceStore(env.db).observe(), in: env.db.reader)
+        }
         .sheet(item: $settingsProject) { project in
-            ProjectSettingsSheet(project: project) {
+            ProjectSettingsSheet(project: project, workspaces: workspaces.value) {
                 if selectedProjectId == project.id { selectedProjectId = nil }
             }
+        }
+        .sheet(item: $workspaceEdit) { edit in
+            WorkspaceNameSheet(edit: edit) { name in commit(edit, name: name) }
+        }
+        .confirmationDialog(
+            workspaceToDelete.map { "Delete the \($0.name) workspace?" } ?? "",
+            isPresented: Binding(get: { workspaceToDelete != nil }, set: { if !$0 { workspaceToDelete = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Delete Workspace", role: .destructive) {
+                if let workspace = workspaceToDelete { deleteWorkspace(workspace) }
+            }
+        } message: {
+            Text("Its projects stay in the sidebar and become ungrouped.")
         }
         .errorAlert($errorMessage)
     }
 
+    private var sections: [ProjectSection] {
+        ProjectGrouping.sections(projects: projects.value, workspaces: workspaces.value)
+    }
+
     private var sidebar: some View {
-        List(projects.value, selection: $selectedProjectId) { project in
-            HStack {
-                Label(project.name, systemImage: "folder")
-                    .help(project.repoPath)
-                Spacer()
-                Button {
-                    settingsProject = project
-                } label: {
-                    Image(systemName: "gearshape")
-                }
-                .buttonStyle(.borderless)
-                .help("Project settings")
+        List(selection: $selectedProjectId) {
+            ForEach(sections) { section in
+                sectionView(section)
             }
-            .tag(project.id)
         }
         .navigationSplitViewColumnWidth(min: 180, ideal: 220)
         .safeAreaInset(edge: .bottom) {
-            Button {
-                addProject()
-            } label: {
-                Label("Add Project…", systemImage: "plus")
-                    .frame(maxWidth: .infinity)
+            HStack(spacing: 4) {
+                Button {
+                    addProject()
+                } label: {
+                    Label("Add Project…", systemImage: "plus")
+                        .frame(maxWidth: .infinity)
+                }
+                workspaceMenu
             }
             .padding(8)
         }
         .overlay {
-            if projects.value.isEmpty {
+            if projects.value.isEmpty && workspaces.value.isEmpty {
                 Text("No projects yet")
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func sectionView(_ section: ProjectSection) -> some View {
+        if section.isUngrouped && workspaces.value.isEmpty {
+            Section {
+                ForEach(section.projects) { projectRow($0) }
+            }
+        } else {
+            Section(isExpanded: expansion(section.id)) {
+                ForEach(section.projects) { projectRow($0) }
+            } header: {
+                sectionHeader(section)
+            }
+        }
+    }
+
+    private func sectionHeader(_ section: ProjectSection) -> some View {
+        Text(section.workspace?.name ?? "Ungrouped")
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .dropDestination(for: String.self) { projectIds, _ in
+                assign(projectIds, to: section.workspace?.id)
+            }
+            .contextMenu {
+                if let workspace = section.workspace {
+                    Button("Rename…") { workspaceEdit = .rename(workspace) }
+                    Button("Delete Workspace…", role: .destructive) { workspaceToDelete = workspace }
+                }
+            }
+    }
+
+    private func projectRow(_ project: Project) -> some View {
+        HStack {
+            Label(project.name, systemImage: "folder")
+                .help(project.repoPath)
+            Spacer()
+            Button {
+                settingsProject = project
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.borderless)
+            .help("Project settings")
+        }
+        .tag(project.id)
+        .draggable(project.id)
+    }
+
+    private var workspaceMenu: some View {
+        Menu {
+            Button("New Workspace…") { workspaceEdit = .create }
+            if !workspaces.value.isEmpty {
+                Divider()
+                ForEach(workspaces.value) { workspace in
+                    Menu(workspace.name) {
+                        Button("Rename…") { workspaceEdit = .rename(workspace) }
+                        Button("Move Up") { move(workspace, by: -1) }
+                            .disabled(workspaces.value.first?.id == workspace.id)
+                        Button("Move Down") { move(workspace, by: 1) }
+                            .disabled(workspaces.value.last?.id == workspace.id)
+                        Divider()
+                        Button("Delete Workspace…", role: .destructive) { workspaceToDelete = workspace }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "folder.badge.gearshape")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Workspaces")
+    }
+
+    private func expansion(_ sectionId: String) -> Binding<Bool> {
+        Binding(
+            get: { !collapsed.contains(sectionId) },
+            set: { expanded in
+                if expanded {
+                    collapsed.remove(sectionId)
+                } else {
+                    collapsed.insert(sectionId)
+                }
+                SidebarCollapseState.save(collapsed)
+            }
+        )
+    }
+
+    private func assign(_ projectIds: [String], to workspaceId: String?) -> Bool {
+        let store = WorkspaceStore(env.db)
+        do {
+            for id in projectIds {
+                try store.assign(projectId: id, workspaceId: workspaceId)
+            }
+            return !projectIds.isEmpty
+        } catch {
+            errorMessage = errorText(error)
+            return false
+        }
+    }
+
+    private func commit(_ edit: WorkspaceEdit, name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            if let workspace = edit.workspace {
+                try WorkspaceStore(env.db).rename(workspace.id, to: trimmed)
+            } else {
+                try WorkspaceStore(env.db).create(name: trimmed)
+            }
+        } catch {
+            errorMessage = errorText(error)
+        }
+    }
+
+    private func deleteWorkspace(_ workspace: Workspace) {
+        do {
+            try WorkspaceStore(env.db).delete(workspace.id)
+            collapsed.remove(workspace.id)
+            SidebarCollapseState.save(collapsed)
+        } catch {
+            errorMessage = errorText(error)
+        }
+        workspaceToDelete = nil
+    }
+
+    private func move(_ workspace: Workspace, by offset: Int) {
+        let ordered = workspaces.value
+        guard let index = ordered.firstIndex(where: { $0.id == workspace.id }) else { return }
+        let target = index + offset
+        guard ordered.indices.contains(target) else { return }
+        let neighbour = ordered[target]
+        do {
+            let store = WorkspaceStore(env.db)
+            try store.setOrdering(workspace.id, neighbour.ordering)
+            try store.setOrdering(neighbour.id, workspace.ordering)
+        } catch {
+            errorMessage = errorText(error)
         }
     }
 

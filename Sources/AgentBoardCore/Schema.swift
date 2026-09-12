@@ -188,9 +188,20 @@ enum Schema {
     CREATE INDEX shutdown_delivery_session ON shutdown_delivery(session_id);
     """
 
+    static let workspace = """
+    CREATE TABLE workspace (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      ordering   REAL NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    ALTER TABLE project ADD COLUMN workspace_id TEXT REFERENCES workspace(id);
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
-        "approval", "shutdown_order", "shutdown_delivery",
+        "approval", "shutdown_order", "shutdown_delivery", "workspace",
     ]
 }

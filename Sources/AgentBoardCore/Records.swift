@@ -13,6 +13,7 @@ public struct Project: Codable, FetchableRecord, PersistableRecord, Identifiable
     public var orchSessionId: String?
     public var settingsJSON: String
     public var createdAt: Int64
+    public var workspaceId: String?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -24,11 +25,13 @@ public struct Project: Codable, FetchableRecord, PersistableRecord, Identifiable
         case orchSessionId = "orch_session_id"
         case settingsJSON = "settings_json"
         case createdAt = "created_at"
+        case workspaceId = "workspace_id"
     }
 
     public init(
         id: String, name: String, repoPath: String, baseBranch: String, worktreeRoot: String,
-        memoryDir: String?, orchSessionId: String?, settingsJSON: String, createdAt: Int64
+        memoryDir: String?, orchSessionId: String?, settingsJSON: String, createdAt: Int64,
+        workspaceId: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -39,6 +42,7 @@ public struct Project: Codable, FetchableRecord, PersistableRecord, Identifiable
         self.orchSessionId = orchSessionId
         self.settingsJSON = settingsJSON
         self.createdAt = createdAt
+        self.workspaceId = workspaceId
     }
 
     public static func newId() -> String { BoardId.new() }
@@ -49,6 +53,33 @@ public struct Project: Codable, FetchableRecord, PersistableRecord, Identifiable
         get { ProjectSettings.decode(settingsJSON) }
         set { settingsJSON = newValue.encoded() }
     }
+}
+
+public struct Workspace: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
+    public static let databaseTableName = "workspace"
+
+    public var id: String
+    public var name: String
+    public var ordering: Double
+    public var createdAt: Int64
+
+    public enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case ordering
+        case createdAt = "created_at"
+    }
+
+    public init(id: String, name: String, ordering: Double, createdAt: Int64) {
+        self.id = id
+        self.name = name
+        self.ordering = ordering
+        self.createdAt = createdAt
+    }
+
+    public static func newId() -> String { BoardId.new() }
+
+    public var createdDate: Date { createdAt.asDate }
 }
 
 public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {

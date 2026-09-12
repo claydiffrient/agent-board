@@ -4,6 +4,7 @@ import SwiftUI
 
 struct ProjectSettingsSheet: View {
     let project: Project
+    let workspaces: [Workspace]
     let onDeleted: () -> Void
 
     @Environment(AppEnvironment.self) private var env
@@ -15,11 +16,13 @@ struct ProjectSettingsSheet: View {
     @State private var extraServers: String
     @State private var archiveMode: ArchivePolicyMode
     @State private var archiveDays: Int
+    @State private var workspaceId: String?
     @State private var confirmDelete = false
     @State private var errorMessage: String?
 
-    init(project: Project, onDeleted: @escaping () -> Void) {
+    init(project: Project, workspaces: [Workspace], onDeleted: @escaping () -> Void) {
         self.project = project
+        self.workspaces = workspaces
         self.onDeleted = onDeleted
         let settings = project.settings
         _settings = State(initialValue: settings)
@@ -29,6 +32,8 @@ struct ProjectSettingsSheet: View {
         _extraServers = State(initialValue: settings.extraMcpServers.joined(separator: ", "))
         _archiveMode = State(initialValue: settings.archivePolicy.mode)
         _archiveDays = State(initialValue: settings.archivePolicy.days ?? ArchivePolicy.defaultDays)
+        let assigned = project.workspaceId
+        _workspaceId = State(initialValue: workspaces.contains { $0.id == assigned } ? assigned : nil)
     }
 
     private var autoModeJSONIsValid: Bool {
@@ -45,6 +50,18 @@ struct ProjectSettingsSheet: View {
                     LabeledContent("Path", value: project.repoPath)
                     TextField("Base branch", text: $baseBranch)
                     TextField("Worktree root", text: $worktreeRoot)
+                }
+
+                Section("Workspace") {
+                    Picker("Workspace", selection: $workspaceId) {
+                        Text("None").tag(String?.none)
+                        ForEach(workspaces) { workspace in
+                            Text(workspace.name).tag(String?.some(workspace.id))
+                        }
+                    }
+                    Text("Groups this project in the sidebar. Optional \u{2014} an ungrouped project works the same.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Caps") {
@@ -151,6 +168,7 @@ struct ProjectSettingsSheet: View {
             .filter { !$0.isEmpty }
         do {
             try ProjectStore(env.db).updateSettings(project.id, updated)
+            try WorkspaceStore(env.db).assign(projectId: project.id, workspaceId: workspaceId)
             try env.db.writer.write { db in
                 try db.execute(
                     sql: "UPDATE project SET base_branch = ?, worktree_root = ? WHERE id = ?",
