@@ -14,6 +14,7 @@ struct TaskBoardView: View {
     @State private var busyMessage: String?
     @State private var errorMessage: String?
     @State private var taskPendingDelete: BoardTask?
+    @State private var drafts = TaskDraftCache()
 
     private let columnWidth: CGFloat = 250
 
@@ -66,10 +67,22 @@ struct TaskBoardView: View {
                         }
                     }
                     .padding()
+                    .contentShape(Rectangle())
+                    .onTapGesture { selectedTaskId = nil }
                 }
             }
         }
+        .background {
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { selectedTaskId = nil }
+        }
         .background(Color(nsColor: .windowBackgroundColor))
+        .onExitCommand { selectedTaskId = nil }
+        .onChange(of: tasks.value) { _, updated in
+            let reconciled = TaskSelection.reconciled(current: selectedTaskId, availableIds: updated.lazy.map(\.id))
+            if reconciled != selectedTaskId { selectedTaskId = reconciled }
+        }
         .task(id: project.id) {
             await tasks.run(TaskStore(env.db).observe(projectId: project.id), in: env.db.reader)
         }
@@ -105,7 +118,9 @@ struct TaskBoardView: View {
                 TaskInspectorView(
                     task: task,
                     allTasks: tasks.value,
-                    sessions: sessionsByTask[task.id] ?? []
+                    sessions: sessionsByTask[task.id] ?? [],
+                    drafts: drafts,
+                    onClose: { selectedTaskId = nil }
                 )
                 .inspectorColumnWidth(min: 300, ideal: 360)
             }
@@ -196,7 +211,7 @@ struct TaskBoardView: View {
                     onReopen: { reopen(task.id) }
                 )
                 .draggable(task.id)
-                .onTapGesture { selectedTaskId = task.id }
+                .onTapGesture { selectedTaskId = TaskSelection.toggled(current: selectedTaskId, tapped: task.id) }
                 .contextMenu {
                     Button("Details") { selectedTaskId = task.id }
                     Menu("Move to") {
