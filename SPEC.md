@@ -88,6 +88,51 @@ proven by the runtime spike in `spike/` on 2026-09-11.
 - Session transcripts are JSONL under `~/.claude/projects/<slug>/`, carrying
   per-message `usage` with `input_tokens`, `output_tokens`,
   `cache_creation_input_tokens`, `cache_read_input_tokens`, `service_tier`.
+- **`/compact` does not fork the session id.** Measured 2026-09-12 by driving a
+  real `claude` PTY with hooks pointed at a scratch `hook_event` table. Manual
+  `/compact` emits, all under the *same* `session_id` and the same
+  `transcript_path`, and with no `SessionEnd`:
+  `PreCompact {"trigger":"manual"}` → `SessionStart {"source":"compact"}`.
+  `/clear` forks and `/compact` does not, so `StoreHookSink.adoptFork` is a
+  no-op here (the payload id is already a known session) and nothing needs to
+  be re-bound or re-pinned across a compaction.
+- **Claude Code auto-compacts on its own, mid-turn.** Measured with
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=3` to pull the threshold down to a reachable
+  value: `UserPromptSubmit` → `PreCompact {"trigger":"auto"}` → (later)
+  `SessionStart {"source":"compact"}` → `Stop`, same session id throughout. The
+  turn *continues by itself* after an auto-compaction. A manual `/compact` at
+  rest does not: it ends with a `Notification {"notification_type":
+  "idle_prompt","message":"Claude is waiting for your input"}` and the session
+  sits there, exactly like a resume (§9). An app-driven compaction therefore
+  has to send the next turn itself.
+- **Auto-compact fires very late.** From the 2.1.269 binary: the trigger is
+  `contextWindow - 20000 - 13000` tokens, i.e. 13k of headroom below the
+  effective window; `blocked` is 3k below that. `--debug` on a Fable 5.1
+  session logs `autocompact: tokens=… level=ok effectiveWindow=980000` at each
+  turn start, so the window is 1M and the auto trigger is 967k. `/autocompact`,
+  the `autoCompactWindow` setting, `--autocompact <auto|tokens>` and
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` move it; `DISABLE_COMPACT` turns it off.
+  Agent Board compacting at a chosen fraction fires *before* this and at a
+  moment it picks, rather than mid-dispatch.
+- **Context pressure = `input_tokens + cache_read_input_tokens +
+  cache_creation_input_tokens` of the last assistant message.** Calibrated
+  against the TUI's own `N% until auto-compact` readout on a session started
+  with `--autocompact 100k` (threshold 67,000 = 100k − 20k − 13k). Before
+  compaction the readout said 10% (implying 59,995–60,664 tokens) and the last
+  assistant message carried `in=2 cr=60,173 cc=69` → 60,244. After compaction
+  it said 19% (implying 53,935–54,605) and the message carried
+  `in=2 cr=32,593 cc=21,624` → 54,219. Dropping `cache_creation_input_tokens`
+  gives 32,595 there — 40% low, and outside the band. `TranscriptMeter` already
+  parses all three fields.
+- **A session started as a child of another Claude session writes no
+  transcript.** `CLAUDE_CODE_CHILD_SESSION=1` in the environment turns
+  persistence off (the TUI says so in its banner) and no
+  `~/.claude/projects/<slug>/<id>.jsonl` ever appears, while
+  `transcript_path` in the hook payload still points at the file that is never
+  written. `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` overrides it. Agent Board
+  is not a Claude child so this does not bite in production, but any harness
+  that spawns `claude` from inside `claude` must scrub the marker or it will
+  measure nothing.
 - **No programmatic read of account-wide remaining subscription quota exists.**
   Every budget in this spec is a self-imposed ceiling over what Agent Board
   itself spawned, not a real-quota ceiling.
