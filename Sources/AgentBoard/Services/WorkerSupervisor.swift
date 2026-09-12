@@ -204,6 +204,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let shortId = session.shortId else { throw SupervisorError.sessionHasNoShortId(sessionId) }
             try await runtime.stop(shortId: shortId)
             try sessions.setState(sessionId, .stopped, endedAt: .nowMillis)
+            try grants.revokeAll(sessionId: sessionId)
         }
     }
 
@@ -270,7 +271,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
             try board.accept(taskId: taskId)
-            guard let worktreePath = try sessions.forTask(taskId).first?.worktreePath,
+            let taskSessions = try sessions.forTask(taskId)
+            for session in taskSessions {
+                try grants.revokeAll(sessionId: session.sessionId)
+            }
+            guard let worktreePath = taskSessions.first?.worktreePath,
                   FileManager.default.fileExists(atPath: worktreePath)
             else { return }
             let manager = WorktreeManager(
@@ -302,6 +307,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     try? await runtime.stop(shortId: shortId)
                 }
                 try sessions.setState(session.sessionId, .stopped, endedAt: .nowMillis)
+            }
+            for session in taskSessions {
+                try grants.revokeAll(sessionId: session.sessionId)
             }
             if let worktreePath = taskSessions.first?.worktreePath,
                FileManager.default.fileExists(atPath: worktreePath) {

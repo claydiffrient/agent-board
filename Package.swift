@@ -47,5 +47,6 @@ let package = Package(
         .testTarget(name: "AgentBoardRuntimeTests", dependencies: ["AgentBoardRuntime"]),
         .testTarget(name: "AgentBoardServerTests", dependencies: ["AgentBoardServer"]),
         .testTarget(name: "AgentBoardBridgeTests", dependencies: ["AgentBoardBridge"]),
+        .testTarget(name: "AgentBoardAppTests", dependencies: ["AgentBoard"]),
     ]
 )
