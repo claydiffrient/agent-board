@@ -1021,9 +1021,49 @@ from knowing how the agents actually behave first.
   back into workers past `--strict-mcp-config`. Starting position: none.
 - **Unresolved:** whether the `PostToolUse` round trip is cheap enough to leave
   on permanently, or needs a matcher narrowing it to interesting tools.
-- **Accepted limitation:** budgets meter only what Agent Board spawned. Account
-  headroom against 5-hour and weekly caps is not readable programmatically, so a
-  green budget does not mean you have quota left.
+- **Was an accepted limitation, now readable:** budgets still meter only what
+  Agent Board spawned, but account headroom against the 5-hour and weekly caps
+  *is* readable programmatically. Claude Code caches it in the
+  `cachedUsageUtilization` block of `~/.claude.json`: `utilization.five_hour`
+  and `utilization.seven_day`, each carrying a 0-100 `utilization` percentage
+  and an RFC3339 `resets_at`, under a `fetchedAtMs` stamp. Sibling keys
+  (`seven_day_opus`, `nimbus_quill`, `limits`, and others) are usually null and
+  are ignored. `AccountUsageReader` parses it and the sidebar shows both windows
+  below "Add Project…". The two numbers answer different questions — a green
+  budget with a 90% five-hour bar means the account cap, not the budget, is what
+  stops the next spawn.
+
+  **The caveat is staleness.** That block is a cache, not a live reading:
+  Claude Code refetches it on its own TTL, and ordinary session traffic does not
+  keep it warm (measured below), so it can be hours old. Every reading
+  therefore carries its age on screen, and one older than 30 minutes
+  (`AccountUsageSnapshot.staleAfter`) is dimmed and labelled `stale` rather than
+  presented as current. A block with no `fetchedAtMs` counts as stale —
+  freshness has to be proven, not assumed.
+- **Verified 2026-09-12: `claude -p "/usage"` does refresh the cache, and only
+  when it is already stale.** Three measurements on this machine:
+
+  | cache age before | after `claude -p "/usage"` |
+  |---|---|
+  | 1265 s | 0.7 s — refetched |
+  | 869 s  | fresh — refetched |
+  | 21 s / 28 s | unchanged — no-op |
+
+  The run reports `num_turns: 0` and `total_cost_usd: 0`: `/usage` is a local
+  command, so it costs no inference. Claude Code applies its own TTL before
+  refetching, so an eager call on a fresh cache is simply a wasted process.
+  `AccountUsageRefresher` therefore fires only past the 30-minute staleness
+  threshold, at most once every 10 minutes, doubling that wait per consecutive
+  failure up to 80 minutes. It runs `claude -p`, never `--bg`, so it writes no
+  `agent_session` row, is never metered as project spend, and never appears in
+  `claude agents --json --all`. It runs detached from the UI, and a failure
+  leaves the stale reading and its age on screen rather than blanking the bars.
+
+  **Unexpected, and the reason the fallback earns its place:** ordinary session
+  traffic does *not* keep the cache warm. A Claude Code session making API calls
+  continuously for 21 minutes left `fetchedAtMs` untouched the whole time — the
+  cache moved only when `/usage` forced it. So "workers are running" is not a
+  reason to expect a fresh reading.
 - **Accepted limitation:** "native Mac app" means native chrome around embedded
   terminals. The agent conversation is Claude Code's TUI, not a SwiftUI rendering
   of it.

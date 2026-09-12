@@ -27,6 +27,14 @@ enum Format {
     static func relative(_ date: Date) -> String {
         date.formatted(.relative(presentation: .named, unitsStyle: .abbreviated))
     }
+
+    /// Time alone for today, weekday plus time otherwise — a sidebar column has no room for a date.
+    static func resetTime(_ date: Date, now: Date = .now) -> String {
+        if Calendar.current.isDate(date, inSameDayAs: now) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+    }
 }
 
 extension AgentSession {
