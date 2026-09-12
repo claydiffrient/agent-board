@@ -545,3 +545,76 @@ public struct HookEventRecord: Codable, FetchableRecord, MutablePersistableRecor
 
     public var date: Date { at.asDate }
 }
+
+/// A specialist that outlives any one task. Not owned by a project — projects opt in
+/// through `project_roster_agent`.
+public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
+    public static let databaseTableName = "roster_agent"
+
+    public var id: String
+    public var name: String
+    /// Free-text specialty the handoff matches against ("frontend", "reviewer"). Deliberately
+    /// not an enum: the roster is user-defined, so a new role must not need a migration.
+    public var role: String
+    /// Injected at spawn as the agent's identity and specialty.
+    public var systemPrompt: String
+    /// Overrides the project's default model for this agent's sessions.
+    public var model: String?
+    /// Tools this agent may use; empty inherits whatever the project grants a worker.
+    public var toolScope: [String]
+    public var enabled: Bool
+    public var createdAt: Int64
+    public var updatedAt: Int64
+
+    public enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case role
+        case systemPrompt = "system_prompt"
+        case model
+        case toolScope = "tool_scope"
+        case enabled
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    public init(
+        id: String, name: String, role: String, systemPrompt: String, model: String? = nil,
+        toolScope: [String] = [], enabled: Bool = true, createdAt: Int64, updatedAt: Int64
+    ) {
+        self.id = id
+        self.name = name
+        self.role = role
+        self.systemPrompt = systemPrompt
+        self.model = model
+        self.toolScope = toolScope
+        self.enabled = enabled
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    public static func newId() -> String { BoardId.new() }
+
+    public var createdDate: Date { createdAt.asDate }
+    public var updatedDate: Date { updatedAt.asDate }
+}
+
+public struct ProjectRosterAgent: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
+    public static let databaseTableName = "project_roster_agent"
+
+    public var projectId: String
+    public var rosterAgentId: String
+    public var ordering: Double
+
+    public enum CodingKeys: String, CodingKey {
+        case projectId = "project_id"
+        case rosterAgentId = "roster_agent_id"
+        case ordering
+    }
+
+    public init(projectId: String, rosterAgentId: String, ordering: Double) {
+        self.projectId = projectId
+        self.rosterAgentId = rosterAgentId
+        self.ordering = ordering
+    }
+}

@@ -3,7 +3,16 @@ import AppKit
 import SwiftUI
 
 struct MainWindow: View {
+    /// The roster outlives any project, so it sits above the project list rather than inside one.
+    private enum TopLevel: String, CaseIterable, Identifiable {
+        case projects = "Projects"
+        case roster = "Roster"
+
+        var id: String { rawValue }
+    }
+
     @Environment(AppEnvironment.self) private var env
+    @State private var topLevel: TopLevel = .projects
     @State private var projects = Observed<[Project]>([])
     @State private var selectedProjectId: String?
     @State private var settingsProject: Project?
@@ -13,15 +22,20 @@ struct MainWindow: View {
         NavigationSplitView {
             sidebar
         } detail: {
-            if let project = projects.value.first(where: { $0.id == selectedProjectId }) {
-                ProjectDetailView(project: project)
-                    .id(project.id)
-            } else {
-                ContentUnavailableView(
-                    "No Project Selected",
-                    systemImage: "folder",
-                    description: Text("Choose a project in the sidebar or add one.")
-                )
+            switch topLevel {
+            case .roster:
+                RosterView()
+            case .projects:
+                if let project = projects.value.first(where: { $0.id == selectedProjectId }) {
+                    ProjectDetailView(project: project)
+                        .id(project.id)
+                } else {
+                    ContentUnavailableView(
+                        "No Project Selected",
+                        systemImage: "folder",
+                        description: Text("Choose a project in the sidebar or add one.")
+                    )
+                }
             }
         }
         .task {
@@ -52,6 +66,15 @@ struct MainWindow: View {
             .tag(project.id)
         }
         .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+        .safeAreaInset(edge: .top) {
+            Picker("Section", selection: $topLevel) {
+                ForEach(TopLevel.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+        }
         .safeAreaInset(edge: .bottom) {
             Button {
                 addProject()
@@ -67,6 +90,9 @@ struct MainWindow: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .onChange(of: selectedProjectId) { _, id in
+            if id != nil { topLevel = .projects }
+        }
     }
 
     private func addProject() {
@@ -80,6 +106,7 @@ struct MainWindow: View {
         _Concurrency.Task {
             do {
                 let project = try await env.supervisor.registerProject(repoPath: url, name: nil, baseBranch: nil)
+                topLevel = .projects
                 selectedProjectId = project.id
             } catch {
                 errorMessage = errorText(error)

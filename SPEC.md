@@ -321,6 +321,27 @@ CREATE TABLE hook_event (
   payload     TEXT NOT NULL,
   at          INTEGER NOT NULL
 );
+
+-- The roster is cross-project: no project_id. Projects opt in below.
+CREATE TABLE roster_agent (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  role          TEXT NOT NULL,          -- free-text specialty: frontend | reviewer | ...
+  system_prompt TEXT NOT NULL,          -- identity and specialty, injected at spawn
+  model         TEXT,                   -- overrides project settings.defaultModel
+  tool_scope    TEXT NOT NULL DEFAULT '[]',  -- JSON array; empty inherits the project's worker tools
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+
+CREATE TABLE project_roster_agent (
+  project_id      TEXT NOT NULL REFERENCES project(id),
+  roster_agent_id TEXT NOT NULL REFERENCES roster_agent(id),
+  ordering        REAL NOT NULL,        -- the project's preference order for the orchestrator
+  PRIMARY KEY (project_id, roster_agent_id)
+);
+CREATE INDEX project_roster_agent_order ON project_roster_agent(project_id, ordering);
 ```
 
 The token is issued before spawn (it has to be in the generated config files)
@@ -331,6 +352,14 @@ never a billed amount.
 Notes are sectioned rather than a single body specifically so three concurrent
 workers appending to one note do not silently lose each other's writes. Whole-
 document replace is not offered.
+
+`roster_agent.role` is a plain string, not an enum: the roster is user-defined,
+so adding a specialty must not need a migration. A project's *usable* set is
+`project_roster_agent` joined to `roster_agent` where `enabled = 1` — disabling
+an agent roster-wide takes it out of every project's rotation without removing
+anyone's selection. Deleting a rostered agent clears its `project_roster_agent`
+rows and nothing else: the tasks it worked, its sessions, and the `progress`
+rows naming it all survive it.
 
 ---
 
@@ -638,6 +667,20 @@ how permission prompts get answered (D15).
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
 section.
+
+**Roster** — the cross-project register of specialists (§4), and the one screen
+that is not scoped to a project: it sits in a top-level Projects/Roster switch
+above the sidebar's project list rather than beside Task Board and Status. Per
+agent: name, role, model, enabled switch, and — once the lifecycle binds a
+session to a rostered agent — the task it is mid-way through. Add, edit and
+delete; the editor covers name, role, system prompt, model and enabled.
+Deleting an agent that is working is **refused**, and the confirmation names the
+task holding it, because deleting would leave a live session with no identity
+behind it. Which agents a project uses is chosen in that project's settings
+sheet, one toggle per rostered agent, writing `project_roster_agent` directly.
+
+Not to be confused with the Status screen, which shows the live agent sessions
+of one project.
 
 ---
 
