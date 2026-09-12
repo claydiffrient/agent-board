@@ -50,6 +50,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let grants: TokenGrantStore
     @ObservationIgnored private let hookEvents: HookEventStore
     @ObservationIgnored private let approvals: ApprovalStore
+    @ObservationIgnored private let notes: NoteStore
     @ObservationIgnored private let board: Board
     @ObservationIgnored private var meteringTask: _Concurrency.Task<Void, Never>?
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
@@ -69,6 +70,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         grants = TokenGrantStore(db)
         hookEvents = HookEventStore(db)
         approvals = ApprovalStore(db)
+        notes = NoteStore(db)
         board = Board(db)
     }
 
@@ -171,7 +173,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let request = SpawnRequest(
                 cwd: worktree,
                 name: Self.sessionName(for: task),
-                prompt: Self.openingPrompt(task: task, branch: branch, attempt: attempt),
+                prompt: Self.openingPrompt(
+                    task: task, branch: branch, attempt: attempt,
+                    notes: try notes.notesForSpawn(
+                        projectId: project.id, taskId: taskId, epicId: task.epicId
+                    )
+                ),
                 configFiles: configFiles,
                 model: task.model ?? project.settings.defaultModel
             )
@@ -640,35 +647,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return String(slug.prefix(40)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    static func openingPrompt(task: BoardTask, branch: String, attempt: Int) -> String {
-        var sections: [String] = []
-        sections.append("# Task: \(task.title)")
-        sections.append(task.body?.isEmpty == false ? task.body! : "(No further description was given.)")
-        sections.append("## Acceptance criteria\n\(task.acceptance?.isEmpty == false ? task.acceptance! : "None given beyond the description above; use your judgment and say what you verified.")")
-        if attempt > 1 {
-            sections.append("""
-            ## Attempt \(attempt)
-            This is attempt \(attempt) at this task. A previous attempt worked on this same branch (`\(branch)`), \
-            and its commits and any uncommitted changes may still be present in this worktree. \
-            Run `git log` and `git status` before starting, and build on that work rather than redoing it.
-            """)
-        }
-        sections.append("""
-        ## How to work
-        - You are in a dedicated git worktree on branch `\(branch)`. Work only in this directory.
-        - The `agent-board` MCP server holds your assignment. Call `get_my_task` if you need the details again.
-        - Use `log_progress` sparingly, at meaningful milestones rather than after every step.
-        - If you are stuck on something that needs a human decision or information you do not have, \
-        call `report_blocked(reason)` and stop.
-        """)
-        sections.append("""
-        ## When you are done
-        1. Commit on the current branch. Write the message in imperative mood, with no conventional-commit prefix.
-        2. Do not push. Do not open a PR. Both are denied at the tool layer; do not spend a turn discovering that.
-        3. Call `report_complete(summary, files_changed, tests_run, caveats)`. That ends your task; \
-        do not start further work afterwards.
-        """)
-        return sections.joined(separator: "\n\n")
+    static func openingPrompt(task: BoardTask, branch: String, attempt: Int, notes: [InjectedNote] = []) -> String {
+        OpeningPrompt.compose(task: task, branch: branch, attempt: attempt, notes: notes)
     }
 
     private nonisolated static func defaultBranch(repo: URL) -> String? {

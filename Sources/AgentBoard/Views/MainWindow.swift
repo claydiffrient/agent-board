@@ -94,6 +94,7 @@ struct ProjectDetailView: View {
     private enum Screen: String, CaseIterable, Identifiable {
         case board = "Task Board"
         case status = "Status"
+        case notes = "Notes"
         case orchestrator = "Orchestrator"
 
         var id: String { rawValue }
@@ -106,6 +107,7 @@ struct ProjectDetailView: View {
             switch screen {
             case .board: TaskBoardView(project: project)
             case .status: StatusView(project: project)
+            case .notes: NotesView(project: project)
             case .orchestrator: OrchestratorView(project: project)
             }
         }

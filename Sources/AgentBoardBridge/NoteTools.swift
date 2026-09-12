@@ -128,18 +128,25 @@ struct NoteTools: Sendable {
             return .json(Self.render(note, sections: sections))
         case "append_section":
             return try write(arguments, identity: identity) { noteId, heading, body, ifVersion in
-                try notes.appendSection(noteId: noteId, heading: heading, body: body, ifVersion: ifVersion)
+                try notes.appendSection(
+                    noteId: noteId, heading: heading, body: body,
+                    ifVersion: ifVersion, writtenBy: identity.sessionId
+                )
             }
         case "replace_section":
             return try write(arguments, identity: identity) { noteId, heading, body, ifVersion in
-                try notes.replaceSection(noteId: noteId, heading: heading, body: body, ifVersion: ifVersion)
+                try notes.replaceSection(
+                    noteId: noteId, heading: heading, body: body,
+                    ifVersion: ifVersion, writtenBy: identity.sessionId
+                )
             }
         case "create_note":
             let title = try ToolArguments.requiredString("title", in: arguments)
             let note = try notes.create(
                 projectId: identity.projectId,
                 title: title,
-                sections: try Self.parseSections(arguments["sections"])
+                sections: try Self.parseSections(arguments["sections"]),
+                writtenBy: identity.sessionId
             )
             return .json(Self.renderSummary(note))
         case "attach_note":
@@ -246,7 +253,9 @@ struct NoteTools: Sendable {
     static func render(_ note: Note, sections: [NoteSection]) -> JSONValue {
         guard case .object(var object) = renderSummary(note) else { return .null }
         object["sections"] = .array(sections.map { section in
-            .object(["heading": .string(section.heading), "body": .string(section.body)])
+            var fields: [String: JSONValue] = ["heading": .string(section.heading), "body": .string(section.body)]
+            if let writtenBy = section.writtenBy { fields["written_by"] = .string(writtenBy) }
+            return .object(fields)
         })
         return .object(object)
     }

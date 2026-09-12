@@ -233,4 +233,22 @@ final class WorkerNoteToolTests: XCTestCase {
         XCTAssertEqual(try f.notes.get(id)?.projectId, f.project.id)
         XCTAssertEqual(try f.notes.list(projectId: other.id).count, 0)
     }
+
+    func testSectionWritesRecordTheWritingSessionId() async throws {
+        let created = try await callJSON("create_note", [
+            "title": .string("Who wrote this"),
+            "sections": .array([.object(["heading": .string("A"), "body": .string("one")])]),
+        ])
+        let noteId = try XCTUnwrap(created["id"]?.stringValue)
+        _ = try await call("append_section", [
+            "note_id": .string(noteId), "heading": .string("B"), "body": .string("two"),
+        ])
+
+        let sections = try XCTUnwrap(f.notes.read(noteId)?.1)
+        XCTAssertEqual(sections.map(\.writtenBy), ["s1", "s1"])
+
+        let read = try await callJSON("read_note", ["id": .string(noteId)])
+        let rendered = try XCTUnwrap(read["sections"]?.arrayValue)
+        XCTAssertEqual(rendered.compactMap { $0["written_by"]?.stringValue }, ["s1", "s1"])
+    }
 }

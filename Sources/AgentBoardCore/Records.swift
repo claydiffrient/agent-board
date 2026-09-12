@@ -474,19 +474,23 @@ public struct NoteSection: Codable, FetchableRecord, PersistableRecord, Sendable
     public var heading: String
     public var body: String
     public var ordering: Double
+    /// Session id of the agent that last wrote this section; nil when a human wrote it in the app.
+    public var writtenBy: String?
 
     public enum CodingKeys: String, CodingKey {
         case noteId = "note_id"
         case heading
         case body
         case ordering
+        case writtenBy = "written_by"
     }
 
-    public init(noteId: String, heading: String, body: String, ordering: Double) {
+    public init(noteId: String, heading: String, body: String, ordering: Double, writtenBy: String? = nil) {
         self.noteId = noteId
         self.heading = heading
         self.body = body
         self.ordering = ordering
+        self.writtenBy = writtenBy
     }
 }
 
