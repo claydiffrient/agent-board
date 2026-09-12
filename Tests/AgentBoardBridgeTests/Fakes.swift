@@ -55,6 +55,7 @@ struct BridgeFixture {
     var sessions: SessionStore { SessionStore(db) }
     var reports: ReportStore { ReportStore(db) }
     var approvals: ApprovalStore { ApprovalStore(db) }
+    var notes: NoteStore { NoteStore(db) }
     var board: Board { Board(db) }
 
     var orchestratorIdentity: TokenIdentity {
@@ -109,6 +110,21 @@ struct BridgeFixture {
         let session = AgentSession(sessionId: id, projectId: project.id, taskId: taskId, role: role, cwd: "/tmp", state: state)
         try sessions.insert(session)
         return session
+    }
+
+    @discardableResult
+    func note(_ title: String, sections: [(heading: String, body: String)] = [], in projectId: String? = nil) throws -> Note {
+        try notes.create(projectId: projectId ?? project.id, title: title, sections: sections)
+    }
+
+    @discardableResult
+    func epic(_ title: String, in projectId: String? = nil) throws -> Epic {
+        let epic = Epic(
+            id: Epic.newId(), projectId: projectId ?? project.id, title: title, goal: nil,
+            branch: "epic/\(title)", state: .active, createdAt: .nowMillis
+        )
+        try db.writer.write { db in try epic.insert(db) }
+        return epic
     }
 
     func workerIdentity(sessionId: String, taskId: String) -> TokenIdentity {

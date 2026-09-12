@@ -24,6 +24,27 @@ enum ToolSchema {
         return .object(fields)
     }
 
+    static func integer(_ description: String? = nil) -> JSONValue {
+        var fields: [String: JSONValue] = ["type": .string("integer")]
+        if let description { fields["description"] = .string(description) }
+        return .object(fields)
+    }
+
+    static func boolean(_ description: String? = nil) -> JSONValue {
+        var fields: [String: JSONValue] = ["type": .string("boolean")]
+        if let description { fields["description"] = .string(description) }
+        return .object(fields)
+    }
+
+    static func objectArray(properties: [String: JSONValue], required: [String], description: String? = nil) -> JSONValue {
+        var fields: [String: JSONValue] = [
+            "type": .string("array"),
+            "items": object(properties: properties, required: required),
+        ]
+        if let description { fields["description"] = .string(description) }
+        return .object(fields)
+    }
+
     static func stringArray(_ description: String? = nil) -> JSONValue {
         var fields: [String: JSONValue] = ["type": .string("array"), "items": .object(["type": .string("string")])]
         if let description { fields["description"] = .string(description) }
@@ -42,6 +63,20 @@ enum ToolArguments {
     static func optionalString(_ key: String, in arguments: JSONValue) -> String? {
         guard let value = arguments[key], value != .null else { return nil }
         return value.stringValue
+    }
+
+    static func requiredBool(_ key: String, in arguments: JSONValue) throws -> Bool {
+        guard let value = arguments[key]?.boolValue else {
+            throw ToolError("Argument \(key) must be true or false")
+        }
+        return value
+    }
+
+    static func optionalInteger(_ key: String, in arguments: JSONValue) throws -> Int64? {
+        guard let value = arguments[key], value != .null else { return nil }
+        if let number = value.numberValue { return Int64(number) }
+        if let parsed = value.stringValue.flatMap(Int64.init) { return parsed }
+        throw ToolError("Argument \(key) must be an integer")
     }
 
     static func stringArray(_ key: String, in arguments: JSONValue) throws -> [String]? {

@@ -7,6 +7,7 @@ public final class WorkerToolHandler: ToolHandler {
     private let sessions: SessionStore
     private let progress: ProgressStore
     private let board: Board
+    private let notes: NoteTools
     private let events: any BoardEventSink
 
     public init(db: AppDatabase, events: any BoardEventSink) {
@@ -14,6 +15,7 @@ public final class WorkerToolHandler: ToolHandler {
         sessions = SessionStore(db)
         progress = ProgressStore(db)
         board = Board(db)
+        notes = NoteTools(db: db)
         self.events = events
     }
 
@@ -82,13 +84,16 @@ public final class WorkerToolHandler: ToolHandler {
                 required: ["reason"]
             )
         ),
-    ]
+    ] + NoteTools.workerDescriptors
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
         Self.descriptors
     }
 
     public func call(_ name: String, arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+        if Self.noteToolNames.contains(name) {
+            return try notes.call(name, arguments: arguments, identity: identity)
+        }
         let task = try ownedTask(identity)
         switch name {
         case "get_my_task":
@@ -124,6 +129,8 @@ public final class WorkerToolHandler: ToolHandler {
             throw ToolError("Unknown tool: \(name)")
         }
     }
+
+    private static let noteToolNames = Set(NoteTools.workerDescriptors.map(\.name))
 
     private func ownedTask(_ identity: TokenIdentity) throws -> BoardTask {
         guard let taskId = identity.taskId else {
