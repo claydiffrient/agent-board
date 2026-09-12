@@ -568,7 +568,7 @@ deferred assumption.
 worktree creation with the `memory` symlink, manual assignment, spend metering,
 caps. Useful without any orchestrator.
 
-**M2 — orchestrator.** Orchestrator PTY, per-scope MCP tokens, `spawn_worker`,
+**M2 — orchestrator. DONE 2026-09-11 (report channel verified live: Stop → notice → `list_reports` → consumed).** Orchestrator PTY, per-scope MCP tokens, `spawn_worker`,
 the report channel, approvals sidebar, autonomy toggle.
 
 **M3 — epics and integration.** Epic entity, epic branches, task branching from
