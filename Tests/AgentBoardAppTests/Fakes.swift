@@ -8,9 +8,11 @@ import Foundation
 actor FakeRuntime: AgentRuntime {
     private(set) var stopped: [String] = []
     private(set) var resumed: [String] = []
+    private(set) var spawns: [SpawnRequest] = []
 
     func spawn(_ request: SpawnRequest) async throws -> SpawnedAgent {
-        SpawnedAgent(shortId: "short", sessionId: "session")
+        spawns.append(request)
+        return SpawnedAgent(shortId: "short-\(spawns.count)", sessionId: "session-\(spawns.count)")
     }
 
     func resume(sessionId: String, cwd: URL, prompt: String) async throws -> SpawnedAgent {
@@ -26,6 +28,11 @@ actor FakeRuntime: AgentRuntime {
     }
 }
 
+struct FixtureError: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
+}
+
 @MainActor
 struct SupervisorFixture {
     let db: AppDatabase
@@ -39,17 +46,20 @@ struct SupervisorFixture {
     var sessions: SessionStore { SessionStore(db) }
     var grants: TokenGrantStore { TokenGrantStore(db) }
 
-    static func make() throws -> SupervisorFixture {
+    static func make(gitRepo: Bool = false) throws -> SupervisorFixture {
         let db = try AppDatabase.inMemory()
         let supportDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentboard-tests/\(UUID().uuidString)")
+            .resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: supportDir, withIntermediateDirectories: true)
+        let repo = supportDir.appendingPathComponent("repo")
+        if gitRepo { try initRepo(at: repo) }
         let project = try ProjectStore(db).register(
             name: "Demo",
-            repoPath: supportDir.appendingPathComponent("repo").path,
+            repoPath: repo.path,
             baseBranch: "main",
             worktreeRoot: supportDir.appendingPathComponent("worktrees").path,
-            memoryDir: nil
+            memoryDir: gitRepo ? supportDir.appendingPathComponent("memory").path : nil
         )
         let sink = LateBoundSink()
         let server = BoardServer(
@@ -69,8 +79,49 @@ struct SupervisorFixture {
         )
     }
 
+    /// Spawn writes a `~/.claude/projects/<worktree-slug>/memory` symlink outside the sandbox,
+    /// so every worktree this fixture created has to be unlinked by path, not just deleted.
     func cleanUp() {
+        let worktreeRoot = URL(fileURLWithPath: project.worktreeRoot)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: worktreeRoot.path)) ?? []
+        for name in names {
+            let worktree = worktreeRoot.appendingPathComponent(name).path
+            try? FileManager.default.removeItem(at: ClaudeProjectPaths.projectDir(forPath: worktree))
+        }
         try? FileManager.default.removeItem(at: supportDir)
+    }
+
+    /// A real repository on `main` with one commit, so spawn's `git worktree add` has something to cut from.
+    private static func initRepo(at repo: URL) throws {
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try git(["init", "-q", "-b", "main"], cwd: repo)
+        try "hello\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try git(["add", "."], cwd: repo)
+        try git(
+            ["-c", "user.email=test@example.com", "-c", "user.name=Test", "-c", "commit.gpgsign=false",
+             "commit", "-q", "-m", "Initial commit"],
+            cwd: repo
+        )
+    }
+
+    @discardableResult
+    static func git(_ args: [String], cwd: URL) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = args
+        process.currentDirectoryURL = cwd
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        let out = stdout.fileHandleForReading.readDataToEndOfFile()
+        let err = stderr.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw FixtureError("git \(args.joined(separator: " ")) exited \(process.terminationStatus): \(String(decoding: err, as: UTF8.self))")
+        }
+        return String(decoding: out, as: UTF8.self)
     }
 
     /// A running worker session for a fresh task, holding a bound, unrevoked grant.

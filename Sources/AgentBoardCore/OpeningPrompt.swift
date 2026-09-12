@@ -13,12 +13,24 @@ public enum OpeningPrompt {
         task: BoardTask,
         branch: String,
         attempt: Int,
+        epicGoal: String? = nil,
         notes: [InjectedNote] = []
     ) -> String {
         var sections: [String] = []
         sections.append("# Task: \(task.title)")
         sections.append(task.body?.isEmpty == false ? task.body! : "(No further description was given.)")
         sections.append("## Acceptance criteria\n\(task.acceptance?.isEmpty == false ? task.acceptance! : "None given beyond the description above; use your judgment and say what you verified.")")
+        if let epicGoal, !epicGoal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            sections.append("""
+            ## Epic goal
+            This task is one of several in an epic. Your branch was cut from the epic branch, and your work \
+            will be merged with the other tasks' work. The epic's goal:
+
+            \(epicGoal)
+
+            Stay inside your own task; the goal is context for the choices you make, not extra scope.
+            """)
+        }
         if attempt > 1 {
             sections.append("""
             ## Attempt \(attempt)
