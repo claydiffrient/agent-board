@@ -187,6 +187,10 @@ public struct Board: Sendable {
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             try TaskStore.move(db, taskId, to: .review, before: nil)
             try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
+            if task.origin == .integration, let epicId = task.epicId,
+               try Epic.fetchOne(db, key: epicId)?.state == .integrating {
+                try EpicStore.setState(db, epicId, .done)
+            }
             return report
         }
     }
@@ -382,6 +386,22 @@ public struct Board: Sendable {
             let refreshed = try TaskStore.list(db, projectId: projectId, column: nil, epicId: epic.id)
             let byId = Dictionary(uniqueKeysWithValues: refreshed.map { ($0.id, $0) })
             return (epic, created.compactMap { byId[$0.id] })
+        }
+    }
+
+    /// The synthetic task the integrator is bound to, so its worker token, its report routing and
+    /// its board card behave exactly as they do for any other worker. Completing it moves the epic
+    /// to `done` in the same transaction as the report (see `complete`).
+    @discardableResult
+    public func createIntegrationTask(epicId: String) throws -> Task {
+        try db.writer.write { db in
+            guard let epic = try Epic.fetchOne(db, key: epicId) else {
+                throw BoardError.epicNotFound(epicId)
+            }
+            return try TaskStore.insert(
+                db, projectId: epic.projectId, title: IntegrationPlan.taskTitle(epic: epic), body: nil,
+                acceptance: nil, priority: nil, column: .ready, origin: .integration, epicId: epicId
+            )
         }
     }
 

@@ -63,6 +63,8 @@ public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, Data
     case human
     case orchestrator
     case workerProposal = "worker_proposal"
+    /// The synthetic task an epic's integrator worker is bound to (§5.2 step 3).
+    case integration
 }
 
 public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
