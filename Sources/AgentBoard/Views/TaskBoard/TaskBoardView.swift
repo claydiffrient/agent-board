@@ -67,11 +67,15 @@ struct TaskBoardView: View {
                         }
                     }
                     .padding()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .contentShape(Rectangle())
                     .onTapGesture { selectedTaskId = nil }
                 }
             }
+        }
+        .background {
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { selectedTaskId = nil }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .onExitCommand { selectedTaskId = nil }
