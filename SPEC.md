@@ -577,6 +577,28 @@ Per project, overridable:
    `\n` as a literal newline inside the prompt.
 4. The orchestrator pulls bodies through MCP, where they arrive as tool results.
 
+**Injection is withheld while the human has unsubmitted text in the prompt.**
+The notice is bytes in the same PTY the human types into: written mid-sentence
+it appends to their half-written message and its `\r` submits the pair, sending
+one garbled prompt and destroying what they wrote. Observed 2026-09-12.
+
+So the console classifies every byte on its way to the child and tracks whether
+the prompt is dirty — printable text and pasted text dirty it; `\r`, `\n`,
+`Ctrl-C`, `Ctrl-U` and a lone `Esc` clear it; cursor keys, backspace and any
+other escape sequence leave it as it was. Every trigger — the `Stop` hook, a
+board change, and the human's manual Nudge — passes through one gate, and a
+notice refused while the prompt is dirty is **held, not dropped**: an
+orchestrator that is never told about pending reports holds a stale board and
+stops dispatching. It goes out at the next submit or cancel, with the pending
+count re-read at that moment because more reports may have queued while it
+waited, and the high-water mark of announced report ids advances only when a
+notice is actually written.
+
+The classification is a heuristic over a TUI whose input model Agent Board does
+not own, so it is biased to read as dirty: an unrecognized sequence delays a
+notice, which is harmless, rather than overwriting a human's typing, which is
+not.
+
 Every board change the orchestrator did not itself make queues a report; an
 orchestrator that is not told holds a stale board and cannot dispatch what just
 became ready.
