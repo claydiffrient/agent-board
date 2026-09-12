@@ -17,6 +17,7 @@ public final class StoreHookSink: HookSink {
     private enum FollowUp {
         case notify(title: String, body: String)
         case orchestratorTurnEnded(projectId: String, sessionId: String)
+        case reportQueued(projectId: String)
     }
 
     public init(db: AppDatabase, events: any BoardEventSink) {
@@ -30,30 +31,32 @@ public final class StoreHookSink: HookSink {
     }
 
     public func handle(_ event: HookEvent, identity: TokenIdentity) async {
-        let followUp: FollowUp? = await withCheckedContinuation { continuation in
+        let followUps: [FollowUp] = await withCheckedContinuation { continuation in
             queue.async {
                 continuation.resume(returning: self.process(event, identity: identity))
             }
         }
-        switch followUp {
-        case .notify(let title, let body):
-            await events.notify(title: title, body: body)
-        case .orchestratorTurnEnded(let projectId, let sessionId):
-            await events.orchestratorTurnEnded(projectId: projectId, sessionId: sessionId)
-        case nil:
-            break
+        for followUp in followUps {
+            switch followUp {
+            case .notify(let title, let body):
+                await events.notify(title: title, body: body)
+            case .orchestratorTurnEnded(let projectId, let sessionId):
+                await events.orchestratorTurnEnded(projectId: projectId, sessionId: sessionId)
+            case .reportQueued(let projectId):
+                await events.reportQueued(projectId: projectId)
+            }
         }
     }
 
-    private func process(_ event: HookEvent, identity: TokenIdentity) -> FollowUp? {
+    private func process(_ event: HookEvent, identity: TokenIdentity) -> [FollowUp] {
         let sessionId = event.sessionId
         _ = try? hookEvents.append(sessionId: sessionId, event: event.name, payload: event.rawJSON)
-        guard !sessionId.isEmpty else { return nil }
+        guard !sessionId.isEmpty else { return [] }
 
         if identity.sessionId == nil {
             try? grants.bind(token: identity.token, sessionId: sessionId)
         }
-        guard let session = try? sessions.get(sessionId) else { return nil }
+        guard let session = try? sessions.get(sessionId) else { return [] }
         let taskId = session.taskId ?? identity.taskId
 
         switch event.name {
@@ -78,22 +81,25 @@ public final class StoreHookSink: HookSink {
             }
 
         case "Notification":
-            guard let type = event.notificationType else { return nil }
+            guard let type = event.notificationType else { return [] }
             if Self.blockingNotificationTypes.contains(type) || type.hasPrefix("elicitation") {
                 let reason = event.notificationMessage ?? type
+                var followUps: [FollowUp] = [.notify(title: "Agent needs input", body: reason)]
                 if let taskId {
-                    _ = try? board.block(taskId: taskId, sessionId: sessionId, reason: reason)
+                    if (try? board.block(taskId: taskId, sessionId: sessionId, reason: reason)) != nil {
+                        followUps.append(.reportQueued(projectId: session.projectId))
+                    }
                 } else {
                     try? sessions.setState(sessionId, .blocked)
                 }
-                return .notify(title: "Agent needs input", body: reason)
+                return followUps
             } else if type == "idle_prompt", session.state.isActive {
                 try? sessions.setState(sessionId, .idle)
             }
 
         case "Stop":
             if session.role == .orchestrator {
-                return .orchestratorTurnEnded(projectId: session.projectId, sessionId: sessionId)
+                return [.orchestratorTurnEnded(projectId: session.projectId, sessionId: sessionId)]
             }
             if session.state.isActive {
                 try? sessions.setState(sessionId, .idle)
@@ -110,6 +116,6 @@ public final class StoreHookSink: HookSink {
         default:
             break
         }
-        return nil
+        return []
     }
 }

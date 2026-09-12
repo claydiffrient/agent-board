@@ -470,6 +470,10 @@ Per project, overridable:
 | Idle (no tool use, no output) | 5 min | Agent stopped, task flagged |
 | Project session ceiling | configurable | Spawn refused |
 
+- A stopped agent's task returns to `ready` with its `failure_reason` set, and a
+  `failed` report goes to the orchestrator (§9.1). Leaving it in `running` with
+  no session strands it: nothing can be spawned from `running`.
+
 - The token cap counts uncached input plus output only. Cache reads recur every
   turn and cache writes re-cache the whole context on every resume (measured:
   200k+ per resume on an M2-sized worker), so neither is a measure of work done.
@@ -509,8 +513,9 @@ Per project, overridable:
 
 ### 9.1 Report channel
 
-1. A worker calls `report_complete` / `report_blocked` / `propose_task`. The
-   body lands in `report`, unconsumed.
+1. A worker calls `report_complete` / `report_blocked` / `propose_task`, **or the
+   app itself changes the board in a way the orchestrator cannot observe** — see
+   the table below. The body lands in `report`, unconsumed.
 2. The orchestrator's `Stop` hook fires when it finishes a turn.
 3. If unconsumed reports exist, Agent Board writes **one fixed, app-authored
    line** into the orchestrator PTY:
@@ -518,6 +523,26 @@ Per project, overridable:
    a carriage return (`\r`); Claude Code's TUI submits on Enter and treats
    `\n` as a literal newline inside the prompt.
 4. The orchestrator pulls bodies through MCP, where they arrive as tool results.
+
+Every board change the orchestrator did not itself make queues a report; an
+orchestrator that is not told holds a stale board and cannot dispatch what just
+became ready.
+
+| App-side change | Report kind | Body carries |
+|---|---|---|
+| Human accepts a task into `done` | `decision` | Accepted task, and the ids that became `ready` |
+| Human reopens a task | `decision` | Task, now back in `ready` |
+| Human discards a task | `decision` | Deleted task id (the task row is gone) |
+| Human promotes a proposal | `decision` | Proposal, and the ids that became `ready` |
+| Human approves or denies an approval | `decision` | Approval, outcome, reason |
+| Cap or idle kill | `failed` | Task, session, `failure_reason` |
+| Human stops a worker, or Pause All | `failed` | Task, session, that a human stopped it |
+| `reconcile` finds a session gone | `failed` | Task, session, that Agent Board did not stop it |
+
+A worker session Agent Board ends itself never lands the task in `running` with
+no session attached: the task returns to `ready` so it can be dispatched again
+without a manual `move_task`. A cap or idle kill also sets `failed` and
+`failure_reason` on the card; a human stop does not.
 
 No agent-generated text is ever written into the orchestrator's user turn. The
 orchestrator holds spawn, assign, and integration authority; a worker that echoes

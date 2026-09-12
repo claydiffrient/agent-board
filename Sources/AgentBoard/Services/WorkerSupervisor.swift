@@ -203,7 +203,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let session = try requireSession(sessionId)
             guard let shortId = session.shortId else { throw SupervisorError.sessionHasNoShortId(sessionId) }
             try await runtime.stop(shortId: shortId)
-            try sessions.setState(sessionId, .stopped, endedAt: .nowMillis)
+            try board.terminate(sessionId: sessionId, cause: .stoppedByHuman)
+            announceReports(projectId: session.projectId)
         }
     }
 
@@ -254,11 +255,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 do {
                     guard let shortId = session.shortId else { throw SupervisorError.sessionHasNoShortId(session.sessionId) }
                     try await runtime.stop(shortId: shortId)
-                    try sessions.setState(session.sessionId, .stopped, endedAt: .nowMillis)
+                    try board.terminate(sessionId: session.sessionId, cause: .stoppedByHuman)
                 } catch {
                     firstFailure = firstFailure ?? error
                 }
             }
+            announceReports(projectId: projectId)
             if let firstFailure { throw firstFailure }
         }
     }
@@ -270,6 +272,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
             try board.accept(taskId: taskId)
+            announceReports(projectId: task.projectId)
             guard let worktreePath = try sessions.forTask(taskId).first?.worktreePath,
                   FileManager.default.fileExists(atPath: worktreePath)
             else { return }
@@ -287,7 +290,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func reopen(taskId: String) async throws {
-        try await recording { try board.reopen(taskId: taskId) }
+        try await recording {
+            let report = try board.reopen(taskId: taskId)
+            announceReports(projectId: report.projectId)
+        }
     }
 
     func discard(taskId: String) async throws {
@@ -316,7 +322,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     lastError = report.hookDiagnostics.joined(separator: "\n")
                 }
             }
-            try tasks.delete(taskId)
+            try board.discard(taskId: taskId)
+            announceReports(projectId: project.id)
         }
     }
 
@@ -333,14 +340,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         for info in listed {
             if let sessionId = info.sessionId, byId[sessionId] == nil { byId[sessionId] = info }
         }
-        let now = Int64.nowMillis
+        var queuedReport = false
         for session in ours {
             guard let info = byId[session.sessionId] else {
                 if session.state.isActive {
                     if session.role == .orchestrator, consoles[session.projectId]?.isProcessRunning == true {
                         continue
                     }
-                    try? sessions.setState(session.sessionId, .stopped, endedAt: now)
+                    let report = (try? board.terminate(sessionId: session.sessionId, cause: .vanished)) ?? nil
+                    queuedReport = queuedReport || report != nil
                 }
                 continue
             }
@@ -351,7 +359,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let status = info.status?.lowercased()
             if state == "stopped" || status == "stopped" {
                 if session.state.isActive {
-                    try? sessions.setState(session.sessionId, .stopped, endedAt: now)
+                    let report = (try? board.terminate(sessionId: session.sessionId, cause: .vanished)) ?? nil
+                    queuedReport = queuedReport || report != nil
                 }
             } else if status == "running" {
                 if [.starting, .idle, .stopped].contains(session.state) {
@@ -363,6 +372,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
             }
         }
+        if queuedReport { announceReports(projectId: projectId) }
     }
 
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? {
@@ -404,6 +414,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording {
             guard let approval = try approvals.get(approvalId) else { throw SupervisorError.approvalNotFound(approvalId) }
             try board.resolveApproval(approvalId, approved: true, by: "human")
+            announceReports(projectId: approval.projectId)
             if approval.kind == .spawn, let taskId = approval.taskId {
                 try await spawn(taskId: taskId)
             }
@@ -413,12 +424,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func deny(approvalId: String, reason: String?) async throws {
         try await recording {
             let trimmed = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
-            try board.resolveApproval(approvalId, approved: false, by: "human", reason: trimmed?.isEmpty == false ? trimmed : nil)
+            let approval = try board.resolveApproval(
+                approvalId, approved: false, by: "human", reason: trimmed?.isEmpty == false ? trimmed : nil
+            )
+            announceReports(projectId: approval.projectId)
         }
     }
 
     func promote(taskId: String) async throws {
-        try await recording { try board.promote(taskId: taskId) }
+        try await recording {
+            guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
+            try board.promote(taskId: taskId)
+            announceReports(projectId: task.projectId)
+        }
     }
 
     // MARK: - WorkerControl
@@ -442,6 +460,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func reportQueued(projectId: String) async {
+        announceReports(projectId: projectId)
+    }
+
+    /// The orchestrator only learns of a queued report through the console notice.
+    private func announceReports(projectId: String) {
         consoles[projectId]?.reportsChanged()
     }
 
@@ -523,11 +546,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if let shortId = session.shortId {
             try? await runtime.stop(shortId: shortId)
         }
-        try? sessions.setState(session.sessionId, .failed, endedAt: .nowMillis)
-        try? sessions.setStopReason(session.sessionId, description)
-        if let taskId = session.taskId {
-            try? tasks.setFailed(taskId, true, reason: description)
-        }
+        _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description))
+        announceReports(projectId: session.projectId)
         MacNotifier.post(title: "Worker stopped at cap", body: description)
     }
 
