@@ -135,3 +135,57 @@ final class EpicCollapseStoreTests: XCTestCase {
         XCTAssertNil(store.userChoice(epicId: "two"))
     }
 }
+
+final class EpicJumpRailTests: XCTestCase {
+    private func epic(_ id: String, _ state: EpicState, title: String, createdAt: Int64) -> Epic {
+        Epic(
+            id: id, projectId: "p", title: title, goal: nil, branch: "epic/\(id)",
+            state: state, createdAt: createdAt
+        )
+    }
+
+    func testNoEpicEntryTargetsTheStandaloneLane() {
+        let first = EpicJumpRail.entries([]).first
+        XCTAssertEqual(first?.laneId, EpicLaneOrder.noEpicLaneId)
+        XCTAssertEqual(first?.title, "No epic")
+        XCTAssertNil(first?.epicId)
+        XCTAssertEqual(EpicJumpRail.laneId(forEpicId: nil), EpicLaneOrder.noEpicLaneId)
+    }
+
+    func testEachEpicEntryTargetsItsOwnLane() {
+        let epics = [
+            epic("e1", .active, title: "Rail", createdAt: 10),
+            epic("e2", .done, title: "Shipped", createdAt: 900),
+        ]
+        let entries = EpicJumpRail.entries(epics)
+        XCTAssertEqual(entries.map(\.laneId), ["no-epic", "e1", "e2"])
+        XCTAssertEqual(entries.map(\.title), ["No epic", "Rail", "Shipped"])
+        XCTAssertEqual(entries.map(\.epicId), [nil, "e1", "e2"])
+        XCTAssertEqual(EpicJumpRail.laneId(forEpicId: "e2"), "e2")
+    }
+
+    /// The rail and the board must walk the same lanes in the same order, or an entry scrolls to
+    /// a lane the reader never rendered an id for.
+    func testEntryOrderMatchesTheBoardLaneOrder() {
+        let epics = [
+            epic("done", .done, title: "Done", createdAt: 900),
+            epic("active", .active, title: "Active", createdAt: 1),
+            epic("planning", .planning, title: "Planning", createdAt: 500),
+        ]
+        XCTAssertEqual(EpicJumpRail.entries(epics).map(\.laneId), EpicLaneOrder.laneOrder(epics))
+    }
+
+    func testEntryIdIsTheLaneId() {
+        let entries = EpicJumpRail.entries([epic("e1", .active, title: "Rail", createdAt: 1)])
+        XCTAssertEqual(entries.map(\.id), entries.map(\.laneId))
+    }
+
+    /// Two epics can share a title; the tap target is the id, not the label.
+    func testDuplicateTitlesStillTargetDistinctLanes() {
+        let epics = [
+            epic("e1", .active, title: "Same", createdAt: 2),
+            epic("e2", .active, title: "Same", createdAt: 1),
+        ]
+        XCTAssertEqual(EpicJumpRail.entries(epics).map(\.laneId), ["no-epic", "e1", "e2"])
+    }
+}

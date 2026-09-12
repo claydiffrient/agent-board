@@ -20,6 +20,7 @@ struct TaskBoardView: View {
     @State private var collapseChoices: [String: Bool] = [:]
     @State private var showArchived = false
     @State private var confirmArchive = false
+    @State private var jumpTarget: String?
 
     private let columnWidth: CGFloat = 250
     private let jumpRailWidth: CGFloat = 190
@@ -67,7 +68,14 @@ struct TaskBoardView: View {
         for task in visibleTasks {
             byEpic[task.epicId, default: []].append(task)
         }
-        var result = [Lane(id: EpicLaneOrder.noEpicLaneId, title: "No epic", epic: nil, tasks: byEpic[nil] ?? [])]
+        var result = [
+            Lane(
+                id: EpicLaneOrder.noEpicLaneId,
+                title: EpicJumpRail.noEpicTitle,
+                epic: nil,
+                tasks: byEpic[nil] ?? []
+            ),
+        ]
         for epic in EpicLaneOrder.sorted(epics.value) {
             result.append(Lane(id: epic.id, title: epic.title, epic: epic, tasks: byEpic[epic.id] ?? []))
         }
@@ -75,6 +83,10 @@ struct TaskBoardView: View {
     }
 
     private var epicLanes: [Lane] { lanes.filter { $0.epic != nil } }
+
+    private var lanesById: [String: Lane] {
+        Dictionary(uniqueKeysWithValues: lanes.map { ($0.id, $0) })
+    }
 
     private func isCollapsed(_ epic: Epic) -> Bool {
         EpicLaneCollapse.isCollapsed(
@@ -107,14 +119,12 @@ struct TaskBoardView: View {
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            HStack(spacing: 0) {
-                if !epicLanes.isEmpty {
-                    epicJumpRail(proxy)
-                    Divider()
-                }
-                board
+        HStack(spacing: 0) {
+            if !epicLanes.isEmpty {
+                epicJumpRail
+                Divider()
             }
+            board
         }
         .background {
             Color.clear
@@ -220,21 +230,28 @@ struct TaskBoardView: View {
                     .padding(.horizontal)
                     .padding(.top, 12)
                 Divider()
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        ForEach(lanes) { lane in
-                            laneView(lane)
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            ForEach(lanes) { lane in
+                                laneView(lane)
+                            }
                         }
+                        .padding()
+                        .contentShape(Rectangle())
+                        .onTapGesture { selectedTaskId = nil }
                     }
-                    .padding()
-                    .contentShape(Rectangle())
-                    .onTapGesture { selectedTaskId = nil }
+                    .onChange(of: jumpTarget) { _, target in
+                        guard let target else { return }
+                        withAnimation { proxy.scrollTo(target, anchor: .top) }
+                        jumpTarget = nil
+                    }
                 }
             }
         }
     }
 
-    private func epicJumpRail(_ proxy: ScrollViewProxy) -> some View {
+    private var epicJumpRail: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Epics")
                 .font(.caption.weight(.semibold))
@@ -244,17 +261,16 @@ struct TaskBoardView: View {
             Divider()
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Button("No epic") {
-                        withAnimation { proxy.scrollTo(EpicLaneOrder.noEpicLaneId, anchor: .top) }
-                    }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    ForEach(epicLanes) { lane in
-                        if let epic = lane.epic {
-                            jumpRailEntry(epic: epic, lane: lane, proxy: proxy)
+                    ForEach(EpicJumpRail.entries(epics.value)) { entry in
+                        if let lane = lanesById[entry.laneId], let epic = lane.epic {
+                            jumpRailEntry(epic: epic, lane: lane)
+                        } else {
+                            Button(entry.title) { jumpTarget = entry.laneId }
+                                .buttonStyle(.plain)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
                         }
                     }
                 }
@@ -265,9 +281,9 @@ struct TaskBoardView: View {
         .background(Color(nsColor: .underPageBackgroundColor))
     }
 
-    private func jumpRailEntry(epic: Epic, lane: Lane, proxy: ScrollViewProxy) -> some View {
+    private func jumpRailEntry(epic: Epic, lane: Lane) -> some View {
         Button {
-            withAnimation { proxy.scrollTo(lane.id, anchor: .top) }
+            jumpTarget = EpicJumpRail.laneId(forEpicId: epic.id)
         } label: {
             VStack(alignment: .leading, spacing: 3) {
                 Text(epic.title)
