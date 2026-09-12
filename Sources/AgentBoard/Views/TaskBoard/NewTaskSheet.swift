@@ -19,25 +19,26 @@ struct NewTaskSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Form {
-                TextField("Title", text: $title)
-                Picker("Priority", selection: $priority) {
-                    ForEach(Self.priorities, id: \.self) { value in
-                        Text(value.isEmpty ? "None" : value.capitalized).tag(value)
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        fieldLabel("Title")
+                        TextField("", text: $title)
+                            .textFieldStyle(.roundedBorder)
+                            .labelsHidden()
                     }
+                    Picker("Priority", selection: $priority) {
+                        ForEach(Self.priorities, id: \.self) { value in
+                            Text(value.isEmpty ? "None" : value.capitalized).tag(value)
+                        }
+                    }
+                    Picker("Column", selection: $column) {
+                        ForEach(TaskColumn.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    ModelPicker(label: "Model", inheritLabel: "Project default", model: $model)
                 }
-                Picker("Column", selection: $column) {
-                    ForEach(TaskColumn.allCases, id: \.self) { Text($0.title).tag($0) }
-                }
-                ModelPicker(label: "Model", inheritLabel: "Project default", model: $model)
-                LabeledContent("Body") {
-                    TextEditor(text: $body_)
-                        .font(.body)
-                        .frame(minHeight: 100)
-                }
-                LabeledContent("Acceptance") {
-                    TextEditor(text: $acceptance)
-                        .font(.body)
-                        .frame(minHeight: 80)
+                Section {
+                    editor("Body", text: $body_, minHeight: 100)
+                    editor("Acceptance", text: $acceptance, minHeight: 80)
                 }
             }
             .formStyle(.grouped)
@@ -55,6 +56,24 @@ struct NewTaskSheet: View {
         .frame(minWidth: 480, minHeight: 420)
         .navigationTitle("New Task")
         .errorAlert($errorMessage)
+    }
+
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.subheadline.weight(.semibold))
+    }
+
+    private func editor(_ label: String, text: Binding<String>, minHeight: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            fieldLabel(label)
+            TextEditor(text: text)
+                .font(.body)
+                .frame(minHeight: minHeight)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Color.secondary.opacity(0.3))
+                )
+        }
     }
 
     private func create() {
