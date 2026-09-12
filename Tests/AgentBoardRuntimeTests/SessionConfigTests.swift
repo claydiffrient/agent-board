@@ -1,4 +1,5 @@
 import XCTest
+import AgentBoardCore
 @testable import AgentBoardRuntime
 
 final class SessionConfigTests: XCTestCase {
@@ -100,5 +101,34 @@ final class SessionConfigTests: XCTestCase {
         XCTAssertEqual(stop[0]["url"] as? String, "http://127.0.0.1:2000/hooks?token=tok")
         let board = try XCTUnwrap((readJSON(second.mcpConfigURL)["mcpServers"] as? [String: Any])?["agent-board"] as? [String: Any])
         XCTAssertEqual(board["url"] as? String, "http://127.0.0.1:2000/mcp")
+    }
+}
+
+final class SessionConfigDefaultAutoModeTests: XCTestCase {
+    private var dir: URL!
+
+    override func setUpWithError() throws {
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("agent-board-config-\(UUID().uuidString)")
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    func testDefaultDenyRulesReachTheSessionSettingsFile() throws {
+        let files = try SessionConfigWriter.write(
+            configDir: dir, configId: "d", port: 7, token: "t",
+            autoModeJSON: ProjectSettings.forNewProject().autoModeJSON
+        )
+        let settings = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try Data(contentsOf: files.settingsURL)) as? [String: Any]
+        )
+        let block = try XCTUnwrap(settings["autoMode"] as? [String: Any])
+        let rules = try XCTUnwrap(block["soft_deny"] as? [String])
+        XCTAssertEqual(rules.first, "$defaults")
+        XCTAssertTrue(rules.contains { $0.contains("`git push`") })
+        XCTAssertTrue(rules.contains { $0.contains("`gh pr create`") })
+        XCTAssertTrue(rules.contains { $0.contains("`gh pr merge`") })
+        XCTAssertNotNil(settings["hooks"])
     }
 }

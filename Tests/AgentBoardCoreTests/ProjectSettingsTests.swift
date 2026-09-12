@@ -73,3 +73,60 @@ final class ModelSettingsTests: XCTestCase {
         XCTAssertNil(try tasks.get(withModel.id)?.model)
     }
 }
+
+final class DefaultAutoModeTests: XCTestCase {
+    private func softDeny(_ json: String) throws -> [String] {
+        let data = Data(json.utf8)
+        let block = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return try XCTUnwrap(block["soft_deny"] as? [String])
+    }
+
+    func testDefaultBlockDeniesPushAndPullRequests() throws {
+        let rules = try softDeny(ProjectSettings.defaultAutoModeJSON)
+        XCTAssertEqual(rules.first, "$defaults")
+        XCTAssertEqual(rules.count, 4)
+        XCTAssertTrue(rules.contains { $0.contains("`git push`") })
+        XCTAssertTrue(rules.contains { $0.contains("`gh pr create`") })
+        XCTAssertTrue(rules.contains { $0.contains("`gh pr merge`") })
+    }
+
+    func testNewProjectSettingsCarryTheDefaultBlock() throws {
+        let settings = ProjectSettings.forNewProject()
+        XCTAssertEqual(settings.autoModeJSON, ProjectSettings.defaultAutoModeJSON)
+        XCTAssertEqual(settings.caps, Caps())
+        XCTAssertFalse(settings.autonomyEnabled)
+        XCTAssertEqual(ProjectSettings.decode(settings.encoded()).autoModeJSON, ProjectSettings.defaultAutoModeJSON)
+    }
+
+    func testRegisteredProjectGetsTheDefaultBlock() throws {
+        let db = try AppDatabase.inMemory()
+        let projects = ProjectStore(db)
+        let project = try projects.register(name: "p", repoPath: "/tmp/p", baseBranch: "main", worktreeRoot: "/tmp/w", memoryDir: nil)
+        let stored = try XCTUnwrap(try projects.get(project.id)?.settings.autoModeJSON)
+        let rules = try softDeny(stored)
+        XCTAssertTrue(rules.contains { $0.contains("`git push`") })
+        XCTAssertTrue(rules.contains { $0.contains("`gh pr create`") })
+        XCTAssertTrue(rules.contains { $0.contains("`gh pr merge`") })
+    }
+
+    func testCustomAutoModeBlockIsNotClobbered() throws {
+        let db = try AppDatabase.inMemory()
+        let projects = ProjectStore(db)
+        let project = try projects.register(name: "p", repoPath: "/tmp/p", baseBranch: "main", worktreeRoot: "/tmp/w", memoryDir: nil)
+
+        var custom = ProjectSettings()
+        custom.autoModeJSON = #"{"soft_deny":["Only Mine: nothing else"]}"#
+        try projects.updateSettings(project.id, custom)
+
+        let reloaded = try XCTUnwrap(try projects.get(project.id)?.settings)
+        XCTAssertEqual(reloaded.autoModeJSON, custom.autoModeJSON)
+        XCTAssertEqual(try softDeny(XCTUnwrap(reloaded.autoModeJSON)), ["Only Mine: nothing else"])
+    }
+
+    func testExistingProjectWithoutAutoModeStaysWithout() {
+        let stored = #"{"caps":{"maxConcurrentWorkers":2},"autonomyEnabled":true}"#
+        let settings = ProjectSettings.decode(stored)
+        XCTAssertNil(settings.autoModeJSON)
+        XCTAssertEqual(settings.caps.maxConcurrentWorkers, 2)
+    }
+}

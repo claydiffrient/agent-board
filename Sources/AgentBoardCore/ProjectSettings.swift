@@ -84,3 +84,27 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         return json
     }
 }
+
+extension ProjectSettings {
+    /// Second enforcement of D8 (§8), alongside the spawn-time `--disallowedTools` list.
+    public static let workerIntegrationDenyRules: [String] = [
+        "Worker Push [named+specifics — **must name:** the push and its remote]: Agent Board workers commit and stop — nothing they produce reaches a shared remote unattended. Any push to a remote is blocked: `git push` in every form (including `-u`, `--set-upstream`, `--force`, and pushes of tags or notes), and the same effect reached through another tool or client. The human integrates the branch. Clears only when the user asks for this specific push in this session.",
+        "Worker Pull Request Creation [named+specifics — **must name:** the pull request being opened]: Opening a pull request from a worker branch — `gh pr create` (draft included), `git request-pull`, the GitHub or GitLab API, or any other client — publishes the work for review before a human has looked at it. A worker finishes by committing and calling `report_complete`; opening the pull request is the human's call.",
+        "Worker Pull Request Merge [named+specifics — **must name:** the pull request being merged]: Merging a pull request — `gh pr merge` in any form (`--auto`, `--admin`, `--squash`, `--rebase`), an API merge, or a merge-button equivalent — integrates work into a shared branch. Integration always requires human approval in Agent Board, autonomy setting regardless.",
+    ]
+
+    /// The `$defaults` sentinel expands in place; without it the array replaces Claude Code's shipped rules.
+    public static let defaultAutoModeJSON: String = {
+        let block = ["soft_deny": ["$defaults"] + workerIntegrationDenyRules]
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(block), let json = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return json
+    }()
+
+    public static func forNewProject() -> ProjectSettings {
+        ProjectSettings(autoModeJSON: defaultAutoModeJSON)
+    }
+}

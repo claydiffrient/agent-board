@@ -18,7 +18,7 @@ public struct ProjectStore: Sendable {
             worktreeRoot: worktreeRoot,
             memoryDir: memoryDir,
             orchSessionId: nil,
-            settingsJSON: ProjectSettings().encoded(),
+            settingsJSON: ProjectSettings.forNewProject().encoded(),
             createdAt: .nowMillis
         )
         try db.writer.write { db in
