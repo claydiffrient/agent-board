@@ -434,9 +434,71 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             for session in taskSessions {
                 try grants.revokeAll(sessionId: session.sessionId)
             }
-            announceReports(projectId: task.projectId)
+            // Teardown runs first so `deleteBranchIfMerged` still sees the task branch as unmerged
+            // and keeps it; the integrator reads the surviving branch as its ledger of what is in.
             await tearDownWorktrees(of: taskSessions, task: task, project: project)
+            await mergeIntoEpicBranch(task: task, project: project)
+            announceReports(projectId: task.projectId)
         }
+    }
+
+    /// §5.2: the epic branch accumulates each accepted task, so a sibling spawned afterwards branches
+    /// from work that is already in. Deliberately outside the acceptance transaction — the human
+    /// accepted the task, and no git failure may put it back.
+    private func mergeIntoEpicBranch(task: BoardTask, project: Project) async {
+        guard let epicId = task.epicId, let epic = try? epics.get(epicId) else { return }
+        let manager = Self.worktreeManager(for: project)
+        let taskBranch = Self.taskBranchPrefix + task.id
+        let epicBranch = epic.branch
+        let projectBase = project.baseBranch
+        let worktreeName = "merge-\(task.id)"
+        let outcome: EpicMerge
+        do {
+            outcome = try await offMain {
+                try manager.ensureBranch(epicBranch, from: projectBase)
+                return try manager.mergeIntoEpic(
+                    taskBranch: taskBranch, epicBranch: epicBranch, worktreeName: worktreeName
+                )
+            }
+        } catch {
+            queueEpicMergeReport(
+                task: task, epic: epic,
+                body: "could not be merged into the epic branch `\(epicBranch)`: \(describe(error))"
+                    + "\nThe epic branch is behind. Dispatch a task to merge `\(taskBranch)` into it by hand."
+            )
+            return
+        }
+        switch outcome {
+        case .alreadyMerged, .fastForwarded, .merged, .nothingToMerge:
+            return
+        case .conflicted(let files):
+            let listed = files.isEmpty ? "(git reported no paths)" : files.map { "- `\($0)`" }.joined(separator: "\n")
+            queueEpicMergeReport(
+                task: task, epic: epic,
+                body: "conflicts with the epic branch `\(epicBranch)`, which is unchanged and now behind."
+                    + "\n\nConflicting files:\n\(listed)"
+                    + "\n\nDispatch a task to merge `\(taskBranch)` into `\(epicBranch)` and resolve these."
+            )
+        case .skippedCheckedOut(let path):
+            queueEpicMergeReport(
+                task: task, epic: epic,
+                body: "was not merged into the epic branch `\(epicBranch)`: that branch is checked out at \(path)."
+                    + "\nWhoever holds it — the integrator, normally — must merge `\(taskBranch)` themselves."
+            )
+        }
+    }
+
+    private func queueEpicMergeReport(task: BoardTask, epic: Epic, body: String) {
+        let text = "Task \(task.id) (\(task.title)) was accepted into done, but its branch \(body)"
+        do {
+            try ReportStore(db).insert(
+                projectId: task.projectId, taskId: task.id, sessionId: nil, kind: .decision, body: text
+            )
+        } catch {
+            report(["could not queue the epic merge report for \(task.id): \(describe(error))"])
+            return
+        }
+        report(["epic \(epic.id): \(text)"])
     }
 
     func reopen(taskId: String) async throws {
