@@ -160,9 +160,31 @@ enum Schema {
     CREATE INDEX approval_pending ON approval(project_id, resolved_at);
     """
 
+    static let roster = """
+    CREATE TABLE roster_agent (
+      id            TEXT PRIMARY KEY,
+      name          TEXT NOT NULL,
+      role          TEXT NOT NULL,
+      system_prompt TEXT NOT NULL,
+      model         TEXT,
+      tool_scope    TEXT NOT NULL DEFAULT '[]',
+      enabled       INTEGER NOT NULL DEFAULT 1,
+      created_at    INTEGER NOT NULL,
+      updated_at    INTEGER NOT NULL
+    );
+
+    CREATE TABLE project_roster_agent (
+      project_id      TEXT NOT NULL REFERENCES project(id),
+      roster_agent_id TEXT NOT NULL REFERENCES roster_agent(id),
+      ordering        REAL NOT NULL,
+      PRIMARY KEY (project_id, roster_agent_id)
+    );
+    CREATE INDEX project_roster_agent_order ON project_roster_agent(project_id, ordering);
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
-        "approval",
+        "approval", "roster_agent", "project_roster_agent",
     ]
 }
