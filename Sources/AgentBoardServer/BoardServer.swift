@@ -101,8 +101,10 @@ public final class BoardServer: Sendable {
         guard let event = HookEvent(body: Data(body.readableBytesView)) else {
             return jsonResponse(status: .badRequest, body: ["error": "invalid json"])
         }
-        await hooks.handle(event, identity: identity)
-        return jsonResponse(status: .ok, body: [String: Any]())
+        guard let decision = await hooks.handle(event, identity: identity) else {
+            return jsonResponse(status: .ok, body: [String: Any]())
+        }
+        return jsonResponse(status: .ok, body: decision.responseBody(hookEventName: event.name))
     }
 
     @Sendable

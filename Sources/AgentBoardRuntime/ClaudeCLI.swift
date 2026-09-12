@@ -118,6 +118,7 @@ public enum ClaudeCLI {
     }
 
     /// Parses `backgrounded · <hex> · <name>`; the name segment is optional.
+    /// The CLI colorizes the id even when stdout is a pipe, so escape sequences are stripped first.
     public static func parseShortId(from stdout: String) -> String? {
         for rawLine in strippingANSIEscapes(stdout).split(whereSeparator: \.isNewline) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)

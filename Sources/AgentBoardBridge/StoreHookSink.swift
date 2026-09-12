@@ -19,6 +19,15 @@ public final class StoreHookSink: HookSink {
         case orchestratorTurnEnded(projectId: String, sessionId: String)
     }
 
+    private struct Outcome {
+        var followUp: FollowUp?
+        var decision: HookDecision?
+
+        static let none = Outcome()
+        static func follow(_ followUp: FollowUp) -> Outcome { Outcome(followUp: followUp) }
+        static func deny(_ decision: HookDecision) -> Outcome { Outcome(decision: decision) }
+    }
+
     public init(db: AppDatabase, events: any BoardEventSink) {
         hookEvents = HookEventStore(db)
         grants = TokenGrantStore(db)
@@ -29,13 +38,13 @@ public final class StoreHookSink: HookSink {
         self.events = events
     }
 
-    public func handle(_ event: HookEvent, identity: TokenIdentity) async {
-        let followUp: FollowUp? = await withCheckedContinuation { continuation in
+    public func handle(_ event: HookEvent, identity: TokenIdentity) async -> HookDecision? {
+        let outcome: Outcome = await withCheckedContinuation { continuation in
             queue.async {
                 continuation.resume(returning: self.process(event, identity: identity))
             }
         }
-        switch followUp {
+        switch outcome.followUp {
         case .notify(let title, let body):
             await events.notify(title: title, body: body)
         case .orchestratorTurnEnded(let projectId, let sessionId):
@@ -43,17 +52,37 @@ public final class StoreHookSink: HookSink {
         case nil:
             break
         }
+        return outcome.decision
     }
 
-    private func process(_ event: HookEvent, identity: TokenIdentity) -> FollowUp? {
+    private func process(_ event: HookEvent, identity: TokenIdentity) -> Outcome {
         let sessionId = event.sessionId
         _ = try? hookEvents.append(sessionId: sessionId, event: event.name, payload: event.rawJSON)
-        guard !sessionId.isEmpty else { return nil }
+
+        if event.name == "PreToolUse" {
+            guard let violation = IntegrationGuard.violation(toolName: event.toolName, command: event.toolCommand) else {
+                return .none
+            }
+            // The deny is decided before any lookup; the row is best-effort so an unrecognized
+            // session can never turn a block into a pass.
+            let session = try? sessions.get(sessionId)
+            if let taskId = session?.taskId ?? identity.taskId {
+                _ = try? progress.append(
+                    taskId: taskId,
+                    sessionId: session?.sessionId,
+                    kind: .error,
+                    text: "Blocked \(violation.rawValue): \(event.toolCommand ?? "")"
+                )
+            }
+            return .deny(.deny(violation.reason))
+        }
+
+        guard !sessionId.isEmpty else { return .none }
 
         if identity.sessionId == nil {
             try? grants.bind(token: identity.token, sessionId: sessionId)
         }
-        guard let session = try? sessions.get(sessionId) else { return nil }
+        guard let session = try? sessions.get(sessionId) else { return .none }
         let taskId = session.taskId ?? identity.taskId
 
         switch event.name {
@@ -78,7 +107,7 @@ public final class StoreHookSink: HookSink {
             }
 
         case "Notification":
-            guard let type = event.notificationType else { return nil }
+            guard let type = event.notificationType else { return .none }
             if Self.blockingNotificationTypes.contains(type) || type.hasPrefix("elicitation") {
                 let reason = event.notificationMessage ?? type
                 if let taskId {
@@ -86,14 +115,14 @@ public final class StoreHookSink: HookSink {
                 } else {
                     try? sessions.setState(sessionId, .blocked)
                 }
-                return .notify(title: "Agent needs input", body: reason)
+                return .follow(.notify(title: "Agent needs input", body: reason))
             } else if type == "idle_prompt", session.state.isActive {
                 try? sessions.setState(sessionId, .idle)
             }
 
         case "Stop":
             if session.role == .orchestrator {
-                return .orchestratorTurnEnded(projectId: session.projectId, sessionId: sessionId)
+                return .follow(.orchestratorTurnEnded(projectId: session.projectId, sessionId: sessionId))
             }
             if session.state.isActive {
                 try? sessions.setState(sessionId, .idle)
@@ -110,6 +139,6 @@ public final class StoreHookSink: HookSink {
         default:
             break
         }
-        return nil
+        return .none
     }
 }

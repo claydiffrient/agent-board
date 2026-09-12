@@ -367,9 +367,9 @@ A worker's closing instructions, injected at spawn:
 
 1. Commit on the current branch. Message in imperative mood, no conventional
    commit prefix.
-2. **Do not push. Do not open a PR.** Both are denied at the tool layer and by
-   a project `autoMode` soft-deny rule; the instruction exists so the agent
-   does not waste a turn discovering that.
+2. **Do not push. Do not open a PR.** Both are denied at the tool layer
+   (`--disallowedTools` and the `PreToolUse` hook, §8); the instruction exists
+   so the agent does not waste a turn discovering that.
 3. Call `report_complete(summary, files_changed, tests_run, caveats)`.
 
 ### 5.2 Epic integration
@@ -443,6 +443,7 @@ Generated into each managed session's `--settings`. All post to
 | Event | Agent Board's reaction |
 |---|---|
 | `SessionStart` | Mark `agent_session.state = running`; record transcript path |
+| `PreToolUse` (matcher `Bash`) | Deny `git push`, `gh pr create`, `gh pr merge`; append an `error` progress row (§8) |
 | `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row |
 | `Notification` | Set `blocked` + reason on the task and session; macOS notification |
 | `Stop` | Mark session idle. **On the orchestrator, this is the trigger for the report notice** (§9) |
@@ -451,7 +452,13 @@ Generated into each managed session's `--settings`. All post to
 
 The handler must be synchronous and trivial — `PostToolUse` fires on every tool
 call, and a slow handler is felt directly as agent latency. Anything expensive
-goes on a queue.
+goes on a queue. `PreToolUse` is matched to `Bash` alone so the round trip is
+not paid on every tool call.
+
+A `PreToolUse` reply denies by returning both shapes in one body — the current
+`hookSpecificOutput.permissionDecision`/`permissionDecisionReason` pair and the
+legacy `decision: "block"`/`reason` pair — so the block lands whichever the
+installed CLI reads. Every other event replies `{}`.
 
 Spend metering tails the session's JSONL transcript rather than relying on
 hooks, since hooks do not carry `usage`.
@@ -481,8 +488,29 @@ Per project, overridable:
   a capped agent resumes exactly where it stopped.
 - **Pause All** stops every managed session in the project via `claude stop`.
 - **Integration always requires human approval**, autonomy setting regardless.
-- Workers never push. Enforced twice: `--disallowedTools` and a project
-  `autoMode` soft-deny rule.
+- **Workers never push.** Enforced twice, by two controls that fail
+  independently:
+  1. `--disallowedTools "Bash(git push*)" "Bash(gh pr create*)" "Bash(gh pr
+     merge*)"` at spawn time, a CLI-level block.
+  2. A `PreToolUse` hook (§7) matched to `Bash`. `IntegrationGuard` scans the
+     command for `git push`, `gh pr create` and `gh pr merge` and Agent Board
+     returns a deny from its own process, so the block does not depend on the
+     session's permission mode. The scan tokenizes on shell punctuation as
+     well as whitespace, so a chained, quoted, piped or env-prefixed
+     invocation (`cd x && git push`, `git -C d push`) is caught too. Every
+     denial appends an `error` progress row naming the blocked command, so the
+     human sees the attempt on the task card.
+
+  Either control alone stops the call; layer 2 exists so a dropped or
+  misconfigured spawn flag is not a silent hole. Verified live: with
+  `--disallowedTools` deliberately emptied, a worker's `git push -u origin
+  HEAD` was denied by the hook and the bare remote stayed at its initial
+  commit (§12).
+- A project `autoMode` classifier rule is **not** a control for an unattended
+  worker. Both `soft_deny` and `hard_deny` reach a `--bg` worker's effective
+  config and neither stops a matching call under `--permission-mode auto`; see
+  §12. The push/PR `soft_deny` rules shipped in the default `autoMode` block
+  document intent and cost nothing, but the `PreToolUse` hook is what enforces.
 - `autoMode.environment` is populated per project — repo visibility, trust
   boundary, org CLIs — so the classifier's single hard-deny rule (data
   exfiltration) has real boundaries to work with. Rule sets are run through
@@ -585,8 +613,97 @@ from knowing how the agents actually behave first.
 ## 12. Open items
 
 - **Verified by M0:** a healthy `claude --bg` session honors injected hooks and
-  MCP config. Still unverified: that the `autoMode` block from `--settings` is
-  applied (the spike ran with the shipped defaults).
+  MCP config.
+- **Verified by M3, with a known limitation:** the project `autoMode` block
+  passed via `--settings` does reach the effective config of a spawned
+  `--bg` worker, but a `soft_deny` rule in it does not stop or pause a
+  matching tool call in that worker — it just runs.
+
+  Method: registered a project whose `settings_json.autoModeJSON` was
+  `{"soft_deny": ["AgentBoard Canary M3 [named+specifics]: any command whose
+  text contains the exact token AGENTBOARD_CANARY_9f3d2c17 is always a
+  soft-deny requiring approval, with no exceptions, regardless of any other
+  rule in this policy."]}`, then ran the headless E2E path (§ below,
+  `AGENTBOARD_E2E_REPO` against a throwaway fixture repo) with the task body
+  changed to run `echo AGENTBOARD_CANARY_9f3d2c17` before the usual
+  hello.txt step. Two independent checks:
+
+  1. `SessionConfigWriter.write` embeds `autoModeJSON` verbatim under the
+     `"autoMode"` key of `settings-<session>.json` (confirmed by reading the
+     file the real spawn below generated). To check the CLI actually loads
+     that key, ran the same shape standalone:
+     ```
+     $ claude --settings test-settings.json auto-mode config > with-settings.json
+     $ grep -n AGENTBOARD_CANARY_9f3d2c17 with-settings.json
+     95:    "AgentBoard Canary M3 [named+specifics]: any command whose text contains the exact token AGENTBOARD_CANARY_9f3d2c17 is always a soft-deny requiring approval, with no exceptions, regardless of any other rule in this policy."
+     ```
+     where `test-settings.json` was `{"autoMode": {"soft_deny": [<the same
+     rule>]}}`. The rule shows up appended to the 70 shipped `soft_deny`
+     defaults — the `--settings` file's `autoMode` key is honored by
+     `auto-mode config`.
+  2. The real worker's `PostToolUse` hook payload, captured by Agent Board's
+     `/hooks` endpoint and read back from the `hook_event` table:
+     ```
+     "hook_event_name": "PostToolUse",
+     "tool_name": "Bash",
+     "permission_mode": "auto",
+     "tool_input": { "command": "echo AGENTBOARD_CANARY_9f3d2c17", ... },
+     "tool_response": { "stdout": "AGENTBOARD_CANARY_9f3d2c17", ... },
+     "duration_ms": 294
+     ```
+     No ask, no denial, no distinguishing field — the command ran exactly
+     like any other Bash call. The task went on to `report_complete` and
+     `E2E PASS`.
+
+  **Known limitation:** a project `autoMode.soft_deny` rule is not a working
+  safety control for an unattended `claude --bg --permission-mode auto`
+  worker — there is no user for the classifier to ask, and the match does
+  not fall back to a deny. `autoMode` is still expressive for the interactive
+  orchestrator session (which has a user to ask), but a project should not add
+  a rule expecting it to stop a worker.
+- **Verified by M3: `hard_deny` does not stop the call either.** The same
+  canary method, with the rule moved to `hard_deny`. The rule reached the
+  effective config — `claude --settings <file> auto-mode config` listed it
+  under `hard_deny` alongside the shipped Data Exfiltration rule, the
+  `"$defaults"` sentinel expanding in place exactly as it does for
+  `soft_deny` — and the worker ran the command anyway:
+  (This run predates the `PreToolUse` hook, so `PostToolUse` was the only
+  evidence available — and it shows the call completed.)
+  ```
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "permission_mode": "auto",
+  "tool_input":    { "command": "echo AGENTBOARD_HARDDENY_4b81e2", ... },
+  "tool_response": { "stdout": "AGENTBOARD_HARDDENY_4b81e2", "interrupted": false, ... }
+  ```
+  The worker then reported `Ran echo AGENTBOARD_HARDDENY_4b81e2; output was
+  AGENTBOARD_HARDDENY_4b81e2` and the run ended `E2E PASS`. So neither
+  classifier severity is a usable control for a `--bg` worker; the
+  `PreToolUse` hook is.
+- **Verified by M3: the `PreToolUse` push block works.** Spawned one real
+  worker with `--disallowedTools` deliberately emptied, against a fixture repo
+  whose `origin` was a local bare clone — so a working push would have
+  succeeded and been visible. Task body required `git push -u origin HEAD`.
+  The hook payload Agent Board denied:
+  ```
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "permission_mode": "auto",
+  "tool_input": { "command": "git push -u origin HEAD 2>&1; echo \"exit=$?\"",
+                  "description": "Push current branch to origin as the task requires" }
+  ```
+  The worker's own report: *"the push was blocked at the tool layer with the
+  message 'Agent Board blocks pushes from workers. Commit on your branch and
+  call report_complete; a human integrates it.' Nothing was pushed."* The bare
+  remote still held only `6cee47b Initial commit` on `main` afterwards, with
+  no `agentboard/<task>` branch, and the task card carried the progress row
+  `error: Blocked push: git push -u origin HEAD 2>&1; echo "exit=$?"`. The
+  unrelated Bash call in the same session (the `hello.txt` commit) was allowed
+  through and completed.
+- **Fixed during M3:** `claude --bg` colorizes the `backgrounded · <id>` line
+  even when stdout is a pipe, so `ClaudeCLI.parseShortId` rejected the hex id
+  and every spawn failed with "exited 0 but no short id was found" while the
+  session kept running orphaned. ANSI escapes are now stripped before parsing.
 - **Unresolved:** the localhost port is ephemeral per app launch, but
   `--bg --resume` reuses the saved `--settings`/`--mcp-config` paths. Either
   rewrite both files before every resume (current plan) or pick a stable

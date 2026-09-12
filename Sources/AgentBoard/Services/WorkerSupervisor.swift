@@ -114,7 +114,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 worktreeRoot: appSupportDir.appendingPathComponent("worktrees/\(id)").path,
                 memoryDir: ClaudeProjectPaths.memoryDir(forPath: repo.path).path,
                 orchSessionId: nil,
-                settingsJSON: ProjectSettings().encoded(),
+                settingsJSON: ProjectSettings.forNewProject().encoded(),
                 createdAt: .nowMillis
             )
             try insert(project)

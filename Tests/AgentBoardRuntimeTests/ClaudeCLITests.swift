@@ -16,6 +16,14 @@ final class ClaudeCLITests: XCTestCase {
         XCTAssertEqual(ClaudeCLI.parseShortId(from: stdout), "0a1b2c3d")
     }
 
+    func testParseShortIdStripsANSIColor() {
+        let stdout = """
+        backgrounded \u{1B}[2m·\u{1B}[22m \u{1B}[36m5a359bd9\u{1B}[39m \u{1B}[2m·\u{1B}[22m add-hello-txt
+        \u{1B}[2m  claude agents             list sessions\u{1B}[22m
+        """
+        XCTAssertEqual(ClaudeCLI.parseShortId(from: stdout), "5a359bd9")
+    }
+
     func testParseShortIdRejectsNonHexAndMissing() {
         XCTAssertNil(ClaudeCLI.parseShortId(from: "backgrounded · not-hex · name"))
         XCTAssertNil(ClaudeCLI.parseShortId(from: "backgrounded ·  · name"))
