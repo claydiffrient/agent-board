@@ -373,6 +373,16 @@ and while that is set no policy re-archives the task. Moving a task out of `done
 clears `done_at` and `unarchived_at` together, so a reopened task starts both the
 clock and the policy from scratch.
 
+The human's side of the archive is the Task Board. Its **Archive** toolbar
+button names its target set — "Archive 23 Done Tasks" — and confirms before
+acting; it is offered under every policy, because the automatic modes save the
+human from remembering, not from deciding. A column that is hiding archived
+tasks says so, in its header and in each lane's cell, so the board never loses
+work silently. Archived tasks come back into view through the **Show Archived**
+toggle, which is off at every launch and draws them dimmed and dashed in the
+columns they are actually in; from there a single task is unarchived from its
+context menu or from the inspector.
+
 ---
 
 ## 5. Task lifecycle
