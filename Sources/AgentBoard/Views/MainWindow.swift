@@ -53,13 +53,16 @@ struct MainWindow: View {
         }
         .navigationSplitViewColumnWidth(min: 180, ideal: 220)
         .safeAreaInset(edge: .bottom) {
-            Button {
-                addProject()
-            } label: {
-                Label("Add Project…", systemImage: "plus")
-                    .frame(maxWidth: .infinity)
+            VStack(spacing: 0) {
+                Button {
+                    addProject()
+                } label: {
+                    Label("Add Project…", systemImage: "plus")
+                        .frame(maxWidth: .infinity)
+                }
+                .padding(8)
+                AccountUsageFooter()
             }
-            .padding(8)
         }
         .overlay {
             if projects.value.isEmpty {
