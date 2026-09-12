@@ -1,7 +1,7 @@
 # Agent Board
 
 Native macOS app that manages work for Claude Code agents. See `SPEC.md` for the
-design and `IDEA.md` for the origin. Status: M0 and M1 complete.
+design and `IDEA.md` for the origin. Status: M0 and M1 complete; M2 (orchestrator) in progress.
 
 ## Layout
 
@@ -10,6 +10,7 @@ design and `IDEA.md` for the origin. Status: M0 and M1 complete.
 | `AgentBoardCore` | GRDB store: schema (SPEC §4), records, stores, `Board` lifecycle facade |
 | `AgentBoardRuntime` | `AgentRuntime` protocol + `BackgroundSessionRuntime` (`claude --bg`), config writer, worktrees, memory symlink, transcript meter, pricing, caps |
 | `AgentBoardServer` | Hummingbird localhost server: `/hooks` and `/mcp`, bearer-scoped tools |
+| `AgentBoardBridge` | Store-backed hook sink, token resolver, and the worker and orchestrator MCP tool handlers |
 | `AgentBoard` | SwiftUI app: Task Board, Status, terminal attach window, supervisor glue |
 | `spike/` | M0 runtime spike, kept as the reference for the proven runtime facts |
 
