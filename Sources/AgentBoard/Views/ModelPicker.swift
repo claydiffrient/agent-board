@@ -36,8 +36,10 @@ struct ModelPicker: View {
                 Text("Custom id…").tag(Self.customTag)
             }
             if selection.wrappedValue == Self.customTag {
-                TextField("Model id", text: $customText)
+                TextField("Model id", text: $customText, prompt: Text("Model id"))
                     .font(.body.monospaced())
+                    .textFieldStyle(.roundedBorder)
+                    .labelsHidden()
                     .onChange(of: customText) { _, text in
                         model = text.trimmingCharacters(in: .whitespaces).isEmpty ? nil : text.trimmingCharacters(in: .whitespaces)
                     }
