@@ -1,3 +1,4 @@
+import AgentBoardBridge
 import AgentBoardCore
 import AgentBoardRuntime
 import AgentBoardServer
@@ -14,9 +15,11 @@ enum SupervisorError: LocalizedError {
     case capRefused(String)
     case serverNotRunning
     case spawnFailed(worktree: String, underlying: String)
+    case approvalNotFound(String)
 
     var errorDescription: String? {
         switch self {
+        case .approvalNotFound(let id): return "approval \(id) not found"
         case .notAGitRepository(let path): return "\(path) is not a git repository"
         case .projectNotFound(let id): return "project \(id) not found"
         case .taskNotFound(let id): return "task \(id) not found"
@@ -33,7 +36,7 @@ enum SupervisorError: LocalizedError {
 
 @MainActor
 @Observable
-final class WorkerSupervisor: WorkerSupervising {
+final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private(set) var serverPort: Int?
     private(set) var lastError: String?
 
@@ -46,8 +49,10 @@ final class WorkerSupervisor: WorkerSupervising {
     @ObservationIgnored private let sessions: SessionStore
     @ObservationIgnored private let grants: TokenGrantStore
     @ObservationIgnored private let hookEvents: HookEventStore
+    @ObservationIgnored private let approvals: ApprovalStore
     @ObservationIgnored private let board: Board
     @ObservationIgnored private var meteringTask: _Concurrency.Task<Void, Never>?
+    @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
 
     static let meteringInterval: Duration = .seconds(5)
     /// Sessions that ended this recently still get one more transcript read so final spend lands.
@@ -63,6 +68,7 @@ final class WorkerSupervisor: WorkerSupervising {
         sessions = SessionStore(db)
         grants = TokenGrantStore(db)
         hookEvents = HookEventStore(db)
+        approvals = ApprovalStore(db)
         board = Board(db)
     }
 
@@ -121,70 +127,74 @@ final class WorkerSupervisor: WorkerSupervising {
     }
 
     func assign(taskId: String) async throws {
-        try await recording {
-            guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
-            guard task.column != .running, task.column != .done else {
-                throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
-            }
-            guard let project = try projects.get(task.projectId) else {
-                throw SupervisorError.projectNotFound(task.projectId)
-            }
-            guard let port = serverPort else { throw SupervisorError.serverNotRunning }
-            if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
-                throw SupervisorError.capRefused(reason)
-            }
+        try await recording { _ = try await spawn(taskId: taskId) }
+    }
 
-            let attempt = try sessions.forTask(taskId).count + 1
-            let branch = "agentboard/\(taskId)"
-            let manager = WorktreeManager(
-                repoPath: URL(fileURLWithPath: project.repoPath),
-                worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
+    @discardableResult
+    private func spawn(taskId: String) async throws -> AgentSession {
+        guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
+        guard task.column != .running, task.column != .done else {
+            throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
+        }
+        guard let project = try projects.get(task.projectId) else {
+            throw SupervisorError.projectNotFound(task.projectId)
+        }
+        guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
+            throw SupervisorError.capRefused(reason)
+        }
+
+        let attempt = try sessions.forTask(taskId).count + 1
+        let branch = "agentboard/\(taskId)"
+        let manager = WorktreeManager(
+            repoPath: URL(fileURLWithPath: project.repoPath),
+            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
+        )
+        let base = project.baseBranch
+        let worktree = try await offMain {
+            try Self.existingWorktree(manager, name: taskId) ?? manager.create(name: taskId, branch: branch, base: base)
+        }
+
+        do {
+            let memoryDir = URL(fileURLWithPath: project.memoryDir ?? ClaudeProjectPaths.memoryDir(forPath: project.repoPath).path)
+            _ = try ClaudeProjectPaths.linkMemory(worktreePath: worktree.path, to: memoryDir)
+
+            let grant = try grants.issue(projectId: project.id, scope: .worker, taskId: taskId)
+            let configFiles = try SessionConfigWriter.write(
+                configDir: sessionConfigDir,
+                configId: Self.configId(taskId: taskId, attempt: attempt),
+                port: port,
+                token: grant.token,
+                autoModeJSON: project.settings.autoModeJSON,
+                extraMcpServers: nil
             )
-            let base = project.baseBranch
-            let worktree = try await offMain {
-                try Self.existingWorktree(manager, name: taskId) ?? manager.create(name: taskId, branch: branch, base: base)
-            }
+            let request = SpawnRequest(
+                cwd: worktree,
+                name: Self.sessionName(for: task),
+                prompt: Self.openingPrompt(task: task, branch: branch, attempt: attempt),
+                configFiles: configFiles,
+                model: task.model ?? project.settings.defaultModel
+            )
+            let spawned = try await runtime.spawn(request)
+            try? grants.bind(token: grant.token, sessionId: spawned.sessionId)
 
-            do {
-                let memoryDir = URL(fileURLWithPath: project.memoryDir ?? ClaudeProjectPaths.memoryDir(forPath: project.repoPath).path)
-                _ = try ClaudeProjectPaths.linkMemory(worktreePath: worktree.path, to: memoryDir)
-
-                let grant = try grants.issue(projectId: project.id, scope: .worker, taskId: taskId)
-                let configFiles = try SessionConfigWriter.write(
-                    configDir: sessionConfigDir,
-                    configId: Self.configId(taskId: taskId, attempt: attempt),
-                    port: port,
-                    token: grant.token,
-                    autoModeJSON: project.settings.autoModeJSON,
-                    extraMcpServers: nil
-                )
-                let request = SpawnRequest(
-                    cwd: worktree,
-                    name: Self.sessionName(for: task),
-                    prompt: Self.openingPrompt(task: task, branch: branch, attempt: attempt),
-                    configFiles: configFiles,
-                    model: task.model ?? project.settings.defaultModel
-                )
-                let spawned = try await runtime.spawn(request)
-                try? grants.bind(token: grant.token, sessionId: spawned.sessionId)
-
-                let session = AgentSession(
-                    sessionId: spawned.sessionId,
-                    shortId: spawned.shortId,
-                    projectId: project.id,
-                    taskId: taskId,
-                    role: .worker,
-                    worktreePath: worktree.path,
-                    branch: branch,
-                    cwd: worktree.path,
-                    startedAt: .nowMillis,
-                    attempt: attempt
-                )
-                try board.assign(taskId: taskId, session: session)
-                try replayEarlyHooks(sessionId: spawned.sessionId)
-            } catch {
-                throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
-            }
+            let session = AgentSession(
+                sessionId: spawned.sessionId,
+                shortId: spawned.shortId,
+                projectId: project.id,
+                taskId: taskId,
+                role: .worker,
+                worktreePath: worktree.path,
+                branch: branch,
+                cwd: worktree.path,
+                startedAt: .nowMillis,
+                attempt: attempt
+            )
+            let recorded = try board.assign(taskId: taskId, session: session)
+            try replayEarlyHooks(sessionId: spawned.sessionId)
+            return recorded
+        } catch {
+            throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
         }
     }
 
@@ -240,7 +250,7 @@ final class WorkerSupervisor: WorkerSupervising {
     func pauseAll(projectId: String) async throws {
         try await recording {
             var firstFailure: Error?
-            for session in try sessions.active(projectId: projectId) {
+            for session in try sessions.active(projectId: projectId) where session.role == .worker {
                 do {
                     guard let shortId = session.shortId else { throw SupervisorError.sessionHasNoShortId(session.sessionId) }
                     try await runtime.stop(shortId: shortId)
@@ -327,6 +337,9 @@ final class WorkerSupervisor: WorkerSupervising {
         for session in ours {
             guard let info = byId[session.sessionId] else {
                 if session.state.isActive {
+                    if session.role == .orchestrator, consoles[session.projectId]?.isProcessRunning == true {
+                        continue
+                    }
                     try? sessions.setState(session.sessionId, .stopped, endedAt: now)
                 }
                 continue
@@ -370,6 +383,66 @@ final class WorkerSupervisor: WorkerSupervising {
         return try? await offMain {
             try manager.diffstat(worktree: URL(fileURLWithPath: worktreePath), against: base)
         }
+    }
+
+    // MARK: - Orchestrator and approvals
+
+    func orchestratorConsole(projectId: String) throws -> OrchestratorConsole {
+        if let existing = consoles[projectId] { return existing }
+        guard try projects.get(projectId) != nil else { throw SupervisorError.projectNotFound(projectId) }
+        let console = OrchestratorConsole(
+            projectId: projectId,
+            db: db,
+            sessionConfigDir: sessionConfigDir,
+            currentPort: { [weak self] in self?.serverPort }
+        )
+        consoles[projectId] = console
+        return console
+    }
+
+    func approve(approvalId: String) async throws {
+        try await recording {
+            guard let approval = try approvals.get(approvalId) else { throw SupervisorError.approvalNotFound(approvalId) }
+            try board.resolveApproval(approvalId, approved: true, by: "human")
+            if approval.kind == .spawn, let taskId = approval.taskId {
+                try await spawn(taskId: taskId)
+            }
+        }
+    }
+
+    func deny(approvalId: String, reason: String?) async throws {
+        try await recording {
+            let trimmed = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+            try board.resolveApproval(approvalId, approved: false, by: "human", reason: trimmed?.isEmpty == false ? trimmed : nil)
+        }
+    }
+
+    func promote(taskId: String) async throws {
+        try await recording { try board.promote(taskId: taskId) }
+    }
+
+    // MARK: - WorkerControl
+
+    func spawnWorker(taskId: String) async throws -> String {
+        try await recording { try await spawn(taskId: taskId).sessionId }
+    }
+
+    func stopWorker(sessionId: String) async throws {
+        try await stop(sessionId: sessionId)
+    }
+
+    // MARK: - BoardEventSink
+
+    func notify(title: String, body: String) async {
+        MacNotifier.post(title: title, body: body)
+    }
+
+    func orchestratorTurnEnded(projectId: String, sessionId: String) async {
+        consoles[projectId]?.turnEnded()
+    }
+
+    func reportQueued(projectId: String) async {
+        consoles[projectId]?.reportsChanged()
     }
 
     // MARK: - Metering
@@ -433,7 +506,7 @@ final class WorkerSupervisor: WorkerSupervising {
             }
         }
 
-        guard let current = try? sessions.get(session.sessionId), current.state.isActive else { return }
+        guard let current = try? sessions.get(session.sessionId), current.state.isActive, current.role == .worker else { return }
         guard let breach = CapEvaluator.evaluate(
             totals: totals,
             startedAt: current.startedDate,

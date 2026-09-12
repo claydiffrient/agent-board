@@ -99,7 +99,7 @@ struct TerminalHostView: NSViewRepresentable {
         coordinator.terminate()
     }
 
-    private static func childEnvironment() -> [String] {
+    static func childEnvironment() -> [String] {
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"

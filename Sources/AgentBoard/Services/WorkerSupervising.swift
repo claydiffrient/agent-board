@@ -3,7 +3,7 @@ import AgentBoardCore
 
 /// The UI's only entry point for anything that touches processes, git, or the network.
 @MainActor
-public protocol WorkerSupervising: AnyObject {
+protocol WorkerSupervising: AnyObject {
     var serverPort: Int? { get }
     var lastError: String? { get }
 
@@ -23,4 +23,10 @@ public protocol WorkerSupervising: AnyObject {
     func reconcile(projectId: String) async
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])?
     func worktreeDiffstat(taskId: String) async -> String?
+    /// Creates the project's console on first call and keeps it alive; does not start the process.
+    func orchestratorConsole(projectId: String) throws -> OrchestratorConsole
+    /// Resolves the approval; a spawn approval then runs the spawn path for its task.
+    func approve(approvalId: String) async throws
+    func deny(approvalId: String, reason: String?) async throws
+    func promote(taskId: String) async throws
 }
