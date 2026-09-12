@@ -146,6 +146,130 @@ final class WorktreeManagerTests: XCTestCase {
         ])
     }
 
+    // MARK: - mergeIntoEpic
+
+    func testMergeIntoEpicFastForwardsWithoutAWorktree() throws {
+        try manager.ensureBranch("agentboard/epic-1", from: "main")
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "agentboard/epic-1")
+        try addCommit("feature.txt", in: work)
+        let taskHead = try manager.headCommit(worktree: work)
+        try manager.remove(path: work)
+
+        let outcome = try manager.mergeIntoEpic(
+            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+        )
+
+        XCTAssertEqual(outcome, .fastForwarded(head: taskHead))
+        XCTAssertEqual(try revParse("agentboard/epic-1"), taskHead)
+        XCTAssertEqual(try manager.list().count, 1, "a fast-forward should not have cut a worktree")
+    }
+
+    func testMergeIntoEpicUsesATemporaryWorktreeAndKeepsTheBranch() throws {
+        try manager.ensureBranch("agentboard/epic-1", from: "main")
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "agentboard/epic-1")
+        try addCommit("feature.txt", in: work)
+        try manager.remove(path: work)
+        let sibling = try manager.create(name: "sibling", branch: "agentboard/epic-1-side", base: "agentboard/epic-1")
+        try addCommit("sibling.txt", in: sibling)
+        try git(["branch", "-f", "agentboard/epic-1", "agentboard/epic-1-side"], cwd: repo)
+        try manager.remove(path: sibling)
+        let epicBefore = try revParse("agentboard/epic-1")
+
+        let outcome = try manager.mergeIntoEpic(
+            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+        )
+
+        guard case .merged(let head) = outcome else { return XCTFail("expected a merge, got \(outcome)") }
+        XCTAssertEqual(try revParse("agentboard/epic-1"), head)
+        XCTAssertNotEqual(head, epicBefore)
+        XCTAssertTrue(try manager.branchExists("agentboard/epic-1"))
+        XCTAssertEqual(try manager.list().count, 1, "the temporary merge worktree was left behind")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktrees.appendingPathComponent("merge").path))
+    }
+
+    func testMergeIntoEpicAbortsAndNamesConflictingFiles() throws {
+        try manager.ensureBranch("agentboard/epic-1", from: "main")
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "agentboard/epic-1")
+        try addCommit("schema.sql", in: work, contents: "task side\n")
+        try manager.remove(path: work)
+        let sibling = try manager.create(name: "sibling", branch: "agentboard/epic-1-side", base: "agentboard/epic-1")
+        try addCommit("schema.sql", in: sibling, contents: "epic side\n")
+        try git(["branch", "-f", "agentboard/epic-1", "agentboard/epic-1-side"], cwd: repo)
+        try manager.remove(path: sibling)
+        let epicBefore = try revParse("agentboard/epic-1")
+
+        let outcome = try manager.mergeIntoEpic(
+            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+        )
+
+        XCTAssertEqual(outcome, .conflicted(files: ["schema.sql"]))
+        XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore, "a conflict moved the epic branch")
+        XCTAssertTrue(try manager.branchExists("agentboard/epic-1"))
+        XCTAssertEqual(try manager.list().count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktrees.appendingPathComponent("merge").path))
+    }
+
+    func testMergeIntoEpicIsANoOpForAnAlreadyMergedBranch() throws {
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "main")
+        try addCommit("feature.txt", in: work)
+        try manager.remove(path: work)
+        try git(["branch", "agentboard/epic-1", "agentboard/task"], cwd: repo)
+        let epicBefore = try revParse("agentboard/epic-1")
+
+        XCTAssertEqual(
+            try manager.mergeIntoEpic(
+                taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+            ),
+            .alreadyMerged
+        )
+        XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore)
+    }
+
+    func testMergeIntoEpicReportsAMissingTaskBranchAndACheckedOutEpicBranch() throws {
+        try manager.ensureBranch("agentboard/epic-1", from: "main")
+        XCTAssertEqual(
+            try manager.mergeIntoEpic(
+                taskBranch: "agentboard/never-ran", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+            ),
+            .nothingToMerge
+        )
+
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "agentboard/epic-1")
+        try addCommit("feature.txt", in: work)
+        try manager.remove(path: work)
+        let integration = try manager.createForBranch(name: "epic-1", branch: "agentboard/epic-1")
+
+        let outcome = try manager.mergeIntoEpic(
+            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+        )
+        guard case .skippedCheckedOut(let path) = outcome else {
+            return XCTFail("expected the merge to defer to the checkout, got \(outcome)")
+        }
+        XCTAssertTrue(WorktreeManager.samePath(URL(fileURLWithPath: path), integration), path)
+    }
+
+    func testMergeIntoEpicRefusesAMissingEpicBranch() throws {
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "main")
+        try addCommit("feature.txt", in: work)
+        try manager.remove(path: work)
+
+        XCTAssertThrowsError(
+            try manager.mergeIntoEpic(
+                taskBranch: "agentboard/task", epicBranch: "agentboard/epic-missing", worktreeName: "merge"
+            )
+        )
+    }
+
+    private func addCommit(_ file: String, in worktree: URL, contents: String = "work\n") throws {
+        try contents.write(to: worktree.appendingPathComponent(file), atomically: true, encoding: .utf8)
+        try git(["add", "."], cwd: worktree)
+        try commit("Add \(file)", cwd: worktree)
+    }
+
+    private func revParse(_ ref: String) throws -> String {
+        try git(["rev-parse", "--verify", ref], cwd: repo).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     func testCreateFailsForMissingBase() {
         XCTAssertThrowsError(try manager.create(name: "x", branch: "agentboard/x", base: "no-such-branch"))
     }

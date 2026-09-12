@@ -362,6 +362,17 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
   Derivita), and `agentboard/<task-id>` is deleted once it is merged into the
   base or epic branch. An unmerged branch, or a worktree with uncommitted
   changes, is kept and the reason surfaced in the status bar.
+  A task that belongs to an epic then has its branch merged into
+  `agentboard/epic-<id>` (§5.2), so the next sibling spawned into the epic
+  branches from work that is already in. The merge runs after the acceptance
+  transaction and off the main actor: nothing it does can hold the task out of
+  `done`. When the epic branch is an ancestor of the task branch the ref is
+  advanced directly; otherwise a temporary worktree on the epic branch carries
+  the merge and is removed afterwards, keeping the branch. A conflict aborts,
+  leaves the epic branch where it was, and queues a `decision` report naming the
+  task, the epic branch and the conflicting files, so the orchestrator can
+  dispatch a fix rather than discover the divergence at integration time.
+  Nothing here pushes: it is a local branch-to-branch merge.
 
 Reconcile also reaps worktrees under the project's worktree root that no active
 session owns, and deletes merged `agentboard/*` branches that no longer have a
@@ -390,7 +401,12 @@ of the autonomy setting.
 3. On approval, Agent Board creates an integration worktree on
    `agentboard/epic-<id>` and spawns an integrator worker whose job is to merge
    each `agentboard/<task-id>` into the epic branch, resolve conflicts, and get
-   the build green.
+   the build green. The epic branch accumulates accepted work as it goes (§5),
+   so by this point most task branches are already in and the integrator's real
+   job is the leftovers — a branch whose merge conflicted, or one accepted while
+   the epic branch was checked out here — plus getting the build green across
+   the whole epic. Both cases arrive as `decision` reports before integration is
+   requested; integration is no longer the first time task branches meet.
 4. The integrator reports. The PR from `agentboard/epic-<id>` → base is opened
    **by you**, from a button on the epic — not by an agent.
 

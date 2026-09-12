@@ -44,6 +44,19 @@ public enum BranchDeletion: Sendable, Equatable {
     case noSuchBranch(String)
 }
 
+/// What `mergeIntoEpic` did to the epic branch.
+public enum EpicMerge: Sendable, Equatable {
+    /// The task branch does not exist, so the task never committed anything.
+    case nothingToMerge
+    case alreadyMerged
+    case fastForwarded(head: String)
+    case merged(head: String)
+    /// The epic branch is untouched and the temporary worktree is gone.
+    case conflicted(files: [String])
+    /// Something else — the integrator, usually — has the epic branch checked out.
+    case skippedCheckedOut(path: String)
+}
+
 public struct WorktreeManager: Sendable {
     public static let gitPath = "/usr/bin/git"
 
@@ -93,6 +106,60 @@ public struct WorktreeManager: Sendable {
     public func branchExists(_ name: String) throws -> Bool {
         let result = try gitRaw(["rev-parse", "--verify", "--quiet", "refs/heads/\(name)"], cwd: repoPath)
         return result.status == 0
+    }
+
+    /// Merges an accepted task branch into its epic branch (SPEC §5.2), without needing the epic
+    /// branch to be checked out: a fast-forward moves the ref directly, and anything else borrows a
+    /// temporary worktree that is removed again — with the epic branch kept — either way.
+    /// A conflict aborts and leaves the epic branch exactly where it was.
+    public func mergeIntoEpic(taskBranch: String, epicBranch: String, worktreeName: String) throws -> EpicMerge {
+        guard try branchExists(taskBranch) else { return .nothingToMerge }
+        guard try branchExists(epicBranch) else {
+            throw AgentRuntimeError("cannot merge \(taskBranch): no branch \(epicBranch) in \(repoPath.path)")
+        }
+        let taskRef = "refs/heads/\(taskBranch)"
+        let epicRef = "refs/heads/\(epicBranch)"
+        if try isAncestor(taskRef, of: epicRef) { return .alreadyMerged }
+        if let holder = try list().first(where: { $0.branch == epicBranch }) {
+            return .skippedCheckedOut(path: holder.path.path)
+        }
+        if try isAncestor(epicRef, of: taskRef) {
+            let head = try resolve(taskRef)
+            try git(["update-ref", epicRef, head, try resolve(epicRef)])
+            return .fastForwarded(head: head)
+        }
+
+        let worktree = try createForBranch(name: worktreeName, branch: epicBranch)
+        defer { try? remove(path: worktree) }
+        let message = "Merge \(taskBranch) into \(epicBranch)"
+        let merge = try gitRaw(mergeConfig() + ["merge", "--no-ff", "--no-edit", "-m", message, taskBranch], cwd: worktree)
+        guard merge.status == 0 else {
+            let files = conflictedFiles(in: worktree)
+            _ = try? gitRaw(["merge", "--abort"], cwd: worktree)
+            return .conflicted(files: files)
+        }
+        return .merged(head: try headCommit(worktree: worktree))
+    }
+
+    private func conflictedFiles(in worktree: URL) -> [String] {
+        guard let output = try? gitRaw(["diff", "--name-only", "--diff-filter=U"], cwd: worktree).stdout else { return [] }
+        return output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// A merge commit needs a committer identity and must never stop on a GPG passphrase prompt —
+    /// the app has no terminal to answer one. The repository's own identity wins when it has one.
+    private func mergeConfig() throws -> [String] {
+        var config = ["-c", "commit.gpgsign=false"]
+        let email = try gitRaw(["config", "user.email"], cwd: repoPath)
+        if email.status != 0 || email.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            config += ["-c", "user.email=agent-board@localhost", "-c", "user.name=Agent Board"]
+        }
+        return config
+    }
+
+    private func resolve(_ ref: String) throws -> String {
+        try gitChecked(["rev-parse", "--verify", ref], cwd: repoPath)
+            .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Never forced: git refuses the removal rather than destroying uncommitted work.
