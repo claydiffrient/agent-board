@@ -32,6 +32,12 @@ struct TaskCardView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if let archived = task.archivedDate {
+                Label("archived \(Format.relative(archived))", systemImage: "archivebox")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             if task.blocked || task.failed {
                 HStack(spacing: 4) {
                     if task.blocked {
@@ -55,14 +61,18 @@ struct TaskCardView: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .opacity(task.isArchived ? 0.55 : 1)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
+                .fill(Color(nsColor: task.isArchived ? .underPageBackgroundColor : .controlBackgroundColor))
+                .shadow(color: .black.opacity(task.isArchived ? 0 : 0.08), radius: 2, y: 1)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+                .strokeBorder(
+                    isSelected ? Color.accentColor : (task.isArchived ? Color.secondary.opacity(0.4) : .clear),
+                    style: StrokeStyle(lineWidth: 2, dash: task.isArchived && !isSelected ? [4, 3] : [])
+                )
         )
         .contentShape(RoundedRectangle(cornerRadius: 8))
     }

@@ -108,6 +108,14 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var updatedAt: Int64
     /// Overrides the project's default model for the worker on this task.
     public var model: String?
+    /// Non-nil means archived: hidden from the default board query, and when it happened.
+    public var archivedAt: Int64?
+    /// When the task most recently entered `done`, cleared when it leaves again. The archive
+    /// policy measures time-in-done from here; `updatedAt` moves for every other edit too.
+    public var doneAt: Int64?
+    /// Set when a human pulls the task back out of the archive. While it is set, no automatic
+    /// policy archives this task again — only the manual button will.
+    public var unarchivedAt: Int64?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -127,15 +135,22 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case model
+        case archivedAt = "archived_at"
+        case doneAt = "done_at"
+        case unarchivedAt = "unarchived_at"
     }
 
     public init(
         id: String, projectId: String, epicId: String?, title: String, body: String?, acceptance: String?,
         priority: String?, column: TaskColumn, blocked: Bool = false, blockedReason: String? = nil,
         failed: Bool = false, failureReason: String? = nil, ordering: Double, origin: TaskOrigin,
-        createdAt: Int64, updatedAt: Int64, model: String? = nil
+        createdAt: Int64, updatedAt: Int64, model: String? = nil, archivedAt: Int64? = nil,
+        doneAt: Int64? = nil, unarchivedAt: Int64? = nil
     ) {
         self.model = model
+        self.archivedAt = archivedAt
+        self.doneAt = doneAt
+        self.unarchivedAt = unarchivedAt
         self.id = id
         self.projectId = projectId
         self.epicId = epicId
@@ -158,6 +173,9 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
 
     public var createdDate: Date { createdAt.asDate }
     public var updatedDate: Date { updatedAt.asDate }
+    public var archivedDate: Date? { archivedAt?.asDate }
+    public var isArchived: Bool { archivedAt != nil }
+    public var doneDate: Date? { doneAt?.asDate }
 }
 
 public typealias BoardTask = Task

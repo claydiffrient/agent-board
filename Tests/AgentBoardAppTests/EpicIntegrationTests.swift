@@ -123,7 +123,13 @@ final class EpicIntegrationTests: XCTestCase {
         try await reportComplete(session: session)
 
         XCTAssertEqual(try fixture.epics.get(ready.epic.id)?.state, .done)
-        XCTAssertEqual(try fixture.tasks.get(XCTUnwrap(session.taskId))?.column, .review)
+        // afterEpicMerge is the default policy: the merged epic's tasks, integration task included,
+        // archive in the same transaction rather than piling up in review and done.
+        let integration = try XCTUnwrap(fixture.tasks.get(XCTUnwrap(session.taskId)))
+        XCTAssertEqual(integration.column, .done)
+        XCTAssertTrue(integration.isArchived)
+        XCTAssertTrue(try XCTUnwrap(fixture.tasks.get(ready.tasks[0].id)).isArchived)
+        XCTAssertEqual(try fixture.tasks.list(projectId: fixture.project.id), [])
     }
 
     func testApprovingASpawnStillSpawnsTheTaskWorker() async throws {

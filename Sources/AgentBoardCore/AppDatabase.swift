@@ -48,6 +48,18 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("shutdown_delivery") { db in
             try db.execute(sql: Schema.shutdownDelivery)
         }
+        migrator.registerMigration("task_archived_at") { db in
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN archived_at INTEGER")
+            try db.execute(sql: "CREATE INDEX task_project_archived ON task(project_id, archived_at)")
+        }
+        migrator.registerMigration("task_done_at") { db in
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN done_at INTEGER")
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN unarchived_at INTEGER")
+            try db.execute(sql: "CREATE INDEX task_project_done_at ON task(project_id, done_at)")
+            // `updated_at` is the closest stamp rows written before this migration have; without it
+            // every task already sitting in done would read as "entered done never" and outlive afterDays.
+            try db.execute(sql: "UPDATE task SET done_at = updated_at WHERE column_name = 'done'")
+        }
         return migrator
     }
 }
