@@ -78,6 +78,11 @@ enum ToolArguments {
         return value
     }
 
+    static func optionalBool(_ key: String, in arguments: JSONValue) -> Bool? {
+        guard let value = arguments[key], value != .null else { return nil }
+        return value.boolValue
+    }
+
     static func optionalInteger(_ key: String, in arguments: JSONValue) throws -> Int64? {
         guard let value = arguments[key], value != .null else { return nil }
         if let number = value.numberValue { return Int64(number) }

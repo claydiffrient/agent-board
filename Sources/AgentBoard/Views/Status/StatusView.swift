@@ -11,9 +11,15 @@ struct StatusView: View {
     @State private var serverPort: Int?
     @State private var lastError: String?
     @State private var errorMessage: String?
+    @State private var now = Date()
+    @AppStorage("status.showEndedSessions") private var showEnded = false
 
     private var taskTitles: [String: String] {
         Dictionary(uniqueKeysWithValues: tasks.value.map { ($0.id, $0.title) })
+    }
+
+    private var roster: SessionRoster {
+        SessionVisibility.roster(sessions.value, now: now, includeEnded: showEnded)
     }
 
     private var tokenCap: Int? {
@@ -22,7 +28,7 @@ struct StatusView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            roster
+            table
             Divider()
             footer
         }
@@ -61,8 +67,8 @@ struct StatusView: View {
         .errorAlert($errorMessage)
     }
 
-    private var roster: some View {
-        Table(sessions.value) {
+    private var table: some View {
+        Table(roster.visible) {
             TableColumn("ID") { session in
                 Text(session.displayShortId)
                     .monospaced()
@@ -142,12 +148,20 @@ struct StatusView: View {
             .width(min: 120, ideal: 140)
         }
         .overlay {
-            if sessions.value.isEmpty {
-                ContentUnavailableView(
-                    "No Sessions",
-                    systemImage: "cpu",
-                    description: Text("Drag a task into Running to spawn a worker.")
-                )
+            if roster.visible.isEmpty {
+                if roster.hiddenCount > 0 {
+                    ContentUnavailableView(
+                        "No Live Sessions",
+                        systemImage: "cpu",
+                        description: Text("\(roster.hiddenCount) ended \(roster.hiddenCount == 1 ? "session" : "sessions") hidden. Turn on Show ended to see them.")
+                    )
+                } else {
+                    ContentUnavailableView(
+                        "No Sessions",
+                        systemImage: "cpu",
+                        description: Text("Drag a task into Running to spawn a worker.")
+                    )
+                }
             }
         }
     }
@@ -162,6 +176,13 @@ struct StatusView: View {
                     .help(lastError)
             }
             Spacer()
+            if roster.hiddenCount > 0 {
+                Text("\(roster.hiddenCount) ended \(roster.hiddenCount == 1 ? "session" : "sessions") hidden")
+                    .help("Ended sessions drop off the roster \(SessionVisibility.endedGraceDescription) after they finish. Nothing is deleted.")
+            }
+            Toggle("Show ended", isOn: $showEnded)
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
             Text("\(sessions.value.filter { $0.state.isActive }.count) active · \(sessions.value.count) total")
         }
         .font(.caption)
@@ -171,6 +192,7 @@ struct StatusView: View {
     }
 
     private func reconcile() async {
+        now = .now
         await env.supervisor.reconcile(projectId: project.id)
         serverPort = env.supervisor.serverPort
         lastError = env.supervisor.lastError
