@@ -69,3 +69,34 @@ public struct EpicCollapseStore {
         EpicLaneCollapse.isCollapsed(state: epic.state, userChoice: userChoice(epicId: epic.id))
     }
 }
+
+/// The jump rail's entries, top to bottom, each carrying the lane id its tap must scroll to. The
+/// rail and the board read lane ids from here so a tap can never target an id the board never set.
+public enum EpicJumpRail {
+    public static let noEpicTitle = "No epic"
+
+    public struct Entry: Sendable, Equatable, Identifiable {
+        public let laneId: String
+        public let title: String
+        public let epicId: String?
+
+        public var id: String { laneId }
+
+        public init(laneId: String, title: String, epicId: String?) {
+            self.laneId = laneId
+            self.title = title
+            self.epicId = epicId
+        }
+    }
+
+    public static func laneId(forEpicId epicId: String?) -> String {
+        epicId ?? EpicLaneOrder.noEpicLaneId
+    }
+
+    public static func entries(_ epics: [Epic]) -> [Entry] {
+        [Entry(laneId: EpicLaneOrder.noEpicLaneId, title: noEpicTitle, epicId: nil)]
+            + EpicLaneOrder.sorted(epics).map {
+                Entry(laneId: laneId(forEpicId: $0.id), title: $0.title, epicId: $0.id)
+            }
+    }
+}
