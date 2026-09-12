@@ -57,13 +57,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let epics: EpicStore
     @ObservationIgnored private let notes: NoteStore
     @ObservationIgnored private let board: Board
+    @ObservationIgnored private let archives: ArchiveSweep
     @ObservationIgnored private var meteringTask: _Concurrency.Task<Void, Never>?
+    /// Millis of the last archive sweep; 0 means none yet, so the first tick after launch sweeps
+    /// and picks up whatever came due while the app was closed.
+    @ObservationIgnored private var lastArchiveSweep: Int64 = 0
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
     @ObservationIgnored private var stallNotified: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
 
     nonisolated static let taskBranchPrefix = "agentboard/"
     static let meteringInterval: Duration = .seconds(5)
+    /// The archive policies are day-granular, so they ride the metering tick at a far coarser
+    /// cadence rather than paying for a scan every 5 seconds — or a second timer.
+    static let archiveSweepIntervalMillis: Int64 = 5 * 60 * 1000
     /// Sessions that ended this recently still get one more transcript read so final spend lands.
     static let finalSpendWindowMillis: Int64 = 15_000
 
@@ -88,6 +95,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         epics = EpicStore(db)
         notes = NoteStore(db)
         board = Board(db)
+        archives = ArchiveSweep(db)
     }
 
     private var sessionConfigDir: URL { appSupportDir.appendingPathComponent("sessions") }
@@ -803,6 +811,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func meterTick() async {
         guard let all = try? projects.list() else { return }
         let now = Int64.nowMillis
+        if now - lastArchiveSweep >= Self.archiveSweepIntervalMillis {
+            lastArchiveSweep = now
+            sweepArchives(all, now: now)
+        }
         for project in all {
             let limits = Self.capLimits(project.settings.caps)
             guard let projectSessions = try? sessions.all(projectId: project.id) else { continue }
@@ -811,6 +823,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 await meter(session, limits: limits, stallSeconds: stallSeconds)
             }
         }
+    }
+
+    /// `manual` and `afterEpicMerge` find nothing here by construction — only `afterDays` has a
+    /// deadline that passing time can cross.
+    @discardableResult
+    func sweepArchives(_ all: [Project], now: Int64 = .nowMillis) -> [String] {
+        all.flatMap { (try? archives.run(projectId: $0.id, now: now)) ?? [] }
     }
 
     private static func shouldMeter(_ session: AgentSession, now: Int64) -> Bool {

@@ -185,11 +185,20 @@ public struct Board: Sendable {
                 db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .complete, body: summary
             )
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
-            try TaskStore.move(db, taskId, to: .review, before: nil)
+            let mergedEpicId = try Self.epicMergedBy(db, task)
+            let sweepsOnMerge = try mergedEpicId != nil
+                && Self.settings(db, projectId: task.projectId).archivePolicy == .afterEpicMerge
+            // Under afterEpicMerge the integration task lands in `done` rather than `review`: the epic
+            // reaching `done` in this same transaction is its acceptance, and a task the sweep is about
+            // to archive has no business sitting in the review queue. Every other policy leaves it in
+            // `review` for a human, exactly as before.
+            try TaskStore.move(db, taskId, to: sweepsOnMerge ? .done : .review, before: nil)
             try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
-            if task.origin == .integration, let epicId = task.epicId,
-               try Epic.fetchOne(db, key: epicId)?.state == .integrating {
-                try EpicStore.setState(db, epicId, .done)
+            if let mergedEpicId {
+                try EpicStore.setState(db, mergedEpicId, .done)
+                if sweepsOnMerge {
+                    _ = try ArchiveSweep.archiveEpic(db, epicId: mergedEpicId, at: .nowMillis)
+                }
             }
             return report
         }
@@ -437,6 +446,22 @@ public struct Board: Sendable {
             ) ?? 0
             return total > 0 && unfinished == 0
         }
+    }
+
+    /// The epic this report finishes, if the task is the synthetic integrator task and the epic is
+    /// still `integrating`; nil for every ordinary task.
+    static func epicMergedBy(_ db: Database, _ task: Task) throws -> String? {
+        guard task.origin == .integration, let epicId = task.epicId,
+              try Epic.fetchOne(db, key: epicId)?.state == .integrating
+        else { return nil }
+        return epicId
+    }
+
+    static func settings(_ db: Database, projectId: String) throws -> ProjectSettings {
+        guard let project = try Project.fetchOne(db, key: projectId) else {
+            throw BoardError.projectNotFound(projectId)
+        }
+        return project.settings
     }
 
     static func requireTask(_ db: Database, _ taskId: String) throws -> Task {

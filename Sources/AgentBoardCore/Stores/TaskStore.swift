@@ -39,7 +39,8 @@ public struct TaskStore: Sendable {
             origin: origin,
             createdAt: now,
             updatedAt: now,
-            model: model
+            model: model,
+            doneAt: column == .done ? now : nil
         )
         try task.insert(db)
         return task
@@ -107,10 +108,26 @@ public struct TaskStore: Sendable {
         } else {
             ordering = try endOrdering(db, projectId: task.projectId, column: column, excluding: id)
         }
+        let now = Int64.nowMillis
         try db.execute(
             sql: "UPDATE task SET column_name = ?, ordering = ?, updated_at = ? WHERE id = ?",
-            arguments: [column, ordering, Int64.nowMillis, id]
+            arguments: [column, ordering, now, id]
         )
+        try stampDoneAt(db, id, entering: column, from: task.column, at: now)
+    }
+
+    /// `done_at` is the only reliable measure of time-in-done: reordering inside `done`, archiving
+    /// and every other edit move `updated_at`. Leaving `done` clears it along with the manual
+    /// unarchive, so a reopened task starts the policy clock — and the policy itself — from scratch.
+    static func stampDoneAt(_ db: Database, _ id: String, entering: TaskColumn, from: TaskColumn, at: Int64) throws {
+        switch (from, entering) {
+        case (.done, .done):
+            return
+        case (_, .done):
+            try db.execute(sql: "UPDATE task SET done_at = ? WHERE id = ?", arguments: [at, id])
+        default:
+            try db.execute(sql: "UPDATE task SET done_at = NULL, unarchived_at = NULL WHERE id = ?", arguments: [id])
+        }
     }
 
     static func endOrdering(_ db: Database, projectId: String, column: TaskColumn, excluding id: String?) throws -> Double {
@@ -243,12 +260,14 @@ public struct TaskStore: Sendable {
     }
 
     /// Clears `archived_at`. Always allowed, whatever column the task now sits in.
+    /// Stamping `unarchived_at` is what stops the next `ArchiveSweep` tick from undoing this.
     public func unarchive(_ id: String) throws {
         try db.writer.write { db in
             guard try Task.exists(db, key: id) else { throw BoardError.taskNotFound(id) }
+            let now = Int64.nowMillis
             try db.execute(
-                sql: "UPDATE task SET archived_at = NULL, updated_at = ? WHERE id = ?",
-                arguments: [Int64.nowMillis, id]
+                sql: "UPDATE task SET archived_at = NULL, unarchived_at = ?, updated_at = ? WHERE id = ?",
+                arguments: [now, now, id]
             )
         }
     }

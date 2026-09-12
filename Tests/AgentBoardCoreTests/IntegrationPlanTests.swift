@@ -135,8 +135,14 @@ final class IntegrationPlanTests: XCTestCase {
 
     // MARK: - epic state on completion
 
+    /// Under `manual` the integration task lands in `review` for a human, as every worker report
+    /// does. `afterEpicMerge` is the one policy that sends it straight to `done` — see
+    /// `ArchiveSweepPolicyTests`.
     func testCompletingTheIntegrationTaskMovesTheEpicToDone() throws {
         let f = try Fixture.make()
+        var settings = try XCTUnwrap(f.projects.get(f.project.id)?.settings)
+        settings.archivePolicy = .manual
+        try f.projects.updateSettings(f.project.id, settings)
         let epic = try epic(f)
         try f.epics.setState(epic.id, .integrating)
         let task = try f.board.createIntegrationTask(epicId: epic.id)

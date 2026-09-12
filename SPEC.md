@@ -212,9 +212,12 @@ CREATE TABLE task (
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
-  archived_at    INTEGER           -- non-null = archived: hidden from the board, never deleted
+  archived_at    INTEGER,          -- non-null = archived: hidden from the board, never deleted
+  done_at        INTEGER,          -- entered done; cleared on leaving. The afterDays clock
+  unarchived_at  INTEGER           -- a human pulled it back; no automatic policy touches it again
 );
 CREATE INDEX task_project_archived ON task(project_id, archived_at);
+CREATE INDEX task_project_done_at ON task(project_id, done_at);
 
 CREATE TABLE task_dep (
   task_id     TEXT NOT NULL REFERENCES task(id),
@@ -342,6 +345,33 @@ progress row is removed or altered by it. `settings_json.archivePolicy` says
 when a done task is archived automatically — `{"mode":"manual"}`,
 `{"mode":"afterDays","days":N}`, or `{"mode":"afterEpicMerge"}`, the default for
 a project with no archive key stored.
+
+The three modes fire on two different things, so they have two entry points
+(`ArchiveSweep`):
+
+- **`manual`** archives nothing on its own; the Task Board button is the only
+  trigger.
+- **`afterDays(N)`** archives a task once `now - done_at` is *strictly greater*
+  than N days — at exactly N it stays. It rides `WorkerSupervisor`'s existing
+  metering tick, throttled to one sweep every 5 minutes rather than the 5-second
+  metering cadence, and there is no second timer. `done_at` rather than
+  `updated_at` measures time-in-done, because archiving, reordering, blocking and
+  every other edit move `updated_at`.
+- **`afterEpicMerge`** archives every `done` task of an epic inside the same
+  `Board.complete` transaction that moves the epic to `done` (§5.2 step 4),
+  including the synthetic `integration` task. Under this policy alone that task
+  lands in `done` rather than `review`: the epic reaching `done` is its
+  acceptance. A task of the epic parked outside `done` is skipped, not an error.
+
+A done task with no epic has no merge event, so under `afterEpicMerge` it never
+archives automatically; it stays on the board until archived by hand. There is
+deliberately no age fallback — a policy that quietly behaves like a different
+policy is worse than one that does nothing.
+
+Automatic archiving never fights a human: `unarchive` stamps `unarchived_at`,
+and while that is set no policy re-archives the task. Moving a task out of `done`
+clears `done_at` and `unarchived_at` together, so a reopened task starts both the
+clock and the policy from scratch.
 
 ---
 
