@@ -85,6 +85,22 @@ public struct TaskStore: Sendable {
         return try Task.fetchAll(db, sql: sql, arguments: arguments)
     }
 
+    public static let branchPrefix = "agentboard/"
+
+    public static func branchName(for id: String) -> String { branchPrefix + id }
+
+    public func setEpic(_ id: String, epicId: String?) throws {
+        try db.writer.write { db in
+            guard try Task.exists(db, key: id) else {
+                throw BoardError.taskNotFound(id)
+            }
+            try db.execute(
+                sql: "UPDATE task SET epic_id = ?, updated_at = ? WHERE id = ?",
+                arguments: [epicId, Int64.nowMillis, id]
+            )
+        }
+    }
+
     public func update(_ task: Task) throws {
         var task = task
         task.updatedAt = .nowMillis

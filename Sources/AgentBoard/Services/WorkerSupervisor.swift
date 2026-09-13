@@ -75,7 +75,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var stallNotified: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
 
-    nonisolated static let taskBranchPrefix = "agentboard/"
+    nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
     /// The archive policies are day-granular, so they ride the metering tick at a far coarser
     /// cadence rather than paying for a scan every 5 seconds — or a second timer.

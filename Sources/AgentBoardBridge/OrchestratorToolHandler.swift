@@ -73,6 +73,10 @@ public final class OrchestratorToolHandler: ToolHandler {
                     "column": ToolSchema.enumeration(["proposed", "backlog", "ready"], "Defaults to backlog."),
                     "model": ToolSchema.string("Claude model id for the worker on this task; omit for the project default."),
                     "depends_on": ToolSchema.stringArray("Task ids that must be done before this one is ready."),
+                    "epic_id": ToolSchema.string(
+                        "Put the task in this existing epic, so it branches from the epic's integration branch rather "
+                            + "than the project base. The epic must be in this project and must not be `done`."
+                    ),
                 ],
                 required: ["title"]
             )
@@ -105,6 +109,21 @@ public final class OrchestratorToolHandler: ToolHandler {
                     "column": ToolSchema.enumeration(["proposed", "backlog", "ready", "review"]),
                 ],
                 required: ["id", "column"]
+            )
+        ),
+        ToolDescriptor(
+            name: "set_epic",
+            description: "Move a task into an epic, between epics, or — by omitting `epic_id` — out of its epic "
+                + "entirely. Only a task that has never been spawned can be moved: a spawned task's branch was cut "
+                + "from whatever base its epic had at spawn time, so re-homing it would leave its commits based on a "
+                + "branch the new epic never shared. Moving into an epic that is already `done` is refused too, "
+                + "because it would make a finished epic unfinished. Dependencies are not touched.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "task_id": ToolSchema.string(),
+                    "epic_id": ToolSchema.string("Destination epic; omit to take the task out of its epic."),
+                ],
+                required: ["task_id"]
             )
         ),
         ToolDescriptor(
@@ -259,6 +278,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "create_task": return try createTask(arguments, identity: identity)
         case "update_task": return try updateTask(arguments, identity: identity)
         case "move_task": return try moveTask(arguments, identity: identity)
+        case "set_epic": return try setEpic(arguments, identity: identity)
         case "set_deps": return try setDeps(arguments, identity: identity)
         case "archive_task": return try archiveTask(arguments, identity: identity)
         case "unarchive_task": return try unarchiveTask(arguments, identity: identity)
@@ -341,6 +361,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         for dep in dependsOn {
             _ = try projectTask(dep, identity: identity)
         }
+        let epic = try destinationEpic(arguments, identity: identity)
         let task = try tasks.create(
             projectId: identity.projectId,
             title: title,
@@ -349,7 +370,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             priority: ToolArguments.optionalString("priority", in: arguments),
             column: column,
             origin: .orchestrator,
-            epicId: nil,
+            epicId: epic?.id,
             model: ToolArguments.optionalString("model", in: arguments)
         )
         if !dependsOn.isEmpty {
@@ -357,7 +378,11 @@ public final class OrchestratorToolHandler: ToolHandler {
         }
         try tasks.refreshReadiness(projectId: identity.projectId)
         let final = try tasks.get(task.id) ?? task
-        return .json(.object(["id": .string(final.id), "column": .string(final.column.rawValue)]))
+        return .json(.object([
+            "id": .string(final.id),
+            "column": .string(final.column.rawValue),
+            "epic_id": .optional(final.epicId),
+        ]))
     }
 
     private func updateTask(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
@@ -390,6 +415,39 @@ public final class OrchestratorToolHandler: ToolHandler {
             )
         }
         return ToolResult(text: "Task \(task.id) is now in \(final.rawValue).\(unarchived)")
+    }
+
+    private func setEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let task = try projectTask(try ToolArguments.requiredString("task_id", in: arguments), identity: identity)
+        let destination = try destinationEpic(arguments, identity: identity)
+        if task.epicId == destination?.id {
+            let placement = destination.map { "already in epic \($0.id)" } ?? "already outside any epic"
+            return ToolResult(text: "Task \(task.id) is \(placement); nothing changed.")
+        }
+        guard try sessions.forTask(task.id).isEmpty else {
+            throw ToolError(
+                "Task \(task.id) has already been spawned: its branch \(TaskStore.branchName(for: task.id)) was cut "
+                    + "from the base its epic had at spawn time, and moving the task now would not move the commits. "
+                    + "Integrating the new epic would merge a branch the work was never based on."
+            )
+        }
+        let source = try task.epicId.map { try projectEpic($0, identity: identity) }
+        try tasks.setEpic(task.id, epicId: destination?.id)
+        try tasks.refreshReadiness(projectId: identity.projectId)
+        let arrival = destination.map { "into epic \($0.id) (\($0.branch))" } ?? "out of every epic"
+        let departure = source.map { " It left epic \($0.id)." } ?? ""
+        return ToolResult(text: "Task \(task.id) moved \(arrival).\(departure)")
+    }
+
+    /// A `done` epic is refused as a destination: adding an unfinished task to it would leave a finished
+    /// epic reporting fewer done tasks than it has.
+    private func destinationEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> Epic? {
+        guard let id = ToolArguments.optionalString("epic_id", in: arguments), !id.isEmpty else { return nil }
+        let epic = try projectEpic(id, identity: identity)
+        guard epic.state != .done else {
+            throw ToolError("Epic \(epic.id) is done: adding a task to it would leave a finished epic unfinished.")
+        }
+        return epic
     }
 
     private func setDeps(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
