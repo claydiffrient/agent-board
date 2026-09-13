@@ -523,11 +523,12 @@ Everything in worker scope over any task in the project, plus:
 | Tool | Effect |
 |---|---|
 | `list_tasks(column, epic_id, include_archived)` | Board query; archived tasks are hidden unless `include_archived` is true |
-| `create_task(...)`, `update_task(...)`, `move_task(id, column)` | Board mutation; moving an archived task out of `done` unarchives it |
+| `create_task(..., epic_id)`, `update_task(...)`, `move_task(id, column)` | Board mutation; moving an archived task out of `done` unarchives it. `create_task`'s `epic_id` is optional and creates the task inside that epic; an unknown id, one belonging to another project, or one whose epic is `done` is refused |
 | `get_task(id)` | Full detail, archived or not; an archived task carries `archived: true` and `archived_at` |
 | `archive_task(task_id)` | Hides a `done` task from the board; refused for any other column |
 | `unarchive_task(task_id)` | Returns the task to the visible board in the column it was archived from |
 | `set_deps(task_id, depends_on[])` | Dependency graph |
+| `set_epic(task_id, epic_id)` | Moves an existing task into an epic, between epics, or — with `epic_id` omitted — out of its epic. Refused for a task that has ever been spawned, and for a `done` destination epic. Dependencies are left alone |
 | `create_epic(title, goal, tasks[])` | Records a decomposition; cuts the epic branch |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
 | `pin_note(note_id, pinned)` | Every future agent sees it in full |
@@ -543,9 +544,26 @@ While a shutdown order is outstanding (§8), `spawn_worker` refuses immediately
 no new workers"`, and a pending spawn or integration approval cannot be
 approved until the order is cancelled (a refused approval is still pending
 once it is, not silently granted). The board itself is untouched: `create_task`,
-`update_task`, `move_task`, `set_deps`, `promote_proposal` and the note tools
-all keep working, and workers already running are not stopped by raising the
-order — only delivering it (§8) reaches them.
+`update_task`, `move_task`, `set_deps`, `set_epic`, `promote_proposal` and the
+note tools all keep working, and workers already running are not stopped by
+raising the order — only delivering it (§8) reaches them.
+
+Epic membership is settled before a task is spawned, never after. A task's
+worktree branches from its epic's integration branch at spawn time (§5), so a
+spawned task's commits are already based on whatever that epic's branch was;
+re-homing the task would leave `mergeIntoEpic` merging a branch the work was
+never based on. `set_epic` therefore refuses any task with a session against it
+— spawned, stopped, failed or completed alike — and names the task's branch
+`agentboard/<task-id>` in the error, so the refusal reads as "meaningless", not
+merely "disallowed". A task that has never been spawned has no branch and no
+worktree, so it moves freely. Both `set_epic` and `create_task` refuse a `done`
+epic as a destination, which would otherwise leave a finished epic reporting
+`done_tasks < total_tasks`. Epic counts and `ready_for_integration` are computed
+from the epic's task list on every read, so `get_epic` and `list_epics` report
+the corrected numbers for the source and the destination immediately after a
+move. `task_dep` rows are never rewritten by either tool: dependencies are
+independent of epic membership.
+
 Archiving is a flag, not a column. `list_tasks` is the only orchestrator read
 that hides archived tasks, and its description says so, so a task missing from
 the board reads as archived rather than deleted. Every by-id tool — `get_task`,

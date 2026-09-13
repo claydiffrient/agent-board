@@ -104,10 +104,12 @@ struct BridgeFixture {
     }
 
     @discardableResult
-    func task(_ title: String, column: TaskColumn = .backlog, in projectId: String? = nil) throws -> BoardTask {
+    func task(
+        _ title: String, column: TaskColumn = .backlog, epicId: String? = nil, in projectId: String? = nil
+    ) throws -> BoardTask {
         try tasks.create(
             projectId: projectId ?? project.id, title: title, body: nil, acceptance: nil, priority: nil,
-            column: column, origin: .human, epicId: nil
+            column: column, origin: .human, epicId: epicId
         )
     }
 
@@ -124,10 +126,10 @@ struct BridgeFixture {
     }
 
     @discardableResult
-    func epic(_ title: String, in projectId: String? = nil) throws -> Epic {
+    func epic(_ title: String, state: EpicState = .active, in projectId: String? = nil) throws -> Epic {
         let epic = Epic(
             id: Epic.newId(), projectId: projectId ?? project.id, title: title, goal: nil,
-            branch: "epic/\(title)", state: .active, createdAt: .nowMillis
+            branch: "epic/\(title)", state: state, createdAt: .nowMillis
         )
         try db.writer.write { db in try epic.insert(db) }
         return epic
