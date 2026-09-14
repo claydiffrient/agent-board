@@ -166,7 +166,12 @@ For a task `T` in project `P`:
 6. Compose the opening prompt: task title, body, acceptance criteria, epic goal,
    pinned notes in full, attached notes in full, the project's build and test
    commands when `settings_json` records them, and the completion protocol
-   (commit, do not push, call `report_complete`).
+   (commit, record one durable finding as a note, do not push, call
+   `report_complete`). Injection alone left D13 half-built: notes flowed in and
+   nothing flowed back, so the prompt also points at `search_notes` in *How to
+   work* and asks for a note before `report_complete` in *When you are done*,
+   with the bar stated and `append_section` preferred over a second note on a
+   subject that already has one.
 7. `claude "<prompt>" --bg -n <task-slug> --permission-mode auto
    --strict-mcp-config --mcp-config <file> --settings <file>
    [--model <task.model ?? settings.defaultModel>]
