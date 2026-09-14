@@ -1,0 +1,32 @@
+git worktree add /Users/claydiffrient/Library/Application Support/AgentBoard/worktrees/f7c95040-65a6-41e2-84a6-d5aed1d809f6/1064a204-6c7c-42ee-82f8-b1764d2c1359/.capture/worktrees/c41e77b2-2222-4a19-8f10-6d0e9a1b4455 -b agentboard/c41e77b2-2222-4a19-8f10-6d0e9a1b4455 main exited 126
+stdout:
+HEAD is now at f4c82bd repro: unrelated missing file
+
+stderr:
+Preparing worktree (new branch 'agentboard/c41e77b2-2222-4a19-8f10-6d0e9a1b4455')
+Installing JavaScript dependencies with Bazel yarn
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Invocation ID: 27664830-38e1-489c-8dc6-2060657697ce
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //:yarn (5 packages loaded, 6 targets configured)
+Analyzing: target //:yarn (5 packages loaded, 6 targets configured)
+
+INFO: Analyzed target //:yarn (79 packages loaded, 436 targets configured).
+INFO: Found 1 target...
+Target //:yarn up-to-date:
+  bazel-bin/yarn
+INFO: Elapsed time: 5.467s, Critical Path: 0.02s
+INFO: 6 processes: 6 internal.
+INFO: Build completed successfully, 6 total actions
+INFO: Running command line: bazel-bin/yarn <args omitted>
+yarn install v1.22.22
+[1/4] Resolving packages...
+preinstall ok
+ensuring lint-staged is installed
+/bin/sh: /opt/derivita/bin/lint-staged: No such file or directory
+/bin/sh: line 0: exec: /opt/derivita/bin/lint-staged: cannot execute: No such file or directory

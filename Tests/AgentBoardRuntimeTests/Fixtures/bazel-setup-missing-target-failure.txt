@@ -1,0 +1,41 @@
+git worktree add /Users/claydiffrient/Library/Application Support/AgentBoard/worktrees/f7c95040-65a6-41e2-84a6-d5aed1d809f6/1064a204-6c7c-42ee-82f8-b1764d2c1359/.capture/worktrees/9f2c1d40-1111-4bcd-9a7e-52ab0f8c7311 -b agentboard/9f2c1d40-1111-4bcd-9a7e-52ab0f8c7311 main exited 1
+stdout:
+HEAD is now at 9b50423 repro: quoted path, missing bazel target
+
+stderr:
+Preparing worktree (new branch 'agentboard/9f2c1d40-1111-4bcd-9a7e-52ab0f8c7311')
+Installing JavaScript dependencies with Bazel yarn
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Invocation ID: fbf3563c-9133-4323-9a69-266e5d6f0ad4
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //:yarn (5 packages loaded, 6 targets configured)
+Analyzing: target //:yarn (5 packages loaded, 6 targets configured)
+
+INFO: Analyzed target //:yarn (79 packages loaded, 436 targets configured).
+[1 / 1] no actions running
+INFO: Found 1 target...
+Target //:yarn up-to-date:
+  bazel-bin/yarn
+INFO: Elapsed time: 5.794s, Critical Path: 0.02s
+INFO: 6 processes: 6 internal.
+INFO: Build completed successfully, 6 total actions
+INFO: Running command line: bazel-bin/yarn <args omitted>
+yarn install v1.22.22
+[1/4] Resolving packages...
+preinstall ok
+ensuring lint-staged is installed
+INFO: Invocation ID: e4b5d3ca-cab3-4990-9816-516eadf9a9ce
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+WARNING: Target pattern parsing failed.
+ERROR: Skipping '//:lint-staged': no such target '//:lint-staged': target 'lint-staged' not declared in package '' defined by /Users/claydiffrient/Library/Application Support/AgentBoard/worktrees/f7c95040-65a6-41e2-84a6-d5aed1d809f6/1064a204-6c7c-42ee-82f8-b1764d2c1359/.capture/worktrees/9f2c1d40-1111-4bcd-9a7e-52ab0f8c7311/BUILD.bazel
+ERROR: no such target '//:lint-staged': target 'lint-staged' not declared in package '' defined by /Users/claydiffrient/Library/Application Support/AgentBoard/worktrees/f7c95040-65a6-41e2-84a6-d5aed1d809f6/1064a204-6c7c-42ee-82f8-b1764d2c1359/.capture/worktrees/9f2c1d40-1111-4bcd-9a7e-52ab0f8c7311/BUILD.bazel
+INFO: Elapsed time: 0.464s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully

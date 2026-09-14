@@ -18,11 +18,15 @@ public struct WorkerSpawn: Sendable, Equatable {
     public var setupSessionId: String
     public var worktreePath: String
     public var branch: String
+    /// Raised before any git work, so a worktree path a repository's setup cannot survive is named
+    /// while the orchestrator can still act on it rather than after setup has already failed.
+    public var warnings: [String]
 
-    public init(setupSessionId: String, worktreePath: String, branch: String) {
+    public init(setupSessionId: String, worktreePath: String, branch: String, warnings: [String] = []) {
         self.setupSessionId = setupSessionId
         self.worktreePath = worktreePath
         self.branch = branch
+        self.warnings = warnings
     }
 }
 
