@@ -138,7 +138,9 @@ final class OrchestratorToolHandlerTests: XCTestCase {
         let task = try f.task("t", column: .ready)
         let result = try await f.call("spawn_worker", ["task_id": .string(task.id)])
 
-        XCTAssertEqual(result.text, "spawned session session-for-\(task.id)")
+        XCTAssertTrue(result.text.contains("Worker dispatched for \(task.id)"), result.text)
+        XCTAssertTrue(result.text.contains("setup is still running"), result.text)
+        XCTAssertFalse(result.text.contains("setup-for-\(task.id)"), "the placeholder id must not be handed out")
         let spawned = await f.control.spawned
         XCTAssertEqual(spawned, [task.id])
         XCTAssertEqual(try f.approvals.pending(projectId: f.project.id).count, 0)

@@ -66,6 +66,7 @@ final class EpicSpawnTests: XCTestCase {
         try advance(epic.branch, message: "Epic groundwork")
 
         try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
 
         let taskBranch = "agentboard/\(task.id)"
         XCTAssertTrue(
@@ -82,6 +83,7 @@ final class EpicSpawnTests: XCTestCase {
         XCTAssertThrowsError(try git(["rev-parse", "--verify", epic.branch]))
 
         try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
 
         XCTAssertEqual(try head(epic.branch), try head("main"))
     }
@@ -96,6 +98,7 @@ final class EpicSpawnTests: XCTestCase {
 
         let task = try makeTask("Second in epic", epicId: epic.id)
         try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
 
         XCTAssertEqual(try head(epic.branch), epicHead, "an existing epic branch was moved")
         XCTAssertEqual(
@@ -108,6 +111,7 @@ final class EpicSpawnTests: XCTestCase {
         let task = try makeTask("No epic here", epicId: nil)
 
         try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
 
         XCTAssertEqual(try head("agentboard/\(task.id)"), try head("main"))
         XCTAssertTrue(
@@ -121,6 +125,7 @@ final class EpicSpawnTests: XCTestCase {
         XCTAssertEqual(epic.state, .planning)
 
         try await fixture.supervisor.assign(taskId: try makeTask("First", epicId: epic.id).id)
+        await fixture.supervisor.waitForSetup()
 
         XCTAssertEqual(try epics.get(epic.id)?.state, .active)
     }
@@ -128,9 +133,11 @@ final class EpicSpawnTests: XCTestCase {
     func testLaterSpawnsLeaveANonPlanningEpicAlone() async throws {
         let epic = try makeEpic()
         try await fixture.supervisor.assign(taskId: try makeTask("First", epicId: epic.id).id)
+        await fixture.supervisor.waitForSetup()
         try epics.setState(epic.id, .integrating)
 
         try await fixture.supervisor.assign(taskId: try makeTask("Second", epicId: epic.id).id)
+        await fixture.supervisor.waitForSetup()
 
         XCTAssertEqual(try epics.get(epic.id)?.state, .integrating, "spawn dragged the epic back to active")
     }
@@ -140,6 +147,7 @@ final class EpicSpawnTests: XCTestCase {
         let task = try makeTask("Epic work", epicId: epic.id)
 
         try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
 
         let spawns = await fixture.runtime.spawns
         let prompt = try XCTUnwrap(spawns.last?.prompt)
@@ -149,6 +157,7 @@ final class EpicSpawnTests: XCTestCase {
 
     func testStandaloneTaskPromptHasNoEpicGoalSection() async throws {
         try await fixture.supervisor.assign(taskId: try makeTask("No epic here", epicId: nil).id)
+        await fixture.supervisor.waitForSetup()
 
         let spawns = await fixture.runtime.spawns
         let prompt = try XCTUnwrap(spawns.last?.prompt)

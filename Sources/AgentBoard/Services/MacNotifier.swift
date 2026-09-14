@@ -1,11 +1,11 @@
 import Foundation
 import UserNotifications
 
-/// `UNUserNotificationCenter` traps in a process without a bundle identifier, so the bare
-/// SwiftPM binary silently drops notifications; the .app bundle shows them.
+/// `UNUserNotificationCenter` traps unless the process is an app bundle, so the bare SwiftPM
+/// binary and the test runner silently drop notifications; the .app bundle shows them.
 enum MacNotifier {
     static func post(title: String, body: String) {
-        guard Bundle.main.bundleIdentifier != nil else { return }
+        guard Bundle.main.bundleIdentifier != nil, Bundle.main.bundleURL.pathExtension == "app" else { return }
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else { return }

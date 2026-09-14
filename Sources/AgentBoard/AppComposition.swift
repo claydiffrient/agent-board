@@ -36,6 +36,7 @@ final class StubSupervisor: WorkerSupervising {
     }
 
     func assign(taskId: String) async throws { throw StubError.notWired }
+    func waitForSetup() async {}
     func stop(sessionId: String) async throws { throw StubError.notWired }
     func resume(sessionId: String) async throws { throw StubError.notWired }
     func pauseAll(projectId: String) async throws { throw StubError.notWired }

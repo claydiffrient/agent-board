@@ -48,8 +48,24 @@ extension AgentSession {
 }
 
 extension SessionState {
+    /// `setup` reads as a phase rather than a state, so it does not pass for a worker at work.
+    var label: String {
+        switch self {
+        case .setup: "setting up"
+        default: rawValue
+        }
+    }
+
+    var help: String? {
+        switch self {
+        case .setup: "The worktree is ready; the repository is still being prepared and the worker cannot work yet."
+        default: nil
+        }
+    }
+
     var color: Color {
         switch self {
+        case .setup: .purple
         case .starting: .orange
         case .running: .green
         case .idle: .blue

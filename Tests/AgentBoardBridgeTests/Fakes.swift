@@ -35,9 +35,13 @@ actor FakeWorkerControl: WorkerControl {
     private(set) var spawned: [String] = []
     private(set) var stopped: [String] = []
 
-    func spawnWorker(taskId: String) async throws -> String {
+    func spawnWorker(taskId: String) async throws -> WorkerSpawn {
         spawned.append(taskId)
-        return "session-for-\(taskId)"
+        return WorkerSpawn(
+            setupSessionId: "setup-for-\(taskId)",
+            worktreePath: "/tmp/worktrees/\(taskId)",
+            branch: "agentboard/\(taskId)"
+        )
     }
 
     func stopWorker(sessionId: String) async throws {

@@ -9,9 +9,27 @@ public protocol BoardEventSink: Sendable {
     func workerAcknowledgedShutdown(projectId: String, sessionId: String) async
 }
 
+/// What `spawn_worker` can promise by the time it answers: the worktree is on disk and the task is
+/// claimed. Preparing the repository and starting the agent carry on afterwards, so no Claude
+/// session id exists yet.
+public struct WorkerSpawn: Sendable, Equatable {
+    /// The `agent_session` row holding the slot during setup. Claude's own session id replaces it
+    /// once the agent registers, so this identifies the spawn, not the session that comes out of it.
+    public var setupSessionId: String
+    public var worktreePath: String
+    public var branch: String
+
+    public init(setupSessionId: String, worktreePath: String, branch: String) {
+        self.setupSessionId = setupSessionId
+        self.worktreePath = worktreePath
+        self.branch = branch
+    }
+}
+
 public protocol WorkerControl: Sendable {
-    /// The caller has already passed `Board.requestSpawn`; returns the new session id.
-    func spawnWorker(taskId: String) async throws -> String
+    /// The caller has already passed `Board.requestSpawn`. Returns once the worktree exists and the
+    /// session row is written, with setup still running.
+    func spawnWorker(taskId: String) async throws -> WorkerSpawn
     func stopWorker(sessionId: String) async throws
 }
 

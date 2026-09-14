@@ -335,4 +335,6 @@ public enum BoardError: Error, Equatable, Sendable {
     case noShutdownOrder(String)
     /// Only a task in `done` may be archived; archiving live work would hide it from the board.
     case archiveRequiresDone(taskId: String, column: TaskColumn)
+    /// A setup row was resolved twice, or something ended it while its worktree was being prepared.
+    case sessionNotInSetup(String, SessionState)
 }

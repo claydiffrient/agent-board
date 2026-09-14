@@ -154,8 +154,11 @@ public final class OrchestratorToolHandler: ToolHandler {
         ToolDescriptor(
             name: "spawn_worker",
             description: "Assign a `ready` task to a new worker session in its own worktree. Subject to the project's "
-                + "concurrency caps. When autonomy is off, this creates an approval the human must grant; you will "
-                + "learn the decision through list_reports, so do not call again for the same task in the meantime.",
+                + "concurrency caps. Returns as soon as the worktree exists and the task is running, while the "
+                + "repository is still being set up — a worker in `setup` holds a concurrency slot but cannot work "
+                + "yet, and a setup that fails puts the task back in ready with a failed report. When autonomy is "
+                + "off, this creates an approval the human must grant; you will learn the decision through "
+                + "list_reports, so do not call again for the same task in the meantime.",
             inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
         ),
         ToolDescriptor(
@@ -500,8 +503,16 @@ public final class OrchestratorToolHandler: ToolHandler {
         let requestedBy = identity.sessionId ?? "orchestrator"
         switch try board.requestSpawn(taskId: task.id, requestedBy: requestedBy) {
         case .proceed:
-            let sessionId = try await control.spawnWorker(taskId: task.id)
-            return ToolResult(text: "spawned session \(sessionId)")
+            let spawn = try await control.spawnWorker(taskId: task.id)
+            return ToolResult(text: """
+            Worker dispatched for \(task.id); the task is now running. Its worktree is ready at \
+            \(spawn.worktreePath) on branch \(spawn.branch), but setup is still running, so the \
+            worker cannot do anything yet and has no session id.
+
+            Nothing to do but wait. The session shows as `setup` in list_agents and turns to \
+            `running` once the agent starts; if setup fails instead, the task goes back to ready \
+            and a failed report tells you why. Do not call spawn_worker for this task again.
+            """)
         case .approvalPending(let approval):
             return ToolResult(text: "approval \(approval.id) pending; the human must approve. You will be told via list_reports.")
         case .refused(let reason):

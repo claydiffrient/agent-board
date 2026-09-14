@@ -33,6 +33,7 @@ final class EpicIntegrationTests: XCTestCase {
         let approval = try requestIntegration(epicId: ready.epic.id)
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         let spawns = await fixture.runtime.spawns
         XCTAssertEqual(spawns.count, 1, "expected exactly one integrator session")
@@ -61,6 +62,7 @@ final class EpicIntegrationTests: XCTestCase {
         let approval = try requestIntegration(epicId: ready.epic.id)
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         let request = try await onlySpawn()
         XCTAssertEqual(request.permissionMode, "auto")
@@ -84,6 +86,7 @@ final class EpicIntegrationTests: XCTestCase {
         let approval = try requestIntegration(epicId: ready.epic.id)
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         let prompt = try await onlySpawn().prompt
         let positions = ["schema", "api", "ui"].map { title in
@@ -103,6 +106,7 @@ final class EpicIntegrationTests: XCTestCase {
         let approval = try requestIntegration(epicId: ready.epic.id)
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         let prompt = try await onlySpawn().prompt
         XCTAssertTrue(prompt.contains("1. `agentboard/\(api.id)` — api"), prompt)
@@ -117,6 +121,7 @@ final class EpicIntegrationTests: XCTestCase {
         let approval = try requestIntegration(epicId: ready.epic.id)
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
         XCTAssertEqual(try fixture.epics.get(ready.epic.id)?.state, .integrating)
 
         let session = try XCTUnwrap(fixture.sessions.all(projectId: fixture.project.id).first)
@@ -143,6 +148,7 @@ final class EpicIntegrationTests: XCTestCase {
         )
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         let spawns = await fixture.runtime.spawns
         XCTAssertEqual(spawns.count, 1)
@@ -167,6 +173,7 @@ final class EpicIntegrationTests: XCTestCase {
         let approval = try requestIntegration(epicId: ready.epic.id)
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         let request = try await onlySpawn()
         XCTAssertTrue(request.prompt.contains("Do not push. Do not open a PR."), request.prompt)

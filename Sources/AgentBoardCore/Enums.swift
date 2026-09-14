@@ -36,6 +36,10 @@ public enum EpicState: String, Codable, Sendable, CaseIterable, Equatable, Datab
 }
 
 public enum SessionState: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    /// The worktree exists and the row is written, but no agent process has been launched yet:
+    /// the repository is still being prepared. A session here holds a concurrency slot and can do
+    /// no work.
+    case setup
     case starting
     case running
     case idle
@@ -46,7 +50,7 @@ public enum SessionState: String, Codable, Sendable, CaseIterable, Equatable, Da
 
     public var isActive: Bool {
         switch self {
-        case .starting, .running, .idle, .blocked: return true
+        case .setup, .starting, .running, .idle, .blocked: return true
         case .stopped, .failed, .completed: return false
         }
     }

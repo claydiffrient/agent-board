@@ -10,8 +10,51 @@ actor FakeRuntime: AgentRuntime {
     private(set) var resumed: [String] = []
     private(set) var resumePrompts: [String] = []
     private(set) var spawns: [SpawnRequest] = []
+    /// True from the moment `spawn` is entered until it answers — what a slow repository's setup
+    /// looks like from the outside.
+    private(set) var isSettingUp = false
+    private var failure: Error?
+    private var gate: CheckedContinuation<Void, Never>?
+    private var delay: Duration?
+    private var holdNextSpawn = false
+    private var entered: [CheckedContinuation<Void, Never>] = []
+
+    /// The next spawn blocks inside `spawn` until `releaseSpawn()` — a setup that outlives the call.
+    func holdSpawn() { holdNextSpawn = true }
+
+    /// A setup that simply takes a long time, the way `yarn install` does.
+    func delaySpawn(_ duration: Duration) { delay = duration }
+
+    func failNextSpawn(_ error: Error) { failure = error }
+
+    /// Returns once the held spawn is actually inside `spawn`, so a test never races its own gate.
+    func waitUntilSettingUp() async {
+        if isSettingUp { return }
+        await withCheckedContinuation { entered.append($0) }
+    }
+
+    func releaseSpawn() {
+        holdNextSpawn = false
+        gate?.resume()
+        gate = nil
+    }
 
     func spawn(_ request: SpawnRequest) async throws -> SpawnedAgent {
+        isSettingUp = true
+        for waiter in entered { waiter.resume() }
+        entered = []
+        if holdNextSpawn {
+            await withCheckedContinuation { gate = $0 }
+        }
+        if let delay {
+            self.delay = nil
+            try? await _Concurrency.Task.sleep(for: delay)
+        }
+        isSettingUp = false
+        if let failure {
+            self.failure = nil
+            throw failure
+        }
         spawns.append(request)
         return SpawnedAgent(shortId: "short-\(spawns.count)", sessionId: "session-\(spawns.count)")
     }

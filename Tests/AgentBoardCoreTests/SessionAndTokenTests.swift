@@ -12,7 +12,7 @@ final class SessionStoreTests: XCTestCase {
         try f.sessions.insert(AgentSession(sessionId: "elsewhere", projectId: other.id, role: .worker, cwd: "/", state: .running))
 
         let active = try f.sessions.active(projectId: f.project.id)
-        XCTAssertEqual(Set(active.map(\.state)), [.starting, .running, .idle, .blocked])
+        XCTAssertEqual(Set(active.map(\.state)), [.setup, .starting, .running, .idle, .blocked])
         XCTAssertFalse(active.contains { $0.sessionId == "elsewhere" })
         XCTAssertEqual(try f.sessions.all(projectId: f.project.id).count, SessionState.allCases.count)
     }
@@ -55,7 +55,7 @@ final class SessionStoreTests: XCTestCase {
     }
 
     func testSessionStateIsActive() {
-        XCTAssertEqual(SessionState.allCases.filter(\.isActive), [.starting, .running, .idle, .blocked])
+        XCTAssertEqual(SessionState.allCases.filter(\.isActive), [.setup, .starting, .running, .idle, .blocked])
     }
 }
 

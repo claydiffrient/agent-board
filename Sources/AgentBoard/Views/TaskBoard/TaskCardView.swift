@@ -83,7 +83,7 @@ struct TaskCardView: View {
                 Image(systemName: "cpu")
                 Text(session.displayShortId)
                     .monospaced()
-                Text(session.state.rawValue)
+                Text(session.state.label)
                     .foregroundStyle(session.state.color)
             }
             HStack(spacing: 4) {

@@ -156,9 +156,21 @@ For a task `T` in project `P`:
    with cwd set to the worktree. The prompt goes first because
    `--disallowedTools` is variadic and would swallow a trailing positional.
 8. Parse the short id from stdout, look up the session uuid in
-   `claude agents --json`, and record it with the worktree path, branch, and
-   token in SQLite. The token grant is bound to the session at this point, not
-   before spawn.
+   `claude agents --json`, and resolve the setup row into it, carrying the
+   worktree path, branch and attempt across. The token grant is bound to the
+   session at this point, not before spawn.
+
+Steps 1-2 are synchronous; `spawn_worker` answers between step 2 and step 3,
+with a row in `agent_session` under a placeholder id and state `setup`, and the
+task already in `running`. Steps 3-8 finish in the background, because on a
+large repository they outlast the MCP call — a timeout an orchestrator cannot
+tell from a failure turns every dispatch into a guess. A session in `setup`
+holds a concurrency slot but does no work, is exempt from the idle cap (the
+clock is measuring setup, not the agent), and is skipped by `reconcile`, whose
+join against `claude agents --json` cannot see a placeholder id. A failure in
+steps 3-8 has nowhere to be thrown: it terminates the session, puts the task
+back in `ready` flagged failed, and queues a `failed` report, which is also what
+happens to a setup still running when Agent Board quits.
 
 `--strict-mcp-config` is deliberate: without it a worker sees `repo-tasks`,
 `solo`, and the other globally configured servers, and has two contradictory
@@ -244,7 +256,7 @@ CREATE TABLE agent_session (
   worktree_path  TEXT,
   branch         TEXT,
   cwd            TEXT NOT NULL,
-  state          TEXT NOT NULL,      -- starting|running|idle|blocked|stopped|failed|completed
+  state          TEXT NOT NULL,      -- setup|starting|running|idle|blocked|stopped|failed|completed
   started_at     INTEGER NOT NULL,
   ended_at       INTEGER,
   last_activity  INTEGER,

@@ -207,7 +207,7 @@ struct TaskInspectorView: View {
                         HStack(spacing: 6) {
                             Text(session.displayShortId)
                                 .monospaced()
-                            Text(session.state.rawValue)
+                            Text(session.state.label)
                                 .foregroundStyle(session.state.color)
                             Text("attempt \(session.attempt)")
                                 .foregroundStyle(.secondary)
