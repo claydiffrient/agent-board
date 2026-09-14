@@ -49,6 +49,9 @@ enum SupervisorError: LocalizedError {
 final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private(set) var serverPort: Int?
     private(set) var lastError: String?
+    /// The last spawn's worktree path warning, raised by the preflight before that spawn touched
+    /// git. Separate from `lastError` so the spawn's own failure cannot overwrite it.
+    private(set) var lastWorktreePathWarning: String?
     /// Wind-down progress per project id, refreshed on every delivery, every acknowledgment and
     /// every metering tick, so the progress sheet reads it instead of polling.
     private(set) var shutdownProgress: [String: ShutdownProgress] = [:]
@@ -220,6 +223,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             repoPath: URL(fileURLWithPath: project.repoPath),
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
         )
+        let warnings = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
         let epic = try task.epicId.flatMap { try epics.get($0) }
         let base: String
         if let epic {
@@ -266,7 +270,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 port: port
             )
             return WorkerSpawn(
-                setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch
+                setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch,
+                warnings: warnings
             )
         } catch {
             throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
@@ -421,6 +426,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
         )
         let worktreeName = "epic-\(epicId)"
+        _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(worktreeName))
         let epicBranch = epic.branch
         let worktree = try await offMain {
             try Self.existingWorktree(manager, name: worktreeName)
@@ -909,6 +915,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func offMainNotices(_ body: @escaping @Sendable () -> [String]) async -> [String] {
         await _Concurrency.Task.detached(priority: .userInitiated) { body() }.value
+    }
+
+    /// Runs before the first git command of a spawn: `git worktree add` fires the repository's
+    /// `post-checkout` hook, so by the time the path is on disk its setup has already run in it.
+    @discardableResult
+    private func preflightWorktreePath(_ path: URL) -> [String] {
+        let warning = WorktreePathDiagnosis.preflight(worktreePath: path.path)?.message
+        lastWorktreePathWarning = warning
+        guard let warning else { return [] }
+        FileHandle.standardError.write(Data("worktree path warning: \(warning)\n".utf8))
+        report([warning])
+        return [warning]
     }
 
     /// Cleanup notices share the status bar's error slot; nothing else surfaces them to the human.

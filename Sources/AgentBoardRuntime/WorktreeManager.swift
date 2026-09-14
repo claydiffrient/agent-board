@@ -80,9 +80,9 @@ public struct WorktreeManager: Sendable {
         try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
         let path = worktreeRoot.appendingPathComponent(name)
         if try branchExists(branch) {
-            try git(["worktree", "add", path.path, branch])
+            try addWorktree(["worktree", "add", path.path, branch], at: path)
         } else {
-            try git(["worktree", "add", path.path, "-b", branch, base])
+            try addWorktree(["worktree", "add", path.path, "-b", branch, base], at: path)
         }
         return path
     }
@@ -94,7 +94,7 @@ public struct WorktreeManager: Sendable {
         }
         try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
         let path = worktreeRoot.appendingPathComponent(name)
-        try git(["worktree", "add", path.path, branch])
+        try addWorktree(["worktree", "add", path.path, branch], at: path)
         return path
     }
 
@@ -386,12 +386,23 @@ public struct WorktreeManager: Sendable {
 
     private func gitChecked(_ args: [String], cwd: URL) throws -> CommandResult {
         let result = try gitRaw(args, cwd: cwd)
-        guard result.status == 0 else {
-            throw AgentRuntimeError(
-                "git \(args.joined(separator: " ")) exited \(result.status)\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)"
-            )
-        }
+        guard result.status == 0 else { throw AgentRuntimeError(Self.failure(args, result)) }
         return result
+    }
+
+    /// `git worktree add` runs the repository's `post-checkout` hook and exits with the hook's
+    /// status, so a repository that sets a new worktree up from that hook reports its setup failure
+    /// as this command's output — including the failure a shell-unsafe worktree path causes.
+    private func addWorktree(_ args: [String], at path: URL) throws {
+        let result = try gitRaw(args, cwd: repoPath)
+        guard result.status != 0 else { return }
+        throw AgentRuntimeError(
+            WorktreePathDiagnosis.explain(Self.failure(args, result), worktreePath: path.path)
+        )
+    }
+
+    private static func failure(_ args: [String], _ result: CommandResult) -> String {
+        "git \(args.joined(separator: " ")) exited \(result.status)\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)"
     }
 
     private func gitRaw(_ args: [String], cwd: URL) throws -> CommandResult {

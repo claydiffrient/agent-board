@@ -542,6 +542,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         switch try board.requestSpawn(taskId: task.id, requestedBy: requestedBy) {
         case .proceed:
             let spawn = try await control.spawnWorker(taskId: task.id)
+            let warnings = spawn.warnings.isEmpty ? "" : "\n\n" + spawn.warnings.joined(separator: "\n")
             return ToolResult(text: """
             Worker dispatched for \(task.id); the task is now running. Its worktree is ready at \
             \(spawn.worktreePath) on branch \(spawn.branch), but setup is still running, so the \
@@ -550,7 +551,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             Nothing to do but wait. The session shows as `setup` in list_agents and turns to \
             `running` once the agent starts; if setup fails instead, the task goes back to ready \
             and a failed report tells you why. Do not call spawn_worker for this task again.
-            """)
+            """ + warnings)
         case .approvalPending(let approval):
             return ToolResult(text: "approval \(approval.id) pending; the human must approve. You will be told via list_reports.")
         case .refused(let reason):

@@ -355,6 +355,76 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(try manager.remove(path: path).hookDiagnostics, [])
     }
 
+    /// The whole mechanism end to end: `git worktree add` fires the repository's `post-checkout`
+    /// hook, the hook's setup interpolates the new worktree path into a shell command unquoted, and
+    /// git exits with the hook's status.
+    func testAPostCheckoutSetupThatSplitsTheWorktreePathIsExplained() throws {
+        try installPostCheckoutSetup("""
+        /bin/sh $1/scripts/preinstall.sh
+        echo "setup: build step 2"
+        exit 1
+        """)
+        let spaced = WorktreeManager(
+            repoPath: repo,
+            worktreeRoot: sandbox.appendingPathComponent("Agent Board/worktrees"),
+            hookSettingsURL: hookSettings
+        )
+
+        let error = try XCTUnwrapError {
+            _ = try spaced.create(name: "task-1", branch: "agentboard/task-1", base: "main")
+        }
+
+        let message = String(describing: error)
+        let headline = try XCTUnwrap(message.split(separator: "\n", omittingEmptySubsequences: false).first)
+        XCTAssertTrue(headline.contains("a space"), message)
+        XCTAssertTrue(headline.contains(sandbox.appendingPathComponent("Agent").path), message)
+        XCTAssertTrue(message.contains("setup: build step 2"), "the hook's own output must survive: \(message)")
+        XCTAssertTrue(message.contains("No such file or directory"), message)
+    }
+
+    func testAPostCheckoutSetupThatFailsForAnotherReasonIsNotExplained() throws {
+        try installPostCheckoutSetup("""
+        echo "setup: no such target //:lint-staged" >&2
+        exit 1
+        """)
+        let spaced = WorktreeManager(
+            repoPath: repo,
+            worktreeRoot: sandbox.appendingPathComponent("Agent Board/worktrees"),
+            hookSettingsURL: hookSettings
+        )
+
+        let error = try XCTUnwrapError {
+            _ = try spaced.create(name: "task-1", branch: "agentboard/task-1", base: "main")
+        }
+
+        let message = String(describing: error)
+        XCTAssertTrue(message.hasPrefix("git worktree add "), message)
+        XCTAssertTrue(message.contains("no such target //:lint-staged"), message)
+    }
+
+    private func installPostCheckoutSetup(_ body: String) throws {
+        let hooks = repo.appendingPathComponent(".git/hooks")
+        try FileManager.default.createDirectory(at: hooks, withIntermediateDirectories: true)
+        let hook = hooks.appendingPathComponent("post-checkout")
+        try """
+        #!/bin/sh
+        [ "$3" = "1" ] || exit 0
+        cd "$(git rev-parse --show-toplevel)"
+        set -- "$PWD"
+        \(body)
+        """.write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+    }
+
+    private func XCTUnwrapError(_ body: () throws -> Void) throws -> Error {
+        do {
+            try body()
+        } catch {
+            return error
+        }
+        throw AgentRuntimeError("expected the worktree creation to fail")
+    }
+
     func testExpandTilde() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         XCTAssertEqual(WorktreeManager.expandTilde("~/bin/hook.sh --flag"), "\(home)/bin/hook.sh --flag")
