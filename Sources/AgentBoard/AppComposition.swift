@@ -59,5 +59,8 @@ final class StubSupervisor: WorkerSupervising {
     func cancelShutdown(projectId: String, by: String) async throws -> ShutdownOrder? { throw StubError.notWired }
     func isShuttingDown(projectId: String) -> Bool { false }
     func deliverShutdownOrder(projectId: String) async throws -> ShutdownProgress { throw StubError.notWired }
+    func requestGlobalShutdown(requestedBy: String, reason: String?) async throws -> [ShutdownOrder] { throw StubError.notWired }
+    func cancelGlobalShutdown(by: String) async throws -> [ShutdownOrder] { throw StubError.notWired }
+    func stopOrchestratorConsoles() {}
     var shutdownProgress: [String: ShutdownProgress] { [:] }
 }

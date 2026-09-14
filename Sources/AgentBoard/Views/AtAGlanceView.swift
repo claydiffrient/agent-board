@@ -10,6 +10,8 @@ struct AtAGlanceView: View {
 
     @Environment(AppEnvironment.self) private var env
     @State private var summary = Observed<GlanceSummary>(.empty)
+    @State private var confirmingShutdown = false
+    @State private var windingDown = false
 
     private var sections: [GlanceGrouping.Section] {
         GlanceGrouping.sections(projects: projects, workspaces: workspaces, summary: summary.value)
@@ -30,15 +32,43 @@ struct AtAGlanceView: View {
         .task {
             await summary.run(GlanceStore(env.db).observe(), in: env.db.reader)
         }
+        .confirmationDialog(
+            "Shut down every project and quit?",
+            isPresented: $confirmingShutdown,
+            titleVisibility: .visible
+        ) {
+            Button("Shut Down", role: .destructive) { windingDown = true }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(shutdownConfirmation)
+        }
+        .sheet(isPresented: $windingDown) {
+            GlobalShutdownSheet()
+                .environment(env)
+        }
     }
 
     private var headline: some View {
-        Text(GlanceHeadline.text(
-            workingSessions: summary.value.workingSessions,
-            tasksInReview: summary.value.tasksInReview
-        ))
-        .font(.title2)
-        .fontWeight(.medium)
+        HStack(alignment: .firstTextBaseline) {
+            Text(GlanceHeadline.text(
+                workingSessions: summary.value.workingSessions,
+                tasksInReview: summary.value.tasksInReview
+            ))
+            .font(.title2)
+            .fontWeight(.medium)
+            Spacer()
+            Button("Shut Down…") { confirmingShutdown = true }
+                .help("Winds down every project's workers, then quits Agent Board.")
+        }
+    }
+
+    /// Workers outlive the app: they are detached sessions that keep spending and keep committing
+    /// if the app simply quits, which is the whole reason this control exists.
+    private var shutdownConfirmation: String {
+        let workers = GlanceHeadline.agents(summary.value.workingSessions).lowercased()
+        return "\(workers) across \(projects.count == 1 ? "1 project" : "\(projects.count) projects"). "
+            + "Each is told to commit its worktree and stop, and its unfinished task goes back to ready "
+            + "with a resume note. Agent Board quits once they have all acknowledged."
     }
 
     private func sectionView(_ section: GlanceGrouping.Section) -> some View {

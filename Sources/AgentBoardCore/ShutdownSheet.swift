@@ -64,10 +64,12 @@ public struct ShutdownRow: Sendable, Equatable, Identifiable {
     /// When this row's clock started: delivery for a timed state, enrollment before that.
     public var since: Date
     public var note: String?
+    /// Nil on a single-project sheet, where every row belongs to the project in its title bar.
+    public var projectName: String?
 
     public init(
         sessionId: String, shortId: String?, taskTitle: String?, state: ShutdownRowState,
-        since: Date, note: String? = nil
+        since: Date, note: String? = nil, projectName: String? = nil
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -75,6 +77,7 @@ public struct ShutdownRow: Sendable, Equatable, Identifiable {
         self.state = state
         self.since = since
         self.note = note
+        self.projectName = projectName
     }
 
     public var id: String { sessionId }
@@ -128,7 +131,8 @@ public enum ShutdownSheetModel {
         sessions: [AgentSession],
         taskTitles: [String: String] = [:],
         graceSeconds: Int,
-        now: Int64
+        now: Int64,
+        projectName: String? = nil
     ) -> [ShutdownRow] {
         let bySession = Dictionary(sessions.map { ($0.sessionId, $0) }, uniquingKeysWith: { first, _ in first })
         return deliveries.map { delivery in
@@ -140,14 +144,22 @@ public enum ShutdownSheetModel {
                 taskTitle: delivery.taskId.flatMap { taskTitles[$0] },
                 state: state,
                 since: clock(for: state, delivery: delivery, session: session).asDate,
-                note: delivery.note
+                note: delivery.note,
+                projectName: projectName
             )
         }
-        .sorted { lhs, rhs in
-            if lhs.isClosed != rhs.isClosed { return !lhs.isClosed }
-            if lhs.state != rhs.state { return lhs.state.rawValue < rhs.state.rawValue }
-            return lhs.sessionId < rhs.sessionId
+        .sorted(by: precedes)
+    }
+
+    /// The one ordering both sheets use: whatever still needs the human first, then by state, then
+    /// grouped by project so a multi-project list does not interleave at random.
+    public static func precedes(_ lhs: ShutdownRow, _ rhs: ShutdownRow) -> Bool {
+        if lhs.isClosed != rhs.isClosed { return !lhs.isClosed }
+        if lhs.state != rhs.state { return lhs.state.rawValue < rhs.state.rawValue }
+        if lhs.projectName != rhs.projectName {
+            return (lhs.projectName ?? "") .localizedCaseInsensitiveCompare(rhs.projectName ?? "") == .orderedAscending
         }
+        return lhs.sessionId < rhs.sessionId
     }
 
     private static func clock(

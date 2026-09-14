@@ -147,4 +147,7 @@ private final class ConsoleRecordingSupervisor: WorkerSupervising {
     func cancelShutdown(projectId: String, by: String) async throws -> ShutdownOrder? { nil }
     func isShuttingDown(projectId: String) -> Bool { false }
     func deliverShutdownOrder(projectId: String) async throws -> ShutdownProgress { throw StubError.notWired }
+    func requestGlobalShutdown(requestedBy: String, reason: String?) async throws -> [ShutdownOrder] { [] }
+    func cancelGlobalShutdown(by: String) async throws -> [ShutdownOrder] { [] }
+    func stopOrchestratorConsoles() {}
 }

@@ -21,6 +21,7 @@ enum SupervisorError: LocalizedError {
     case spawnFailed(worktree: String, underlying: String)
     case setupInterrupted
     case approvalNotFound(String)
+    case globalShutdownIncomplete([String])
 
     var errorDescription: String? {
         switch self {
@@ -40,6 +41,8 @@ enum SupervisorError: LocalizedError {
             return "spawn failed; worktree kept at \(worktree) for retry.\n\(underlying)"
         case .setupInterrupted:
             return "Agent Board quit while the worktree was still being set up"
+        case .globalShutdownIncomplete(let failures):
+            return "some projects could not be wound down:\n" + failures.joined(separator: "\n")
         }
     }
 }
@@ -1128,6 +1131,58 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             ?? ShutdownProgress(orderId: order.id, total: 0, acknowledged: 0)
         shutdownProgress[projectId] = progress
         return progress
+    }
+
+    /// Raises an order on every project, then delivers them all. The two passes are deliberate:
+    /// delivering project by project would leave the projects further down the list unordered
+    /// while the first ones' resumes are in flight, and an orchestrator could spawn into that gap.
+    /// A project with no active worker still gets its order for the same reason.
+    @discardableResult
+    func requestGlobalShutdown(requestedBy: String = "human", reason: String? = nil) async throws -> [ShutdownOrder] {
+        let all = try projects.list()
+        var raised: [ShutdownOrder] = []
+        var failures: [String] = []
+        for project in all {
+            do {
+                raised.append(try await requestShutdown(projectId: project.id, requestedBy: requestedBy, reason: reason))
+            } catch {
+                failures.append("\(project.name): \(describe(error))")
+            }
+        }
+        for project in all where raised.contains(where: { $0.projectId == project.id }) {
+            do {
+                _ = try await deliverShutdownOrder(projectId: project.id)
+            } catch {
+                failures.append("\(project.name): \(describe(error))")
+            }
+        }
+        if !failures.isEmpty { throw SupervisorError.globalShutdownIncomplete(failures) }
+        return raised
+    }
+
+    /// Every project is attempted before anything is thrown. A partial cancel is the one outcome
+    /// this must not produce: a project left refusing spawns with no sheet on screen saying why.
+    @discardableResult
+    func cancelGlobalShutdown(by: String = "human") async throws -> [ShutdownOrder] {
+        let all = try projects.list()
+        var lifted: [ShutdownOrder] = []
+        var failures: [String] = []
+        for project in all {
+            do {
+                if let order = try await cancelShutdown(projectId: project.id, by: by) { lifted.append(order) }
+            } catch {
+                failures.append("\(project.name): \(describe(error))")
+            }
+        }
+        if !failures.isEmpty { throw SupervisorError.globalShutdownIncomplete(failures) }
+        return lifted
+    }
+
+    /// The consoles are PTYs this process owns, so they die with it either way. Stopping them
+    /// first makes the exit deliberate: each session is marked `stopped` rather than left looking
+    /// active in a database the next launch reads.
+    func stopOrchestratorConsoles() {
+        for console in consoles.values { console.stop() }
     }
 
     func isShuttingDown(projectId: String) -> Bool {

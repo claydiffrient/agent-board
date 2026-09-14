@@ -878,6 +878,36 @@ through the same write the sidebar uses, landing on Orchestrator and starting
 its console (§9) — which is the only way a console ever starts, so this page
 itself costs nothing.
 
+**Shut Down** — a button beside the At a Glance headline, for the wind-down
+that quitting does not do on its own: workers are detached `claude --bg`
+sessions that outlive the app, keep spending, and keep committing into
+worktrees nothing is watching. It confirms first, naming how many agents are
+working across how many projects, then raises a shutdown order (§8) on **every**
+project — including ones with nothing running, so an orchestrator cannot spawn
+into the gap — and only then delivers them all. One sheet shows every ordered
+session from every project, each row naming its project and measured against
+its own project's `shutdownGraceSeconds`, over a total that spans them
+("Closing 3/5 agents across 4 projects"). It shares `ShutdownSheetBody` and
+therefore the row states and wording with Stop All's sheet; the aggregation and
+the decision to quit live in `AgentBoardCore.GlobalShutdown`, unit-tested apart
+from SwiftUI.
+
+The app quits once every delivery has closed. A wind-down whose remainder is
+only permission prompts and silence cannot finish on its own, so **Quit Anyway**
+is always offered. The orders are deliberately *not* lifted on quit: a session
+that never acknowledged is still running detached, and the order standing on its
+project is what hands it the wind-down through `PreToolUse` on the next launch.
+**Cancel Shutdown** lifts every standing order, not only the ones this sheet
+raised — a project left refusing spawns with nothing on screen explaining it is
+the one outcome cancelling must not produce.
+
+Orchestrator consoles are stopped deliberately before terminating rather than
+left to die with the process, so each session is marked `stopped` instead of
+looking active to the next launch. A session still in `setup` is untouched: the
+wind-down never enrolls one (it has no agent to acknowledge), so it is still
+sitting in `setup` when the app goes, and `failInterruptedSetups()` on the next
+launch is what puts its task back in `ready`.
+
 **Orchestrator Command** — the project's orchestrator terminal (SwiftTerm),
 with a sidebar of everything waiting on the human, in the order it is urgent:
 
