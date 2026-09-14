@@ -160,6 +160,10 @@ enum Schema {
     CREATE INDEX approval_pending ON approval(project_id, resolved_at);
     """
 
+    static let approvalPayload = """
+    ALTER TABLE approval ADD COLUMN payload TEXT;
+    """
+
     static let shutdownOrder = """
     CREATE TABLE shutdown_order (
       id           TEXT PRIMARY KEY,

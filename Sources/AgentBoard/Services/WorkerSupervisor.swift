@@ -938,8 +938,54 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 if let taskId = approval.taskId { try await spawn(taskId: taskId) }
             case .integration:
                 if let epicId = approval.epicId { try await spawnIntegrator(epicId: epicId) }
+            case .push, .pullRequest:
+                try await publish(approval)
             }
         }
+    }
+
+    /// The human's half of D8's orchestrator path: the orchestrator asked, this grant is what lets
+    /// anything reach the remote. Whatever happens is written back to the board — the pull request
+    /// URL on the card, and a `decision` report the orchestrator pulls — including the failure,
+    /// which names its own cause (no remote, no `gh`, not logged in).
+    private func publish(_ approval: Approval) async throws {
+        guard let project = try projects.get(approval.projectId) else {
+            throw SupervisorError.projectNotFound(approval.projectId)
+        }
+        let request = try approval.publishRequest()
+        let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
+        let base = request.base ?? project.baseBranch
+        do {
+            switch approval.kind {
+            case .push:
+                let result = try await offMain { try publisher.push(branch: request.branch, remote: request.remote) }
+                try board.recordPublished(approval: approval, summary: "Push approved: \(result.summary).")
+            case .pullRequest:
+                let result = try await offMain {
+                    try publisher.openPullRequest(
+                        branch: request.branch, base: base, title: request.title ?? request.branch,
+                        body: request.body ?? "", remote: request.remote
+                    )
+                }
+                let verb = result.alreadyOpen ? "Pull request already open" : "Pull request opened"
+                try board.recordPublished(
+                    approval: approval,
+                    summary: "\(verb) from \(request.branch) into \(base).",
+                    url: result.url
+                )
+            case .spawn, .integration:
+                return
+            }
+        } catch {
+            try? board.recordPublished(
+                approval: approval,
+                summary: "\(approval.kind.rawValue) failed for \(request.branch): \(describe(error))",
+                failed: true
+            )
+            announceReports(projectId: approval.projectId)
+            throw error
+        }
+        announceReports(projectId: approval.projectId)
     }
 
     func deny(approvalId: String, reason: String?) async throws {

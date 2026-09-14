@@ -442,6 +442,9 @@ public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiabl
     public var epicId: String?
     public var requestedBy: String
     public var reason: String?
+    /// JSON for the kinds that carry one — a `PublishRequest` on `push` and `pull_request`. Nil for
+    /// `spawn` and `integration`, which are fully described by `taskId`/`epicId`.
+    public var payload: String?
     public var createdAt: Int64
     public var resolvedAt: Int64?
     public var resolution: ApprovalResolution?
@@ -454,6 +457,7 @@ public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiabl
         case epicId = "epic_id"
         case requestedBy = "requested_by"
         case reason
+        case payload
         case createdAt = "created_at"
         case resolvedAt = "resolved_at"
         case resolution
@@ -461,8 +465,8 @@ public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiabl
 
     public init(
         id: String, projectId: String, kind: ApprovalKind, taskId: String?, epicId: String?,
-        requestedBy: String, reason: String?, createdAt: Int64, resolvedAt: Int64? = nil,
-        resolution: ApprovalResolution? = nil
+        requestedBy: String, reason: String?, payload: String? = nil, createdAt: Int64,
+        resolvedAt: Int64? = nil, resolution: ApprovalResolution? = nil
     ) {
         self.id = id
         self.projectId = projectId
@@ -471,6 +475,7 @@ public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiabl
         self.epicId = epicId
         self.requestedBy = requestedBy
         self.reason = reason
+        self.payload = payload
         self.createdAt = createdAt
         self.resolvedAt = resolvedAt
         self.resolution = resolution
@@ -481,6 +486,8 @@ public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiabl
     public var isPending: Bool { resolvedAt == nil }
     public var createdDate: Date { createdAt.asDate }
     public var resolvedDate: Date? { resolvedAt?.asDate }
+
+    public func publishRequest() throws -> PublishRequest { try PublishRequest.decode(payload) }
 }
 
 public struct Note: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {

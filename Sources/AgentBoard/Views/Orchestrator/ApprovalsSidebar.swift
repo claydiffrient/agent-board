@@ -183,6 +183,12 @@ struct ApprovalsSidebar: View {
             Text(describe(approval))
                 .fontWeight(.medium)
                 .lineLimit(2)
+            if let reason = approval.reason, !reason.isEmpty {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(4)
+            }
             HStack(spacing: 6) {
                 Text(approval.kind.rawValue)
                     .padding(.horizontal, 6)
@@ -273,7 +279,15 @@ struct ApprovalsSidebar: View {
             return "Spawn a worker for \"\(title)\""
         case .integration:
             return "Integrate epic \(approval.epicId ?? "?")"
+        case .push:
+            return "Push \(branchOf(approval)) to the remote"
+        case .pullRequest:
+            return "Open a pull request from \(branchOf(approval))"
         }
+    }
+
+    private func branchOf(_ approval: Approval) -> String {
+        (try? approval.publishRequest().branch) ?? "?"
     }
 
     private func requester(_ requestedBy: String) -> String {

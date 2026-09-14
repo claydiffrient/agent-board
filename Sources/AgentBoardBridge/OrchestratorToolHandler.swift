@@ -255,6 +255,42 @@ public final class OrchestratorToolHandler: ToolHandler {
             inputSchema: ToolSchema.object(properties: ["epic_id": ToolSchema.string()], required: ["epic_id"])
         ),
         ToolDescriptor(
+            name: "push_branch",
+            description: "Ask the human to push one of this project's branches to its git remote. Refused for any "
+                + "branch that is neither `agentboard/<something>` nor the project's base branch. A push is "
+                + "outward-facing and cannot be taken back, so this always waits on human approval regardless of the "
+                + "autonomy setting: the call returns a pending approval, not a finished push. You will learn the "
+                + "decision through list_reports.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "branch": ToolSchema.string("Branch to push, e.g. `agentboard/epic-<id>`."),
+                ],
+                required: ["branch"]
+            )
+        ),
+        ToolDescriptor(
+            name: "open_pull_request",
+            description: "Ask the human to open a pull request from one of this project's branches. Name either "
+                + "`epic_id`, which uses that epic's integration branch, or `branch` directly; a branch that is "
+                + "neither `agentboard/<something>` nor the project's base branch is refused. The branch is pushed "
+                + "first if the remote does not have it. Opening a pull request is visible to collaborators and CI "
+                + "the moment it happens and cannot be taken back, so this always waits on human approval regardless "
+                + "of the autonomy setting: the call returns a pending approval, not a finished pull request. On "
+                + "approval the pull request's URL is recorded against the epic or task and reaches you through "
+                + "list_reports. An epic whose tasks are not all `done` is allowed — the approval says so, and the "
+                + "human decides whether early review is what you meant.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "epic_id": ToolSchema.string("Epic whose integration branch to open the pull request from."),
+                    "branch": ToolSchema.string("Branch to open the pull request from, if you are not naming an epic."),
+                    "title": ToolSchema.string("Pull request title."),
+                    "body": ToolSchema.string("Pull request description."),
+                    "base": ToolSchema.string("Branch to merge into; defaults to the project's base branch."),
+                ],
+                required: ["title"]
+            )
+        ),
+        ToolDescriptor(
             name: "archive_task",
             description: "Hide a `done` task from the board without deleting it. Archived tasks stay readable through "
                 + "get_task and reappear in list_tasks with `include_archived`. Only `done` tasks can be archived.",
@@ -297,6 +333,8 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "list_epics": return try listEpics(identity: identity)
         case "get_epic": return try getEpic(arguments, identity: identity)
         case "request_integration": return try requestIntegration(arguments, identity: identity)
+        case "push_branch": return try pushBranch(arguments, identity: identity)
+        case "open_pull_request": return try openPullRequest(arguments, identity: identity)
         default: throw ToolError("Unknown tool: \(name)")
         }
     }
@@ -697,6 +735,93 @@ public final class OrchestratorToolHandler: ToolHandler {
             requestedBy: identity.sessionId ?? "orchestrator"
         )
         return ToolResult(text: "integration approval \(approval.id) pending")
+    }
+
+    // MARK: Publishing
+
+    private func pushBranch(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let project = try requireProject(identity)
+        let branch = try ownedBranch(try ToolArguments.requiredString("branch", in: arguments), project: project)
+        let target = try publishTarget(branch: branch, identity: identity)
+        let approval = try board.requestPublish(
+            projectId: project.id,
+            kind: .push,
+            request: PublishRequest(branch: branch),
+            taskId: target.taskId,
+            epicId: target.epicId,
+            requestedBy: identity.sessionId ?? "orchestrator",
+            reason: "Push \(branch) to the project's git remote."
+        )
+        return ToolResult(text: "push approval \(approval.id) pending; the human must approve before \(branch) "
+            + "reaches the remote. You will be told via list_reports.")
+    }
+
+    private func openPullRequest(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let project = try requireProject(identity)
+        let epicId = ToolArguments.optionalString("epic_id", in: arguments)
+        let epic = try epicId.map { try projectEpic($0, identity: identity) }
+        guard let requested = epic?.branch ?? ToolArguments.optionalString("branch", in: arguments) else {
+            throw ToolError("Name either epic_id or branch: open_pull_request needs to know what to open the pull request from.")
+        }
+        let branch = try ownedBranch(requested, project: project)
+        let base = try ownedBranch(
+            ToolArguments.optionalString("base", in: arguments) ?? project.baseBranch, project: project
+        )
+        guard base != branch else {
+            throw ToolError("A pull request cannot merge \(branch) into itself. Give a different `base`.")
+        }
+        let title = try ToolArguments.requiredString("title", in: arguments)
+        let body = ToolArguments.optionalString("body", in: arguments) ?? ""
+        let target = try publishTarget(branch: branch, identity: identity)
+
+        var reason = "Open a pull request from \(branch) into \(base): \(title)"
+        if let epic, !(try board.epicReadyForIntegration(epicId: epic.id)) {
+            let counts = try taskCounts(epic)
+            reason += counts.total == 0
+                ? "\nThis epic has no tasks yet."
+                : "\nThis epic is not ready for integration: \(counts.total - counts.done) of \(counts.total) task(s) are not done."
+        }
+
+        let approval = try board.requestPublish(
+            projectId: project.id,
+            kind: .pullRequest,
+            request: PublishRequest(branch: branch, base: base, title: title, body: body),
+            taskId: target.taskId,
+            epicId: epic?.id ?? target.epicId,
+            requestedBy: identity.sessionId ?? "orchestrator",
+            reason: reason
+        )
+        return ToolResult(text: "pull request approval \(approval.id) pending; nothing is pushed and no pull request "
+            + "exists until the human approves. The URL reaches you via list_reports.")
+    }
+
+    private func ownedBranch(_ raw: String, project: Project) throws -> String {
+        do {
+            return try PublishPolicy.validate(branch: raw, baseBranch: project.baseBranch)
+        } catch let error as PublishPolicyError {
+            throw ToolError(error.description)
+        }
+    }
+
+    /// What the eventual progress row hangs off: the epic that owns the branch, or the task whose
+    /// branch this is. Either may be absent — a base-branch push belongs to neither.
+    private func publishTarget(branch: String, identity: TokenIdentity) throws -> (taskId: String?, epicId: String?) {
+        if let epic = try epics.list(projectId: identity.projectId).first(where: { $0.branch == branch }) {
+            return (nil, epic.id)
+        }
+        let taskId = branch.hasPrefix(PublishPolicy.ownedPrefix)
+            ? String(branch.dropFirst(PublishPolicy.ownedPrefix.count))
+            : nil
+        guard let taskId, let task = try tasks.get(taskId, includeArchived: true), task.projectId == identity.projectId
+        else { return (nil, nil) }
+        return (task.id, task.epicId)
+    }
+
+    private func requireProject(_ identity: TokenIdentity) throws -> Project {
+        guard let project = try projects.get(identity.projectId) else {
+            throw ToolError("Project \(identity.projectId) not found.")
+        }
+        return project
     }
 
     // MARK: Helpers

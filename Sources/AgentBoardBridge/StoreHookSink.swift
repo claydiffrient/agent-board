@@ -87,7 +87,9 @@ public final class StoreHookSink: HookSink {
         _ = try? hookEvents.append(sessionId: sessionId, event: event.name, payload: event.rawJSON)
 
         if event.name == "PreToolUse" {
-            if let violation = IntegrationGuard.violation(toolName: event.toolName, command: event.toolCommand) {
+            if let violation = IntegrationGuard.violation(
+                toolName: event.toolName, command: event.toolCommand, scope: identity.scope
+            ) {
                 // The deny is decided before any lookup; the row is best-effort so an unrecognized
                 // session can never turn a block into a pass.
                 let session = try? sessions.get(sessionId)
@@ -99,7 +101,7 @@ public final class StoreHookSink: HookSink {
                         text: "Blocked \(violation.rawValue): \(event.toolCommand ?? "")"
                     )
                 }
-                return .deny(.deny(violation.reason))
+                return .deny(.deny(violation.reason(for: identity.scope)))
             }
             if let order = windDownToDeliver(sessionId: sessionId, identity: identity) {
                 return .deny(.deny(ShutdownOrder.windDownOrder(reason: order.reason, via: .hook)))

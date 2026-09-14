@@ -11,19 +11,19 @@ public struct ApprovalStore: Sendable {
     @discardableResult
     public func create(
         projectId: String, kind: ApprovalKind, taskId: String?, epicId: String?,
-        requestedBy: String, reason: String?
+        requestedBy: String, reason: String?, payload: String? = nil
     ) throws -> Approval {
         try db.writer.write { db in
             try Self.insert(
                 db, projectId: projectId, kind: kind, taskId: taskId, epicId: epicId,
-                requestedBy: requestedBy, reason: reason
+                requestedBy: requestedBy, reason: reason, payload: payload
             )
         }
     }
 
     static func insert(
         _ db: Database, projectId: String, kind: ApprovalKind, taskId: String?, epicId: String?,
-        requestedBy: String, reason: String?
+        requestedBy: String, reason: String?, payload: String? = nil
     ) throws -> Approval {
         let approval = Approval(
             id: Approval.newId(),
@@ -33,6 +33,7 @@ public struct ApprovalStore: Sendable {
             epicId: epicId,
             requestedBy: requestedBy,
             reason: reason,
+            payload: payload,
             createdAt: .nowMillis
         )
         try approval.insert(db)
@@ -81,6 +82,22 @@ public struct ApprovalStore: Sendable {
             """,
             arguments: [epicId]
         )
+    }
+
+    /// A pending `push` or `pull_request` approval already aimed at this branch. Matching on the
+    /// decoded payload rather than a column keeps the dedup honest without widening the schema.
+    public static func pendingPublish(
+        _ db: Database, projectId: String, kind: ApprovalKind, branch: String
+    ) throws -> Approval? {
+        try Approval.fetchAll(
+            db,
+            sql: """
+            SELECT * FROM approval
+            WHERE project_id = ? AND kind = ? AND resolved_at IS NULL
+            ORDER BY created_at, rowid
+            """,
+            arguments: [projectId, kind.rawValue]
+        ).first { (try? $0.publishRequest().branch) == branch }
     }
 
     @discardableResult

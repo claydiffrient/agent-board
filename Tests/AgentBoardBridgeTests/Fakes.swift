@@ -131,9 +131,10 @@ struct BridgeFixture {
 
     @discardableResult
     func epic(_ title: String, state: EpicState = .active, in projectId: String? = nil) throws -> Epic {
+        let id = Epic.newId()
         let epic = Epic(
-            id: Epic.newId(), projectId: projectId ?? project.id, title: title, goal: nil,
-            branch: "epic/\(title)", state: state, createdAt: .nowMillis
+            id: id, projectId: projectId ?? project.id, title: title, goal: nil,
+            branch: EpicStore.branchPrefix + id, state: state, createdAt: .nowMillis
         )
         try db.writer.write { db in try epic.insert(db) }
         return epic

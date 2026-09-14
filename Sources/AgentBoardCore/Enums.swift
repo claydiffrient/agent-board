@@ -82,6 +82,8 @@ public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, Data
 public enum ApprovalKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
     case spawn
     case integration
+    case push
+    case pullRequest = "pull_request"
 }
 
 public enum ApprovalResolution: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {

@@ -52,6 +52,23 @@ final class IntegrationDenyTests: XCTestCase {
         XCTAssertEqual(try f.tasks.get(task.id)?.blocked, false)
     }
 
+    func testAnOrchestratorGrantIsNotStoppedByTheGuardAndLeavesNoDenialRow() async throws {
+        let orch = f.orchestratorIdentity
+        let pushed = await f.preToolUse("git push -u origin HEAD", sessionId: "orch-session", identity: orch)
+        let opened = await f.preToolUse("gh pr create --draft", sessionId: "orch-session", identity: orch)
+        XCTAssertNil(pushed)
+        XCTAssertNil(opened)
+        XCTAssertTrue(try f.progress.list(taskId: task.id).isEmpty)
+    }
+
+    func testMergingAPullRequestIsStillDeniedForAnOrchestratorWithoutBlamingWorkers() async throws {
+        let decision = await f.preToolUse("gh pr merge 42", sessionId: "orch-session", identity: f.orchestratorIdentity)
+        XCTAssertEqual(decision?.permissionDecision, "deny")
+        let reason = try XCTUnwrap(decision?.reason)
+        XCTAssertFalse(reason.contains("worker"), reason)
+        XCTAssertEqual(reason, IntegrationGuard.Violation.pullRequestMerge.reason(for: .orchestrator))
+    }
+
     func testTheGuardDoesNotDependOnASessionRow() async throws {
         let orphan = TokenIdentity(token: "w9", scope: .worker, projectId: f.project.id, sessionId: nil, taskId: task.id)
         let decision = await f.preToolUse("git push", sessionId: "unknown-session", identity: orphan)
