@@ -44,6 +44,10 @@ struct SupervisorFixture {
     let resolver: StoreTokenResolver
     let supportDir: URL
     let repo: URL
+    /// What `SupportPaths.worktreeBase` resolves to when AGENTBOARD_SUPPORT_DIR points at `supportDir`.
+    let worktreeBase: URL
+    /// Stands in for `~`, so a test can assert nothing leaked into a real `~/.agentboard`.
+    let fakeHome: URL
 
     var epics: EpicStore { EpicStore(db) }
     var approvals: ApprovalStore { ApprovalStore(db) }
@@ -82,14 +86,21 @@ struct SupervisorFixture {
             )
         )
         let runtime = FakeRuntime()
+        let fakeHome = supportDir.appendingPathComponent("home")
+        let worktreeBase = SupportPaths.worktreeBase(
+            environment: [SupportPaths.supportDirEnvKey: supportDir.path],
+            home: fakeHome
+        )
         let supervisor = WorkerSupervisor(
             db: db, runtime: runtime, server: server, appSupportDir: supportDir,
+            worktreeBase: worktreeBase,
             projectsRoot: supportDir.appendingPathComponent("claude-projects")
         )
         sink.target = supervisor
         return SupervisorFixture(
             db: db, project: project, supervisor: supervisor, runtime: runtime,
-            resolver: StoreTokenResolver(db: db), supportDir: supportDir, repo: repo
+            resolver: StoreTokenResolver(db: db), supportDir: supportDir, repo: repo,
+            worktreeBase: worktreeBase, fakeHome: fakeHome
         )
     }
 

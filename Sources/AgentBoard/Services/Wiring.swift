@@ -7,12 +7,14 @@ import Foundation
 @MainActor
 enum Wiring {
     static var appSupportDir: URL {
-        if let override = ProcessInfo.processInfo.environment["AGENTBOARD_SUPPORT_DIR"] {
+        if let override = ProcessInfo.processInfo.environment[SupportPaths.supportDirEnvKey] {
             return URL(fileURLWithPath: override)
         }
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("AgentBoard")
     }
+
+    static var worktreeBase: URL { SupportPaths.worktreeBase() }
 
     static func makeSupervisor(db: AppDatabase) -> WorkerSupervisor {
         let sink = LateBoundSink()
@@ -28,7 +30,8 @@ enum Wiring {
             db: db,
             runtime: BackgroundSessionRuntime(),
             server: server,
-            appSupportDir: appSupportDir
+            appSupportDir: appSupportDir,
+            worktreeBase: worktreeBase
         )
         sink.target = supervisor
         return supervisor

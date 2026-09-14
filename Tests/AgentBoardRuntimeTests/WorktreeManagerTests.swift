@@ -42,6 +42,25 @@ final class WorktreeManagerTests: XCTestCase {
         try git(["-c", "user.email=test@example.com", "-c", "user.name=Test", "-c", "commit.gpgsign=false", "commit", "-q", "-m", message], cwd: cwd)
     }
 
+    func testMoveRelocatesTheCheckoutAndGitsOwnRecordOfIt() throws {
+        let path = try manager.create(name: "task-1", branch: "agentboard/task-1", base: "main")
+        try "line\n".write(to: path.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+        try git(["add", "."], cwd: path)
+        try commit("Add new file", cwd: path)
+        let commit = try manager.headCommit(worktree: path)
+
+        let destination = sandbox.appendingPathComponent("moved/task-1")
+        try manager.move(worktree: path, to: destination)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.appendingPathComponent("new.txt").path))
+        let listed = try manager.list()
+        XCTAssertNotNil(listed.first { WorktreeManager.samePath($0.path, destination) }, "\(listed)")
+        XCTAssertNil(listed.first { WorktreeManager.samePath($0.path, path) })
+        XCTAssertEqual(try manager.headCommit(worktree: destination), commit)
+        XCTAssertFalse(try manager.hasUncommittedChanges(worktree: destination))
+    }
+
     func testCreateListDiffstatAndRemove() throws {
         let path = try manager.create(name: "task-1", branch: "agentboard/task-1", base: "main")
         XCTAssertEqual(path.path, worktrees.appendingPathComponent("task-1").path)
