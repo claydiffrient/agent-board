@@ -89,7 +89,7 @@ struct OrchestratorView: View {
         }
     }
 
-    /// SPEC §9: resumed lazily on first view, after the server has a port to hand the session.
+    /// SPEC §9: resumed when the human opens the project, after the server has a port to hand the session.
     private func attach() async {
         let console: OrchestratorConsole
         do {

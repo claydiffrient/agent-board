@@ -724,8 +724,12 @@ from the progress sheet (§10).
 ## 9. Orchestrator
 
 - One per project. Foreground PTY owned by the app (not `--bg`), pinned
-  `--session-id`, cwd at the repo root, resumed lazily on first view so
-  launching the app does not wake four orchestrators and spend tokens.
+  `--session-id`, cwd at the repo root, resumed when the human selects the
+  project in the sidebar — Orchestrator is the project's first screen (§10),
+  so opening a project is what starts its session. The selected project is not
+  persisted, so launching the app selects nothing and wakes nothing: the cost
+  is one orchestrator per project the human actually opens, not four on every
+  launch.
 - Permission mode: your normal interactive default. It's the session you are
   watching.
 - Its job description is injected with `--append-system-prompt`: the board
