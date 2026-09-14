@@ -102,6 +102,20 @@ struct ProjectSettingsSheet: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Verification") {
+                    TextField("Build command", text: Binding(
+                        get: { settings.buildCommand ?? "" },
+                        set: { settings.buildCommand = $0.isEmpty ? nil : $0 }
+                    ), prompt: Text("e.g. swift build"))
+                    TextField("Test command", text: Binding(
+                        get: { settings.testCommand ?? "" },
+                        set: { settings.testCommand = $0.isEmpty ? nil : $0 }
+                    ), prompt: Text("e.g. swift test"))
+                    Text("How this project builds and tests itself. Handed to every worker and to the integrator; left empty, they work it out from the repo and report what they ran.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Archive") {
                     Picker("Archive done tasks", selection: $archiveMode) {
                         ForEach(ArchivePolicyMode.allCases, id: \.self) { mode in
@@ -173,6 +187,8 @@ struct ProjectSettingsSheet: View {
 
     private func save() {
         var updated = settings
+        updated.buildCommand = VerificationCommands(build: settings.buildCommand).build
+        updated.testCommand = VerificationCommands(test: settings.testCommand).test
         updated.archivePolicy = ArchivePolicy.make(mode: archiveMode, days: archiveDays)
         let trimmedJSON = autoModeJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.autoModeJSON = trimmedJSON.isEmpty ? nil : trimmedJSON

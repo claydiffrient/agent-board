@@ -147,7 +147,8 @@ For a task `T` in project `P`:
    `Authorization: Bearer <token>`, where the token carries scope `worker` and
    is bound to `(session, task)`.
 6. Compose the opening prompt: task title, body, acceptance criteria, epic goal,
-   pinned notes in full, attached notes in full, and the completion protocol
+   pinned notes in full, attached notes in full, the project's build and test
+   commands when `settings_json` records them, and the completion protocol
    (commit, do not push, call `report_complete`).
 7. `claude "<prompt>" --bg -n <task-slug> --permission-mode auto
    --strict-mcp-config --mcp-config <file> --settings <file>
@@ -199,7 +200,8 @@ CREATE TABLE project (
   worktree_root   TEXT NOT NULL,
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
-  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance, archivePolicy
+  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
+                                   -- buildCommand, testCommand, archivePolicy
   created_at      INTEGER NOT NULL
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance
   created_at      INTEGER NOT NULL,
@@ -487,6 +489,11 @@ of the autonomy setting.
    the epic branch was checked out here — plus getting the build green across
    the whole epic. Both cases arrive as `decision` reports before integration is
    requested; integration is no longer the first time task branches meet.
+   "Green" is the project's own `settings_json.buildCommand` and `testCommand`
+   (§4), interpolated into the prompt. When either is unset the prompt does not
+   drop verification: it tells the integrator to work out how this project
+   builds and tests itself, run both, and name in its report exactly what it
+   ran. Nothing in the prompt assumes a language or a build tool.
 4. The integrator reports. Under the default `afterEpicMerge` archive policy
    (§4), the epic's merge is itself the trigger: `Board.complete` moves the
    epic to `done` and archives every `done` task of it, the synthetic

@@ -14,7 +14,8 @@ public enum OpeningPrompt {
         branch: String,
         attempt: Int,
         epicGoal: String? = nil,
-        notes: [InjectedNote] = []
+        notes: [InjectedNote] = [],
+        verification: VerificationCommands = VerificationCommands()
     ) -> String {
         var sections: [String] = []
         sections.append("# Task: \(task.title)")
@@ -38,6 +39,9 @@ public enum OpeningPrompt {
             and its commits and any uncommitted changes may still be present in this worktree. \
             Run `git log` and `git status` before starting, and build on that work rather than redoing it.
             """)
+        }
+        if let verificationSection = verification.workerSection {
+            sections.append(verificationSection)
         }
         if let notesSection = renderNotes(notes) {
             sections.append(notesSection)
