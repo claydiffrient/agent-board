@@ -251,16 +251,18 @@ struct MainWindow: View {
 struct ProjectDetailView: View {
     let project: Project
 
-    private enum Screen: String, CaseIterable, Identifiable {
+    enum Screen: String, CaseIterable, Identifiable {
+        case orchestrator = "Orchestrator"
         case board = "Task Board"
         case status = "Status"
         case notes = "Notes"
-        case orchestrator = "Orchestrator"
 
         var id: String { rawValue }
     }
 
-    @State private var screen: Screen = .board
+    static let defaultScreen = Screen.orchestrator
+
+    @State private var screen: Screen = ProjectDetailView.defaultScreen
 
     var body: some View {
         Group {
