@@ -36,6 +36,15 @@ struct ProjectSettingsSheet: View {
         _workspaceId = State(initialValue: workspaces.contains { $0.id == assigned } ? assigned : nil)
     }
 
+    private var worktreeRootComplaint: String? {
+        do {
+            try WorktreeRootRule.validate(worktreeRoot)
+            return nil
+        } catch {
+            return errorText(error)
+        }
+    }
+
     private var autoModeJSONIsValid: Bool {
         let trimmed = autoModeJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return true }
@@ -50,6 +59,11 @@ struct ProjectSettingsSheet: View {
                     LabeledContent("Path", value: project.repoPath)
                     TextField("Base branch", text: $baseBranch)
                     TextField("Worktree root", text: $worktreeRoot)
+                    if let complaint = worktreeRootComplaint {
+                        Text(complaint)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
                 }
 
                 Section("Workspace") {
@@ -139,7 +153,7 @@ struct ProjectSettingsSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Save") { save() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!autoModeJSONIsValid || baseBranch.isEmpty || worktreeRoot.isEmpty)
+                    .disabled(!autoModeJSONIsValid || baseBranch.isEmpty || worktreeRootComplaint != nil)
             }
             .padding()
         }
@@ -167,6 +181,7 @@ struct ProjectSettingsSheet: View {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         do {
+            try WorktreeRootRule.validate(worktreeRoot)
             try ProjectStore(env.db).updateSettings(project.id, updated)
             try WorkspaceStore(env.db).assign(projectId: project.id, workspaceId: workspaceId)
             try env.db.writer.write { db in

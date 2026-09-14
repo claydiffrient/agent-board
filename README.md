@@ -24,7 +24,15 @@ open .build/AgentBoard.app
 ```
 
 Environment overrides: `AGENTBOARD_DB` (sqlite path), `AGENTBOARD_SUPPORT_DIR`
-(worktrees, session configs). Default is `~/Library/Application Support/AgentBoard`.
+(session configs, server port file, and worktrees). Default support dir is
+`~/Library/Application Support/AgentBoard`; worktrees default to
+`~/.agentboard/worktrees/<project-id>` instead, because a worktree path with a
+space in it breaks any repo whose setup shells out without quoting it. Setting
+`AGENTBOARD_SUPPORT_DIR` still redirects worktrees to `<dir>/worktrees`, which is
+what keeps the headless check below inside its scratch directory. A worktree root
+containing a space is refused, both at project registration and in the project
+settings sheet; projects still recorded on the old spaced root are relocated with
+`git worktree move` at launch, skipping any project with a running session.
 
 ## Headless end-to-end check
 

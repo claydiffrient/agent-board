@@ -162,6 +162,16 @@ public struct WorktreeManager: Sendable {
             .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Git records each worktree's location in `.git/worktrees/<name>/gitdir`; only `git worktree
+    /// move` rewrites that record, so a plain directory move leaves the worktree unresolvable.
+    public func move(worktree: URL, to destination: URL) throws {
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try git(["worktree", "move", worktree.path, destination.path])
+    }
+
     /// Never forced: git refuses the removal rather than destroying uncommitted work.
     @discardableResult
     public func remove(path: URL) throws -> WorktreeRemovalReport {

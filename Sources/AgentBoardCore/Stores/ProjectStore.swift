@@ -10,6 +10,7 @@ public struct ProjectStore: Sendable {
 
     @discardableResult
     public func register(name: String, repoPath: String, baseBranch: String, worktreeRoot: String, memoryDir: String?) throws -> Project {
+        try WorktreeRootRule.validate(worktreeRoot)
         let project = Project(
             id: Project.newId(),
             name: name,

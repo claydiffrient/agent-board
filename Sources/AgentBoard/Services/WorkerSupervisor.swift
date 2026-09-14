@@ -54,6 +54,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let runtime: any AgentRuntime
     @ObservationIgnored private let server: BoardServer
     @ObservationIgnored private let appSupportDir: URL
+    @ObservationIgnored private let worktreeBase: URL
     @ObservationIgnored private let projectsRoot: URL
     @ObservationIgnored private let projects: ProjectStore
     @ObservationIgnored private let tasks: TaskStore
@@ -88,12 +89,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         runtime: any AgentRuntime,
         server: BoardServer,
         appSupportDir: URL,
+        worktreeBase: URL,
         projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot
     ) {
         self.db = db
         self.runtime = runtime
         self.server = server
         self.appSupportDir = appSupportDir
+        self.worktreeBase = worktreeBase
         self.projectsRoot = projectsRoot
         projects = ProjectStore(db)
         tasks = TaskStore(db)
@@ -122,7 +125,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             lastError = describe(error)
         }
+        await migrateWorktreeRoots()
         startMetering()
+    }
+
+    /// Idempotent: a project whose root is already space-free is left alone, so the second launch
+    /// is a no-op.
+    @discardableResult
+    func migrateWorktreeRoots() async -> WorktreeRootMigration.Outcome {
+        let migration = WorktreeRootMigration(db: db, worktreeBase: worktreeBase)
+        let outcome = await _Concurrency.Task.detached(priority: .userInitiated) { migration.run() }.value
+        for line in outcome.migrated {
+            FileHandle.standardError.write(Data("worktree root migrated: \(line)\n".utf8))
+        }
+        for line in outcome.skipped + outcome.notices {
+            FileHandle.standardError.write(Data("worktree root not migrated: \(line)\n".utf8))
+        }
+        report(outcome.skipped + outcome.notices)
+        return outcome
     }
 
     // MARK: - WorkerSupervising
@@ -143,12 +163,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 resolvedBase = try await offMain { Self.defaultBranch(repo: repo) } ?? "main"
             }
             let id = Project.newId()
+            let worktreeRoot = worktreeBase.appendingPathComponent(id)
+            try WorktreeRootRule.validate(worktreeRoot.path)
             let project = Project(
                 id: id,
                 name: name?.isEmpty == false ? name! : repo.lastPathComponent,
                 repoPath: repo.path,
                 baseBranch: resolvedBase,
-                worktreeRoot: appSupportDir.appendingPathComponent("worktrees/\(id)").path,
+                worktreeRoot: worktreeRoot.path,
                 memoryDir: ClaudeProjectPaths.memoryDir(forPath: repo.path).path,
                 orchSessionId: nil,
                 settingsJSON: ProjectSettings.forNewProject().encoded(),
