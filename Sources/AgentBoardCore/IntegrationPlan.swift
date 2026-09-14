@@ -123,7 +123,8 @@ public enum IntegrationPlan {
         ## When you are done
         1. Commit on `\(epic.branch)`. Write the message in imperative mood, with no conventional-commit prefix.
         2. Do not push. Do not open a PR. Both are denied at the tool layer; do not spend a turn discovering that. \
-        A human opens the pull request from `\(epic.branch)` into `\(baseBranch)`.
+        The pull request from `\(epic.branch)` into `\(baseBranch)` is opened outside this session, by a human or \
+        by the orchestrator through an approval the human grants.
         3. Call `report_complete(summary, files_changed, tests_run, caveats)`. Say which branches you merged, which you \
         skipped and why, and \(verification.reportInstruction). That ends your task; do not start \
         further work afterwards.

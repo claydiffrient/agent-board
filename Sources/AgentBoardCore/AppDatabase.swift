@@ -63,6 +63,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("workspace") { db in
             try db.execute(sql: Schema.workspace)
         }
+        migrator.registerMigration("approval_payload") { db in
+            try db.execute(sql: Schema.approvalPayload)
+        }
         return migrator
     }
 }

@@ -22,7 +22,7 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D5 | Budgeted autonomy with caps | Recorded session ids + `--resume` make cap-kills non-destructive | Manual gate on every spawn |
 | D6 | Worktree per task, branch bound to task id | A retry sees what the previous attempt built | Worktree per agent session |
 | D7 | Fixed columns: Proposed → Backlog → Ready → Running → Review → Done | The orchestrator must be told which column is assignable | User-defined columns |
-| D8 | Workers commit and stop. They never push | Nothing reaches a shared remote unattended | Worker opens a draft PR |
+| D8 | Workers commit and stop. They never push. The orchestrator may push and open a pull request, but only through named tools that each wait on a human approval | Nothing reaches a shared remote unattended; the last step of an epic stops being manual without handing an agent a shell it can aim anywhere | Worker opens a draft PR; unblocking `gh` in Bash for the orchestrator |
 | D9 | Reports queue in SQLite; app injects a fixed notice; orchestrator pulls | Worker text never enters the orchestrator's user-authority turn | Inject report text into PTY |
 | D10 | Epics group tasks and own the integration branch | Merge scope becomes a lookup, not a judgment call | Flat tasks |
 | D11 | One orchestrator per project | cwd determines which CLAUDE.md, skills, and MCP servers load | One global orchestrator |
@@ -33,6 +33,23 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D16 | Workers are `claude --bg` background sessions | Deletes process supervision, crash recovery, and scrollback from scope | App owns the PTYs |
 | D17 | Swift + SwiftUI | Literal reading of "native Mac app" | Tauri |
 | D18 | Runtime spike → board → orchestrator → epics → notes | The riskiest assumption is provable in 200 lines | Build everything |
+
+**D8 amended.** As first written, D8 said the pull request was opened by the
+human and by nobody else, and §5.2 step 5 said the same. The orchestrator half
+of that is now relaxed: the orchestrator may call `push_branch` and
+`open_pull_request` (§6), each of which creates an approval row and stops there.
+Nothing reaches the remote until a human grants it, autonomy setting regardless,
+so "nothing reaches a shared remote unattended" is unchanged — what changed is
+who may ask. The refusal the amendment is careful *not* to relax: unblocking
+`gh` in Bash for orchestrator sessions would have been one line, and would have
+granted every GitHub operation the user's token can reach, on every repository,
+with no record on the board. The tools are narrow on purpose — `push_branch`
+refuses any branch that is not `agentboard/<something>` or the project's base
+branch, and there is no tool that merges a pull request.
+
+**The worker half of D8 is untouched.** Workers commit on their branch and stop.
+They never push, never open a pull request, and the two controls in §8 that
+enforce it are unchanged for them.
 
 Pivots named at decision time, to be designed for but not built:
 
@@ -504,8 +521,20 @@ of the autonomy setting.
    implementation detail: under the default policy, the integrator's own
    completion produces no review-queue entry. Every other archive policy
    leaves it in `review` for a human, exactly as before this feature existed.
-5. The PR from `agentboard/epic-<id>` → base is opened **by you**, from a
-   button on the epic — not by an agent.
+5. The PR from `agentboard/epic-<id>` → base is opened either **by you**, from
+   the button on the epic, or by the orchestrator calling `open_pull_request`
+   (§6) — which does not open one either. It creates an approval row, exactly
+   as `request_integration` does, and the branch is pushed and the pull request
+   opened only once you grant it, autonomy setting regardless (D8 amended, §1).
+   The resulting URL is written to `progress` against the epic's integrator
+   task, so the board records that the pull request exists without anyone
+   reading a terminal, and reaches the orchestrator as a `decision` report.
+
+   An epic whose tasks are not all `done` is **not** refused here, unlike
+   `request_integration`. Opening a pull request early for review is a real
+   workflow and the approval is already a human gate; the approval row names
+   how many tasks are unfinished, so the mistake is visible to the person
+   deciding rather than pre-empted for them.
 
 ---
 
@@ -557,6 +586,8 @@ Everything in worker scope over any task in the project, plus:
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Always creates a human approval row |
+| `push_branch(branch)` | Always creates a human approval row. Refused for any branch that is not `agentboard/<something>` or the project's base branch |
+| `open_pull_request(epic_id \| branch, title, body, base?)` | Always creates a human approval row. Same branch rule; `base` defaults to the project's base branch. On approval the branch is pushed if the remote lacks it, the pull request is opened, and its URL lands in `progress` and in a `decision` report |
 
 While a shutdown order is outstanding (§8), `spawn_worker` refuses immediately
 — before caps are even checked — with the fixed string `"shutdown in progress;
@@ -669,8 +700,12 @@ Per project, overridable:
   a capped agent resumes exactly where it stopped.
 - **Pause All** stops every managed session in the project via `claude stop`.
 - **Integration always requires human approval**, autonomy setting regardless.
-- **Workers never push.** Enforced twice, by two controls that fail
-  independently:
+  So does every outward-facing publish: `push_branch` and `open_pull_request`
+  (§6) create an approval row and return it. Both are visible to collaborators
+  and CI the moment they happen and cannot be taken back, which is why neither
+  is reachable through the autonomy setting.
+- **Workers never push.** Unchanged by the D8 amendment (§1). Enforced twice, by
+  two controls that fail independently:
   1. `--disallowedTools "Bash(git push*)" "Bash(gh pr create*)" "Bash(gh pr
      merge*)"` at spawn time, a CLI-level block.
   2. A `PreToolUse` hook (§7) matched to `Bash`. `IntegrationGuard` scans the
@@ -681,6 +716,16 @@ Per project, overridable:
      invocation (`cd x && git push`, `git -C d push`) is caught too. Every
      denial appends an `error` progress row naming the blocked command, so the
      human sees the attempt on the task card.
+
+  The verdict is scoped at the grant, not the prompt (D4): the guard reads
+  `identity.scope`, and the deny text differs accordingly. An orchestrator grant
+  is not denied the push and pull-request-create shapes — its authority to reach
+  the remote is real, and is spent through `push_branch` and
+  `open_pull_request` — but is still denied `gh pr merge`, because merging a pull
+  request is the human's call and Agent Board has no tool for it. A worker grant
+  is denied all three, and the text it gets still names workers; the text an
+  orchestrator gets names the tool to call instead and never claims the caller
+  is a worker.
 
   Either control alone stops the call; layer 2 exists so a dropped or
   misconfigured spawn flag is not a silent hole. Verified live: with

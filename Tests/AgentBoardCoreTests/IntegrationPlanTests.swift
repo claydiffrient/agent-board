@@ -107,7 +107,10 @@ final class IntegrationPlanTests: XCTestCase {
         XCTAssertTrue(prompt.contains("run `swift build` and then `swift test`"), prompt)
         XCTAssertTrue(prompt.contains("the final result of `swift build` and `swift test`"), prompt)
         XCTAssertTrue(prompt.contains("Do not push. Do not open a PR."), prompt)
-        XCTAssertTrue(prompt.contains("A human opens the pull request from `\(epic.branch)` into `main`."), prompt)
+        XCTAssertTrue(
+            prompt.contains("The pull request from `\(epic.branch)` into `main` is opened outside this session"),
+            prompt
+        )
         XCTAssertTrue(prompt.contains("report_complete"), prompt)
         XCTAssertFalse(prompt.contains("git push"), prompt)
         XCTAssertFalse(prompt.contains("gh pr create"), prompt)

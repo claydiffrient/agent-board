@@ -549,6 +549,74 @@ public struct Board: Sendable {
         }
     }
 
+    /// The only path that creates a `push` or `pull_request` approval row. Pushing and opening a
+    /// pull request are outward-facing and cannot be taken back, so both wait on a human regardless
+    /// of the autonomy setting — the same rule integration follows. A pending request for the same
+    /// branch is returned as-is rather than duplicated.
+    @discardableResult
+    public func requestPublish(
+        projectId: String,
+        kind: ApprovalKind,
+        request: PublishRequest,
+        taskId: String? = nil,
+        epicId: String? = nil,
+        requestedBy: String,
+        reason: String? = nil
+    ) throws -> Approval {
+        try db.writer.write { db in
+            guard try Project.exists(db, key: projectId) else {
+                throw BoardError.projectNotFound(projectId)
+            }
+            if let existing = try ApprovalStore.pendingPublish(
+                db, projectId: projectId, kind: kind, branch: request.branch
+            ) {
+                return existing
+            }
+            return try ApprovalStore.insert(
+                db, projectId: projectId, kind: kind, taskId: taskId, epicId: epicId,
+                requestedBy: requestedBy, reason: reason, payload: try request.encoded()
+            )
+        }
+    }
+
+    /// What the board keeps once a `push` or `pull_request` approval has actually run: a `progress`
+    /// row on the epic's or task's card carrying the pull request URL, and a `decision` report so
+    /// the orchestrator reads the outcome through `list_reports` rather than a terminal.
+    @discardableResult
+    public func recordPublished(
+        approval: Approval, summary: String, url: String? = nil, failed: Bool = false
+    ) throws -> Report {
+        try db.writer.write { db in
+            let text = url.map { "\(summary)\n\($0)" } ?? summary
+            if let taskId = try Self.publishProgressTask(db, approval) {
+                _ = try ProgressStore.append(
+                    db, taskId: taskId, sessionId: nil, kind: failed ? .error : .status, text: text
+                )
+            }
+            return try ReportStore.insert(
+                db, projectId: approval.projectId, taskId: approval.taskId, sessionId: nil,
+                kind: .decision, body: text
+            )
+        }
+    }
+
+    /// The card a publish outcome belongs on. An epic-scoped approval names no task, so it lands on
+    /// the epic's integrator task when there is one and on its last task otherwise.
+    static func publishProgressTask(_ db: Database, _ approval: Approval) throws -> String? {
+        if let taskId = approval.taskId, try Task.exists(db, key: taskId) { return taskId }
+        guard let epicId = approval.epicId else { return nil }
+        if let integrator = try String.fetchOne(
+            db,
+            sql: "SELECT id FROM task WHERE epic_id = ? AND origin = 'integration' ORDER BY created_at DESC LIMIT 1",
+            arguments: [epicId]
+        ) {
+            return integrator
+        }
+        return try String.fetchOne(
+            db, sql: "SELECT id FROM task WHERE epic_id = ? ORDER BY ordering DESC LIMIT 1", arguments: [epicId]
+        )
+    }
+
     /// True when the epic holds at least one task and every one of them is in `done`.
     public func epicReadyForIntegration(epicId: String) throws -> Bool {
         try db.reader.read { db in
