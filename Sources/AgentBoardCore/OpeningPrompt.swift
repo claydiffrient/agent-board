@@ -50,6 +50,11 @@ public enum OpeningPrompt {
         ## How to work
         - You are in a dedicated git worktree on branch `\(branch)`. Work only in this directory.
         - The `agent-board` MCP server holds your assignment. Call `get_my_task` if you need the details again.
+        - Call `search_notes` when something surprises you: a tool that will not do what the task assumes, \
+        a platform behavior you are about to establish by experiment, a step that fails for no stated reason. \
+        Earlier workers on this project wrote down what they found; search costs one call and the rediscovery \
+        costs an hour. `search_notes` reaches every note in this project — only the pinned ones and the ones \
+        attached to this task are reproduced above.
         - Use `log_progress` sparingly, at meaningful milestones rather than after every step.
         - If you are stuck on something that needs a human decision or information you do not have, \
         call `report_blocked(reason)` and stop.
@@ -57,8 +62,20 @@ public enum OpeningPrompt {
         sections.append("""
         ## When you are done
         1. Commit on the current branch. Write the message in imperative mood, with no conventional-commit prefix.
-        2. Do not push. Do not open a PR. Both are denied at the tool layer; do not spend a turn discovering that.
-        3. Call `report_complete(summary, files_changed, tests_run, caveats)`. That ends your task; \
+        2. Write down one durable finding as a note, if this task produced one. The bar is something a later \
+        worker on this project would otherwise have to rediscover: a platform or tool behavior you had to \
+        establish by experiment, a trap in this codebase, a technique that worked after several that did not, \
+        or a claim in a task body, a doc or a comment that turned out to be false. It is not a summary of what \
+        you built — that is `report_complete`, and no future worker ever reads a report. Most tasks produce one \
+        such finding or none; if this one produced none, skip this step, because an empty notes table is worth \
+        more than a noisy one.
+           Search before you write. Run `search_notes` on the subject and `read_note` on anything close. If a \
+        note already covers the subject, add to it with `append_section` — a second note on the same subject \
+        splits the answer and the next worker finds half of it. Call `create_note` only when the project has \
+        no note on the subject at all. Either way, write what you observed and the command, payload or code \
+        that showed it, so the next worker can tell evidence from advice.
+        3. Do not push. Do not open a PR. Both are denied at the tool layer; do not spend a turn discovering that.
+        4. Call `report_complete(summary, files_changed, tests_run, caveats)`. That ends your task; \
         do not start further work afterwards.
         """)
         return sections.joined(separator: "\n\n")

@@ -31,6 +31,13 @@ enum OrchestratorPrompt {
         - Workers commit on `agentboard/<task-id>` and never push. Integration into the epic branch requires `request_integration(epic_id)` and human approval.
         - `push_branch(branch)` and `open_pull_request(epic_id or branch, title, body)` are how anything reaches the git remote. Both return a pending approval rather than a finished push or pull request: the human grants it, regardless of the autonomy setting, and the pull request URL comes back to you as a `decision` report. Do not try to reach the remote from the shell; those calls are denied.
         - Prefer fewer, well-specified tasks over many vague ones. Keep the human's spend in mind: check `list_agents` before spawning.
+
+        ## Notes
+        Notes are this project's durable memory: what one agent learned that the next would otherwise rediscover. Workers are told to write one at the end of a task, so they accumulate without you asking. Curating them is yours alone — `attach_note` and `pin_note` are orchestrator-only, and a note nobody attaches or pins reaches a worker only if that worker guesses the right search.
+        - `search_notes` and `read_note` before you write a task. A constraint that is already written down belongs in the task body or on an attached note, not left for the worker to find twice.
+        - `attach_note(note_id, task_id or epic_id)` hands the note in full to every worker spawned on that task or that epic. Prefer it to pinning: it is the targeted version and costs the rest of the board nothing.
+        - `pin_note(note_id, true)` hands the note to every future worker on this project — not to you; your own prompt is not re-injected. Pin what a worker on any task in this project needs, which is a handful of notes, not a shelf. Unpin one when it stops being true.
+        - When a worker's report carries a finding it did not write down — a platform limit, a false premise in a task body you wrote, a technique that finally worked — record it with `create_note` yourself and pin or attach it. A finding that lives only in a report reaches nobody: you consume the report once and no worker ever sees it.
         """)
         if let defaultModel = project.settings.defaultModel {
             sections.append("## Default model\nWorkers run on `\(defaultModel)` unless a task sets its own `model`.")
