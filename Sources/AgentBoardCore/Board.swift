@@ -617,6 +617,103 @@ public struct Board: Sendable {
         )
     }
 
+    /// What closing this epic would do, read before the human is asked to confirm it. The same
+    /// query backs `closeEpic`'s guards, so the dialog cannot promise something the write refuses.
+    public func epicClosurePlan(epicId: String, as closure: EpicClosure) throws -> EpicClosurePlan {
+        try db.reader.read { db in try Self.closurePlan(db, epicId: epicId, as: closure) }
+    }
+
+    /// A human ends the epic without driving it through integration: the terminal state is written,
+    /// a `decision` report tells the orchestrator to stop planning into it, and nothing else moves.
+    /// No branch is merged or deleted, no worktree is removed, and no task is deleted, archived or
+    /// re-homed — unfinished tasks stay in this epic's lane exactly as they are, because rewriting a
+    /// human's unfinished work is not what "I am finished with this epic" asks for.
+    ///
+    /// Refused while any session in the epic is still active, so a live worker is never left running
+    /// against a closed epic, and refused for an epic that is already terminal: `done` and
+    /// `abandoned` mean different things and one does not silently become the other.
+    @discardableResult
+    public func closeEpic(epicId: String, as closure: EpicClosure, by: String) throws -> Report {
+        try db.writer.write { db in
+            let plan = try Self.closurePlan(db, epicId: epicId, as: closure)
+            if let state = plan.alreadyClosed {
+                throw BoardError.epicAlreadyClosed(epicId: epicId, state: state)
+            }
+            guard plan.running.isEmpty else {
+                throw BoardError.epicHasRunningWorkers(epicId: epicId, sessionIds: plan.running.map(\.sessionId))
+            }
+            guard let epic = try Epic.fetchOne(db, key: epicId) else {
+                throw BoardError.epicNotFound(epicId)
+            }
+            try EpicStore.setState(db, epicId, closure.state)
+
+            var lines = [
+                "Epic \(epicId) (\(epic.title)) was closed as \(closure.state.rawValue) by a human, "
+                    + "without being integrated. Do not plan or dispatch further work into it.",
+                "Nothing was merged, pushed or deleted: the epic branch \(epic.branch) and every "
+                    + "`agentboard/<task-id>` branch and worktree are untouched.",
+            ]
+            if plan.unfinished.isEmpty {
+                lines.append("Every task in the epic was already finished.")
+            } else {
+                let listed = plan.unfinished.map { "- \($0.id) (\($0.title)) in \($0.column.rawValue)" }
+                    .joined(separator: "\n")
+                lines.append(
+                    "\(plan.unfinished.count) task(s) were left unfinished and stay in this epic exactly "
+                        + "as they are — not deleted, not archived, not moved out:\n\(listed)"
+                )
+                lines.append(
+                    "If any of that work still matters, take it out of the epic with "
+                        + "set_epic(task_id) and no epic_id, and it stands alone on the board."
+                )
+            }
+            lines.append("Closed by: \(by)")
+            return try ReportStore.insert(
+                db, projectId: epic.projectId, taskId: nil, sessionId: nil, kind: .decision,
+                body: lines.joined(separator: "\n\n")
+            )
+        }
+    }
+
+    static func closurePlan(_ db: Database, epicId: String, as closure: EpicClosure) throws -> EpicClosurePlan {
+        guard let epic = try Epic.fetchOne(db, key: epicId) else {
+            throw BoardError.epicNotFound(epicId)
+        }
+        let unfinished = try Task
+            .fetchAll(
+                db,
+                sql: "SELECT * FROM task WHERE epic_id = ? AND column_name != 'done' ORDER BY ordering",
+                arguments: [epicId]
+            )
+            .map { EpicUnfinishedTask(id: $0.id, title: $0.title, column: $0.column) }
+        let running = try Row
+            .fetchAll(
+                db,
+                sql: """
+                SELECT s.session_id AS session_id, s.short_id AS short_id, t.title AS title
+                FROM agent_session s
+                JOIN task t ON t.id = s.task_id
+                WHERE t.epic_id = ? AND s.state IN (\(SessionStore.activeStatesSQL))
+                ORDER BY s.started_at
+                """,
+                arguments: [epicId]
+            )
+            .map {
+                EpicRunningWorker(
+                    sessionId: $0["session_id"], shortId: $0["short_id"], taskTitle: $0["title"]
+                )
+            }
+        return EpicClosurePlan(
+            epicId: epic.id,
+            epicTitle: epic.title,
+            branch: epic.branch,
+            closure: closure,
+            alreadyClosed: epic.state.isTerminal ? epic.state : nil,
+            unfinished: unfinished,
+            running: running
+        )
+    }
+
     /// True when the epic holds at least one task and every one of them is in `done`.
     public func epicReadyForIntegration(epicId: String) throws -> Bool {
         try db.reader.read { db in

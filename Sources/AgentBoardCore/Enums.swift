@@ -33,6 +33,15 @@ public enum EpicState: String, Codable, Sendable, CaseIterable, Equatable, Datab
     case integrating
     case done
     case abandoned
+
+    /// The epic is over: nothing further is planned into it and it cannot be closed again into the
+    /// other terminal state. `done` and `abandoned` mean different things to the human who chose one.
+    public var isTerminal: Bool {
+        switch self {
+        case .done, .abandoned: return true
+        case .planning, .active, .integrating: return false
+        }
+    }
 }
 
 public enum SessionState: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {

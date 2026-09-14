@@ -16,6 +16,7 @@ struct TaskBoardView: View {
     @State private var busyMessage: String?
     @State private var errorMessage: String?
     @State private var taskPendingDelete: BoardTask?
+    @State private var closurePlan: EpicClosurePlan?
     @State private var drafts = TaskDraftCache()
     @State private var collapseChoices: [String: Bool] = [:]
     @State private var showArchived = false
@@ -210,6 +211,7 @@ struct TaskBoardView: View {
         }
         .background(deleteConfirmation)
         .background(archiveConfirmation)
+        .background(closeEpicConfirmation)
         .overlay {
             if let busyMessage {
                 ZStack {
@@ -366,7 +368,8 @@ struct TaskBoardView: View {
                     isCollapsed: collapsed,
                     onToggleCollapse: { toggleCollapse(epic) },
                     onRequestIntegration: { requestIntegration(epic) },
-                    onOpenPullRequest: { openPullRequest(epic) }
+                    onOpenPullRequest: { openPullRequest(epic) },
+                    onClose: { planClosure(epic, as: $0) }
                 )
             } else if lanes.count > 1 {
                 Text(lane.title)
@@ -502,6 +505,36 @@ struct TaskBoardView: View {
                 Button("Archive") { archive(archivableTasks.map(\.id)) }
             } message: {
                 Text("They leave the board but are never deleted — branches, worktrees and reports are untouched. Turn on Show Archived to bring them back into view, or unarchive one from its card.")
+            }
+    }
+
+    /// The plan is read before the dialog opens, so its copy names this epic's actual leftovers and
+    /// its actual running workers rather than describing closing in general.
+    private func planClosure(_ epic: Epic, as closure: EpicClosure) {
+        do {
+            closurePlan = try env.supervisor.epicClosurePlan(epicId: epic.id, as: closure)
+        } catch {
+            errorMessage = errorText(error)
+        }
+    }
+
+    private var closeEpicConfirmation: some View {
+        EmptyView()
+            .confirmationDialog(
+                closurePlan?.title ?? "",
+                isPresented: Binding(get: { closurePlan != nil }, set: { if !$0 { closurePlan = nil } }),
+                titleVisibility: .visible,
+                presenting: closurePlan
+            ) { plan in
+                if !plan.isRefused {
+                    Button(plan.closure.confirmLabel, role: .destructive) {
+                        runSupervised("Closing epic…") {
+                            try await env.supervisor.closeEpic(epicId: plan.epicId, as: plan.closure)
+                        }
+                    }
+                }
+            } message: { plan in
+                Text(plan.message)
             }
     }
 

@@ -337,4 +337,8 @@ public enum BoardError: Error, Equatable, Sendable {
     case archiveRequiresDone(taskId: String, column: TaskColumn)
     /// A setup row was resolved twice, or something ended it while its worktree was being prepared.
     case sessionNotInSetup(String, SessionState)
+    /// `done` and `abandoned` are both terminal; one never silently becomes the other.
+    case epicAlreadyClosed(epicId: String, state: EpicState)
+    /// Closing would have left these sessions running against a closed epic.
+    case epicHasRunningWorkers(epicId: String, sessionIds: [String])
 }
