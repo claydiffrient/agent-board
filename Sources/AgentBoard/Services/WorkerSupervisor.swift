@@ -21,10 +21,12 @@ enum SupervisorError: LocalizedError {
     case spawnFailed(worktree: String, underlying: String)
     case setupInterrupted
     case approvalNotFound(String)
+    case epicCloseRefused(String)
 
     var errorDescription: String? {
         switch self {
         case .approvalNotFound(let id): return "approval \(id) not found"
+        case .epicCloseRefused(let reason): return reason
         case .epicNotFound(let id): return "epic \(id) not found"
         case .notAGitRepository(let path): return "\(path) is not a git repository"
         case .projectNotFound(let id): return "project \(id) not found"
@@ -1011,6 +1013,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording {
             guard try epics.get(epicId) != nil else { throw SupervisorError.epicNotFound(epicId) }
             try board.requestIntegration(epicId: epicId, requestedBy: "human")
+        }
+    }
+
+    /// SPEC §10: the preflight behind the close/abandon confirmation.
+    func epicClosurePlan(epicId: String, as closure: EpicClosure) throws -> EpicClosurePlan {
+        try board.epicClosurePlan(epicId: epicId, as: closure)
+    }
+
+    /// SPEC §10: a human ends the epic without integrating it. Board state and a `decision` report,
+    /// nothing else — no merge, no push, no worktree teardown, no task touched.
+    func closeEpic(epicId: String, as closure: EpicClosure) async throws {
+        try await recording {
+            let plan = try board.epicClosurePlan(epicId: epicId, as: closure)
+            if plan.isRefused { throw SupervisorError.epicCloseRefused(plan.message) }
+            let report = try board.closeEpic(epicId: epicId, as: closure, by: "human")
+            announceReports(projectId: report.projectId)
         }
     }
 

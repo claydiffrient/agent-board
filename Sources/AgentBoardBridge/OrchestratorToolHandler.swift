@@ -255,6 +255,27 @@ public final class OrchestratorToolHandler: ToolHandler {
             inputSchema: ToolSchema.object(properties: ["epic_id": ToolSchema.string()], required: ["epic_id"])
         ),
         ToolDescriptor(
+            name: "close_epic",
+            description: "End an epic without integrating it. `state` is `done` when the epic got where it needed to "
+                + "get, or `abandoned` when it was the wrong idea. This is a board state change and nothing else: "
+                + "the epic branch is not merged, no pull request is opened, no branch or worktree is deleted, and "
+                + "no task is deleted, archived, or moved out of the epic — unfinished tasks stay in the epic's lane "
+                + "exactly as they are. Refused while any worker is still running in the epic; stop those first. "
+                + "Refused for an epic that is already `done` or `abandoned`: the two mean different things and one "
+                + "does not become the other. If work left in a closed epic still matters, take it out with "
+                + "`set_epic(task_id)` and no `epic_id` and it stands alone on the board.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "epic_id": ToolSchema.string(),
+                    "state": ToolSchema.enumeration(
+                        EpicClosure.allCases.map(\.rawValue),
+                        "`done` if the epic is finished, `abandoned` if it should not have been started."
+                    ),
+                ],
+                required: ["epic_id", "state"]
+            )
+        ),
+        ToolDescriptor(
             name: "push_branch",
             description: "Ask the human to push one of this project's branches to its git remote. Refused for any "
                 + "branch that is neither `agentboard/<something>` nor the project's base branch. A push is "
@@ -333,6 +354,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "list_epics": return try listEpics(identity: identity)
         case "get_epic": return try getEpic(arguments, identity: identity)
         case "request_integration": return try requestIntegration(arguments, identity: identity)
+        case "close_epic": return try closeEpic(arguments, identity: identity)
         case "push_branch": return try pushBranch(arguments, identity: identity)
         case "open_pull_request": return try openPullRequest(arguments, identity: identity)
         default: throw ToolError("Unknown tool: \(name)")
@@ -480,13 +502,14 @@ public final class OrchestratorToolHandler: ToolHandler {
         return ToolResult(text: "Task \(task.id) moved \(arrival).\(departure)")
     }
 
-    /// A `done` epic is refused as a destination: adding an unfinished task to it would leave a finished
-    /// epic reporting fewer done tasks than it has.
+    /// A closed epic is refused as a destination: adding an unfinished task to it would leave a
+    /// finished epic reporting fewer done tasks than it has, and an abandoned one would acquire work
+    /// nobody intends to do.
     private func destinationEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> Epic? {
         guard let id = ToolArguments.optionalString("epic_id", in: arguments), !id.isEmpty else { return nil }
         let epic = try projectEpic(id, identity: identity)
-        guard epic.state != .done else {
-            throw ToolError("Epic \(epic.id) is done: adding a task to it would leave a finished epic unfinished.")
+        guard !epic.state.isTerminal else {
+            throw ToolError("Epic \(epic.id) is \(epic.state.rawValue): it is closed, so it takes no more tasks.")
         }
         return epic
     }
@@ -735,6 +758,27 @@ public final class OrchestratorToolHandler: ToolHandler {
             requestedBy: identity.sessionId ?? "orchestrator"
         )
         return ToolResult(text: "integration approval \(approval.id) pending")
+    }
+
+    private func closeEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let epic = try projectEpic(try ToolArguments.requiredString("epic_id", in: arguments), identity: identity)
+        let raw = try ToolArguments.requiredString("state", in: arguments)
+        guard let closure = EpicClosure(rawValue: raw) else {
+            throw ToolError(
+                "Unknown state '\(raw)'. Use one of: \(EpicClosure.allCases.map(\.rawValue).joined(separator: ", "))."
+            )
+        }
+        let plan = try board.epicClosurePlan(epicId: epic.id, as: closure)
+        if plan.isRefused { throw ToolError(plan.message) }
+        try board.closeEpic(epicId: epic.id, as: closure, by: identity.sessionId ?? "orchestrator")
+        var text = "Epic \(epic.id) is \(closure.state.rawValue). Nothing was merged, pushed or deleted; "
+            + "\(epic.branch) and every task branch are untouched."
+        if !plan.unfinished.isEmpty {
+            text += " \(plan.unfinished.count) unfinished task(s) stay in the epic as they are: "
+                + plan.unfinished.map { "\($0.id) (\($0.column.rawValue))" }.joined(separator: ", ")
+                + ". Do not plan further work into this epic."
+        }
+        return ToolResult(text: text)
     }
 
     // MARK: Publishing

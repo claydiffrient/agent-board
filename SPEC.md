@@ -369,6 +369,23 @@ CREATE TABLE hook_event (
 );
 ```
 
+Every `epic.state` value is written by exactly one place, and nothing writes one
+that is not listed here:
+
+| State | Written by | When |
+|---|---|---|
+| `planning` | `EpicStore.insert` | The epic is created; `create_epic` and the New Epic sheet both land here |
+| `active` | `WorkerSupervisor.spawn`, `Board.accept` | The first task in the epic is spawned, or accepted, while the epic is still `planning` |
+| `integrating` | `WorkerSupervisor.spawnIntegrator` | The integrator worker spawned successfully on the epic branch (§5.2 step 3) |
+| `done` | `Board.complete`, `Board.closeEpic` | The integrator reported and the epic merged, **or** a human closed the epic by hand (§10) |
+| `abandoned` | `Board.closeEpic` | A human abandoned the epic by hand (§10) |
+
+`done` and `abandoned` are terminal: `Board.closeEpic` refuses an epic that is
+already in either, so one never silently becomes the other, and `create_task`
+and `set_epic` refuse a terminal epic as a destination. There is no reopen —
+a closed epic stays closed, and work left inside one is freed with
+`set_epic(task_id)` and no `epic_id` rather than by reviving the epic.
+
 The token is issued before spawn (it has to be in the generated config files)
 and bound to the session afterwards; the SessionStart hook may arrive first and
 bind it itself. `est_cost_usd` is a list-price estimate from transcript usage,
@@ -494,11 +511,19 @@ A worker's closing instructions, injected at spawn:
 Integration is the orchestrator's job and is gated on your approval regardless
 of the autonomy setting.
 
+This is the path that ends an epic by *finishing* it. §10's **Close as done**
+and **Abandon** are the other way out, for an epic you are finished with rather
+than one that is finished; they merge nothing and are not part of this sequence.
+
 1. All tasks in the epic reach `done`.
 2. Orchestrator calls `request_integration(epic_id)`. This creates an approval
    row and a macOS notification. Nothing proceeds until you approve.
 3. On approval, Agent Board creates an integration worktree on
-   `agentboard/epic-<id>` and spawns an integrator worker whose job is to merge
+   `agentboard/epic-<id>` and spawns an integrator worker. The epic moves to
+   `integrating` in `WorkerSupervisor.spawnIntegrator`, after the integrator's
+   session row is written and before its process is launched, so a spawn that
+   throws leaves the epic `active` rather than stranded mid-integration. The
+   integrator's job is to merge
    each `agentboard/<task-id>` into the epic branch, resolve conflicts, and get
    the build green. The epic branch accumulates accepted work as it goes (§5),
    so by this point most task branches are already in and the integrator's real
@@ -586,6 +611,7 @@ Everything in worker scope over any task in the project, plus:
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Always creates a human approval row |
+| `close_epic(epic_id, state)` | Ends the epic without integrating it. `state` is `done` or `abandoned`; both are terminal. Board state and a `decision` report and nothing else — no merge, no push, no branch or worktree deleted, no task deleted, archived or moved out. Refused while any session in the epic is active, and refused for an epic that is already terminal |
 | `push_branch(branch)` | Always creates a human approval row. Refused for any branch that is not `agentboard/<something>` or the project's base branch |
 | `open_pull_request(epic_id \| branch, title, body, base?)` | Always creates a human approval row. Same branch rule; `base` defaults to the project's base branch. On approval the branch is pushed if the remote lacks it, the pull request is opened, and its URL lands in `progress` and in a `decision` report |
 
@@ -606,9 +632,10 @@ never based on. `set_epic` therefore refuses any task with a session against it
 — spawned, stopped, failed or completed alike — and names the task's branch
 `agentboard/<task-id>` in the error, so the refusal reads as "meaningless", not
 merely "disallowed". A task that has never been spawned has no branch and no
-worktree, so it moves freely. Both `set_epic` and `create_task` refuse a `done`
-epic as a destination, which would otherwise leave a finished epic reporting
-`done_tasks < total_tasks`. Epic counts and `ready_for_integration` are computed
+worktree, so it moves freely. Both `set_epic` and `create_task` refuse a terminal
+epic (`done` or `abandoned`) as a destination: a `done` one would otherwise
+report `done_tasks < total_tasks`, and an abandoned one would acquire work
+nobody intends to do. Epic counts and `ready_for_integration` are computed
 from the epic's task list on every read, so `get_epic` and `list_epics` report
 the corrected numbers for the source and the destination immediately after a
 move. `task_dep` rows are never rewritten by either tool: dependencies are
@@ -622,6 +649,10 @@ task: it is hidden, not frozen. Epic views (`get_epic`, `list_epics`) count
 archived tasks, so integration readiness is unchanged by archiving. Workers get
 neither archive tool, and their own task can never be archived because archiving
 requires `done`.
+
+`close_epic` is orchestrator-only for the same reason `request_integration` is:
+a worker must not be able to end the epic it is working inside. A worker token
+calling it gets `Unknown tool`, because the tool list is rendered per scope.
 
 ---
 
@@ -918,6 +949,37 @@ disappear silently. Turning the toggle on draws archived cards back into the
 columns they actually sit in (always `done`), dimmed to 55% opacity with a
 dashed border and an "archived `<when>`" line; from there a card's context menu
 or the inspector unarchives it.
+
+**Ending an epic by hand** — the epic lane header carries a `…` menu with
+**Close as done** and **Abandon**. Integration (§5.2) is how an epic ends when
+it is *finished*; these are how it ends when *you* are finished with it —
+"I got what I needed out of this" and "this was the wrong idea" respectively.
+Both are terminal, the lane badge already draws them apart (green and red), and
+neither is offered on an epic that is already in one.
+
+Closing is a board state change and nothing else. It does not merge
+`agentboard/epic-<id>`, does not open a pull request, and does not touch a task
+branch. **No branch and no worktree is deleted** — exactly as a `done` task
+keeps its branch until integration. Unfinished tasks stay exactly where they
+are: same lane, same column, same `epic_id`, not deleted, not archived, not
+re-homed. Silently rewriting a human's unfinished work is not what "I am done
+with this epic" asks for, and the epic is the record of what that work was for.
+Work left in a closed epic is freed with `set_epic(task_id)` and no `epic_id`
+when it still matters, which the `decision` report says in so many words.
+
+The confirmation names all of it before the human commits: the state being
+written, the specific leftover tasks and their columns, that they stay put, and
+that the branches and worktrees survive. Its copy and the write's guards read
+the same `EpicClosurePlan` (`AgentBoardCore.EpicClosure`, unit-tested apart
+from SwiftUI), so the dialog cannot promise something `Board.closeEpic` refuses.
+
+Closing is **refused**, not forced, while any session in the epic is still
+active — the integrator's included, since it is bound to a synthetic task inside
+the epic. The refusal names each live worker by task and short id, the way the
+Stop All sheet does, and stops nothing itself: a live session is never orphaned
+against a closed epic, and the human stops it from its card or from Stop All and
+closes afterwards. `close_epic` (§6) does the same thing for the orchestrator
+under the same guards; workers get no such tool.
 
 **Status** — the agent roster. Reconciled from `claude agents --json --all`
 joined against `agent_session`, so a session that died outside the app is shown

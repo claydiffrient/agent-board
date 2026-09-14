@@ -52,6 +52,8 @@ final class StubSupervisor: WorkerSupervising {
     func deny(approvalId: String, reason: String?) async throws { throw StubError.notWired }
     func promote(taskId: String) async throws { throw StubError.notWired }
     func requestIntegration(epicId: String) async throws { throw StubError.notWired }
+    func epicClosurePlan(epicId: String, as closure: EpicClosure) throws -> EpicClosurePlan { throw StubError.notWired }
+    func closeEpic(epicId: String, as closure: EpicClosure) async throws { throw StubError.notWired }
     func openPullRequest(epicId: String) async throws -> PullRequestOutcome { throw StubError.notWired }
     func requestShutdown(projectId: String, requestedBy: String, reason: String?) async throws -> ShutdownOrder {
         throw StubError.notWired

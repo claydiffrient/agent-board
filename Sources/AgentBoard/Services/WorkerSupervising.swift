@@ -38,6 +38,12 @@ protocol WorkerSupervising: AnyObject {
     func promote(taskId: String) async throws
     /// Queues the human integration approval for the epic. Creates nothing else.
     func requestIntegration(epicId: String) async throws
+    /// What closing the epic would do, for the confirmation to read before the human commits.
+    func epicClosurePlan(epicId: String, as closure: EpicClosure) throws -> EpicClosurePlan
+    /// Writes the terminal epic state and queues the `decision` report. Merges nothing, deletes no
+    /// branch or worktree, and leaves every unfinished task where it is. Refused while a worker is
+    /// running in the epic and for an epic that is already terminal.
+    func closeEpic(epicId: String, as closure: EpicClosure) async throws
     /// Opens the prefilled compare page for the epic branch; never creates the PR itself.
     @discardableResult
     func openPullRequest(epicId: String) async throws -> PullRequestOutcome
