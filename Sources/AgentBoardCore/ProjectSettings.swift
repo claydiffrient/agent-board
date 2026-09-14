@@ -93,6 +93,11 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var defaultModel: String? = nil
     /// Free text the orchestrator reads when choosing a model per task.
     public var modelGuidance: String? = nil
+    /// Shell command that builds this project, e.g. `swift build` or `pnpm build`. Empty leaves the
+    /// agent to work it out from the repo.
+    public var buildCommand: String? = nil
+    /// Shell command that runs this project's tests. Empty leaves the agent to work it out.
+    public var testCommand: String? = nil
     public var archivePolicy: ArchivePolicy = .afterEpicMerge
 
     public init(
@@ -102,6 +107,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         extraMcpServers: [String] = [],
         defaultModel: String? = nil,
         modelGuidance: String? = nil,
+        buildCommand: String? = nil,
+        testCommand: String? = nil,
         archivePolicy: ArchivePolicy = .afterEpicMerge
     ) {
         self.caps = caps
@@ -110,6 +117,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.extraMcpServers = extraMcpServers
         self.defaultModel = defaultModel
         self.modelGuidance = modelGuidance
+        self.buildCommand = buildCommand
+        self.testCommand = testCommand
         self.archivePolicy = archivePolicy
     }
 
@@ -121,6 +130,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         extraMcpServers = try c.decodeIfPresent([String].self, forKey: .extraMcpServers) ?? []
         defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
         modelGuidance = try c.decodeIfPresent(String.self, forKey: .modelGuidance)
+        buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
+        testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
         archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge
     }
 

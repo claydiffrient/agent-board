@@ -67,7 +67,12 @@ public enum IntegrationPlan {
         }
     }
 
-    public static func compose(epic: Epic, baseBranch: String, branches: [IntegrationBranch]) -> String {
+    public static func compose(
+        epic: Epic,
+        baseBranch: String,
+        branches: [IntegrationBranch],
+        verification: VerificationCommands
+    ) -> String {
         let toMerge = branches.filter { $0.disposition == .merge }
         let alreadyMerged = branches.filter { $0.disposition == .alreadyMerged }
         let missing = branches.filter { $0.disposition == .missing }
@@ -110,7 +115,7 @@ public enum IntegrationPlan {
         - You are in a dedicated git worktree checked out on `\(epic.branch)`. Work only in this directory.
         - Merge each branch listed above in order, one at a time: `git merge --no-ff <branch>`.
         - Resolve every conflict yourself. Read both sides before choosing; do not drop one side's work to make the merge go through.
-        - After the merges, run `swift build` and then `swift test`. Fix what breaks and run them again until both are green.
+        - After the merges, \(verification.integratorInstruction)
         - The `agent-board` MCP server holds this assignment. Use `log_progress` at meaningful milestones, not after every merge.
         - If you are stuck on something that needs a human decision, call `report_blocked(reason)` and stop.
         """)
@@ -120,7 +125,7 @@ public enum IntegrationPlan {
         2. Do not push. Do not open a PR. Both are denied at the tool layer; do not spend a turn discovering that. \
         A human opens the pull request from `\(epic.branch)` into `\(baseBranch)`.
         3. Call `report_complete(summary, files_changed, tests_run, caveats)`. Say which branches you merged, which you \
-        skipped and why, and the final result of `swift build` and `swift test`. That ends your task; do not start \
+        skipped and why, and \(verification.reportInstruction). That ends your task; do not start \
         further work afterwards.
         """)
         return sections.joined(separator: "\n\n")

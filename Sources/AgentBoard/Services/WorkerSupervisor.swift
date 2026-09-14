@@ -256,7 +256,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         task: task, branch: branch, attempt: placeholder.attempt, epicGoal: epic?.goal,
                         notes: try notes.notesForSpawn(
                             projectId: project.id, taskId: taskId, epicId: task.epicId
-                        )
+                        ),
+                        verification: project.settings.verification
                     ),
                     model: task.model ?? project.settings.defaultModel,
                     attempt: placeholder.attempt
@@ -460,7 +461,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     branch: epicBranch,
                     configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
                     name: Self.sessionName(for: task),
-                    prompt: IntegrationPlan.compose(epic: epic, baseBranch: project.baseBranch, branches: branches),
+                    prompt: IntegrationPlan.compose(
+                        epic: epic,
+                        baseBranch: project.baseBranch,
+                        branches: branches,
+                        verification: project.settings.verification
+                    ),
                     model: project.settings.defaultModel,
                     attempt: placeholder.attempt
                 ),
@@ -1331,9 +1337,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     static func openingPrompt(
-        task: BoardTask, branch: String, attempt: Int, epicGoal: String? = nil, notes: [InjectedNote] = []
+        task: BoardTask,
+        branch: String,
+        attempt: Int,
+        epicGoal: String? = nil,
+        notes: [InjectedNote] = [],
+        verification: VerificationCommands = VerificationCommands()
     ) -> String {
-        OpeningPrompt.compose(task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes)
+        OpeningPrompt.compose(
+            task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes,
+            verification: verification
+        )
     }
 
     private nonisolated static func defaultBranch(repo: URL) -> String? {
