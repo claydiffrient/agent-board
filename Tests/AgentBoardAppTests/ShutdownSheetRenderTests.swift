@@ -190,6 +190,7 @@ private final class RenderStubSupervisor: WorkerSupervising {
         throw StubError.notWired
     }
     func assign(taskId: String) async throws {}
+    func waitForSetup() async {}
     func stop(sessionId: String) async throws {}
     func resume(sessionId: String) async throws {}
     func pauseAll(projectId: String) async throws {}

@@ -86,9 +86,7 @@ struct StatusView: View {
             }
 
             TableColumn("State") { session in
-                Text(session.state.rawValue)
-                    .foregroundStyle(session.state.color)
-                    .fontWeight(.medium)
+                SessionStateLabel(state: session.state)
             }
             .width(min: 70, ideal: 90)
 
@@ -214,4 +212,15 @@ struct StatusView: View {
     StatusView(project: preview.project)
         .environment(preview.environment)
         .frame(width: 1100, height: 500)
+}
+
+struct SessionStateLabel: View {
+    let state: SessionState
+
+    var body: some View {
+        Text(state.label)
+            .foregroundStyle(state.color)
+            .fontWeight(.medium)
+            .help(state.help ?? "")
+    }
 }

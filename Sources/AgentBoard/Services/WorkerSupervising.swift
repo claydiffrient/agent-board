@@ -11,6 +11,8 @@ protocol WorkerSupervising: AnyObject {
     func registerProject(repoPath: URL, name: String?, baseBranch: String?) async throws -> Project
     /// SPEC §3.1: worktree, memory symlink, config files, spawn, record session. Refuses on cap breach.
     func assign(taskId: String) async throws
+    /// `assign` answers while the worktree is still being prepared; this waits for that half.
+    func waitForSetup() async
     func stop(sessionId: String) async throws
     /// Rewrites the session's config files with the current port, then `claude --bg --resume`.
     func resume(sessionId: String) async throws

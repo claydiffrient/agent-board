@@ -57,20 +57,23 @@ public enum SessionTermination: Sendable, Equatable {
     case stoppedByHuman
     /// `reconcile` found the process gone without Agent Board having stopped it.
     case vanished
+    /// Preparing the worktree failed after `spawn_worker` had already answered, so the session
+    /// never became an agent. Nothing ran, but the task is in `running` with a row attached.
+    case setupFailed(String)
     /// The worker was told to wind down, committed, and answered. Neither a kill nor a cap breach:
     /// the task is unfinished work with a note on it, so it must not read as failed or accepted.
     case shutdownAcknowledged(note: String?)
 
     var sessionState: SessionState {
         switch self {
-        case .capBreach: return .failed
+        case .capBreach, .setupFailed: return .failed
         case .stoppedByHuman, .vanished, .shutdownAcknowledged: return .stopped
         }
     }
 
     var flagsTaskFailed: Bool {
         switch self {
-        case .capBreach, .vanished: return true
+        case .capBreach, .vanished, .setupFailed: return true
         case .stoppedByHuman, .shutdownAcknowledged: return false
         }
     }
@@ -80,6 +83,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .capBreach(let breach): return breach
         case .stoppedByHuman: return "stopped from Agent Board by a human"
         case .vanished: return "the session is no longer running and Agent Board did not stop it"
+        case .setupFailed(let detail): return "setting up the worktree failed before the worker started: \(detail)"
         case .shutdownAcknowledged: return "wound down for the project shutdown order and acknowledged"
         }
     }
@@ -87,13 +91,14 @@ public enum SessionTermination: Sendable, Equatable {
     var reportKind: ReportKind {
         switch self {
         case .shutdownAcknowledged: return .decision
-        case .capBreach, .stoppedByHuman, .vanished: return .failed
+        case .capBreach, .stoppedByHuman, .vanished, .setupFailed: return .failed
         }
     }
 
     var headline: String {
         switch self {
         case .shutdownAcknowledged: return "Worker wound down for the shutdown order: \(reason)"
+        case .setupFailed: return "Worker never started: \(reason)"
         case .capBreach, .stoppedByHuman, .vanished: return "Worker session ended without reporting: \(reason)"
         }
     }
@@ -104,7 +109,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .shutdownAcknowledged(let note):
             guard let note, !note.isEmpty else { return nil }
             return note
-        case .capBreach, .stoppedByHuman, .vanished: return nil
+        case .capBreach, .stoppedByHuman, .vanished, .setupFailed: return nil
         }
     }
 }
@@ -273,7 +278,9 @@ public struct Board: Sendable {
             session.taskId = taskId
             session.projectId = task.projectId
             session.role = .worker
-            session.state = .starting
+            // The row is written before any agent process exists, so the task is visibly claimed
+            // while the worktree is still being prepared.
+            session.state = .setup
             session.attempt = previousAttempts + 1
             try session.insert(db)
             try TaskStore.setBlocked(db, taskId, false, reason: nil)

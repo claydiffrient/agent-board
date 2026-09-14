@@ -64,7 +64,7 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         await target?.workerAcknowledgedShutdown(projectId: projectId, sessionId: sessionId)
     }
 
-    func spawnWorker(taskId: String) async throws -> String {
+    func spawnWorker(taskId: String) async throws -> WorkerSpawn {
         guard let target else { throw SupervisorError.serverNotRunning }
         return try await target.spawnWorker(taskId: taskId)
     }

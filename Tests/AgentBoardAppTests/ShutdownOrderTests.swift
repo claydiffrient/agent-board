@@ -62,6 +62,7 @@ final class ShutdownOrderTests: XCTestCase {
 
         try await fixture.supervisor.cancelShutdown(projectId: fixture.project.id, by: "human")
         try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
 
         let spawns = await fixture.runtime.spawns
         XCTAssertEqual(spawns.count, 1)
@@ -84,6 +85,7 @@ final class ShutdownOrderTests: XCTestCase {
 
         try await fixture.supervisor.cancelShutdown(projectId: fixture.project.id, by: "human")
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         XCTAssertEqual(try fixture.approvals.get(approval.id)?.resolution, .approved)
         let afterCancel = await fixture.runtime.spawns

@@ -36,7 +36,7 @@ final class ShutdownToolGateTests: XCTestCase {
         try f.board.cancelShutdown(projectId: f.project.id, by: "human")
 
         let result = try await f.call("spawn_worker", ["task_id": .string(task.id)])
-        XCTAssertTrue(result.text.contains("session-for-\(task.id)"), result.text)
+        XCTAssertTrue(result.text.contains("Worker dispatched for \(task.id)"), result.text)
         let spawned = await f.control.spawned
         XCTAssertEqual(spawned, [task.id])
     }

@@ -19,6 +19,7 @@ enum SupervisorError: LocalizedError {
     case noShutdownOrder
     case serverNotRunning
     case spawnFailed(worktree: String, underlying: String)
+    case setupInterrupted
     case approvalNotFound(String)
 
     var errorDescription: String? {
@@ -37,6 +38,8 @@ enum SupervisorError: LocalizedError {
         case .serverNotRunning: return "the Agent Board server is not running"
         case .spawnFailed(let worktree, let underlying):
             return "spawn failed; worktree kept at \(worktree) for retry.\n\(underlying)"
+        case .setupInterrupted:
+            return "Agent Board quit while the worktree was still being set up"
         }
     }
 }
@@ -75,6 +78,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
     @ObservationIgnored private var stallNotified: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
+    /// Keyed by setup session id, so a test — or a human stopping a worker mid-setup — can wait on
+    /// or cancel the half of a spawn that outlives the call.
+    @ObservationIgnored private var setupTasks: [String: _Concurrency.Task<Void, Never>] = [:]
 
     nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
@@ -125,6 +131,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             lastError = describe(error)
         }
+        failInterruptedSetups()
         await migrateWorktreeRoots()
         startMetering()
     }
@@ -189,8 +196,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording { _ = try await spawn(taskId: taskId) }
     }
 
+    /// Answers as soon as the worktree is on disk and the task is claimed; §3.1 steps 3-8 finish in
+    /// the background. On a large repository the agent's own start-up outlasts an MCP call, and an
+    /// orchestrator that cannot tell a timeout from a failure has to poll to find out what happened.
     @discardableResult
-    private func spawn(taskId: String) async throws -> AgentSession {
+    private func spawn(taskId: String) async throws -> WorkerSpawn {
         guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
         guard task.column != .running, task.column != .done else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
@@ -225,31 +235,109 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
 
         do {
-            let recorded = try await launch(
+            let placeholder = try board.assign(
+                taskId: taskId,
+                session: Self.setupRow(
+                    projectId: project.id, taskId: taskId, worktree: worktree, branch: branch, attempt: attempt
+                )
+            )
+            if let epic, epic.state == .planning {
+                try epics.setState(epic.id, .active)
+            }
+            beginSetup(
                 LaunchPlan(
                     project: project,
                     taskId: taskId,
                     worktree: worktree,
                     branch: branch,
-                    configId: Self.configId(taskId: taskId, attempt: attempt),
+                    configId: Self.configId(taskId: taskId, attempt: placeholder.attempt),
                     name: Self.sessionName(for: task),
                     prompt: Self.openingPrompt(
-                        task: task, branch: branch, attempt: attempt, epicGoal: epic?.goal,
+                        task: task, branch: branch, attempt: placeholder.attempt, epicGoal: epic?.goal,
                         notes: try notes.notesForSpawn(
                             projectId: project.id, taskId: taskId, epicId: task.epicId
                         )
                     ),
                     model: task.model ?? project.settings.defaultModel,
-                    attempt: attempt
+                    attempt: placeholder.attempt
                 ),
+                placeholder: placeholder,
                 port: port
             )
-            if let epic, epic.state == .planning {
-                try epics.setState(epic.id, .active)
-            }
-            return recorded
+            return WorkerSpawn(
+                setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch
+            )
         } catch {
             throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
+        }
+    }
+
+    private static func setupRow(
+        projectId: String, taskId: String, worktree: URL, branch: String, attempt: Int
+    ) -> AgentSession {
+        AgentSession(
+            sessionId: "setup-\(UUID().uuidString)",
+            projectId: projectId,
+            taskId: taskId,
+            role: .worker,
+            worktreePath: worktree.path,
+            branch: branch,
+            cwd: worktree.path,
+            state: .setup,
+            attempt: attempt
+        )
+    }
+
+    /// The failure has nowhere to be thrown once `spawn` has answered, so it reaches the
+    /// orchestrator the way every other asynchronous worker outcome does: as a queued report, with
+    /// the task put back in `ready` rather than left in `running` behind a session that never ran.
+    private func beginSetup(_ plan: LaunchPlan, placeholder: AgentSession, port: Int) {
+        let sessionId = placeholder.sessionId
+        setupTasks[sessionId] = _Concurrency.Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await launch(plan, port: port, placeholder: placeholder)
+            } catch {
+                lastError = describe(error)
+                // The placeholder may already have been resolved into a real session, in which case
+                // that is the row to end — the placeholder no longer exists to be reported against.
+                let live = ((try? sessions.forTask(plan.taskId)) ?? [])
+                    .first { $0.state.isActive }?.sessionId ?? sessionId
+                failSetup(sessionId: live, projectId: plan.project.id, error: error)
+            }
+            setupTasks[sessionId] = nil
+        }
+    }
+
+    /// Waits for every spawn whose setup is still running, for callers that need the session that
+    /// comes out of it rather than the placeholder `spawn` answered with.
+    func waitForSetup() async {
+        while let task = setupTasks.values.first {
+            await task.value
+        }
+    }
+
+    private func failSetup(sessionId: String, projectId: String, error: Error) {
+        let detail = describe(error)
+        let queued = (try? board.terminate(sessionId: sessionId, cause: .setupFailed(detail))) ?? nil
+        guard queued != nil else { return }
+        announceReports(projectId: projectId)
+        MacNotifier.post(title: "Worker never started", body: detail)
+    }
+
+    /// A setup that was still running when Agent Board quit has no process behind it any more, and
+    /// its task would otherwise sit in `running` forever behind a session that will never start.
+    private func failInterruptedSetups() {
+        guard let all = try? projects.list() else { return }
+        for project in all {
+            let stale = ((try? sessions.all(projectId: project.id)) ?? []).filter { $0.state == .setup }
+            for session in stale {
+                failSetup(
+                    sessionId: session.sessionId,
+                    projectId: project.id,
+                    error: SupervisorError.setupInterrupted
+                )
+            }
         }
     }
 
@@ -265,48 +353,52 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var attempt: Int
     }
 
-    /// §3.1 steps 3-8, shared by task workers and the epic integrator: memory symlink, generated
-    /// settings and MCP config, a worker-scoped token bound to the session, and the board row.
-    private func launch(_ plan: LaunchPlan, port: Int) async throws -> AgentSession {
+    /// §3.1 steps 3-8, shared by task workers and the epic integrator, and the whole of what runs
+    /// after `spawn` has answered: memory symlink, generated settings and MCP config, the agent
+    /// itself, and the setup row resolved into the session Claude issued.
+    private func launch(_ plan: LaunchPlan, port: Int, placeholder: AgentSession) async throws -> AgentSession {
         let project = plan.project
         let memoryDir = URL(fileURLWithPath: project.memoryDir
             ?? ClaudeProjectPaths.memoryDir(forPath: project.repoPath, projectsRoot: projectsRoot).path)
         _ = try ClaudeProjectPaths.linkMemory(worktreePath: plan.worktree.path, to: memoryDir, projectsRoot: projectsRoot)
 
         let grant = try grants.issue(projectId: project.id, scope: .worker, taskId: plan.taskId)
-        let configFiles = try SessionConfigWriter.write(
-            configDir: sessionConfigDir,
-            configId: plan.configId,
-            port: port,
-            token: grant.token,
-            autoModeJSON: project.settings.autoModeJSON,
-            extraMcpServers: nil
-        )
-        let request = SpawnRequest(
-            cwd: plan.worktree,
-            name: plan.name,
-            prompt: plan.prompt,
-            configFiles: configFiles,
-            model: plan.model
-        )
-        let spawned = try await runtime.spawn(request)
-        let session = AgentSession(
-            sessionId: spawned.sessionId,
-            shortId: spawned.shortId,
-            projectId: project.id,
-            taskId: plan.taskId,
-            role: .worker,
-            worktreePath: plan.worktree.path,
-            branch: plan.branch,
-            cwd: plan.worktree.path,
-            startedAt: .nowMillis,
-            attempt: plan.attempt
-        )
-        let recorded = try board.assign(taskId: plan.taskId, session: session)
-        // §3.1 step 8: the grant binds after the session row exists, or the foreign key rejects it.
-        try grants.bind(token: grant.token, sessionId: spawned.sessionId)
-        try replayEarlyHooks(sessionId: spawned.sessionId)
-        return recorded
+        do {
+            let configFiles = try SessionConfigWriter.write(
+                configDir: sessionConfigDir,
+                configId: plan.configId,
+                port: port,
+                token: grant.token,
+                autoModeJSON: project.settings.autoModeJSON,
+                extraMcpServers: nil
+            )
+            let request = SpawnRequest(
+                cwd: plan.worktree,
+                name: plan.name,
+                prompt: plan.prompt,
+                configFiles: configFiles,
+                model: plan.model
+            )
+            let spawned = try await runtime.spawn(request)
+            let recorded: AgentSession
+            do {
+                recorded = try sessions.promoteSetupSession(
+                    placeholder.sessionId, to: spawned.sessionId, shortId: spawned.shortId
+                )
+            } catch {
+                // Something ended the setup row while the agent was starting, so nothing owns the
+                // agent that just came up. Leaving it running would be an untracked worker.
+                try? await runtime.stop(shortId: spawned.shortId)
+                throw error
+            }
+            // §3.1 step 8: the grant binds after the session row exists, or the foreign key rejects it.
+            try grants.bind(token: grant.token, sessionId: spawned.sessionId)
+            try replayEarlyHooks(sessionId: spawned.sessionId)
+            return recorded
+        } catch {
+            try? grants.revoke(token: grant.token)
+            throw error
+        }
     }
 
     /// §5.2 step 3. The integrator is an ordinary worker on a worktree checked out on the epic
@@ -350,27 +442,35 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let branches = IntegrationPlan.classify(ordered, merged: repoState.merged, exists: repoState.exists)
 
         let task = try board.createIntegrationTask(epicId: epicId)
-        var recorded: AgentSession?
+        var assigned: AgentSession?
         do {
-            let session = try await launch(
+            let placeholder = try board.assign(
+                taskId: task.id,
+                session: Self.setupRow(
+                    projectId: project.id, taskId: task.id, worktree: worktree, branch: epicBranch, attempt: 1
+                )
+            )
+            assigned = placeholder
+            try epics.setState(epicId, .integrating)
+            beginSetup(
                 LaunchPlan(
                     project: project,
                     taskId: task.id,
                     worktree: worktree,
                     branch: epicBranch,
-                    configId: Self.configId(taskId: task.id, attempt: 1),
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
                     name: Self.sessionName(for: task),
                     prompt: IntegrationPlan.compose(epic: epic, baseBranch: project.baseBranch, branches: branches),
                     model: project.settings.defaultModel,
-                    attempt: 1
+                    attempt: placeholder.attempt
                 ),
+                placeholder: placeholder,
                 port: port
             )
-            recorded = session
-            try epics.setState(epicId, .integrating)
-            return session
+            return placeholder
         } catch {
-            if recorded == nil { try? tasks.delete(task.id) }
+            // A task with a session row on it cannot be deleted; the failure path below owns it.
+            if assigned == nil { try? tasks.delete(task.id) }
             throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
         }
     }
@@ -378,8 +478,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func stop(sessionId: String) async throws {
         try await recording {
             let session = try requireSession(sessionId)
-            guard let shortId = session.shortId else { throw SupervisorError.sessionHasNoShortId(sessionId) }
-            try await runtime.stop(shortId: shortId)
+            if let shortId = session.shortId {
+                try await runtime.stop(shortId: shortId)
+            } else if session.state == .setup {
+                // No agent to stop yet; `launch` finds the row gone and stops whatever it started.
+                setupTasks[sessionId]?.cancel()
+            } else {
+                throw SupervisorError.sessionHasNoShortId(sessionId)
+            }
             try board.terminate(sessionId: sessionId, cause: .stoppedByHuman)
             try grants.revokeAll(sessionId: sessionId)
             announceReports(projectId: session.projectId)
@@ -441,8 +547,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             var firstFailure: Error?
             for session in try sessions.active(projectId: projectId) where session.role == .worker {
                 do {
-                    guard let shortId = session.shortId else { throw SupervisorError.sessionHasNoShortId(session.sessionId) }
-                    try await runtime.stop(shortId: shortId)
+                    if let shortId = session.shortId {
+                        try await runtime.stop(shortId: shortId)
+                    } else if session.state == .setup {
+                        setupTasks[session.sessionId]?.cancel()
+                    } else {
+                        throw SupervisorError.sessionHasNoShortId(session.sessionId)
+                    }
                     try board.terminate(sessionId: session.sessionId, cause: .stoppedByHuman)
                 } catch {
                     firstFailure = firstFailure ?? error
@@ -578,6 +689,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         var queuedReport = false
         for session in ours {
+            // Its id is Agent Board's own placeholder, so `claude agents` cannot list it and the
+            // vanished check below would kill every worker whose repository is still being set up.
+            if session.state == .setup { continue }
             guard let info = byId[session.sessionId] else {
                 if session.state.isActive {
                     if session.role == .orchestrator, consoles[session.projectId]?.isProcessRunning == true {
@@ -910,7 +1024,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let order = try shutdowns.outstanding(projectId: projectId) else {
                 throw SupervisorError.noShutdownOrder
             }
-            let workers = try sessions.active(projectId: projectId).filter { $0.role == .worker }
+            let workers = try sessions.active(projectId: projectId)
+                .filter { $0.role == .worker && $0.state != .setup }
             for worker in workers {
                 try deliveries.enroll(orderId: order.id, sessionId: worker.sessionId, taskId: worker.taskId)
             }
@@ -957,8 +1072,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     // MARK: - WorkerControl
 
-    func spawnWorker(taskId: String) async throws -> String {
-        try await recording { try await spawn(taskId: taskId).sessionId }
+    func spawnWorker(taskId: String) async throws -> WorkerSpawn {
+        try await recording { try await spawn(taskId: taskId) }
     }
 
     func stopWorker(sessionId: String) async throws {
@@ -1098,7 +1213,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             now: Date(),
             limits: limits
         ) else { return }
-        if case .idle = breach, current.state == .blocked { return }
+        if case .idle = breach, current.state == .blocked || current.state == .setup { return }
         await enforce(breach, on: current)
     }
 
