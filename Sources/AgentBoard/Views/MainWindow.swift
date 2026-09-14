@@ -6,7 +6,7 @@ struct MainWindow: View {
     @Environment(AppEnvironment.self) private var env
     @State private var projects = Observed<[Project]>([])
     @State private var workspaces = Observed<[Workspace]>([])
-    @State private var selectedProjectId: String?
+    @State private var selection: SidebarSelection = .atAGlance
     @State private var settingsProject: Project?
     @State private var workspaceEdit: WorkspaceEdit?
     @State private var workspaceToDelete: Workspace?
@@ -17,14 +17,12 @@ struct MainWindow: View {
         NavigationSplitView {
             sidebar
         } detail: {
-            if let project = projects.value.first(where: { $0.id == selectedProjectId }) {
+            if let project = projects.value.first(where: { $0.id == selection.projectId }) {
                 ProjectDetailView(project: project)
                     .id(project.id)
             } else {
-                ContentUnavailableView(
-                    "No Project Selected",
-                    systemImage: "folder",
-                    description: Text("Choose a project in the sidebar or add one.")
+                AtAGlanceView(
+                    projects: projects.value, workspaces: workspaces.value, select: select
                 )
             }
         }
@@ -36,7 +34,7 @@ struct MainWindow: View {
         }
         .sheet(item: $settingsProject) { project in
             ProjectSettingsSheet(project: project, workspaces: workspaces.value) {
-                if selectedProjectId == project.id { selectedProjectId = nil }
+                if selection == .project(project.id) { select(.atAGlance) }
             }
         }
         .sheet(item: $workspaceEdit) { edit in
@@ -60,8 +58,20 @@ struct MainWindow: View {
         ProjectGrouping.sections(projects: projects.value, workspaces: workspaces.value)
     }
 
+    /// The only writer of `selection`. Adding a project, deselecting in the sidebar, deleting the
+    /// open project and clicking an At a Glance card all land here, so no two paths can disagree.
+    private func select(_ next: SidebarSelection) {
+        selection = next
+    }
+
+    private var sidebarSelection: Binding<SidebarSelection?> {
+        Binding(get: { selection }, set: { select($0 ?? .atAGlance) })
+    }
+
     private var sidebar: some View {
-        List(selection: $selectedProjectId) {
+        List(selection: sidebarSelection) {
+            Label("At a Glance", systemImage: "square.grid.2x2")
+                .tag(SidebarSelection.atAGlance)
             ForEach(sections) { section in
                 sectionView(section)
             }
@@ -133,7 +143,7 @@ struct MainWindow: View {
             .buttonStyle(.borderless)
             .help("Project settings")
         }
-        .tag(project.id)
+        .tag(SidebarSelection.project(project.id))
         .draggable(project.id)
     }
 
@@ -240,7 +250,7 @@ struct MainWindow: View {
         _Concurrency.Task {
             do {
                 let project = try await env.supervisor.registerProject(repoPath: url, name: nil, baseBranch: nil)
-                selectedProjectId = project.id
+                select(.project(project.id))
             } catch {
                 errorMessage = errorText(error)
             }

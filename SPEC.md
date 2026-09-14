@@ -783,10 +783,10 @@ from the progress sheet (§10).
 - One per project. Foreground PTY owned by the app (not `--bg`), pinned
   `--session-id`, cwd at the repo root, resumed when the human selects the
   project in the sidebar — Orchestrator is the project's first screen (§10),
-  so opening a project is what starts its session. The selected project is not
-  persisted, so launching the app selects nothing and wakes nothing: the cost
-  is one orchestrator per project the human actually opens, not four on every
-  launch.
+  so opening a project is what starts its session. No project is selected at
+  launch — the sidebar lands on At a Glance (§10), which is not a project — so
+  launching the app wakes nothing: the cost is one orchestrator per project the
+  human actually opens, not four on every launch.
 - Permission mode: your normal interactive default. It's the session you are
   watching.
 - Its job description is injected with `--append-system-prompt`: the board
@@ -861,6 +861,22 @@ a malicious file into its report must not be able to drive it.
 ---
 
 ## 10. Screens
+
+**At a Glance** — the landing view, and what the detail pane shows whenever no
+project is selected. A row pinned above the workspace sections in the sidebar
+selects it; it stays visible when every section is collapsed, because it sits
+outside them. A headline answers "is anything happening, and does anything need
+me?" from one cross-project observation (`GlanceStore`) — how many agents are
+working and how many tasks await review, worded so zero reads as rest
+("Nothing running, and nothing is waiting on you.") rather than as a count of
+absent things. Below it, one card per project — every project, including idle
+ones — grouped into the same workspace sections in the same order as the
+sidebar, so a project sits in the same relative place in both. A card carries
+the project name and its running, in-review and ready counts, or reads **Idle**
+when all three are zero. Clicking anywhere on a card selects that project
+through the same write the sidebar uses, landing on Orchestrator and starting
+its console (§9) — which is the only way a console ever starts, so this page
+itself costs nothing.
 
 **Orchestrator Command** — the project's orchestrator terminal (SwiftTerm),
 with a sidebar of everything waiting on the human, in the order it is urgent:
