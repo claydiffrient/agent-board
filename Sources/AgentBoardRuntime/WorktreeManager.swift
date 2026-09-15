@@ -100,6 +100,32 @@ public struct WorktreeManager: Sendable {
         return path
     }
 
+    /// Puts the project's own checkout on the shared branch, cutting it from `base` the first time.
+    /// Throws rather than switching when the checkout carries uncommitted work or git refuses the
+    /// switch — that work belongs to whoever is using the repository, and the caller falls back to
+    /// a worktree instead.
+    public func adoptSharedBranch(_ branch: String, from base: String) throws {
+        if try currentBranch(at: repoPath) == branch { return }
+        if try hasUncommittedChanges(worktree: repoPath) {
+            throw AgentRuntimeError(
+                "\(repoPath.path) has uncommitted changes, so it cannot be switched to \(branch)"
+            )
+        }
+        if try branchExists(branch) {
+            try gitChecked(["checkout", branch], cwd: repoPath)
+        } else {
+            try gitChecked(["checkout", "-b", branch, base], cwd: repoPath)
+        }
+    }
+
+    /// The branch checked out at `path`, or nil when its HEAD is detached.
+    public func currentBranch(at path: URL) throws -> String? {
+        let result = try gitRaw(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd: path)
+        guard result.status == 0 else { return nil }
+        let name = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
+    }
+
     public func ensureBranch(_ name: String, from base: String) throws {
         if try branchExists(name) { return }
         try git(["branch", name, base])

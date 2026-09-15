@@ -15,7 +15,8 @@ public enum OpeningPrompt {
         attempt: Int,
         epicGoal: String? = nil,
         notes: [InjectedNote] = [],
-        verification: VerificationCommands = VerificationCommands()
+        verification: VerificationCommands = VerificationCommands(),
+        placement: WorkerPlacement = .worktree
     ) -> String {
         var sections: [String] = []
         sections.append("# Task: \(task.title)")
@@ -48,7 +49,7 @@ public enum OpeningPrompt {
         }
         sections.append("""
         ## How to work
-        - You are in a dedicated git worktree on branch `\(branch)`. Work only in this directory.
+        - \(workingDirectoryLine(placement: placement, branch: branch))
         - The `agent-board` MCP server holds your assignment. Call `get_my_task` if you need the details again.
         - Call `search_notes` when something surprises you: a tool that will not do what the task assumes, \
         a platform behavior you are about to establish by experiment, a step that fails for no stated reason. \
@@ -79,6 +80,17 @@ public enum OpeningPrompt {
         do not start further work afterwards.
         """)
         return sections.joined(separator: "\n\n")
+    }
+
+    static func workingDirectoryLine(placement: WorkerPlacement, branch: String) -> String {
+        switch placement {
+        case .worktree:
+            return "You are in a dedicated git worktree on branch `\(branch)`. Work only in this directory."
+        case .shared:
+            return "You are in the project's own checkout on shared branch `\(branch)`, not in a worktree "
+                + "of your own. Work only in this directory, and touch only the files your task needs: "
+                + "another agent may join this same checkout."
+        }
     }
 
     static func renderNotes(_ notes: [InjectedNote]) -> String? {

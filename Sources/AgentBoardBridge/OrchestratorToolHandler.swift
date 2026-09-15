@@ -566,10 +566,13 @@ public final class OrchestratorToolHandler: ToolHandler {
         case .proceed:
             let spawn = try await control.spawnWorker(taskId: task.id)
             let warnings = spawn.warnings.isEmpty ? "" : "\n\n" + spawn.warnings.joined(separator: "\n")
+            let site = spawn.sharesCheckout
+                ? "It runs in the project's own checkout at \(spawn.worktreePath)"
+                : "Its worktree is ready at \(spawn.worktreePath)"
             return ToolResult(text: """
-            Worker dispatched for \(task.id); the task is now running. Its worktree is ready at \
-            \(spawn.worktreePath) on branch \(spawn.branch), but setup is still running, so the \
-            worker cannot do anything yet and has no session id.
+            Worker dispatched for \(task.id); the task is now running. \(site) on branch \
+            \(spawn.branch), but setup is still running, so the worker cannot do anything yet and \
+            has no session id.
 
             Nothing to do but wait. The session shows as `setup` in list_agents and turns to \
             `running` once the agent starts; if setup fails instead, the task goes back to ready \

@@ -8,9 +8,13 @@ public enum TaskBranchLedger {
 
     public static func tipRef(taskId: String) -> String { "refs/agentboard/reaped/\(taskId)" }
 
-    /// `agentboard/<task-id>` → `<task-id>`. Epic branches are not task branches and have no ledger.
+    /// `agentboard/<task-id>` → `<task-id>`. Epic and shared-checkout branches are not task
+    /// branches and have no ledger.
     public static func taskId(ofBranch branch: String) -> String? {
-        guard branch.hasPrefix(TaskStore.branchPrefix), !branch.hasPrefix(EpicStore.branchPrefix) else { return nil }
+        guard branch.hasPrefix(TaskStore.branchPrefix),
+              !branch.hasPrefix(EpicStore.branchPrefix),
+              !branch.hasPrefix(SharedCheckoutGroup.branchPrefix)
+        else { return nil }
         let id = String(branch.dropFirst(TaskStore.branchPrefix.count))
         return id.isEmpty ? nil : id
     }
