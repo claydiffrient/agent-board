@@ -75,6 +75,27 @@ final class SessionConfigTests: XCTestCase {
         XCTAssertEqual((board["headers"] as? [String: String])?["Authorization"], "Bearer tok")
     }
 
+    func testCompactionAndSubagentEventsRouteToTheHookEndpoint() throws {
+        let files = try SessionConfigWriter.write(configDir: dir, configId: "c", port: 4321, token: "tok")
+        let settings = try readJSON(files.settingsURL)
+
+        for event in ["PreCompact", "SubagentStop"] {
+            let hookList = try hooks(for: event, in: settings)
+            XCTAssertEqual(hookList.count, 1, event)
+            XCTAssertEqual(hookList[0]["type"] as? String, "http", event)
+            XCTAssertEqual(hookList[0]["url"] as? String, "http://127.0.0.1:4321/hooks?token=tok", event)
+        }
+    }
+
+    func testEveryConfiguredHookEventIsAccountedFor() throws {
+        let files = try SessionConfigWriter.write(configDir: dir, configId: "c", port: 1, token: "t")
+        let hooks = try XCTUnwrap(readJSON(files.settingsURL)["hooks"] as? [String: Any])
+        XCTAssertEqual(
+            Set(hooks.keys),
+            Set(SessionConfigWriter.httpHookEvents + ["SessionStart", "PreToolUse"])
+        )
+    }
+
     func testAutoModeMergedAtTopLevel() throws {
         let autoMode = #"{"rules":[{"action":"deny","pattern":"git push"}],"environment":{"trust":"private"}}"#
         let files = try SessionConfigWriter.write(configDir: dir, configId: "a", port: 1, token: "t", autoModeJSON: autoMode)

@@ -30,9 +30,10 @@ final class ShutdownWindDownTests: XCTestCase {
 
         let decision = try XCTUnwrap(first, "the busy worker was never handed the order")
         XCTAssertEqual(decision.permissionDecision, "deny")
-        XCTAssertTrue(decision.reason.contains("acknowledge_shutdown"), decision.reason)
-        XCTAssertTrue(decision.reason.contains("Commit whatever is in your worktree"), decision.reason)
-        XCTAssertTrue(decision.reason.contains("spend"), decision.reason)
+        let reason = try XCTUnwrap(decision.reason)
+        XCTAssertTrue(reason.contains("acknowledge_shutdown"), reason)
+        XCTAssertTrue(reason.contains("Commit whatever is in your worktree"), reason)
+        XCTAssertTrue(reason.contains("spend"), reason)
 
         for command in ["git add -A", "git commit -m wip", "git status"] {
             let next = await f.preToolUse(command, sessionId: worker.sessionId, identity: worker.identity)
@@ -83,7 +84,8 @@ final class ShutdownWindDownTests: XCTestCase {
         let decision = try XCTUnwrap(pushed)
 
         XCTAssertEqual(decision.permissionDecision, "deny")
-        XCTAssertFalse(decision.reason.contains("acknowledge_shutdown"), decision.reason)
+        let reason = try XCTUnwrap(decision.reason)
+        XCTAssertFalse(reason.contains("acknowledge_shutdown"), reason)
         let order = try XCTUnwrap(ShutdownOrderStore(f.db).outstanding(projectId: f.project.id))
         XCTAssertNil(try deliveries.get(orderId: order.id, sessionId: worker.sessionId)?.deliveredAt)
     }

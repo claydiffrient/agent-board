@@ -35,12 +35,17 @@ public struct HookEvent: Sendable {
     public var notificationType: String?
     public var notificationMessage: String?
     public var lastAssistantMessage: String?
+    /// `PreCompact`: "manual" for `/compact`, "auto" for the context-window trigger.
+    public var compactTrigger: String?
+    /// `SubagentStop`: the agent name, e.g. "Explore".
+    public var agentType: String?
     public var rawJSON: String
     public var receivedAt: Date
 
     public init(name: String, sessionId: String, transcriptPath: String? = nil, cwd: String? = nil, toolName: String? = nil,
                 toolCommand: String? = nil, notificationType: String? = nil, notificationMessage: String? = nil,
-                lastAssistantMessage: String? = nil, rawJSON: String, receivedAt: Date = Date()) {
+                lastAssistantMessage: String? = nil, compactTrigger: String? = nil, agentType: String? = nil,
+                rawJSON: String, receivedAt: Date = Date()) {
         self.name = name
         self.sessionId = sessionId
         self.transcriptPath = transcriptPath
@@ -50,38 +55,52 @@ public struct HookEvent: Sendable {
         self.notificationType = notificationType
         self.notificationMessage = notificationMessage
         self.lastAssistantMessage = lastAssistantMessage
+        self.compactTrigger = compactTrigger
+        self.agentType = agentType
         self.rawJSON = rawJSON
         self.receivedAt = receivedAt
     }
 }
 
-/// A `PreToolUse` verdict. Agent Board decides this in its own process, so it holds under any
-/// `--permission-mode`; see §8.
+/// What Agent Board sends back on a hook: a `PreToolUse` verdict, or context injected into the
+/// session. Decided in Agent Board's own process, so a verdict holds under any `--permission-mode`;
+/// see §8.
 public struct HookDecision: Sendable, Equatable {
-    public var permissionDecision: String
-    public var reason: String
+    public var permissionDecision: String?
+    public var reason: String?
+    public var additionalContext: String?
 
-    public init(permissionDecision: String, reason: String) {
+    public init(permissionDecision: String? = nil, reason: String? = nil, additionalContext: String? = nil) {
         self.permissionDecision = permissionDecision
         self.reason = reason
+        self.additionalContext = additionalContext
     }
 
     public static func deny(_ reason: String) -> HookDecision {
         HookDecision(permissionDecision: "deny", reason: reason)
     }
 
-    /// Both the current `hookSpecificOutput` shape and the legacy `decision`/`reason` pair, so the
-    /// deny lands whichever one the installed CLI reads.
+    /// Context only — no verdict, so the body carries no `decision` key and cannot be read as a block.
+    public static func context(_ text: String) -> HookDecision {
+        HookDecision(additionalContext: text)
+    }
+
+    /// A verdict is sent in both the current `hookSpecificOutput` shape and the legacy
+    /// `decision`/`reason` pair, so the deny lands whichever one the installed CLI reads.
     public func responseBody(hookEventName: String) -> [String: Any] {
-        [
-            "hookSpecificOutput": [
-                "hookEventName": hookEventName,
-                "permissionDecision": permissionDecision,
-                "permissionDecisionReason": reason,
-            ],
-            "decision": permissionDecision == "deny" ? "block" : "approve",
-            "reason": reason,
-        ]
+        var specific: [String: Any] = ["hookEventName": hookEventName]
+        var body: [String: Any] = [:]
+        if let permissionDecision {
+            specific["permissionDecision"] = permissionDecision
+            specific["permissionDecisionReason"] = reason ?? ""
+            body["decision"] = permissionDecision == "deny" ? "block" : "approve"
+            body["reason"] = reason ?? ""
+        }
+        if let additionalContext {
+            specific["additionalContext"] = additionalContext
+        }
+        body["hookSpecificOutput"] = specific
+        return body
     }
 }
 
