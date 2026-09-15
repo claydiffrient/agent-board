@@ -34,7 +34,7 @@ final class ShutdownSheetTests: XCTestCase {
             delivery("a", orderedAgo: 900, deliveredAgo: 880, acknowledgedAgo: 10),
             session: session("a", state: .running),
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         XCTAssertEqual(state, .acknowledged)
         XCTAssertTrue(state.isClosed)
@@ -47,7 +47,7 @@ final class ShutdownSheetTests: XCTestCase {
             delivery("a", orderedAgo: 600),
             session: session("a", state: .running),
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         XCTAssertEqual(state, .ordered)
         XCTAssertFalse(state.isClosed)
@@ -58,7 +58,7 @@ final class ShutdownSheetTests: XCTestCase {
             delivery("a", orderedAgo: 600, deliveredAgo: 119),
             session: session("a", state: .running),
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         XCTAssertEqual(state, .closing)
     }
@@ -68,16 +68,37 @@ final class ShutdownSheetTests: XCTestCase {
             delivery("a", orderedAgo: 600, deliveredAgo: 120),
             session: session("a", state: .running),
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         let oneSecondShort = ShutdownSheetModel.rowState(
             delivery("a", orderedAgo: 600, deliveredAgo: 119),
             session: session("a", state: .running),
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         XCTAssertEqual(atBoundary, .notResponding)
         XCTAssertEqual(oneSecondShort, .closing)
+    }
+
+    /// The sheet's own grace deadline rides the same clock: a suspended worker is not labelled
+    /// "not responding" on wake.
+    func testASuspendedWorkerIsNotLabelledNotResponding() {
+        let row = delivery("a", orderedAgo: 1_300, deliveredAgo: 1_200)
+        let slept = ObservedSleep(endedAtMillis: now - 5_000, millis: 1_195_000)
+
+        XCTAssertEqual(
+            ShutdownSheetModel.rowState(
+                row, session: session("a", state: .running), graceSeconds: grace, awake: .init(nowMillis: now)
+            ),
+            .notResponding
+        )
+        XCTAssertEqual(
+            ShutdownSheetModel.rowState(
+                row, session: session("a", state: .running), graceSeconds: grace,
+                awake: .init(nowMillis: now, sleeps: [slept])
+            ),
+            .closing
+        )
     }
 
     /// A blocked worker is sitting on a permission prompt: no hook fires, so nothing was delivered
@@ -87,7 +108,7 @@ final class ShutdownSheetTests: XCTestCase {
             delivery("a", orderedAgo: 9_000, deliveredAgo: 8_000),
             session: session("a", state: .blocked),
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         XCTAssertEqual(longPastGrace, .waitingOnHuman)
         XCTAssertFalse(longPastGrace.isClosed)
@@ -98,13 +119,13 @@ final class ShutdownSheetTests: XCTestCase {
             delivery("a", orderedAgo: 600, deliveredAgo: 500),
             session: nil,
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         let dead = ShutdownSheetModel.rowState(
             delivery("b", orderedAgo: 600, deliveredAgo: 500),
             session: session("b", state: .failed, endedAgo: 30),
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         XCTAssertEqual(missing, .ended)
         XCTAssertEqual(dead, .ended)
@@ -117,7 +138,7 @@ final class ShutdownSheetTests: XCTestCase {
             deliveries: [delivery("b", orderedAgo: 600, deliveredAgo: 500)],
             sessions: [session("b", state: .stopped, endedAgo: 30)],
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         XCTAssertEqual(rows.first?.since, (now - 30_000).asDate)
     }
@@ -128,7 +149,7 @@ final class ShutdownSheetTests: XCTestCase {
             sessions: [session("3f9a1c2e-0000", state: .completed, taskId: "t1", endedAgo: 5)],
             taskTitles: ["t1": "Add login form validation"],
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0].taskTitle, "Add login form validation")
@@ -150,7 +171,7 @@ final class ShutdownSheetTests: XCTestCase {
                 session("blocked", state: .blocked),
             ],
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         XCTAssertEqual(rows.map(\.sessionId), ["silent", "blocked", "done"])
         XCTAssertEqual(rows.map(\.state), [.notResponding, .waitingOnHuman, .acknowledged])
@@ -169,7 +190,7 @@ final class ShutdownSheetTests: XCTestCase {
                 session("c", state: .running),
             ],
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         let reported = ShutdownProgress(orderId: "order-1", total: 3, acknowledged: 1, overdue: ["b", "c"])
         let counts = ShutdownSheetModel.counts(rows: rows, reported: reported)
@@ -186,7 +207,7 @@ final class ShutdownSheetTests: XCTestCase {
             deliveries: (1...7).map { delivery("s\($0)", orderedAgo: 600, deliveredAgo: 590, acknowledgedAgo: 100) },
             sessions: (1...7).map { session("s\($0)", state: .completed, endedAgo: 100) },
             graceSeconds: grace,
-            now: now
+            awake: .init(nowMillis: now)
         )
         let counts = ShutdownSheetModel.counts(
             rows: rows,
@@ -220,7 +241,7 @@ final class ShutdownSheetTests: XCTestCase {
             delivery("a", orderedAgo: 600),
             session: session("a", state: .running),
             graceSeconds: 0,
-            now: now
+            awake: .init(nowMillis: now)
         )
         XCTAssertEqual(state, .ordered)
     }

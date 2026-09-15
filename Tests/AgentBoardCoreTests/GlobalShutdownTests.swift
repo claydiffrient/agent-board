@@ -56,7 +56,7 @@ final class GlobalShutdownTests: XCTestCase {
     }
 
     func testEveryProjectsSessionsLandInOneListWithTheProjectNamed() {
-        let rows = GlobalShutdown.rows(twoProjects(), now: now)
+        let rows = GlobalShutdown.rows(twoProjects(), awake: .init(nowMillis: now))
 
         XCTAssertEqual(rows.count, 3)
         XCTAssertEqual(
@@ -70,14 +70,14 @@ final class GlobalShutdownTests: XCTestCase {
     /// The projects do not share a grace period. `a1` and `b1` were delivered at the same instant;
     /// only the project whose grace is 20s has expired.
     func testEachProjectIsMeasuredAgainstItsOwnGracePeriod() {
-        let rows = GlobalShutdown.rows(twoProjects(), now: now)
+        let rows = GlobalShutdown.rows(twoProjects(), awake: .init(nowMillis: now))
 
         XCTAssertEqual(rows.first { $0.sessionId == "a1" }?.state, .closing)
         XCTAssertEqual(rows.first { $0.sessionId == "b1" }?.state, .notResponding)
     }
 
     func testTheCountIsTheTotalAcrossProjects() {
-        let counts = GlobalShutdown.counts(rows: GlobalShutdown.rows(twoProjects(), now: now))
+        let counts = GlobalShutdown.counts(rows: GlobalShutdown.rows(twoProjects(), awake: .init(nowMillis: now)))
 
         XCTAssertEqual(counts.total, 3)
         XCTAssertEqual(counts.closed, 1)
@@ -87,7 +87,7 @@ final class GlobalShutdownTests: XCTestCase {
     }
 
     func testTheHeadlineNamesHowManyProjectsAreBeingWoundDown() {
-        let counts = GlobalShutdown.counts(rows: GlobalShutdown.rows(twoProjects(), now: now))
+        let counts = GlobalShutdown.counts(rows: GlobalShutdown.rows(twoProjects(), awake: .init(nowMillis: now)))
 
         XCTAssertEqual(GlobalShutdown.headline(counts: counts, projects: 2), "Closing 1/3 agents across 2 projects")
         XCTAssertEqual(
@@ -107,7 +107,7 @@ final class GlobalShutdownTests: XCTestCase {
         snapshot.orders.append(order("o-gamma", project: "gamma"))
         snapshot.projectNames["gamma"] = "Gamma"
 
-        let rows = GlobalShutdown.rows(snapshot, now: now)
+        let rows = GlobalShutdown.rows(snapshot, awake: .init(nowMillis: now))
         XCTAssertEqual(rows.count, 3)
         XCTAssertEqual(snapshot.projectCount, 3)
     }
@@ -133,7 +133,7 @@ final class GlobalShutdownTests: XCTestCase {
 
         XCTAssertEqual(
             GlobalShutdown.decide(
-                counts: GlobalShutdown.counts(rows: GlobalShutdown.rows(.empty, now: now)),
+                counts: GlobalShutdown.counts(rows: GlobalShutdown.rows(.empty, awake: .init(nowMillis: now))),
                 ordersRaised: GlobalShutdown.ordersVisible(in: .empty, raised: raised)
             ),
             .wait
@@ -193,7 +193,7 @@ final class GlobalShutdownTests: XCTestCase {
         snapshot.deliveries.append(delivery("a2", order: "o-alpha", taskId: "t4", deliveredAgo: 30))
         snapshot.sessions.append(session("a2", project: "alpha", state: .running, taskId: "t4"))
 
-        let rows = GlobalShutdown.rows(snapshot, now: now)
+        let rows = GlobalShutdown.rows(snapshot, awake: .init(nowMillis: now))
 
         XCTAssertEqual(rows.map(\.sessionId), ["a1", "a2", "b1", "b2"])
         XCTAssertEqual(rows.last?.state, .acknowledged, "the closed row did not sort last")

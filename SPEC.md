@@ -728,8 +728,8 @@ Per project, overridable:
 |---|---|---|
 | Concurrent workers | 3 (lower for large repos — Derivita) | Spawn refused; orchestrator told why |
 | Tokens per agent (uncached input + output) | off until set | Agent stopped, task flagged, Resume offered |
-| Wall clock per agent | 30 min | Agent stopped, task flagged, Resume offered |
-| Idle (no tool use, no output) | 5 min | Agent stopped, task flagged |
+| Elapsed per agent, sleep excluded | 30 min | Agent stopped, task flagged, Resume offered |
+| Idle (no tool use, no output), sleep excluded | 5 min | Agent stopped, task flagged |
 | Project session ceiling | configurable | Spawn refused |
 
 - A stopped agent's task returns to `ready` with its `failure_reason` set, and a
@@ -741,6 +741,19 @@ Per project, overridable:
   200k+ per resume on an M2-sized worker), so neither is a measure of work done.
   Counting cache writes killed the first M2 worker twice in ten minutes; the cap
   is therefore off until a project sets it.
+- **Every time cap is measured on a clock that stops while the machine sleeps.**
+  Darwin's `CLOCK_UPTIME_RAW` excludes system sleep; `CLOCK_MONOTONIC` and
+  `CLOCK_MONOTONIC_RAW` do not (measured: 20.3 days since `kern.boottime`,
+  `CLOCK_MONOTONIC` 1_752_842s, `CLOCK_UPTIME_RAW` 666_698s — 12.6 days of
+  sleep). `SleepLedger` samples both clocks on every metering tick and records
+  each suspend it sees; `AwakeElapsed` subtracts those from a wall-clock
+  interval. Both time caps, `caps.stallSeconds` and `caps.shutdownGraceSeconds`
+  read it. Closing the lid for longer than the idle cap used to execute every
+  running worker on wake — one of them holding finished, committed, green work
+  — because a suspended `claude --bg` process makes no tool calls and the cap
+  counted every sleeping minute against it. Archive retention
+  (`ArchivePolicy.afterDays`) stays on the wall clock: it bounds calendar time,
+  not work. So does the token cap, which is a count, not a duration.
 - **Autonomy is off on first run.** Every `spawn_worker` creates a pending
   approval until you turn it on. This is a setting, not a rebuild.
 - **Stopping is not destructive.** Every session has a pinned `--session-id`, so

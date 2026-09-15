@@ -77,7 +77,7 @@ final class HookAndWorkerEventTests: XCTestCase {
         let items = AttentionSelection.needingAttention(
             tasks: try f.tasks.list(projectId: f.project.id),
             sessions: try f.sessions.all(projectId: f.project.id),
-            now: .now,
+            awake: .init(now: .now),
             stallThreshold: TimeInterval(f.project.settings.caps.stallSeconds)
         )
         XCTAssertEqual(items.map(\.id), [task.id])
@@ -97,7 +97,7 @@ final class HookAndWorkerEventTests: XCTestCase {
         let items = AttentionSelection.needingAttention(
             tasks: try f.tasks.list(projectId: f.project.id),
             sessions: try f.sessions.all(projectId: f.project.id),
-            now: .now,
+            awake: .init(now: .now),
             stallThreshold: TimeInterval(f.project.settings.caps.stallSeconds)
         )
         XCTAssertTrue(items.isEmpty)

@@ -25,7 +25,7 @@ struct ShutdownSheet: View {
             sessions: sessions.value,
             taskTitles: Dictionary(tasks.value.map { ($0.id, $0.title) }, uniquingKeysWith: { first, _ in first }),
             graceSeconds: project.settings.caps.shutdownGraceSeconds,
-            now: .nowMillis
+            awake: SleepLedger.shared.reading()
         )
     }
 

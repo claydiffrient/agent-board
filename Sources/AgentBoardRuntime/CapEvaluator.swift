@@ -1,3 +1,4 @@
+import AgentBoardCore
 import Foundation
 
 public struct CapLimits: Sendable, Equatable {
@@ -16,6 +17,7 @@ public struct CapLimits: Sendable, Equatable {
 
 public enum CapBreach: Sendable, Equatable {
     case tokens(used: Int, limit: Int)
+    /// Named for `maxWallClockSeconds`, the setting it enforces, but measured on awake time.
     case wallClock(elapsed: TimeInterval, limit: TimeInterval)
     case idle(since: Date, limit: TimeInterval)
 }
@@ -27,24 +29,28 @@ public enum CapEvaluator {
         totals.inputTokens + totals.outputTokens
     }
 
-    /// Checks tokens, then wall clock, then idle; a missing `lastActivity` idles from `startedAt`.
+    /// Checks tokens, then elapsed, then idle; a missing `lastActivity` idles from `startedAt`.
+    ///
+    /// Both time caps bound how long an agent has been *working*, so they are measured on
+    /// `AwakeElapsed` rather than the wall clock. A worker on a sleeping laptop is suspended, not
+    /// idle: closing the lid used to execute every running worker at the idle cap.
     public static func evaluate(
         totals: UsageTotals,
         startedAt: Date,
         lastActivity: Date?,
-        now: Date,
+        awake: AwakeElapsed,
         limits: CapLimits
     ) -> CapBreach? {
         let used = countedTokens(totals)
         if let maxTokens = limits.maxTokens, used >= maxTokens {
             return .tokens(used: used, limit: maxTokens)
         }
-        let elapsed = now.timeIntervalSince(startedAt)
+        let elapsed = awake.secondsAwake(since: startedAt)
         if elapsed >= TimeInterval(limits.maxWallClockSeconds) {
             return .wallClock(elapsed: elapsed, limit: TimeInterval(limits.maxWallClockSeconds))
         }
         let since = lastActivity ?? startedAt
-        if now.timeIntervalSince(since) >= TimeInterval(limits.maxIdleSeconds) {
+        if awake.secondsAwake(since: since) >= TimeInterval(limits.maxIdleSeconds) {
             return .idle(since: since, limit: TimeInterval(limits.maxIdleSeconds))
         }
         return nil
