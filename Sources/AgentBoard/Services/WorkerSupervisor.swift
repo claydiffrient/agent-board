@@ -1514,7 +1514,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         branch: String,
         attempt: Int,
         epicGoal: String? = nil,
-        notes: [InjectedNote] = [],
+        notes: SpawnNotes = SpawnNotes(),
         verification: VerificationCommands = VerificationCommands()
     ) -> String {
         OpeningPrompt.compose(
