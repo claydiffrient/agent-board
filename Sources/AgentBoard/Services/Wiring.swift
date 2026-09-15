@@ -24,7 +24,12 @@ enum Wiring {
             tools: ScopedToolHandler(
                 worker: WorkerToolHandler(db: db, events: sink, scopedCommits: ScopedCommitRunner()),
                 orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink)
-            )
+            ),
+            resources: CompositeResourceHandler([
+                (NoteResourceURI.scheme, NoteResourceHandler(db: db)),
+                (BriefingResourceURI.scheme, BriefingResourceHandler(db: db)),
+            ]),
+            prompts: BriefingPromptHandler()
         )
         let supervisor = WorkerSupervisor(
             db: db,

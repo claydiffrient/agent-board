@@ -1609,7 +1609,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if let previousStop, !previousStop.isEmpty {
             lines.append("The previous run was stopped by Agent Board: \(previousStop).")
         }
-        lines.append("When finished, follow the completion protocol from your original instructions (commit, do not push, call report_complete).")
+        lines.append(
+            "When finished: commit on this branch, do not push, call `report_complete`. "
+            + "If a resume or a compaction has left you without the instructions you were spawned with, "
+            + "read the MCP resource `\(BriefingResourceURI.worker)` — it returns them in full."
+        )
         return lines.joined(separator: " ")
     }
 
@@ -1638,7 +1642,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         branch: String,
         attempt: Int,
         epicGoal: String? = nil,
-        notes: [InjectedNote] = [],
+        notes: SpawnNotes = SpawnNotes(),
         verification: VerificationCommands = VerificationCommands(),
         placement: WorkerPlacement = .worktree,
         workingDirectory: String? = nil
