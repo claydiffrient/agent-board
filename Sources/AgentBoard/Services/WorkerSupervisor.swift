@@ -1337,6 +1337,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         announceReports(projectId: projectId)
     }
 
+    func orchestratorCompacted(projectId: String, sessionId: String, manual: Bool) async {
+        consoles[projectId]?.compactionCompleted(manual: manual)
+    }
+
     /// The worker has committed and recorded its note; this is the orderly end of its session. The
     /// cause is neither a human kill nor a cap kill, and `terminate` puts the unfinished task back
     /// in `ready` with the note attached to the report.
@@ -1426,11 +1430,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
         var model = session.model
         var lastActivity = session.lastActivityDate
+        // Nil until a transcript has been read: the session row sums what it cost, which says
+        // nothing about how full its context is, so there is no fallback to compute this from.
+        var context: ContextPressure?
 
         if let path = session.transcriptPath {
             let url = URL(fileURLWithPath: path)
             if let summary = try? await offMain({ try TranscriptMeter.summarize(transcriptAt: url) }) {
                 totals = summary.totals
+                context = ContextPressure(
+                    usedTokens: summary.contextTokens,
+                    limitTokens: ModelCatalog.effectiveContextWindow(for: summary.model ?? model)
+                )
                 model = summary.model ?? model
                 if let seen = summary.lastActivity {
                     lastActivity = lastActivity.map { max($0, seen) } ?? seen
@@ -1447,7 +1458,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
         }
 
-        guard let current = try? sessions.get(session.sessionId), current.state.isActive, current.role == .worker else {
+        guard let current = try? sessions.get(session.sessionId), current.state.isActive else {
+            stallNotified.remove(session.sessionId)
+            return
+        }
+        if current.role == .orchestrator, let context {
+            consoles[current.projectId]?.contextPressureObserved(context)
+        }
+        guard current.role == .worker else {
             stallNotified.remove(session.sessionId)
             return
         }

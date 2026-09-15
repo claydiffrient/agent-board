@@ -10,7 +10,8 @@ import SwiftTerm
 final class OrchestratorTerminalView: LocalProcessTerminalView {
     private(set) var promptIsDirty = false
     var isInjecting = false
-    var promptDidClear: (() -> Void)?
+    /// `submitted` is true for Enter and false for a cancel: only the former starts a turn.
+    var promptDidClear: ((_ submitted: Bool) -> Void)?
 
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
         super.send(source: source, data: data)
@@ -18,9 +19,12 @@ final class OrchestratorTerminalView: LocalProcessTerminalView {
         switch PromptInputClassifier.classify(data) {
         case .dirties:
             promptIsDirty = true
-        case .submits, .cancels:
+        case .submits:
             promptIsDirty = false
-            promptDidClear?()
+            promptDidClear?(true)
+        case .cancels:
+            promptIsDirty = false
+            promptDidClear?(false)
         case .neutral:
             break
         }
@@ -43,6 +47,13 @@ final class OrchestratorConsole {
     private(set) var sessionId: String?
     private(set) var lastError: String?
     private(set) var lastNoticeAt: Date?
+    /// Surfaced in the orchestrator header (SPEC §9.2): a session that silently forgot what it was
+    /// doing is worse than one that says so.
+    private(set) var lastCompactionAt: Date?
+    private(set) var lastCompactionWasAutomatic = false
+    private(set) var compactionCount = 0
+    /// Nil until the metering tick has read the session's transcript at least once.
+    private(set) var contextPressure: ContextPressure?
 
     @ObservationIgnored let terminal: OrchestratorTerminalView
     @ObservationIgnored private let projects: ProjectStore
@@ -73,9 +84,13 @@ final class OrchestratorConsole {
             isRunning: { [weak self] in self?.isProcessRunning ?? false },
             promptIsDirty: { [weak self] in self?.terminal.promptIsDirty ?? true },
             pendingReports: { [weak self] in try? self?.pendingReports() },
-            deliver: { [weak self] count in self?.sendNotice(count: count) }
+            deliver: { [weak self] count in self?.sendNotice(count: count) },
+            deliverCompaction: { [weak self] in self?.sendCompaction() },
+            deliverReorientation: { [weak self] in self?.sendReorientation() }
         )
-        terminal.promptDidClear = { [weak self] in self?.noticeGate.promptCleared() }
+        terminal.promptDidClear = { [weak self] submitted in
+            self?.noticeGate.promptCleared(submitted: submitted)
+        }
     }
 
     var isProcessRunning: Bool {
@@ -206,10 +221,51 @@ final class OrchestratorConsole {
     }
 
     private func sendNotice(count: Int) {
-        terminal.isInjecting = true
-        terminal.send(txt: "[agent-board] \(count) worker reports pending. Call list_reports.\r")
-        terminal.isInjecting = false
+        inject("[agent-board] \(count) worker reports pending. Call list_reports.")
         lastNoticeAt = Date()
+    }
+
+    // MARK: - Compaction (SPEC §9.2)
+
+    /// The metering tick's reading of how full the context is. Crossing the threshold asks the gate
+    /// for a compaction; the gate decides when it is safe to write.
+    func contextPressureObserved(_ pressure: ContextPressure) {
+        // The tick runs every 5s and an idle session reports the same number each time; writing it
+        // back unconditionally would re-render the whole orchestrator pane on every tick.
+        if contextPressure != pressure { contextPressure = pressure }
+        guard pressure.usedTokens >= OrchestratorCompaction.minimumUsefulTokens,
+              pressure.exceeds(OrchestratorCompaction.threshold)
+        else { return }
+        noticeGate.compactionNeeded()
+    }
+
+    /// `SessionStart` with `source: compact`. The session id does not change across a compaction
+    /// (measured, SPEC §2), so nothing is rebound here — only recorded, and re-oriented.
+    func compactionCompleted(manual: Bool) {
+        compactionCount += 1
+        lastCompactionAt = Date()
+        lastCompactionWasAutomatic = !manual
+        contextPressure = nil
+        noticeGate.compactionFinished(wasOurs: manual)
+    }
+
+    private func sendCompaction() {
+        inject(OrchestratorCompaction.command)
+    }
+
+    private func sendReorientation() {
+        inject(OrchestratorCompaction.reorientation)
+    }
+
+    /// The carriage return is a **separate** write. Claude Code's slash-command autocomplete eats a
+    /// `\r` that arrives in the same burst as the text, leaving a literal `^M` in the prompt and the
+    /// command unsubmitted; measured 2026-09-15 (SPEC §2). Splitting it costs nothing for the plain
+    /// notice, so every injection takes the same path.
+    private func inject(_ line: String) {
+        terminal.isInjecting = true
+        terminal.send(txt: line)
+        terminal.send(txt: "\r")
+        terminal.isInjecting = false
     }
 
     private final class ProcessObserver: NSObject, LocalProcessTerminalViewDelegate {

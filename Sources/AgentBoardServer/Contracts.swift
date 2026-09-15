@@ -35,7 +35,9 @@ public struct HookEvent: Sendable {
     public var notificationType: String?
     public var notificationMessage: String?
     public var lastAssistantMessage: String?
-    /// `PreCompact`: "manual" for `/compact`, "auto" for the context-window trigger.
+    /// `SessionStart.source`: `startup`, `resume`, `clear`, or `compact`.
+    public var sessionSource: String?
+    /// `PreCompact.trigger`: "manual" for `/compact`, "auto" for the context-window trigger.
     public var compactTrigger: String?
     /// `SubagentStop`: the agent name, e.g. "Explore".
     public var agentType: String?
@@ -44,7 +46,8 @@ public struct HookEvent: Sendable {
 
     public init(name: String, sessionId: String, transcriptPath: String? = nil, cwd: String? = nil, toolName: String? = nil,
                 toolCommand: String? = nil, notificationType: String? = nil, notificationMessage: String? = nil,
-                lastAssistantMessage: String? = nil, compactTrigger: String? = nil, agentType: String? = nil,
+                lastAssistantMessage: String? = nil, sessionSource: String? = nil,
+                compactTrigger: String? = nil, agentType: String? = nil,
                 rawJSON: String, receivedAt: Date = Date()) {
         self.name = name
         self.sessionId = sessionId
@@ -55,6 +58,7 @@ public struct HookEvent: Sendable {
         self.notificationType = notificationType
         self.notificationMessage = notificationMessage
         self.lastAssistantMessage = lastAssistantMessage
+        self.sessionSource = sessionSource
         self.compactTrigger = compactTrigger
         self.agentType = agentType
         self.rawJSON = rawJSON

@@ -26,6 +26,7 @@ public final class StoreHookSink: HookSink {
         case notify(title: String, body: String)
         case orchestratorTurnEnded(projectId: String, sessionId: String)
         case reportQueued(projectId: String)
+        case orchestratorCompacted(projectId: String, sessionId: String, manual: Bool)
     }
 
     private struct Outcome {
@@ -68,6 +69,8 @@ public final class StoreHookSink: HookSink {
                 await events.orchestratorTurnEnded(projectId: projectId, sessionId: sessionId)
             case .reportQueued(let projectId):
                 await events.reportQueued(projectId: projectId)
+            case .orchestratorCompacted(let projectId, let sessionId, let manual):
+                await events.orchestratorCompacted(projectId: projectId, sessionId: sessionId, manual: manual)
             }
         }
         return outcome.decision
@@ -123,6 +126,17 @@ public final class StoreHookSink: HookSink {
         )
     }
 
+    /// `PreCompact` carries the trigger; the `SessionStart` that follows it does not. An unreadable
+    /// or missing row reads as manual, because the cost of re-orienting a session that did not need
+    /// it is one wasted turn, and the cost of skipping it is a session that sits idle forever.
+    private func lastCompactTrigger(sessionId: String) -> String? {
+        guard let row = try? hookEvents.mostRecent(sessionId: sessionId, event: "PreCompact"),
+              let data = row.payload.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return object["trigger"] as? String
+    }
+
     private func process(_ event: HookEvent, identity: TokenIdentity) -> Outcome {
         let sessionId = event.sessionId
         _ = try? hookEvents.append(sessionId: sessionId, event: event.name, payload: event.rawJSON)
@@ -163,6 +177,16 @@ public final class StoreHookSink: HookSink {
             try? sessions.setState(sessionId, .running)
             if let path = event.transcriptPath {
                 try? sessions.setTranscriptPath(sessionId, path)
+            }
+            // A compaction keeps the session id and writes no `SessionEnd` (measured, SPEC §2), so
+            // nothing is rebound or re-pinned here. A worker's compaction is handled instead by
+            // `PreCompact` arming a re-brief that `PostToolUse` delivers.
+            if event.sessionSource == "compact", session.role == .orchestrator {
+                return .follow([.orchestratorCompacted(
+                    projectId: session.projectId,
+                    sessionId: sessionId,
+                    manual: lastCompactTrigger(sessionId: sessionId) != "auto"
+                )])
             }
 
         case "PostToolUse":
