@@ -1,3 +1,4 @@
+import AgentBoardCore
 import Foundation
 
 public struct WorktreeInfo: Sendable, Equatable {
@@ -83,6 +84,7 @@ public struct WorktreeManager: Sendable {
             try addWorktree(["worktree", "add", path.path, branch], at: path)
         } else {
             try addWorktree(["worktree", "add", path.path, "-b", branch, base], at: path)
+            recordBranchBase(branch, base: base)
         }
         return path
     }
@@ -194,8 +196,27 @@ public struct WorktreeManager: Sendable {
         guard try known.contains(where: { try isAncestor("refs/heads/\(branch)", of: $0) }) else {
             return .kept(branch: branch, reason: "it is not merged into \(known.joined(separator: " or "))")
         }
+        recordReapedTip(branch)
         try git(["update-ref", "-d", "refs/heads/\(branch)"])
         return .deleted(branch)
+    }
+
+    /// The ledger is best effort: it must never be the reason a branch survives or a spawn fails.
+    /// Nothing outside `agentboard/<task-id>` gets an entry.
+    private func recordBranchBase(_ branch: String, base: String) {
+        guard let taskId = TaskBranchLedger.taskId(ofBranch: branch) else { return }
+        let ref = TaskBranchLedger.baseRef(taskId: taskId)
+        guard (try? refCommit(ref)) == nil, let commit = try? refCommit(base) else { return }
+        _ = try? setRef(ref, to: commit)
+    }
+
+    /// Written before the ref is dropped, so a task whose work merged stays distinguishable from
+    /// one that never committed. Without it both look the same: no branch.
+    private func recordReapedTip(_ branch: String) {
+        guard let taskId = TaskBranchLedger.taskId(ofBranch: branch),
+              let tip = try? refCommit("refs/heads/\(branch)")
+        else { return }
+        _ = try? setRef(TaskBranchLedger.tipRef(taskId: taskId), to: tip)
     }
 
     public func localBranches(withPrefix prefix: String) throws -> [String] {
@@ -240,6 +261,30 @@ public struct WorktreeManager: Sendable {
         let known = try bases.filter { try commitExists($0) }
         guard !known.isEmpty else { return true }
         return try !known.contains { try isAncestor("HEAD", of: $0, cwd: worktree) }
+    }
+
+    /// Resolves any ref — including the ledger refs outside `refs/heads` — to its commit, or nil
+    /// when the ref is not there.
+    public func refCommit(_ ref: String) throws -> String? {
+        let result = try gitRaw(["rev-parse", "--verify", "--quiet", "\(ref)^{commit}"], cwd: repoPath)
+        guard result.status == 0 else { return nil }
+        let commit = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return commit.isEmpty ? nil : commit
+    }
+
+    public func setRef(_ ref: String, to commit: String) throws {
+        try git(["update-ref", ref, commit])
+    }
+
+    /// Whether `commit` is already in `ref`'s history. Both must exist.
+    public func isMerged(commit: String, into ref: String) throws -> Bool {
+        try isAncestor(commit, of: ref)
+    }
+
+    /// How many commits `tip` carries that `base` does not.
+    public func commitCount(from base: String, to tip: String) throws -> Int {
+        let output = try gitChecked(["rev-list", "--count", "\(base)..\(tip)"], cwd: repoPath).stdout
+        return Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
 
     public func commitExists(_ rev: String) throws -> Bool {

@@ -446,12 +446,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         let ordered = IntegrationPlan.order(members, deps: deps)
         let branchNames = ordered.map { IntegrationPlan.branchName(taskId: $0.id) }
-        let repoState = try await offMain { () -> (merged: [String: Bool], exists: Set<String>) in
+        let dispatched = Set(ordered.filter { ((try? sessions.forTask($0.id)) ?? []).isEmpty == false }.map(\.id))
+        let taskIds = ordered.map(\.id)
+        let facts = try await offMain { () -> [String: TaskBranchFacts] in
             let merged = try manager.mergeStatus(worktree: worktree, branches: branchNames)
-            let exists = try branchNames.filter { try manager.branchExists($0) }
-            return (merged, Set(exists))
+            return try Self.branchFacts(
+                manager, taskIds: taskIds, epicBranch: epicBranch, merged: merged, dispatched: dispatched
+            )
         }
-        let branches = IntegrationPlan.classify(ordered, merged: repoState.merged, exists: repoState.exists)
+        let branches = IntegrationPlan.classify(ordered, facts: facts)
 
         let task = try board.createIntegrationTask(epicId: epicId)
         var assigned: AgentSession?
@@ -774,6 +777,39 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
         )
         return (manager, URL(fileURLWithPath: worktreePath), project.baseBranch)
+    }
+
+    /// A task branch that git no longer has is read from the ledger, never from its own absence:
+    /// Agent Board deletes a task branch precisely because its work was merged.
+    nonisolated static func branchFacts(
+        _ manager: WorktreeManager,
+        taskIds: [String],
+        epicBranch: String,
+        merged: [String: Bool],
+        dispatched: Set<String>
+    ) throws -> [String: TaskBranchFacts] {
+        let epicRef = "refs/heads/\(epicBranch)"
+        var facts: [String: TaskBranchFacts] = [:]
+        for taskId in taskIds {
+            let branch = IntegrationPlan.branchName(taskId: taskId)
+            var fact = TaskBranchFacts(
+                branchExists: try manager.branchExists(branch),
+                mergedIntoEpic: merged[branch] == true,
+                everDispatched: dispatched.contains(taskId)
+            )
+            if !fact.branchExists {
+                fact.recordedBase = try manager.refCommit(TaskBranchLedger.baseRef(taskId: taskId))
+                fact.recordedTip = try manager.refCommit(TaskBranchLedger.tipRef(taskId: taskId))
+                if let tip = fact.recordedTip {
+                    fact.tipOnEpicBranch = try manager.isMerged(commit: tip, into: epicRef)
+                    if let base = fact.recordedBase {
+                        fact.ownCommits = try manager.commitCount(from: base, to: tip)
+                    }
+                }
+            }
+            facts[taskId] = fact
+        }
+        return facts
     }
 
     // MARK: - Worktree and branch cleanup

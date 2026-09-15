@@ -19,7 +19,7 @@ let package = Package(
         ),
         .target(
             name: "AgentBoardRuntime",
-            dependencies: []
+            dependencies: ["AgentBoardCore"]
         ),
         .target(
             name: "AgentBoardServer",

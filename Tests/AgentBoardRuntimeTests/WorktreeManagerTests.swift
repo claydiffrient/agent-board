@@ -1,3 +1,4 @@
+import AgentBoardCore
 import XCTest
 @testable import AgentBoardRuntime
 
@@ -109,6 +110,51 @@ final class WorktreeManagerTests: XCTestCase {
         let second = try manager.create(name: "attempt-2", branch: "agentboard/task-2", base: "main")
         XCTAssertEqual(try manager.headCommit(worktree: second), wipHead)
         XCTAssertTrue(FileManager.default.fileExists(atPath: second.appendingPathComponent("wip.txt").path))
+    }
+
+    // MARK: - The ledger a reaped branch leaves behind
+
+    func testDeletingAMergedBranchRecordsWhereItStood() throws {
+        let epic = "agentboard/epic-ledger"
+        try manager.ensureBranch(epic, from: "main")
+        let worktree = try manager.create(name: "task-ledger", branch: "agentboard/task-ledger", base: epic)
+        try "work\n".write(to: worktree.appendingPathComponent("work.txt"), atomically: true, encoding: .utf8)
+        try git(["add", "."], cwd: worktree)
+        try commit("Do the work", cwd: worktree)
+        let tip = try manager.headCommit(worktree: worktree)
+        let epicBase = try git(["rev-parse", epic], cwd: repo).trimmingCharacters(in: .whitespacesAndNewlines)
+        try git(["branch", "-f", epic, "agentboard/task-ledger"], cwd: repo)
+        try manager.remove(path: worktree)
+
+        XCTAssertEqual(try manager.deleteBranchIfMerged("agentboard/task-ledger", into: [epic]), .deleted("agentboard/task-ledger"))
+
+        XCTAssertFalse(try manager.branchExists("agentboard/task-ledger"))
+        XCTAssertEqual(try manager.refCommit(TaskBranchLedger.baseRef(taskId: "task-ledger")), epicBase)
+        XCTAssertEqual(try manager.refCommit(TaskBranchLedger.tipRef(taskId: "task-ledger")), tip)
+        XCTAssertEqual(try manager.commitCount(from: epicBase, to: tip), 1)
+        XCTAssertTrue(try manager.isMerged(commit: tip, into: "refs/heads/\(epic)"))
+    }
+
+    func testTheLedgerSeparatesABranchThatCarriedNothingFromOneThatDid() throws {
+        let epic = "agentboard/epic-ledger"
+        try manager.ensureBranch(epic, from: "main")
+        let worktree = try manager.create(name: "task-silent", branch: "agentboard/task-silent", base: epic)
+        try manager.remove(path: worktree)
+
+        XCTAssertEqual(try manager.deleteBranchIfMerged("agentboard/task-silent", into: [epic]), .deleted("agentboard/task-silent"))
+
+        let base = try XCTUnwrap(manager.refCommit(TaskBranchLedger.baseRef(taskId: "task-silent")))
+        let tip = try XCTUnwrap(manager.refCommit(TaskBranchLedger.tipRef(taskId: "task-silent")))
+        XCTAssertEqual(try manager.commitCount(from: base, to: tip), 0)
+    }
+
+    func testABranchOutsideTheTaskNamespaceGetsNoLedger() throws {
+        try manager.ensureBranch("keep-me", from: "main")
+
+        XCTAssertEqual(try manager.deleteBranchIfMerged("keep-me", into: ["main"]), .deleted("keep-me"))
+
+        XCTAssertNil(try manager.refCommit(TaskBranchLedger.baseRef(taskId: "keep-me")))
+        XCTAssertNil(try manager.refCommit(TaskBranchLedger.tipRef(taskId: "keep-me")))
     }
 
     func testEnsureBranchIsIdempotent() throws {
