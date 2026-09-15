@@ -130,12 +130,8 @@ final class ShellConsole {
         }
     }
 
-    /// SwiftTerm hands the delegate the raw `waitpid` status, not the exit code, so an `exit 7`
-    /// arrives as 1792. Decoded here to the number a human typed; a signalled shell reports
-    /// 128 + signal, the way every shell reports one.
     static func exitCode(fromWaitStatus status: Int32) -> Int32 {
-        let signal = status & 0x7f
-        return signal == 0 ? (status >> 8) & 0xff : 128 + signal
+        WaitStatus.exitCode(fromWaitStatus: status)
     }
 
     private final class ProcessObserver: NSObject, LocalProcessTerminalViewDelegate {
