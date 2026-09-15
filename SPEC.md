@@ -904,10 +904,28 @@ became ready.
 | Human stops a worker, or Pause All | `failed` | Task, session, that a human stopped it |
 | `reconcile` finds a session gone | `failed` | Task, session, that Agent Board did not stop it |
 
-A worker session Agent Board ends itself never lands the task in `running` with
-no session attached: the task returns to `ready` so it can be dispatched again
-without a manual `move_task`. A cap or idle kill also sets `failed` and
-`failure_reason` on the card; a human stop does not.
+A task in `running` that no active session owns is always moved out of it,
+whatever path the session death took, so it never needs a manual `move_task`.
+Where it lands depends on what the worker left on `agentboard/<task-id>`:
+
+- No commits the branch's recorded base does not have — back to `ready`, the
+  report saying so, ready to be dispatched again.
+- Commits ahead of that base — into `review`, with the commit count in the
+  report. The report never calls that work finished: no worker vouched for it
+  and Agent Board builds nothing. Routing it to `ready` instead would tell an
+  orchestrator to re-dispatch work that is already written, and a retry reuses
+  the same branch, so the second worker would redo it on top of itself.
+
+Two clocks enforce this, because one of them only runs while a screen is open:
+the metering tick sweeps every project, and `reconcile` sweeps the project it
+was called for. The sweep re-checks the strand inside its write, so a task that
+has since moved or gained a session is left alone. It exists because
+`terminate` cannot reach a death that left no session row at all, and because
+`SessionEnd` can write `stopped` before a cap kill or `reconcile` gets there.
+
+A cap or idle kill also sets `failed` and `failure_reason` on the card; a human
+stop does not. A wind-down acknowledgment keeps its own contract — `ready` with
+a resume note — whatever is on the branch.
 
 No agent-generated text is ever written into the orchestrator's user turn. The
 orchestrator holds spawn, assign, and integration authority; a worker that echoes

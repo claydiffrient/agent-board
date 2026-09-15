@@ -511,7 +511,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             } else {
                 throw SupervisorError.sessionHasNoShortId(sessionId)
             }
-            try board.terminate(sessionId: sessionId, cause: .stoppedByHuman)
+            let salvage = await branchSalvage(taskId: session.taskId)
+            try board.terminate(sessionId: sessionId, cause: .stoppedByHuman, salvage: salvage)
             try grants.revokeAll(sessionId: sessionId)
             announceReports(projectId: session.projectId)
         }
@@ -722,7 +723,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     if session.role == .orchestrator, consoles[session.projectId]?.isProcessRunning == true {
                         continue
                     }
-                    let report = (try? board.terminate(sessionId: session.sessionId, cause: .vanished)) ?? nil
+                    let salvage = await branchSalvage(taskId: session.taskId)
+                    let report = (try? board.terminate(
+                        sessionId: session.sessionId, cause: .vanished, salvage: salvage
+                    )) ?? nil
                     queuedReport = queuedReport || report != nil
                 }
                 continue
@@ -734,7 +738,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let status = info.status?.lowercased()
             if state == "stopped" || status == "stopped" {
                 if session.state.isActive {
-                    let report = (try? board.terminate(sessionId: session.sessionId, cause: .vanished)) ?? nil
+                    let salvage = await branchSalvage(taskId: session.taskId)
+                    let report = (try? board.terminate(
+                        sessionId: session.sessionId, cause: .vanished, salvage: salvage
+                    )) ?? nil
                     queuedReport = queuedReport || report != nil
                 }
             } else if status == "running" {
@@ -748,6 +755,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
         }
         if queuedReport { announceReports(projectId: projectId) }
+        await recoverStrandedTasks(projectId: projectId)
         await reapOrphanedWorktrees(projectId: projectId, keeping: liveWorktrees)
     }
 
@@ -815,6 +823,57 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             facts[taskId] = fact
         }
         return facts
+    }
+
+    /// A session death that never reached `terminate` — the row already inactive when the cap or
+    /// `reconcile` got there, or no row at all — leaves its task in `running`, where `spawn_worker`
+    /// refuses it and no report is ever coming. Nothing else clears that, so both the metering tick
+    /// and `reconcile` sweep it: `reconcile` only runs while the Status screen is on screen, and a
+    /// task must not stay unreachable for as long as nobody happens to look at it.
+    func recoverStrandedTasks(projectId: String) async {
+        guard let stranded = try? board.strandedRunningTasks(projectId: projectId), !stranded.isEmpty else { return }
+        var queued = false
+        for task in stranded {
+            let salvage = await branchSalvage(taskId: task.id)
+            let report = (try? board.recoverStranded(taskId: task.id, salvage: salvage)) ?? nil
+            queued = queued || report != nil
+        }
+        if queued { announceReports(projectId: projectId) }
+    }
+
+    /// What git can say about a task's branch, for a failure report to carry rather than throw the
+    /// work back to `ready` as if the branch were empty. Best effort: nil claims nothing.
+    private func branchSalvage(taskId: String?) async -> BranchSalvage? {
+        guard let taskId, let task = try? tasks.get(taskId),
+              let project = try? projects.get(task.projectId)
+        else { return nil }
+        let manager = Self.worktreeManager(for: project)
+        let branch = Self.taskBranchPrefix + taskId
+        let fallbackBase = mergeTargets(for: task, project: project).last ?? project.baseBranch
+        let worktree = (try? sessions.forTask(taskId).compactMap(\.worktreePath))?
+            .first { FileManager.default.fileExists(atPath: $0) }
+            .map { URL(fileURLWithPath: $0) }
+        return try? await offMain {
+            try Self.readSalvage(manager: manager, branch: branch, fallbackBase: fallbackBase, worktree: worktree)
+        }
+    }
+
+    /// The branch was cut from the ledger's recorded base; `fallbackBase` only covers a branch that
+    /// predates the ledger. A base that no longer resolves makes the count a lie, so nothing is claimed.
+    private nonisolated static func readSalvage(
+        manager: WorktreeManager, branch: String, fallbackBase: String, worktree: URL?
+    ) throws -> BranchSalvage? {
+        guard try manager.branchExists(branch) else { return nil }
+        let recorded = TaskBranchLedger.taskId(ofBranch: branch)
+            .flatMap { try? manager.refCommit(TaskBranchLedger.baseRef(taskId: $0)) }
+        let base = recorded ?? fallbackBase
+        guard try manager.commitExists(base) else { return nil }
+        let dirty = worktree.map { (try? manager.hasUncommittedChanges(worktree: $0)) ?? false } ?? false
+        return BranchSalvage(
+            branch: branch,
+            commitsAheadOfBase: try manager.commitCount(from: base, to: "refs/heads/\(branch)"),
+            uncommittedChanges: dirty
+        )
     }
 
     // MARK: - Worktree and branch cleanup
@@ -1314,6 +1373,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    /// Internal so a test can drive one tick without waiting out the timer.
     func meterTick() async {
         guard let all = try? projects.list() else { return }
         let awake = sleepLedger.reading()
@@ -1324,6 +1384,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         for project in all {
             refreshShutdownProgressIfOrdered(projectId: project.id)
+            await recoverStrandedTasks(projectId: project.id)
             let limits = Self.capLimits(project.settings.caps)
             guard let projectSessions = try? sessions.all(projectId: project.id) else { continue }
             let stallSeconds = project.settings.caps.stallSeconds
@@ -1429,7 +1490,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if let shortId = session.shortId {
             try? await runtime.stop(shortId: shortId)
         }
-        _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description))
+        let salvage = await branchSalvage(taskId: session.taskId)
+        _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description), salvage: salvage)
         announceReports(projectId: session.projectId)
         MacNotifier.post(title: "Worker stopped at cap", body: description)
     }

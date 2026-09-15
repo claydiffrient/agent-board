@@ -18,6 +18,7 @@ actor FakeRuntime: AgentRuntime {
     private var delay: Duration?
     private var holdNextSpawn = false
     private var entered: [CheckedContinuation<Void, Never>] = []
+    private var listed: [AgentInfo] = []
 
     /// The next spawn blocks inside `spawn` until `releaseSpawn()` — a setup that outlives the call.
     func holdSpawn() { holdNextSpawn = true }
@@ -65,9 +66,12 @@ actor FakeRuntime: AgentRuntime {
         return SpawnedAgent(shortId: "short-\(sessionId)", sessionId: sessionId)
     }
 
+    /// What `claude agents --json --all` answers next. Empty — the default — is every session gone.
+    func listing(_ infos: [AgentInfo]) { listed = infos }
+
     func stop(shortId: String) async throws { stopped.append(shortId) }
     func remove(shortId: String) async throws {}
-    func listSessions() async throws -> [AgentInfo] { [] }
+    func listSessions() async throws -> [AgentInfo] { listed }
     nonisolated func attachCommand(shortId: String) -> (executable: String, arguments: [String]) {
         ("claude", ["attach", shortId])
     }
@@ -100,6 +104,7 @@ struct SupervisorFixture {
     var deliveries: ShutdownDeliveryStore { ShutdownDeliveryStore(db) }
     var sessions: SessionStore { SessionStore(db) }
     var grants: TokenGrantStore { TokenGrantStore(db) }
+    var reports: ReportStore { ReportStore(db) }
 
     /// `gitRepo` lays down a real git repository at `repoPath`, which every test that exercises
     /// spawning, worktrees, or branch teardown needs.
