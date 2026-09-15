@@ -99,6 +99,9 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// Shell command that runs this project's tests. Empty leaves the agent to work it out.
     public var testCommand: String? = nil
     public var archivePolicy: ArchivePolicy = .afterEpicMerge
+    /// What this project may interrupt the human for. Banners only — the sidebar badge and the
+    /// rest of the attention signal are unaffected by it.
+    public var notifications: NotificationPreferences = NotificationPreferences()
 
     public init(
         caps: Caps = Caps(),
@@ -109,7 +112,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         modelGuidance: String? = nil,
         buildCommand: String? = nil,
         testCommand: String? = nil,
-        archivePolicy: ArchivePolicy = .afterEpicMerge
+        archivePolicy: ArchivePolicy = .afterEpicMerge,
+        notifications: NotificationPreferences = NotificationPreferences()
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -120,6 +124,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.buildCommand = buildCommand
         self.testCommand = testCommand
         self.archivePolicy = archivePolicy
+        self.notifications = notifications
     }
 
     public init(from decoder: Decoder) throws {
@@ -133,6 +138,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
         archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge
+        notifications = try c.decodeIfPresent(NotificationPreferences.self, forKey: .notifications)
+            ?? NotificationPreferences()
     }
 
     public static func decode(_ json: String) -> ProjectSettings {

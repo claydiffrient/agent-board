@@ -29,6 +29,16 @@ public struct AttentionNotice: Sendable, Equatable, Identifiable {
 }
 
 extension AttentionReason {
+    /// Which project preference decides whether this cause may banner. Nil for the reasons nothing
+    /// ever banners for — they raise the sidebar badge alone, so there is nothing to gate.
+    public var notificationCategory: NotificationCategory? {
+        switch self {
+        case .pendingApproval: return .approvals
+        case .blockedWorker: return .blockedWorkers
+        case .strandedReports, .overdueShutdown: return nil
+        }
+    }
+
     /// The headline for this cause, before the project name is appended.
     func headline(count: Int) -> String {
         switch self {
@@ -65,8 +75,15 @@ public struct AttentionNotifier: Sendable {
     /// `focused` is the project whose screen the human is looking at right now, or nil when the app
     /// is in the background or sitting on At a Glance. Its banners are suppressed and still recorded
     /// as announced: the condition was on screen, so it must not resurface as a banner later.
+    /// `preferences` answers for one project id. A category the project has turned off, or any
+    /// category while the project is muted, is dropped here and **not** recorded as announced: it
+    /// was never shown, so turning the switch back on while the condition still stands must raise
+    /// it. Nothing on this path touches `attention` itself, so the sidebar badge is unaffected.
     public mutating func notices(
-        for attention: [ProjectAttention], focused: String? = nil
+        for attention: [ProjectAttention],
+        focused: String? = nil,
+        now: Int64 = .nowMillis,
+        preferences: (String) -> NotificationPreferences = { _ in NotificationPreferences() }
     ) -> [AttentionNotice] {
         var live: Set<String> = []
         var raised: [AttentionNotice] = []
@@ -81,6 +98,9 @@ public struct AttentionNotifier: Sendable {
                     body: project.summary ?? cause.text
                 )
                 live.insert(notice.id)
+                guard let category = cause.reason.notificationCategory,
+                      preferences(project.id).allows(category, now: now)
+                else { continue }
                 guard announced.insert(notice.id).inserted, project.id != focused else { continue }
                 raised.append(notice)
             }
