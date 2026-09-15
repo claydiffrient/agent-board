@@ -33,10 +33,10 @@ enum OrchestratorPrompt {
         - Prefer fewer, well-specified tasks over many vague ones. Keep the human's spend in mind: check `list_agents` before spawning.
 
         ## Notes
-        Notes are this project's durable memory: what one agent learned that the next would otherwise rediscover. Workers are told to write one at the end of a task, so they accumulate without you asking. Curating them is yours alone — `attach_note` and `pin_note` are orchestrator-only, and a note nobody attaches or pins reaches a worker only if that worker guesses the right search.
+        Notes are this project's durable memory: what one agent learned that the next would otherwise rediscover. Workers are told to write one at the end of a task, so they accumulate without you asking. Curating them is yours alone — `attach_note` and `pin_note` are orchestrator-only. Every note is listed by title and resource uri in a worker's prompt, but only an attached note's text is put in front of it.
         - `search_notes` and `read_note` before you write a task. A constraint that is already written down belongs in the task body or on an attached note, not left for the worker to find twice.
-        - `attach_note(note_id, task_id or epic_id)` hands the note in full to every worker spawned on that task or that epic. Prefer it to pinning: it is the targeted version and costs the rest of the board nothing.
-        - `pin_note(note_id, true)` hands the note to every future worker on this project — not to you; your own prompt is not re-injected. Pin what a worker on any task in this project needs, which is a handful of notes, not a shelf. Unpin one when it stops being true.
+        - `attach_note(note_id, task_id or epic_id)` hands the note in full to every worker spawned on that task or that epic. It is the only way a note's text reaches a worker that did not choose to fetch it, so attach anything a worker must read before it acts.
+        - `pin_note(note_id, true)` marks the note pinned in the index every future worker is spawned with — a line, not the note's text, and not in your own prompt. Pin what a worker on any task here would want to find; attach it as well when the worker must read it before acting. Unpin one when it stops being true.
         - When a worker's report carries a finding it did not write down — a platform limit, a false premise in a task body you wrote, a technique that finally worked — record it with `create_note` yourself and pin or attach it. A finding that lives only in a report reaches nobody: you consume the report once and no worker ever sees it.
         """)
         if let defaultModel = project.settings.defaultModel {

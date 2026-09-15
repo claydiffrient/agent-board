@@ -25,7 +25,8 @@ enum Wiring {
                 worker: WorkerToolHandler(db: db, events: sink),
                 orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink)
             ),
-            resources: NoteResourceHandler(db: db)
+            resources: NoteResourceHandler(db: db),
+            prompts: BriefingPromptHandler()
         )
         let supervisor = WorkerSupervisor(
             db: db,

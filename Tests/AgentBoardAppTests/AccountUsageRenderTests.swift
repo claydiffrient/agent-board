@@ -88,7 +88,13 @@ extension AccountUsageRenderTests {
         )
         for (model, name) in [(fresh, "footer-fresh"), (stale, "footer-stale")] {
             let task = _Concurrency.Task { await model.run() }
-            try await _Concurrency.Task.sleep(for: .milliseconds(300))
+            // The read is a `.utility` detached task, which a loaded machine starves well past any
+            // fixed wait. Poll for the reading rather than guessing how long it will take.
+            var waited = 0
+            while model.snapshot == nil, waited < 200 {
+                try await _Concurrency.Task.sleep(for: .milliseconds(25))
+                waited += 1
+            }
             task.cancel()
             XCTAssertNotNil(model.snapshot, "\(name) fixture must have been read")
             _ = try render(AccountUsageFooter(model: model), name: name)
