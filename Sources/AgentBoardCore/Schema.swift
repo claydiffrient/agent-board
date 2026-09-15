@@ -203,9 +203,23 @@ enum Schema {
     ALTER TABLE project ADD COLUMN workspace_id TEXT REFERENCES workspace(id);
     """
 
+    static let message = """
+    CREATE TABLE message (
+      id              INTEGER PRIMARY KEY,
+      from_project_id TEXT NOT NULL REFERENCES project(id),
+      to_project_id   TEXT NOT NULL REFERENCES project(id),
+      from_session_id TEXT REFERENCES agent_session(session_id),
+      body            TEXT NOT NULL,
+      created_at      INTEGER NOT NULL,
+      delivered_at    INTEGER,
+      report_id       INTEGER REFERENCES report(id)
+    );
+    CREATE INDEX message_to_project_delivered ON message(to_project_id, delivered_at);
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
-        "approval", "shutdown_order", "shutdown_delivery", "workspace",
+        "approval", "shutdown_order", "shutdown_delivery", "workspace", "message",
     ]
 }

@@ -432,6 +432,54 @@ public struct Report: Codable, FetchableRecord, MutablePersistableRecord, Identi
     public var isConsumed: Bool { consumedAt != nil }
 }
 
+/// Text one project's orchestrator sent to another. The body is delivered into the receiving
+/// project's report queue as a `message` report; this row is the sender-side ledger of that.
+public struct Message: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Sendable, Equatable {
+    public static let databaseTableName = "message"
+
+    public var id: Int64?
+    public var fromProjectId: String
+    public var toProjectId: String
+    public var fromSessionId: String?
+    /// Exactly what the sender wrote, with no framing. The framing lives on the delivered report.
+    public var body: String
+    public var createdAt: Int64
+    public var deliveredAt: Int64?
+    public var reportId: Int64?
+
+    public enum CodingKeys: String, CodingKey {
+        case id
+        case fromProjectId = "from_project_id"
+        case toProjectId = "to_project_id"
+        case fromSessionId = "from_session_id"
+        case body
+        case createdAt = "created_at"
+        case deliveredAt = "delivered_at"
+        case reportId = "report_id"
+    }
+
+    public init(
+        id: Int64? = nil, fromProjectId: String, toProjectId: String, fromSessionId: String?,
+        body: String, createdAt: Int64, deliveredAt: Int64? = nil, reportId: Int64? = nil
+    ) {
+        self.id = id
+        self.fromProjectId = fromProjectId
+        self.toProjectId = toProjectId
+        self.fromSessionId = fromSessionId
+        self.body = body
+        self.createdAt = createdAt
+        self.deliveredAt = deliveredAt
+        self.reportId = reportId
+    }
+
+    public mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
+
+    public var createdDate: Date { createdAt.asDate }
+    public var isDelivered: Bool { deliveredAt != nil }
+}
+
 public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
     public static let databaseTableName = "approval"
 

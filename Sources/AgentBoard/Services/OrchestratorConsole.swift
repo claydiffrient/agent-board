@@ -207,7 +207,7 @@ final class OrchestratorConsole {
 
     private func sendNotice(count: Int) {
         terminal.isInjecting = true
-        terminal.send(txt: "[agent-board] \(count) worker reports pending. Call list_reports.\r")
+        terminal.send(txt: "[agent-board] \(count) reports pending. Call list_reports.\r")
         terminal.isInjecting = false
         lastNoticeAt = Date()
     }

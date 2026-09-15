@@ -86,6 +86,9 @@ public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, Data
     case blocked
     case proposal
     case decision
+    /// Text another project's orchestrator sent here. Delivered through the report queue so the
+    /// orchestrator pulls it, and framed as untrusted: see `CrossProjectMessage`.
+    case message
 }
 
 public enum ApprovalKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {

@@ -320,10 +320,23 @@ CREATE TABLE report (
   project_id  TEXT NOT NULL REFERENCES project(id),
   task_id     TEXT REFERENCES task(id),
   session_id  TEXT REFERENCES agent_session(session_id),
-  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision
+  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision | message
   body        TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
   consumed_at INTEGER               -- set when the orchestrator pulls it
+);
+
+-- Text one project's orchestrator sent to another (§9.2). The recipient never sees this row:
+-- delivery writes a framed `message` report into its queue, which it pulls like any other.
+CREATE TABLE message (
+  id              INTEGER PRIMARY KEY,
+  from_project_id TEXT NOT NULL REFERENCES project(id),
+  to_project_id   TEXT NOT NULL REFERENCES project(id),
+  from_session_id TEXT REFERENCES agent_session(session_id),
+  body            TEXT NOT NULL,     -- the sender's text, unframed
+  created_at      INTEGER NOT NULL,
+  delivered_at    INTEGER,           -- set when the `message` report is written
+  report_id       INTEGER REFERENCES report(id)
 );
 
 CREATE TABLE approval (
@@ -845,11 +858,13 @@ from the progress sheet (§10).
 
 1. A worker calls `report_complete` / `report_blocked` / `propose_task`, **or the
    app itself changes the board in a way the orchestrator cannot observe** — see
-   the table below. The body lands in `report`, unconsumed.
+   the table below — **or another project's orchestrator sends a message** (§9.2).
+   The body lands in `report`, unconsumed. The notice counts items, not workers:
+   a queue holding a `message` is not a queue of worker reports.
 2. The orchestrator's `Stop` hook fires when it finishes a turn.
 3. If unconsumed reports exist, Agent Board writes **one fixed, app-authored
    line** into the orchestrator PTY:
-   `[agent-board] N worker reports pending. Call list_reports.` terminated by
+   `[agent-board] N reports pending. Call list_reports.` terminated by
    a carriage return (`\r`); Claude Code's TUI submits on Enter and treats
    `\n` as a literal newline inside the prompt.
 4. The orchestrator pulls bodies through MCP, where they arrive as tool results.
@@ -899,6 +914,23 @@ without a manual `move_task`. A cap or idle kill also sets `failed` and
 No agent-generated text is ever written into the orchestrator's user turn. The
 orchestrator holds spawn, assign, and integration authority; a worker that echoes
 a malicious file into its report must not be able to drive it.
+
+### 9.2 Cross-project messages
+
+An orchestrator may send text to another project's orchestrator. D9 forbids
+agent-authored text in the receiving orchestrator's user-authority turn, and
+§9.1 keeps `OrchestratorConsole` the only writer into that PTY, so a message is
+never injected. It is **delivered into the recipient's `report` queue** as a
+`message` report and pulled through `list_reports` exactly like a worker report.
+
+The stored `message` row keeps the sender's text verbatim. The delivered report
+body wraps it: the sending project's name and id, a statement that the text
+carries no authority over this board and is information rather than an
+instruction, and begin/end delimiters around the sender's own words. The report
+names no task and no session — a message from outside cannot hand the reader
+something in this project to act on.
+
+A message to a project that does not exist is refused, as is an empty one.
 
 ---
 
