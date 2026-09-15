@@ -16,7 +16,8 @@ public enum OpeningPrompt {
         epicGoal: String? = nil,
         notes: [InjectedNote] = [],
         verification: VerificationCommands = VerificationCommands(),
-        placement: WorkerPlacement = .worktree
+        placement: WorkerPlacement = .worktree,
+        workingDirectory: String? = nil
     ) -> String {
         var sections: [String] = []
         sections.append("# Task: \(task.title)")
@@ -49,7 +50,7 @@ public enum OpeningPrompt {
         }
         sections.append("""
         ## How to work
-        - \(workingDirectoryLine(placement: placement, branch: branch))
+        \(workingDirectoryLines(placement: placement, branch: branch, directory: workingDirectory))
         - The `agent-board` MCP server holds your assignment. Call `get_my_task` if you need the details again.
         - Call `search_notes` when something surprises you: a tool that will not do what the task assumes, \
         a platform behavior you are about to establish by experiment, a step that fails for no stated reason. \
@@ -62,7 +63,7 @@ public enum OpeningPrompt {
         """)
         sections.append("""
         ## When you are done
-        1. Commit on the current branch. Write the message in imperative mood, with no conventional-commit prefix.
+        1. \(commitStep(placement: placement))
         2. Write down one durable finding as a note, if this task produced one. The bar is something a later \
         worker on this project would otherwise have to rediscover: a platform or tool behavior you had to \
         establish by experiment, a trap in this codebase, a technique that worked after several that did not, \
@@ -82,17 +83,49 @@ public enum OpeningPrompt {
         return sections.joined(separator: "\n\n")
     }
 
-    static func workingDirectoryLine(placement: WorkerPlacement, branch: String) -> String {
+    /// What the worker is standing in. A shared-checkout worker is told every way its situation
+    /// differs from a worktree's, because each of them is otherwise discovered by experiment: a
+    /// write that hangs, a `git commit` that is refused, a sibling's file appearing under `git
+    /// status`.
+    static func workingDirectoryLines(placement: WorkerPlacement, branch: String, directory: String?) -> String {
+        let here = directory.map { "`\($0)`" } ?? "this directory"
         switch placement {
         case .worktree:
-            return "You are in a dedicated git worktree on branch `\(branch)`. Work only in this directory."
+            return "- You are in a dedicated git worktree at \(here) on branch `\(branch)`. "
+                + "Work only in this directory."
         case .shared:
-            return "You are in the project's own checkout on shared branch `\(branch)`, not in a worktree "
-                + "of your own. Work only in this directory, and touch only the files your task needs: "
-                + "another agent may join this same checkout. Your first write to a file claims it "
-                + "until your session ends. If another agent already holds a file, your write is held "
-                + "for up to \(Int(FileLockPolicy.waitTimeout))s and then refused — do the rest of your "
-                + "task first, and call `report_blocked` naming the file only when nothing else is left."
+            return [
+                "- You are in the project's own checkout at \(here), on shared branch `\(branch)`. "
+                    + "This is not a worktree of your own. Work only in this directory.",
+                "- Other agents are working on their own tasks in this same tree, on this same branch. "
+                    + "Files you did not touch may change under you, and `git status` and `git diff` "
+                    + "show their work next to yours. Touch only the files your task needs.",
+                "- Your first write to a file locks it for you until your session ends. If another "
+                    + "agent already holds that file your write waits, silently, for up to "
+                    + "\(Int(FileLockPolicy.waitTimeout))s, and is then refused — do the rest of your "
+                    + "task first, and call `report_blocked` naming the file only when nothing else is left.",
+                "- `git commit` is refused here. Call the `\(commitToolName)` tool instead: Agent Board "
+                    + "commits exactly the files you have written, taken from those locks rather than "
+                    + "from your memory, and tags the commit with your task id so your work can be "
+                    + "reviewed apart from the other agents'. Nothing a sibling has edited goes into "
+                    + "your commit.",
+            ].joined(separator: "\n")
+        }
+    }
+
+    /// Named here rather than imported from the server target, which Core does not depend on.
+    static let commitToolName = "commit_my_work"
+
+    static func commitStep(placement: WorkerPlacement) -> String {
+        switch placement {
+        case .worktree:
+            return "Commit on the current branch. Write the message in imperative mood, with no "
+                + "conventional-commit prefix."
+        case .shared:
+            return "Commit by calling `\(commitToolName)(message)` — not `git commit`, which is refused "
+                + "in this checkout. Write the message in imperative mood, with no conventional-commit "
+                + "prefix. Agent Board commits only the files you wrote and tags the commit with your "
+                + "task id; you may call it more than once."
         }
     }
 

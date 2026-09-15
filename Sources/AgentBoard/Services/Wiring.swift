@@ -22,7 +22,7 @@ enum Wiring {
             tokens: StoreTokenResolver(db: db),
             hooks: StoreHookSink(db: db, events: sink),
             tools: ScopedToolHandler(
-                worker: WorkerToolHandler(db: db, events: sink),
+                worker: WorkerToolHandler(db: db, events: sink, scopedCommits: ScopedCommitRunner()),
                 orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink)
             )
         )

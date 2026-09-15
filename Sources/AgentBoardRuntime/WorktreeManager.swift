@@ -176,7 +176,7 @@ public struct WorktreeManager: Sendable {
 
     /// A merge commit needs a committer identity and must never stop on a GPG passphrase prompt —
     /// the app has no terminal to answer one. The repository's own identity wins when it has one.
-    private func mergeConfig() throws -> [String] {
+    func mergeConfig() throws -> [String] {
         var config = ["-c", "commit.gpgsign=false"]
         let email = try gitRaw(["config", "user.email"], cwd: repoPath)
         if email.status != 0 || email.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -455,7 +455,8 @@ public struct WorktreeManager: Sendable {
         try gitChecked(args, cwd: repoPath)
     }
 
-    private func gitChecked(_ args: [String], cwd: URL) throws -> CommandResult {
+    @discardableResult
+    func gitChecked(_ args: [String], cwd: URL) throws -> CommandResult {
         let result = try gitRaw(args, cwd: cwd)
         guard result.status == 0 else { throw AgentRuntimeError(Self.failure(args, result)) }
         return result
@@ -476,7 +477,7 @@ public struct WorktreeManager: Sendable {
         "git \(args.joined(separator: " ")) exited \(result.status)\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)"
     }
 
-    private func gitRaw(_ args: [String], cwd: URL) throws -> CommandResult {
+    func gitRaw(_ args: [String], cwd: URL) throws -> CommandResult {
         var env = ProcessInfo.processInfo.environment
         env["GIT_TERMINAL_PROMPT"] = "0"
         return try ProcessRunner.run(

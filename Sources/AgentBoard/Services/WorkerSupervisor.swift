@@ -282,7 +282,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             projectId: project.id, taskId: taskId, epicId: task.epicId
                         ),
                         verification: project.settings.verification,
-                        placement: site.placement
+                        placement: site.placement,
+                        workingDirectory: site.cwd.path
                     ),
                     model: task.model ?? project.settings.defaultModel,
                     attempt: placeholder.attempt
@@ -843,29 +844,63 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func worktreeDiffstat(taskId: String) async -> String? {
         guard let context = diffContext(taskId: taskId) else { return nil }
         return try? await offMain {
-            try context.manager.diffstat(worktree: context.worktree, against: context.base)
+            switch context.site {
+            case .worktree(let path):
+                return try context.manager.diffstat(worktree: path, against: context.base)
+            case .sharedBranch(let branch):
+                return try context.manager.diffstat(taskId: taskId, on: branch, since: context.base)
+            }
         }
     }
 
     func worktreeDiffSummary(taskId: String) async -> DiffSummary? {
         guard let context = diffContext(taskId: taskId) else { return nil }
         return try? await offMain {
-            try context.manager.diffSummary(worktree: context.worktree, against: context.base)
+            switch context.site {
+            case .worktree(let path):
+                return try context.manager.diffSummary(worktree: path, against: context.base)
+            case .sharedBranch(let branch):
+                return try context.manager.diffSummary(taskId: taskId, on: branch, since: context.base)
+            }
         }
     }
 
-    private func diffContext(taskId: String) -> (manager: WorktreeManager, worktree: URL, base: String)? {
+    private enum DiffSite {
+        case worktree(URL)
+        /// The task's commits are interleaved with its siblings' on one branch, so the diff is
+        /// selected by the attribution trailer rather than by the branch's whole range.
+        case sharedBranch(String)
+    }
+
+    private struct DiffContext {
+        var manager: WorktreeManager
+        var site: DiffSite
+        var base: String
+    }
+
+    private func diffContext(taskId: String) -> DiffContext? {
         guard let task = try? tasks.get(taskId),
               let project = try? projects.get(task.projectId),
-              let worktreePath = try? sessions.forTask(taskId)
-                  .map({ $0.worktreePath ?? $0.cwd })
-                  .first(where: { FileManager.default.fileExists(atPath: $0) })
+              let taskSessions = try? sessions.forTask(taskId)
         else { return nil }
         let manager = WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
         )
-        return (manager, URL(fileURLWithPath: worktreePath), project.baseBranch)
+        // A session with no worktree of its own ran in the shared checkout; its branch carries other
+        // tasks' commits too. Preferred over any worktree row, because a task that was retried into
+        // a worktree keeps that row and the shared path still answers for the shared attempt.
+        if let shared = taskSessions.last(where: { $0.worktreePath == nil && $0.branch != nil }),
+           let branch = shared.branch {
+            return DiffContext(manager: manager, site: .sharedBranch(branch), base: project.baseBranch)
+        }
+        guard let worktreePath = taskSessions
+            .map({ $0.worktreePath ?? $0.cwd })
+            .first(where: { FileManager.default.fileExists(atPath: $0) })
+        else { return nil }
+        return DiffContext(
+            manager: manager, site: .worktree(URL(fileURLWithPath: worktreePath)), base: project.baseBranch
+        )
     }
 
     /// A task branch that git no longer has is read from the ledger, never from its own absence:
@@ -1605,11 +1640,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         epicGoal: String? = nil,
         notes: [InjectedNote] = [],
         verification: VerificationCommands = VerificationCommands(),
-        placement: WorkerPlacement = .worktree
+        placement: WorkerPlacement = .worktree,
+        workingDirectory: String? = nil
     ) -> String {
         OpeningPrompt.compose(
             task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes,
-            verification: verification, placement: placement
+            verification: verification, placement: placement, workingDirectory: workingDirectory
         )
     }
 

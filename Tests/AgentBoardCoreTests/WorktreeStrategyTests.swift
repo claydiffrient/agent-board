@@ -197,21 +197,66 @@ final class OpeningPromptPlacementTests: XCTestCase {
         )
     }
 
-    func testAWorktreeWorkerIsToldItHasOne() {
-        let prompt = OpeningPrompt.compose(task: task(), branch: "agentboard/x", attempt: 1)
+    private func sharedPrompt(directory: String? = "/repos/demo") -> String {
+        OpeningPrompt.compose(
+            task: task(), branch: "agentboard/shared", attempt: 1,
+            placement: .shared(branch: "agentboard/shared"), workingDirectory: directory
+        )
+    }
 
-        XCTAssertTrue(prompt.contains("You are in a dedicated git worktree on branch `agentboard/x`"), prompt)
+    func testAWorktreeWorkerIsToldItHasOneAndWhereItIs() {
+        let prompt = OpeningPrompt.compose(
+            task: task(), branch: "agentboard/x", attempt: 1, workingDirectory: "/worktrees/x"
+        )
+
+        XCTAssertTrue(prompt.contains("dedicated git worktree at `/worktrees/x` on branch `agentboard/x`"), prompt)
+        XCTAssertTrue(prompt.contains("Commit on the current branch."), prompt)
+        XCTAssertFalse(prompt.contains("commit_my_work"), prompt)
     }
 
     func testASharedWorkerIsNotToldItHasAWorktree() {
-        let prompt = OpeningPrompt.compose(
-            task: task(), branch: "agentboard/shared", attempt: 1,
-            placement: .shared(branch: "agentboard/shared")
-        )
+        let prompt = sharedPrompt()
 
         XCTAssertFalse(prompt.contains("dedicated git worktree"), prompt)
-        XCTAssertTrue(prompt.contains("project's own checkout on shared branch `agentboard/shared`"), prompt)
-        XCTAssertTrue(prompt.contains("another agent may join this same checkout"), prompt)
+        XCTAssertTrue(prompt.contains("project's own checkout at `/repos/demo`"), prompt)
+        XCTAssertTrue(prompt.contains("shared branch `agentboard/shared`"), prompt)
         XCTAssertTrue(prompt.contains("Do not push."), prompt)
+    }
+
+    func testASharedWorkerIsToldSiblingsAreInTheSameTree() {
+        let prompt = sharedPrompt()
+
+        XCTAssertTrue(prompt.contains("Other agents are working on their own tasks in this same tree"), prompt)
+        XCTAssertTrue(prompt.contains("`git status` and `git diff` show their work next to yours"), prompt)
+    }
+
+    func testASharedWorkerIsToldItsWritesAreLockedAndMayWait() {
+        let prompt = sharedPrompt()
+
+        XCTAssertTrue(prompt.contains("first write to a file locks it for you"), prompt)
+        XCTAssertTrue(prompt.contains("your write waits"), prompt)
+        XCTAssertTrue(prompt.contains("\(Int(FileLockPolicy.waitTimeout))s"), prompt)
+        XCTAssertTrue(prompt.contains("report_blocked"), prompt)
+    }
+
+    /// The worker must not learn that `git commit` is refused by running it.
+    func testASharedWorkerIsToldHowItsCommitIsScopedBeforeItTriesGit() {
+        let prompt = sharedPrompt()
+
+        XCTAssertTrue(prompt.contains("`git commit` is refused here"), prompt)
+        XCTAssertTrue(prompt.contains("commits exactly the files you have written"), prompt)
+        XCTAssertTrue(prompt.contains("tags the commit with your task id"), prompt)
+        XCTAssertTrue(prompt.contains("Commit by calling `commit_my_work(message)`"), prompt)
+        XCTAssertFalse(
+            prompt.contains("1. Commit on the current branch."),
+            "the shared worker is still being told to commit with git"
+        )
+    }
+
+    func testAnUnknownDirectoryDegradesToAPhraseRatherThanAnEmptyBacktickPair() {
+        let prompt = sharedPrompt(directory: nil)
+
+        XCTAssertTrue(prompt.contains("project's own checkout at this directory"), prompt)
+        XCTAssertFalse(prompt.contains("at ``"), prompt)
     }
 }

@@ -71,6 +71,21 @@ public struct SharedCheckoutGroup: Sendable, Equatable {
         return SharedCheckoutGroup(branch: branch, memberSessionIds: members.map(\.sessionId), maxMembers: limit)
     }
 
+    /// Whether `session` is a worker running in `project`'s own checkout rather than a worktree.
+    ///
+    /// Both halves are needed. No worktree path alone is how a group member is recognised when the
+    /// group is rebuilt from the session rows, but a row can carry no worktree path for other
+    /// reasons — a stub, a session recorded before the row was finished — and a control that reads
+    /// that as "shared" would fire on a worker standing somewhere else entirely.
+    public static func isMember(_ session: AgentSession, of project: Project) -> Bool {
+        guard session.role == .worker, session.worktreePath == nil else { return false }
+        return resolved(session.cwd) == resolved(project.repoPath)
+    }
+
+    private static func resolved(_ path: String) -> String {
+        URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
     /// Whether a task wanting `wanted` can join this group: same branch means same base, and the
     /// group must still have room under `maxMembers`.
     public func admits(_ wanted: String) -> Bool {

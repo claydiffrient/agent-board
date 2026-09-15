@@ -35,8 +35,8 @@ public struct JSONObjectString: Sendable, Equatable, ExpressibleByStringLiteral 
 
 public enum SessionConfigWriter {
     public static let httpHookEvents = ["UserPromptSubmit", "PostToolUse", "Notification", "Stop", "SessionEnd"]
-    /// `PreToolUse` is the app-side half of the push/PR block (§8). Matched to `Bash` so the
-    /// round trip is not paid on every tool call.
+    /// `PreToolUse` is the app-side half of the push/PR block (§8), and of the `git commit` block a
+    /// shared checkout adds. Matched to `Bash` so the round trip is not paid on every tool call.
     public static let guardedPreToolUseMatcher = "Bash"
 
     public static func settingsURL(configDir: URL, configId: String) -> URL {

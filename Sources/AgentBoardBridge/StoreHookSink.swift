@@ -110,6 +110,14 @@ public final class StoreHookSink: HookSink {
         )
     }
 
+    private func isSharedWorker(_ identity: TokenIdentity, sessionId: String) -> Bool {
+        guard identity.scope == .worker, !sessionId.isEmpty else { return false }
+        guard let session = try? sessions.get(sessionId),
+              let project = try? projectStore.get(session.projectId)
+        else { return false }
+        return SharedCheckoutGroup.isMember(session, of: project)
+    }
+
     private func claim(_ request: LockWait) -> Outcome {
         guard let outcome = try? locks.acquire(
             projectId: request.projectId, path: request.path,
@@ -222,6 +230,16 @@ public final class StoreHookSink: HookSink {
                     )
                 }
                 return .deny(.deny(violation.reason(for: identity.scope)))
+            }
+            if SharedCheckoutGuard.deniesCommit(toolName: event.toolName, command: event.toolCommand),
+               isSharedWorker(identity, sessionId: sessionId) {
+                if let taskId = (try? sessions.get(sessionId))?.taskId ?? identity.taskId {
+                    _ = try? progress.append(
+                        taskId: taskId, sessionId: sessionId, kind: .error,
+                        text: "Blocked `git commit` in the shared checkout: \(event.toolCommand ?? "")"
+                    )
+                }
+                return .deny(.deny(SharedCheckoutGuard.commitReason))
             }
             if let order = windDownToDeliver(sessionId: sessionId, identity: identity) {
                 return .deny(.deny(ShutdownOrder.windDownOrder(reason: order.reason, via: .hook)))

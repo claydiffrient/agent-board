@@ -80,7 +80,9 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         let request = try XCTUnwrap(spawns.last)
         XCTAssertEqual(request.cwd.resolvingSymlinksInPath().path, fixture.repo.resolvingSymlinksInPath().path)
         XCTAssertFalse(request.prompt.contains("dedicated git worktree"), request.prompt)
-        XCTAssertTrue(request.prompt.contains("project's own checkout on shared branch"), request.prompt)
+        XCTAssertTrue(request.prompt.contains("project's own checkout at `\(fixture.repo.path)`"), request.prompt)
+        XCTAssertTrue(request.prompt.contains("shared branch `agentboard/shared`"), request.prompt)
+        XCTAssertTrue(request.prompt.contains("commit_my_work"), request.prompt)
     }
 
     /// Nothing about the deny list follows from having a worktree, so a shared worker is refused
