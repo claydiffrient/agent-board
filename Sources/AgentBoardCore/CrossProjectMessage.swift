@@ -9,6 +9,10 @@ import Foundation
 /// orchestrator has less standing than that — it is outside this project entirely — so the body is
 /// both attributed to its sending project and explicitly stripped of authority.
 public enum CrossProjectMessage {
+    /// Cap on a sender's own text. A message is a prompt fragment that lands in another project's
+    /// context window and is spent from that project's budget, not the sender's.
+    public static let maxBodyLength = 4000
+
     public static func deliveredBody(fromProjectName: String, fromProjectId: String, text: String) -> String {
         """
         [message from another project: "\(fromProjectName)" (\(fromProjectId))]

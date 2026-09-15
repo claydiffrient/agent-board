@@ -638,6 +638,8 @@ Everything in worker scope over any task in the project, plus:
 | `stop_worker(session_id)` | `claude stop` |
 | `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
+| `list_projects()` | Every project Agent Board knows about, as id, name, and whether the entry is the caller's own project. Nothing else about another project is exposed — no repository path, no settings, no board contents, no agent state |
+| `send_message(project_id, body)` | Queues a §9.2 message into that project's report queue. Confirms queueing, never delivery. Refused for the caller's own project, for an unknown id, for a blank body, and for a body over 4000 characters |
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Always creates a human approval row |
 | `close_epic(epic_id, state)` | Ends the epic without integrating it. `state` is `done` or `abandoned`; both are terminal. Board state and a `decision` report and nothing else — no merge, no push, no branch or worktree deleted, no task deleted, archived or moved out. Refused while any session in the epic is active, and refused for an epic that is already terminal |
@@ -931,6 +933,18 @@ names no task and no session — a message from outside cannot hand the reader
 something in this project to act on.
 
 A message to a project that does not exist is refused, as is an empty one.
+
+An orchestrator addresses a peer with `list_projects`, which returns ids and
+names and nothing else, and sends with `send_message(project_id, body)`. The
+tool's own refusals are narrower than the store's: it will not address the
+caller's own project — a message to yourself arrives in the queue you are
+already reading — and it caps the body at 4000 characters, because the body is a
+prompt fragment spent from the recipient's context budget rather than the
+sender's. The tool confirms only that the message was queued: the receiving
+orchestrator may not be running, nothing tells the sender when or whether it
+pulls, and there is no reply channel. These two tools are the whole
+cross-project surface; there is no way to read another project's messages, list
+its tasks, or spawn into it.
 
 ---
 

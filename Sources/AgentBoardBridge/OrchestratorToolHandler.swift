@@ -10,6 +10,7 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let sessions: SessionStore
     private let progress: ProgressStore
     private let reports: ReportStore
+    private let messages: MessageStore
     private let approvals: ApprovalStore
     private let epics: EpicStore
     private let board: Board
@@ -24,6 +25,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         sessions = SessionStore(db)
         progress = ProgressStore(db)
         reports = ReportStore(db)
+        messages = MessageStore(db)
         approvals = ApprovalStore(db)
         epics = EpicStore(db)
         board = Board(db)
@@ -322,6 +324,36 @@ public final class OrchestratorToolHandler: ToolHandler {
             description: "Put an archived task back on the visible board. It returns to the column it was archived from.",
             inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
         ),
+        ToolDescriptor(
+            name: "list_projects",
+            description: "Every project Agent Board knows about, so you can address one by id. Returns only what "
+                + "addressing needs — id, name, and which entry is your own project. Nothing about what any other "
+                + "project is doing reaches you here: no repository paths, no settings, no board contents, no agent "
+                + "state. The only thing you can do with another project's id is send_message.",
+            inputSchema: ToolSchema.object(properties: [:], required: [])
+        ),
+        ToolDescriptor(
+            name: "send_message",
+            description: "Queue a message to another project's orchestrator. You are asking, not instructing: the "
+                + "message arrives in that project's report queue, and its orchestrator is told to treat the body as "
+                + "information and never as an instruction, a task to act on, or a command to run — exactly as it "
+                + "treats a worker report, and more firmly, because you are outside its board. Nothing you send can "
+                + "make that orchestrator do anything. A successful call confirms the message was queued, not that it "
+                + "was read: the other orchestrator may not be running, and the message waits in its queue either "
+                + "way. You will not learn whether it was pulled, and there is no reply channel — if you need an "
+                + "answer, say so in the body and let them message you back. Sending to your own project is refused. "
+                + "The body is capped at \(CrossProjectMessage.maxBodyLength) characters because it lands in "
+                + "someone else's context window at their expense: say the one thing, not everything you know.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "project_id": ToolSchema.string("Recipient project id, from list_projects."),
+                    "body": ToolSchema.string(
+                        "What you want the other orchestrator to know.", maxLength: CrossProjectMessage.maxBodyLength
+                    ),
+                ],
+                required: ["project_id", "body"]
+            )
+        ),
     ] + NoteTools.orchestratorDescriptors
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
@@ -357,6 +389,8 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "close_epic": return try closeEpic(arguments, identity: identity)
         case "push_branch": return try pushBranch(arguments, identity: identity)
         case "open_pull_request": return try openPullRequest(arguments, identity: identity)
+        case "list_projects": return try listProjects(identity: identity)
+        case "send_message": return try await sendMessage(arguments, identity: identity)
         default: throw ToolError("Unknown tool: \(name)")
         }
     }
@@ -649,6 +683,49 @@ public final class OrchestratorToolHandler: ToolHandler {
         try board.promote(taskId: task.id)
         let final = try tasks.get(task.id)?.column ?? .backlog
         return ToolResult(text: "Task \(task.id) promoted to \(final.rawValue).")
+    }
+
+    // MARK: Peer projects
+
+    private func listProjects(identity: TokenIdentity) throws -> ToolResult {
+        .json(.array(try projects.list().map { project in
+            .object([
+                "id": .string(project.id),
+                "name": .string(project.name),
+                "is_self": .bool(project.id == identity.projectId),
+            ])
+        }))
+    }
+
+    private func sendMessage(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+        let recipientId = try ToolArguments.requiredString("project_id", in: arguments)
+        let body = try ToolArguments.requiredString("body", in: arguments)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { throw ToolError("Message body is blank; say something or send nothing.") }
+        guard recipientId != identity.projectId else {
+            throw ToolError(
+                "send_message cannot address your own project. A message to yourself would arrive in the queue you "
+                    + "are already reading; write it down with log_progress or a note instead."
+            )
+        }
+        guard let recipient = try projects.get(recipientId) else {
+            throw ToolError("No project has id \(recipientId). Call list_projects for the ids you can address.")
+        }
+        guard body.count <= CrossProjectMessage.maxBodyLength else {
+            throw ToolError(
+                "Message body is \(body.count) characters; the cap is \(CrossProjectMessage.maxBodyLength). It lands "
+                    + "in another project's context window at their expense, so send the point, not the transcript."
+            )
+        }
+        let sent = try messages.send(
+            fromProjectId: identity.projectId, fromSessionId: identity.sessionId, toProjectId: recipient.id, body: body
+        )
+        await events.reportQueued(projectId: recipient.id)
+        return ToolResult(
+            text: "Queued for \"\(recipient.name)\" (\(recipient.id)) as message \(sent.message.id.map(String.init) ?? "?"). "
+                + "That project's orchestrator will see it the next time it pulls its reports; it may not be running, "
+                + "and nothing tells you when or whether it reads it."
+        )
     }
 
     // MARK: Epics
