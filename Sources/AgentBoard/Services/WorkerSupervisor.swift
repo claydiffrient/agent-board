@@ -605,7 +605,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func resume(sessionId: String) async throws {
         try await recording {
             let session = try requireSession(sessionId)
-            try await resume(session, prompt: Self.resumePrompt(previousStop: session.stopReason))
+            let placement = try projects.get(session.projectId).map {
+                WorkerStanding.recorded(session: session, project: $0, taskId: session.taskId ?? "").placement
+            } ?? .worktree
+            try await resume(
+                session,
+                prompt: Self.resumePrompt(previousStop: session.stopReason, placement: placement)
+            )
         }
     }
 
@@ -1604,13 +1610,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             .path
     }
 
-    static func resumePrompt(previousStop: String?) -> String {
+    /// The commit step differs by placement: `git commit` is refused in a shared checkout, so a
+    /// resumed co-resident worker told to "commit on this branch" is sent at a command that fails.
+    static func resumePrompt(previousStop: String?, placement: WorkerPlacement = .worktree) -> String {
         var lines = ["Agent Board resumed this session. Continue your task from where you left off; check `git status` and `git log` first."]
         if let previousStop, !previousStop.isEmpty {
             lines.append("The previous run was stopped by Agent Board: \(previousStop).")
         }
+        let commit = placement.sharedBranch == nil
+            ? "commit on this branch"
+            : "commit by calling `\(OpeningPrompt.commitToolName)`"
         lines.append(
-            "When finished: commit on this branch, do not push, call `report_complete`. "
+            "When finished: \(commit), do not push, call `report_complete`. "
             + "If a resume or a compaction has left you without the instructions you were spawned with, "
             + "read the MCP resource `\(BriefingResourceURI.worker)` — it returns them in full."
         )

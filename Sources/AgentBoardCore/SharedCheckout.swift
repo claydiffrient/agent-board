@@ -114,3 +114,40 @@ public enum WorkerPlacementDecision {
         }
     }
 }
+
+/// Where a worker is actually standing, read back from its own session row.
+///
+/// A resource read carries no arguments, so a briefing has only the token's identity to go on.
+/// Deriving the branch from the task id yields `agentboard/<task-id>`, which is the branch a
+/// worktree worker is on and is not the branch a shared-checkout worker is on: a shared branch is
+/// cut once per base and its name carries that base rather than any one task. The session row
+/// records the branch and the worktree path already — the same pair `SharedCheckoutGroup` rebuilds
+/// its membership from.
+public struct WorkerStanding: Sendable, Equatable {
+    public var branch: String
+    public var placement: WorkerPlacement
+    public var workingDirectory: String?
+
+    public init(branch: String, placement: WorkerPlacement, workingDirectory: String? = nil) {
+        self.branch = branch
+        self.placement = placement
+        self.workingDirectory = workingDirectory
+    }
+
+    /// A nil `session` is the pre-spawn case: nothing is recorded yet, so the task-id branch is the
+    /// only answer available and the placement is the default.
+    public static func recorded(session: AgentSession?, project: Project, taskId: String) -> WorkerStanding {
+        guard let session else {
+            return WorkerStanding(branch: TaskStore.branchName(for: taskId), placement: .worktree)
+        }
+        guard let branch = session.branch else {
+            return WorkerStanding(
+                branch: TaskStore.branchName(for: taskId), placement: .worktree, workingDirectory: session.cwd
+            )
+        }
+        let placement: WorkerPlacement = SharedCheckoutGroup.isMember(session, of: project)
+            ? .shared(branch: branch)
+            : .worktree
+        return WorkerStanding(branch: branch, placement: placement, workingDirectory: session.cwd)
+    }
+}

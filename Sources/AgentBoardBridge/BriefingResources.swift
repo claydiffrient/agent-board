@@ -11,9 +11,11 @@ import Foundation
 /// session that fetches one cannot be handed text that has drifted from what it was spawned with.
 public struct BriefingResourceHandler: ResourceHandler {
     private let projects: ProjectStore
+    private let sessions: SessionStore
 
     public init(db: AppDatabase) {
         projects = ProjectStore(db)
+        sessions = SessionStore(db)
     }
 
     public func resources(for identity: TokenIdentity) async throws -> [ResourceDescriptor] {
@@ -24,7 +26,7 @@ public struct BriefingResourceHandler: ResourceHandler {
                 uri: BriefingResourceURI.worker,
                 name: "Worker protocol",
                 description: "The standing How to work and When you are done sections you were spawned with — "
-                    + "worktree rules, when to search notes, and the completion protocol. "
+                    + "where you are working and on which branch, when to search notes, and the completion protocol. "
                     + "Read it after a resume or a compaction, when those instructions are no longer in context.",
                 mimeType: Self.mimeType
             )]
@@ -46,7 +48,17 @@ public struct BriefingResourceHandler: ResourceHandler {
             guard let taskId = identity.taskId else {
                 throw ResourceError(uri: uri, message: "This token is not bound to a task, so it has no branch to render.")
             }
-            return [contents(uri, OpeningPrompt.workingProtocol(branch: TaskStore.branchName(for: taskId)))]
+            guard let project = try projects.get(identity.projectId) else {
+                throw ResourceError(uri: uri, message: "No project \(identity.projectId).")
+            }
+            let standing = WorkerStanding.recorded(
+                session: try callerSession(identity, taskId: taskId), project: project, taskId: taskId
+            )
+            return [contents(uri, OpeningPrompt.workingProtocol(
+                branch: standing.branch,
+                placement: standing.placement,
+                workingDirectory: standing.workingDirectory
+            ))]
         case (BriefingResourceURI.orchestrator, .orchestrator):
             guard let project = try projects.get(identity.projectId) else {
                 throw ResourceError(uri: uri, message: "No project \(identity.projectId).")
@@ -55,6 +67,15 @@ public struct BriefingResourceHandler: ResourceHandler {
         default:
             throw ResourceError(uri: uri, message: Self.refusal(for: identity))
         }
+    }
+
+    /// The token is bound to the session once the worker is spawned; before that it is bound only
+    /// to the task, and the newest row for the task is the one that was just written for it.
+    private func callerSession(_ identity: TokenIdentity, taskId: String) throws -> AgentSession? {
+        if let sessionId = identity.sessionId, let session = try sessions.get(sessionId) {
+            return session
+        }
+        return try sessions.forTask(taskId).first
     }
 
     static let mimeType = "text/markdown"

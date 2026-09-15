@@ -139,7 +139,7 @@ public enum OpeningPrompt {
     }
 
     /// Named here rather than imported from the server target, which Core does not depend on.
-    static let commitToolName = "commit_my_work"
+    public static let commitToolName = "commit_my_work"
 
     static func commitStep(placement: WorkerPlacement) -> String {
         switch placement {

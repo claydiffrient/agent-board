@@ -18,7 +18,7 @@ final class BriefingResourceTests: XCTestCase {
         resources = BriefingResourceHandler(db: f.db)
         let task = try f.task("t", column: .running)
         taskId = task.id
-        try f.session("s1", taskId: task.id)
+        try f.worktreeSession("s1", taskId: task.id)
         worker = f.workerIdentity(sessionId: "s1", taskId: task.id)
     }
 
@@ -38,18 +38,92 @@ final class BriefingResourceTests: XCTestCase {
 
     // MARK: The worker protocol
 
+    /// Against the branch the session row actually carries, not a second computation of
+    /// `agentboard/<task-id>`: the bug this replaced was that the resource and its test derived the
+    /// branch the same way, so both were wrong together for a shared-checkout worker and the test
+    /// still passed.
     func testTheWorkerProtocolResourceIsByteIdenticalToTheTextASpawnComposes() async throws {
+        let session = try XCTUnwrap(f.sessions.get("s1"))
+        let recorded = try XCTUnwrap(session.branch)
         let served = try await read(BriefingResourceURI.worker, as: worker)
-        XCTAssertEqual(served, OpeningPrompt.workingProtocol(branch: "agentboard/\(taskId!)"))
+
+        XCTAssertEqual(
+            served,
+            OpeningPrompt.workingProtocol(branch: recorded, placement: .worktree, workingDirectory: session.cwd)
+        )
     }
 
     func testTheProtocolIsRenderedForTheCallersOwnBranch() async throws {
         let other = try f.task("other", column: .running)
-        try f.session("s2", taskId: other.id)
+        try f.worktreeSession("s2", taskId: other.id)
         let served = try await read(BriefingResourceURI.worker, as: f.workerIdentity(sessionId: "s2", taskId: other.id))
 
         XCTAssertTrue(served.contains("agentboard/\(other.id)"), "the protocol named someone else's branch")
         XCTAssertFalse(served.contains(taskId), "the protocol named someone else's branch")
+    }
+
+    // MARK: Which branch the worker is actually on
+
+    func testAWorktreeWorkerIsServedItsOwnTaskBranch() async throws {
+        let served = try await read(BriefingResourceURI.worker, as: worker)
+
+        XCTAssertTrue(served.contains("`agentboard/\(taskId!)`"), served)
+        XCTAssertTrue(served.contains("dedicated git worktree"), served)
+        XCTAssertFalse(served.contains(SharedCheckoutGroup.branchPrefix), served)
+    }
+
+    /// A shared branch is cut once per base and its name carries that base, so a co-resident worker
+    /// is never on `agentboard/<task-id>`. Telling it to commit there names a branch that does not
+    /// exist and, if it did, is not the one under its feet.
+    func testASharedCheckoutWorkerIsServedTheSharedBranchItIsStandingOn() async throws {
+        let epic = try f.epic("Shared work")
+        let task = try f.task("co-resident", column: .running, epicId: epic.id)
+        let shared = SharedCheckoutGroup.branch(epicId: epic.id)
+        try f.sharedSession("s-shared", taskId: task.id, branch: shared)
+
+        let served = try await read(
+            BriefingResourceURI.worker, as: f.workerIdentity(sessionId: "s-shared", taskId: task.id)
+        )
+
+        XCTAssertTrue(served.contains("`\(shared)`"), served)
+        XCTAssertFalse(
+            served.contains("agentboard/\(task.id)"),
+            "the protocol named the task-id branch, which a shared-checkout worker is not on"
+        )
+    }
+
+    /// The branch is only half of what the placement decides; a shared worker that follows the
+    /// worktree closeout runs `git commit`, which the checkout refuses.
+    func testASharedCheckoutWorkerIsServedTheSharedCheckoutProtocolAndNotTheWorktreeOne() async throws {
+        let task = try f.task("co-resident", column: .running)
+        try f.sharedSession("s-shared", taskId: task.id)
+
+        let served = try await read(
+            BriefingResourceURI.worker, as: f.workerIdentity(sessionId: "s-shared", taskId: task.id)
+        )
+
+        XCTAssertTrue(served.contains("commit_my_work"), served)
+        XCTAssertTrue(served.contains("This is not a worktree of your own"), served)
+        XCTAssertFalse(served.contains("dedicated git worktree"), served)
+    }
+
+    /// The resource is read back after a compaction, when the session has been resumed and the
+    /// token is bound to the resumed session rather than the setup row.
+    func testTheProtocolFollowsTheSessionTheTokenIsBoundTo() async throws {
+        let task = try f.task("moved", column: .running)
+        try f.worktreeSession("isolated", taskId: task.id)
+        try f.sharedSession("co-resident", taskId: task.id, branch: "agentboard/shared-epic-abc")
+
+        let isolated = try await read(
+            BriefingResourceURI.worker, as: f.workerIdentity(sessionId: "isolated", taskId: task.id)
+        )
+        let coResident = try await read(
+            BriefingResourceURI.worker, as: f.workerIdentity(sessionId: "co-resident", taskId: task.id)
+        )
+
+        XCTAssertTrue(isolated.contains("`agentboard/\(task.id)`"), isolated)
+        XCTAssertTrue(coResident.contains("`agentboard/shared-epic-abc`"), coResident)
+        XCTAssertNotEqual(isolated, coResident)
     }
 
     func testAWorkerListsTheProtocolAndNotTheOrchestratorBriefing() async throws {
@@ -139,8 +213,14 @@ final class BriefingResourceTests: XCTestCase {
             [NoteResourceURI.uri(projectId: f.project.id, noteId: note.id), BriefingResourceURI.worker]
         )
 
+        let session = try XCTUnwrap(f.sessions.get("s1"))
         let protocolText = try await composite.read(BriefingResourceURI.worker, identity: worker)
-        XCTAssertEqual(protocolText.first?.text, OpeningPrompt.workingProtocol(branch: "agentboard/\(taskId!)"))
+        XCTAssertEqual(
+            protocolText.first?.text,
+            OpeningPrompt.workingProtocol(
+                branch: try XCTUnwrap(session.branch), placement: .worktree, workingDirectory: session.cwd
+            )
+        )
 
         let noteText = try await composite.read(
             NoteResourceURI.uri(projectId: f.project.id, noteId: note.id), identity: worker

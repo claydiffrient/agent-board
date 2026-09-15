@@ -487,9 +487,11 @@ public final class OrchestratorToolHandler: ToolHandler {
             let placement = destination.map { "already in epic \($0.id)" } ?? "already outside any epic"
             return ToolResult(text: "Task \(task.id) is \(placement); nothing changed.")
         }
-        guard try sessions.forTask(task.id).isEmpty else {
+        let spawned = try sessions.forTask(task.id)
+        guard spawned.isEmpty else {
+            let branch = spawned.compactMap(\.branch).first ?? TaskStore.branchName(for: task.id)
             throw ToolError(
-                "Task \(task.id) has already been spawned: its branch \(TaskStore.branchName(for: task.id)) was cut "
+                "Task \(task.id) has already been spawned: its branch \(branch) was cut "
                     + "from the base its epic had at spawn time, and moving the task now would not move the commits. "
                     + "Integrating the new epic would merge a branch the work was never based on."
             )
