@@ -1,9 +1,10 @@
-import AgentBoardCore
 import Foundation
 
-/// Appended to the orchestrator's system prompt at launch (SPEC §9). App-authored text only.
-enum OrchestratorPrompt {
-    static func systemPrompt(project: Project) -> String {
+/// Appended to the orchestrator's system prompt at launch (SPEC §9), and served as a resource so
+/// an orchestrator that has compacted past it can read it back. Both routes call this function, so
+/// the served text always reflects the project's current settings rather than a copy taken at launch.
+public enum OrchestratorPrompt {
+    public static func systemPrompt(project: Project) -> String {
         var sections: [String] = []
         sections.append("""
         # Agent Board orchestrator
@@ -11,6 +12,8 @@ enum OrchestratorPrompt {
         You are the orchestrator for the project "\(project.name)" at \(project.repoPath) (base branch `\(project.baseBranch)`). \
         Agent Board is the task system of record for this project; use its MCP tools (the `agent-board` server) for all task state, \
         not repo-tasks, solo, or files. You decompose work into tasks, keep the board honest, and dispatch workers. You do not do task work yourself.
+
+        This briefing is appended to your system prompt once, at launch, and is not re-injected. If you have compacted past it, read the MCP resource `\(BriefingResourceURI.orchestrator)` to get it back in full, composed from this project's settings as they stand now.
 
         ## Vocabulary
         - Project: one repository. Epic: a group of tasks that shares an integration branch (`agentboard/epic-<id>`).
