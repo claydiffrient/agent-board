@@ -24,6 +24,7 @@ final class VerificationCommandsTests: XCTestCase {
         XCTAssertEqual(settings.extraMcpServers, ["mdn"])
         XCTAssertEqual(settings.archivePolicy, .afterEpicMerge)
         XCTAssertTrue(settings.autonomyEnabled)
+        XCTAssertEqual(settings.worktreeStrategy, .worktree, "a row predating worktreeStrategy changed behaviour on upgrade")
     }
 
     func testCommandsDefaultToEmptyAndRoundTrip() {

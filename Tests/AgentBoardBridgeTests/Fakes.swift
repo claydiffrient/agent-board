@@ -58,6 +58,7 @@ struct BridgeFixture {
     let worker: WorkerToolHandler
     let scoped: ScopedToolHandler
     let hooks: StoreHookSink
+    var commits: RecordingScopedCommits?
 
     var projects: ProjectStore { ProjectStore(db) }
     var tasks: TaskStore { TaskStore(db) }
@@ -72,7 +73,9 @@ struct BridgeFixture {
         TokenIdentity(token: "orch", scope: .orchestrator, projectId: project.id, sessionId: "orch-session")
     }
 
-    static func make() throws -> BridgeFixture {
+    static func make(
+        lockWait: FileLockWaitPolicy = .default, scopedCommits: RecordingScopedCommits? = nil
+    ) throws -> BridgeFixture {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
             name: "Demo",
@@ -84,7 +87,7 @@ struct BridgeFixture {
         let events = RecordingEventSink()
         let control = FakeWorkerControl()
         let orchestrator = OrchestratorToolHandler(db: db, control: control, events: events)
-        let worker = WorkerToolHandler(db: db, events: events)
+        let worker = WorkerToolHandler(db: db, events: events, scopedCommits: scopedCommits)
         return BridgeFixture(
             db: db,
             project: project,
@@ -93,7 +96,8 @@ struct BridgeFixture {
             orchestrator: orchestrator,
             worker: worker,
             scoped: ScopedToolHandler(worker: worker, orchestrator: orchestrator),
-            hooks: StoreHookSink(db: db, events: events)
+            hooks: StoreHookSink(db: db, events: events, lockWait: lockWait),
+            commits: scopedCommits
         )
     }
 
@@ -118,10 +122,22 @@ struct BridgeFixture {
     }
 
     @discardableResult
-    func session(_ id: String, role: SessionRole = .worker, state: SessionState = .running, taskId: String? = nil) throws -> AgentSession {
-        let session = AgentSession(sessionId: id, projectId: project.id, taskId: taskId, role: role, cwd: "/tmp", state: state)
+    func session(
+        _ id: String, role: SessionRole = .worker, state: SessionState = .running, taskId: String? = nil,
+        worktreePath: String? = nil, cwd: String? = nil
+    ) throws -> AgentSession {
+        let session = AgentSession(
+            sessionId: id, projectId: project.id, taskId: taskId, role: role,
+            worktreePath: worktreePath, cwd: cwd ?? worktreePath ?? "/tmp", state: state
+        )
         try sessions.insert(session)
         return session
+    }
+
+    /// A worker co-resident in the project's own checkout: no worktree, standing in the repo.
+    @discardableResult
+    func sharedSession(_ id: String, taskId: String, state: SessionState = .running) throws -> AgentSession {
+        try session(id, role: .worker, state: state, taskId: taskId, cwd: project.repoPath)
     }
 
     @discardableResult
@@ -173,6 +189,20 @@ struct BridgeFixture {
         let event = HookEvent(name: "PreToolUse", sessionId: sessionId, toolName: tool, toolCommand: command, rawJSON: "{}")
         return await hooks.handle(event, identity: identity)
     }
+
+    /// A write the way Claude Code reports one: the tool name plus the file it is about to touch.
+    func preToolUseWrite(
+        _ filePath: String, sessionId: String, identity: TokenIdentity, tool: String = "Edit"
+    ) async -> HookDecision? {
+        let event = HookEvent(
+            name: "PreToolUse", sessionId: sessionId, toolName: tool, toolFilePath: filePath, rawJSON: "{}"
+        )
+        return await hooks.handle(event, identity: identity)
+    }
+
+    func repoFile(_ relative: String) -> String {
+        project.repoPath + "/" + relative
+    }
 }
 
 func XCTAssertToolError<T>(
@@ -190,5 +220,26 @@ func XCTAssertToolError<T>(
         }
     } catch {
         XCTFail("Expected ToolError, got \(error)", file: file, line: line)
+    }
+}
+
+
+/// Stands in for `ScopedCommitRunner`, which lives in AgentBoardRuntime — a target this one does
+/// not depend on. What matters here is the request the tool builds, not what git does with it.
+final class RecordingScopedCommits: ScopedCommitting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [ScopedCommitRequest] = []
+    var outcome: ScopedCommitOutcome?
+
+    var requests: [ScopedCommitRequest] {
+        lock.lock(); defer { lock.unlock() }
+        return recorded
+    }
+
+    func commit(_ request: ScopedCommitRequest) async throws -> ScopedCommitOutcome {
+        lock.lock()
+        recorded.append(request)
+        lock.unlock()
+        return outcome ?? .committed(sha: String(repeating: "a", count: 40), paths: request.paths)
     }
 }

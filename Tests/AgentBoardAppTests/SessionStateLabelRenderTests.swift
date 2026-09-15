@@ -27,10 +27,12 @@ final class SessionStateLabelRenderTests: XCTestCase {
         XCTAssertNotEqual(try render(.setup), try render(.starting))
     }
 
-    func testSetupReadsAsAPhaseNotAState() {
+    func testSetupAndWaitingOnALockReadAsPhasesNotStates() {
         XCTAssertEqual(SessionState.setup.label, "setting up")
+        XCTAssertEqual(SessionState.waitingOnLock.label, "waiting on a file")
         XCTAssertNotNil(SessionState.setup.help)
-        for state in SessionState.allCases where state != .setup {
+        XCTAssertNotNil(SessionState.waitingOnLock.help)
+        for state in SessionState.allCases where state != .setup && state != .waitingOnLock {
             XCTAssertEqual(state.label, state.rawValue)
         }
     }

@@ -1,3 +1,4 @@
+import AgentBoardCore
 import Foundation
 
 public struct CapLimits: Sendable, Equatable {
@@ -28,12 +29,17 @@ public enum CapEvaluator {
     }
 
     /// Checks tokens, then wall clock, then idle; a missing `lastActivity` idles from `startedAt`.
+    ///
+    /// `state` only excuses the idle check. A session that is waiting on a file lock, blocked, or
+    /// still in setup makes no tool call by design, and killing it would throw away exactly the work
+    /// it is waiting to do; the token and wall-clock caps still apply to it unchanged.
     public static func evaluate(
         totals: UsageTotals,
         startedAt: Date,
         lastActivity: Date?,
         now: Date,
-        limits: CapLimits
+        limits: CapLimits,
+        state: SessionState = .running
     ) -> CapBreach? {
         let used = countedTokens(totals)
         if let maxTokens = limits.maxTokens, used >= maxTokens {
@@ -43,6 +49,7 @@ public enum CapEvaluator {
         if elapsed >= TimeInterval(limits.maxWallClockSeconds) {
             return .wallClock(elapsed: elapsed, limit: TimeInterval(limits.maxWallClockSeconds))
         }
+        guard !state.idlesByDesign else { return nil }
         let since = lastActivity ?? startedAt
         if now.timeIntervalSince(since) >= TimeInterval(limits.maxIdleSeconds) {
             return .idle(since: since, limit: TimeInterval(limits.maxIdleSeconds))

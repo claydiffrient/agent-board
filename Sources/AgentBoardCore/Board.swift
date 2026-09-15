@@ -307,6 +307,7 @@ public struct Board: Sendable {
             // `review` for a human, exactly as before.
             try TaskStore.move(db, taskId, to: sweepsOnMerge ? .done : .review, before: nil)
             try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
+            try FileLockStore.releaseAll(db, sessionId: sessionId)
             if let mergedEpicId {
                 try EpicStore.setState(db, mergedEpicId, .done)
                 if sweepsOnMerge {
@@ -340,6 +341,32 @@ public struct Board: Sendable {
             )
             try TaskStore.setBlocked(db, taskId, true, reason: reason)
             try SessionStore.setState(db, sessionId, .blocked, endedAt: nil)
+            return report
+        }
+    }
+
+    /// What a shared-checkout worker's `report_blocked` does when it gave up waiting for another
+    /// session's file lock: unlike an ordinary block, the task goes back to `ready` and the session
+    /// ends, because the work is queued behind a file rather than behind a human.
+    @discardableResult
+    public func blockOnFileLock(taskId: String, sessionId: String, reason: String) throws -> Report {
+        try db.writer.write { db in
+            let task = try Self.requireTask(db, taskId)
+            let report = try ReportStore.insert(
+                db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .blocked,
+                body: reason + "\n\nThe task is back in ready; dispatch it again once the file is free."
+            )
+            try TaskStore.setBlocked(db, taskId, true, reason: reason)
+            if task.column == .running {
+                try TaskStore.move(db, taskId, to: .ready, before: nil)
+            }
+            try SessionStore.setState(db, sessionId, .stopped, endedAt: .nowMillis)
+            try SessionStore.setStopReason(db, sessionId, reason)
+            try db.execute(
+                sql: "UPDATE agent_session SET blocked_on_path = NULL WHERE session_id = ?",
+                arguments: [sessionId]
+            )
+            try FileLockStore.releaseAll(db, sessionId: sessionId)
             return report
         }
     }
@@ -417,6 +444,10 @@ public struct Board: Sendable {
             let reason = cause.reason
             try SessionStore.setState(db, sessionId, cause.sessionState, endedAt: .nowMillis)
             try SessionStore.setStopReason(db, sessionId, reason)
+            // Every route out of a session lands here or in `complete`: a cap kill, a human stop,
+            // a vanished process, a failed setup, an acknowledged wind-down. A lock that outlived
+            // one of them would block the checkout with nobody behind it.
+            try FileLockStore.releaseAll(db, sessionId: sessionId)
             guard session.role == .worker, let taskId = session.taskId,
                   let task = try Task.fetchOne(db, key: taskId)
             else { return nil }

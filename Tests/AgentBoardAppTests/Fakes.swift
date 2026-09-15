@@ -147,6 +147,34 @@ struct SupervisorFixture {
         )
     }
 
+    func setWorktreeStrategy(_ strategy: WorktreeStrategy, maxAgents: Int? = nil) throws {
+        var settings = project.settings
+        settings.worktreeStrategy = strategy
+        if let maxAgents { settings.sharedCheckoutMaxAgents = maxAgents }
+        try ProjectStore(db).updateSettings(project.id, settings)
+    }
+
+    /// A second supervisor over the same database and support directory: what the next launch of
+    /// the app builds, with everything the previous one wrote still on disk and in the tables.
+    func relaunchedSupervisor() -> WorkerSupervisor {
+        let sink = LateBoundSink()
+        let server = BoardServer(
+            tokens: StoreTokenResolver(db: db),
+            hooks: StoreHookSink(db: db, events: sink),
+            tools: ScopedToolHandler(
+                worker: WorkerToolHandler(db: db, events: sink),
+                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink)
+            )
+        )
+        let supervisor = WorkerSupervisor(
+            db: db, runtime: runtime, server: server, appSupportDir: supportDir,
+            worktreeBase: worktreeBase,
+            projectsRoot: supportDir.appendingPathComponent("claude-projects")
+        )
+        sink.target = supervisor
+        return supervisor
+    }
+
     var manager: WorktreeManager {
         WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),

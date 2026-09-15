@@ -79,6 +79,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let notes: NoteStore
     @ObservationIgnored private let board: Board
     @ObservationIgnored private let archives: ArchiveSweep
+    @ObservationIgnored private let fileLocks: FileLockStore
     @ObservationIgnored private var meteringTask: _Concurrency.Task<Void, Never>?
     /// Millis of the last archive sweep; 0 means none yet, so the first tick after launch sweeps
     /// and picks up whatever came due while the app was closed.
@@ -124,6 +125,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         notes = NoteStore(db)
         board = Board(db)
         archives = ArchiveSweep(db)
+        fileLocks = FileLockStore(db)
     }
 
     private var sessionConfigDir: URL { appSupportDir.appendingPathComponent("sessions") }
@@ -140,6 +142,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             lastError = describe(error)
         }
         failInterruptedSetups()
+        sweepStaleFileLocks()
         await migrateWorktreeRoots()
         startMetering()
     }
@@ -223,13 +226,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
 
         let attempt = try sessions.forTask(taskId).count + 1
-        let branch = Self.taskBranchPrefix + taskId
         let manager = WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
         )
-        let warnings = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
         let epic = try task.epicId.flatMap { try epics.get($0) }
+        let placement = WorkerPlacementDecision.decide(
+            strategy: project.settings.worktreeStrategy,
+            wantedSharedBranch: SharedCheckoutGroup.branch(epicId: task.epicId),
+            group: try SharedCheckoutGroup.current(db: db, projectId: project.id)
+        )
+        // Before the first git command either way: `git worktree add` fires the repository's
+        // post-checkout hook, so a path that hook cannot survive has to be named while nothing has
+        // run yet. A shared placement creates no path, so it has nothing to judge and says nothing.
+        let warnings = placement == .worktree
+            ? preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
+            : clearedWorktreePathWarning()
         let base: String
         if let epic {
             let epicBranch = epic.branch
@@ -239,15 +251,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } else {
             base = project.baseBranch
         }
-        let worktree = try await offMain {
-            try Self.existingWorktree(manager, name: taskId) ?? manager.create(name: taskId, branch: branch, base: base)
-        }
+        let site = try await checkoutSite(
+            project: project, taskId: taskId, placement: placement, base: base, manager: manager,
+            warnings: warnings
+        )
+        let branch = site.branch
 
         do {
             let placeholder = try board.assign(
                 taskId: taskId,
                 session: Self.setupRow(
-                    projectId: project.id, taskId: taskId, worktree: worktree, branch: branch, attempt: attempt
+                    projectId: project.id, taskId: taskId, site: site, attempt: attempt
                 )
             )
             if let epic, epic.state == .planning {
@@ -257,7 +271,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 LaunchPlan(
                     project: project,
                     taskId: taskId,
-                    worktree: worktree,
+                    cwd: site.cwd,
+                    worktreePath: site.worktreePath,
                     branch: branch,
                     configId: Self.configId(taskId: taskId, attempt: placeholder.attempt),
                     name: Self.sessionName(for: task),
@@ -266,7 +281,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         notes: try notes.notesForSpawn(
                             projectId: project.id, taskId: taskId, epicId: task.epicId
                         ),
-                        verification: project.settings.verification
+                        verification: project.settings.verification,
+                        placement: site.placement,
+                        workingDirectory: site.cwd.path
                     ),
                     model: task.model ?? project.settings.defaultModel,
                     attempt: placeholder.attempt
@@ -275,25 +292,74 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 port: port
             )
             return WorkerSpawn(
-                setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch,
-                warnings: warnings
+                setupSessionId: placeholder.sessionId, worktreePath: site.cwd.path, branch: branch,
+                sharesCheckout: site.placement.sharedBranch != nil, warnings: site.warnings
             )
         } catch {
-            throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
+            throw SupervisorError.spawnFailed(worktree: site.cwd.path, underlying: describe(error))
         }
     }
 
+    /// Where a worker will run, once the strategy, the group holding the checkout and git have all
+    /// had their say.
+    private struct CheckoutSite {
+        var placement: WorkerPlacement
+        var cwd: URL
+        /// Nil for a shared checkout: there is no worktree to record, move, diff or tear down.
+        var worktreePath: String?
+        var branch: String
+        var warnings: [String]
+    }
+
+    /// Carries out the placement. A `shared` one that git will not accept — a dirty checkout, or a
+    /// branch another worktree holds — degrades to a worktree with a notice rather than failing the
+    /// spawn.
+    private func checkoutSite(
+        project: Project, taskId: String, placement: WorkerPlacement, base: String,
+        manager: WorktreeManager, warnings: [String]
+    ) async throws -> CheckoutSite {
+        if let sharedBranch = placement.sharedBranch {
+            let repo = URL(fileURLWithPath: project.repoPath)
+            do {
+                try await offMain { try manager.adoptSharedBranch(sharedBranch, from: base) }
+                return CheckoutSite(
+                    placement: placement, cwd: repo, worktreePath: nil, branch: sharedBranch, warnings: warnings
+                )
+            } catch {
+                report(["\(project.name): the shared checkout could not be used, so this task got a worktree. \(describe(error))"])
+            }
+        }
+        let branch = Self.taskBranchPrefix + taskId
+        let fallbackWarnings = placement == .worktree
+            ? warnings
+            : preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
+        let worktree = try await offMain {
+            try Self.existingWorktree(manager, name: taskId) ?? manager.create(name: taskId, branch: branch, base: base)
+        }
+        return CheckoutSite(
+            placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch,
+            warnings: fallbackWarnings
+        )
+    }
+
+    /// A shared placement creates no path, so a warning left over from an earlier spawn would be
+    /// read as this one's.
+    private func clearedWorktreePathWarning() -> [String] {
+        lastWorktreePathWarning = nil
+        return []
+    }
+
     private static func setupRow(
-        projectId: String, taskId: String, worktree: URL, branch: String, attempt: Int
+        projectId: String, taskId: String, site: CheckoutSite, attempt: Int
     ) -> AgentSession {
         AgentSession(
             sessionId: "setup-\(UUID().uuidString)",
             projectId: projectId,
             taskId: taskId,
             role: .worker,
-            worktreePath: worktree.path,
-            branch: branch,
-            cwd: worktree.path,
+            worktreePath: site.worktreePath,
+            branch: site.branch,
+            cwd: site.cwd.path,
             state: .setup,
             attempt: attempt
         )
@@ -336,6 +402,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         MacNotifier.post(title: "Worker never started", body: detail)
     }
 
+    /// A lock held by a session the last run of the app never saw end — a killed process, a crash —
+    /// would keep a file in the shared checkout claimed by nobody. Same shape as
+    /// `failInterruptedSetups`: sweep it at launch, before any worker can contend for it.
+    @discardableResult
+    func sweepStaleFileLocks() -> [FileLock] {
+        let swept = (try? fileLocks.sweepStale()) ?? []
+        for lock in swept {
+            FileHandle.standardError.write(
+                Data("stale file lock released: \(lock.path) (session \(lock.sessionId))\n".utf8)
+            )
+        }
+        return swept
+    }
+
     /// A setup that was still running when Agent Board quit has no process behind it any more, and
     /// its task would otherwise sit in `running` forever behind a session that will never start.
     private func failInterruptedSetups() {
@@ -355,7 +435,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private struct LaunchPlan {
         var project: Project
         var taskId: String
-        var worktree: URL
+        var cwd: URL
+        /// Nil when the worker runs in the project's own checkout.
+        var worktreePath: String?
         var branch: String
         var configId: String
         var name: String
@@ -371,7 +453,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let project = plan.project
         let memoryDir = URL(fileURLWithPath: project.memoryDir
             ?? ClaudeProjectPaths.memoryDir(forPath: project.repoPath, projectsRoot: projectsRoot).path)
-        _ = try ClaudeProjectPaths.linkMemory(worktreePath: plan.worktree.path, to: memoryDir, projectsRoot: projectsRoot)
+        _ = try ClaudeProjectPaths.linkMemory(worktreePath: plan.cwd.path, to: memoryDir, projectsRoot: projectsRoot)
 
         let grant = try grants.issue(projectId: project.id, scope: .worker, taskId: plan.taskId)
         do {
@@ -381,10 +463,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 port: port,
                 token: grant.token,
                 autoModeJSON: project.settings.autoModeJSON,
-                extraMcpServers: nil
+                extraMcpServers: nil,
+                fileLocks: plan.worktreePath == nil
             )
             let request = SpawnRequest(
-                cwd: plan.worktree,
+                cwd: plan.cwd,
                 name: plan.name,
                 prompt: plan.prompt,
                 configFiles: configFiles,
@@ -462,7 +545,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let placeholder = try board.assign(
                 taskId: task.id,
                 session: Self.setupRow(
-                    projectId: project.id, taskId: task.id, worktree: worktree, branch: epicBranch, attempt: 1
+                    projectId: project.id,
+                    taskId: task.id,
+                    site: CheckoutSite(
+                        placement: .worktree, cwd: worktree, worktreePath: worktree.path,
+                        branch: epicBranch, warnings: []
+                    ),
+                    attempt: 1
                 )
             )
             assigned = placeholder
@@ -471,7 +560,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 LaunchPlan(
                     project: project,
                     taskId: task.id,
-                    worktree: worktree,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
                     branch: epicBranch,
                     configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
                     name: Self.sessionName(for: task),
@@ -754,29 +844,63 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func worktreeDiffstat(taskId: String) async -> String? {
         guard let context = diffContext(taskId: taskId) else { return nil }
         return try? await offMain {
-            try context.manager.diffstat(worktree: context.worktree, against: context.base)
+            switch context.site {
+            case .worktree(let path):
+                return try context.manager.diffstat(worktree: path, against: context.base)
+            case .sharedBranch(let branch):
+                return try context.manager.diffstat(taskId: taskId, on: branch, since: context.base)
+            }
         }
     }
 
     func worktreeDiffSummary(taskId: String) async -> DiffSummary? {
         guard let context = diffContext(taskId: taskId) else { return nil }
         return try? await offMain {
-            try context.manager.diffSummary(worktree: context.worktree, against: context.base)
+            switch context.site {
+            case .worktree(let path):
+                return try context.manager.diffSummary(worktree: path, against: context.base)
+            case .sharedBranch(let branch):
+                return try context.manager.diffSummary(taskId: taskId, on: branch, since: context.base)
+            }
         }
     }
 
-    private func diffContext(taskId: String) -> (manager: WorktreeManager, worktree: URL, base: String)? {
+    private enum DiffSite {
+        case worktree(URL)
+        /// The task's commits are interleaved with its siblings' on one branch, so the diff is
+        /// selected by the attribution trailer rather than by the branch's whole range.
+        case sharedBranch(String)
+    }
+
+    private struct DiffContext {
+        var manager: WorktreeManager
+        var site: DiffSite
+        var base: String
+    }
+
+    private func diffContext(taskId: String) -> DiffContext? {
         guard let task = try? tasks.get(taskId),
               let project = try? projects.get(task.projectId),
-              let worktreePath = try? sessions.forTask(taskId)
-                  .compactMap(\.worktreePath)
-                  .first(where: { FileManager.default.fileExists(atPath: $0) })
+              let taskSessions = try? sessions.forTask(taskId)
         else { return nil }
         let manager = WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
         )
-        return (manager, URL(fileURLWithPath: worktreePath), project.baseBranch)
+        // A session with no worktree of its own ran in the shared checkout; its branch carries other
+        // tasks' commits too. Preferred over any worktree row, because a task that was retried into
+        // a worktree keeps that row and the shared path still answers for the shared attempt.
+        if let shared = taskSessions.last(where: { $0.worktreePath == nil && $0.branch != nil }),
+           let branch = shared.branch {
+            return DiffContext(manager: manager, site: .sharedBranch(branch), base: project.baseBranch)
+        }
+        guard let worktreePath = taskSessions
+            .map({ $0.worktreePath ?? $0.cwd })
+            .first(where: { FileManager.default.fileExists(atPath: $0) })
+        else { return nil }
+        return DiffContext(
+            manager: manager, site: .worktree(URL(fileURLWithPath: worktreePath)), base: project.baseBranch
+        )
     }
 
     /// A task branch that git no longer has is read from the ledger, never from its own absence:
@@ -910,7 +1034,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private nonisolated static func sweepMergedBranches(_ manager: WorktreeManager, bases: [String]) -> [String] {
         guard let branches = try? manager.localBranches(withPrefix: taskBranchPrefix) else { return [] }
         return branches
-            .filter { !$0.hasPrefix(EpicStore.branchPrefix) }
+            .filter { !$0.hasPrefix(EpicStore.branchPrefix) && !$0.hasPrefix(SharedCheckoutGroup.branchPrefix) }
             .flatMap { branch -> [String] in
                 do {
                     _ = try manager.deleteBranchIfMerged(branch, into: bases)
@@ -1390,9 +1514,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             startedAt: current.startedDate,
             lastActivity: lastActivity,
             now: Date(),
-            limits: limits
+            limits: limits,
+            state: current.state
         ) else { return }
-        if case .idle = breach, current.state == .blocked || current.state == .setup { return }
         await enforce(breach, on: current)
     }
 
@@ -1515,11 +1639,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         attempt: Int,
         epicGoal: String? = nil,
         notes: [InjectedNote] = [],
-        verification: VerificationCommands = VerificationCommands()
+        verification: VerificationCommands = VerificationCommands(),
+        placement: WorkerPlacement = .worktree,
+        workingDirectory: String? = nil
     ) -> String {
         OpeningPrompt.compose(
             task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes,
-            verification: verification
+            verification: verification, placement: placement, workingDirectory: workingDirectory
         )
     }
 

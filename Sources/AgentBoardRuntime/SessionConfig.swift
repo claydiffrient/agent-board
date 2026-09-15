@@ -1,3 +1,4 @@
+import AgentBoardCore
 import Foundation
 
 public struct SessionConfigFiles: Sendable, Equatable {
@@ -34,8 +35,8 @@ public struct JSONObjectString: Sendable, Equatable, ExpressibleByStringLiteral 
 
 public enum SessionConfigWriter {
     public static let httpHookEvents = ["UserPromptSubmit", "PostToolUse", "Notification", "Stop", "SessionEnd"]
-    /// `PreToolUse` is the app-side half of the push/PR block (§8). Matched to `Bash` so the
-    /// round trip is not paid on every tool call.
+    /// `PreToolUse` is the app-side half of the push/PR block (§8), and of the `git commit` block a
+    /// shared checkout adds. Matched to `Bash` so the round trip is not paid on every tool call.
     public static let guardedPreToolUseMatcher = "Bash"
 
     public static func settingsURL(configDir: URL, configId: String) -> URL {
@@ -61,11 +62,14 @@ public enum SessionConfigWriter {
         port: Int,
         token: String,
         autoModeJSON: String? = nil,
-        extraMcpServers: [String: JSONObjectString]? = nil
+        extraMcpServers: [String: JSONObjectString]? = nil,
+        fileLocks: Bool = false
     ) throws -> SessionConfigFiles {
         try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
 
-        let settings = try settingsObject(port: port, token: token, autoModeJSON: autoModeJSON)
+        let settings = try settingsObject(
+            port: port, token: token, autoModeJSON: autoModeJSON, fileLocks: fileLocks
+        )
         let mcp = try mcpConfigObject(port: port, token: token, extraMcpServers: extraMcpServers)
 
         let files = SessionConfigFiles(
@@ -77,7 +81,9 @@ public enum SessionConfigWriter {
         return files
     }
 
-    static func settingsObject(port: Int, token: String, autoModeJSON: String?) throws -> [String: Any] {
+    static func settingsObject(
+        port: Int, token: String, autoModeJSON: String?, fileLocks: Bool = false
+    ) throws -> [String: Any] {
         let url = hookURL(port: port, token: token)
         let httpHook: [String: Any] = ["type": "http", "url": url, "timeout": 5]
         let curlHook: [String: Any] = [
@@ -85,9 +91,20 @@ public enum SessionConfigWriter {
             "command": "curl -s -m 5 -X POST -H 'Content-Type: application/json' --data-binary @- '\(url)' >/dev/null",
         ]
 
+        var preToolUse: [[String: Any]] = [["matcher": guardedPreToolUseMatcher, "hooks": [httpHook]]]
+        if fileLocks {
+            // Its own entry rather than a wider matcher on the guard's: this one may hold the
+            // response for the whole of `FileLockPolicy.waitTimeout`, and every Bash call would
+            // otherwise inherit that timeout for nothing.
+            let lockHook: [String: Any] = [
+                "type": "http", "url": url, "timeout": FileLockPolicy.hookTimeoutSeconds,
+            ]
+            preToolUse.append(["matcher": FileLockPolicy.toolMatcher, "hooks": [lockHook]])
+        }
+
         var hooks: [String: Any] = [
             "SessionStart": [["hooks": [curlHook]]],
-            "PreToolUse": [["matcher": guardedPreToolUseMatcher, "hooks": [httpHook]]],
+            "PreToolUse": preToolUse,
         ]
         for event in httpHookEvents {
             hooks[event] = [["hooks": [httpHook]]]

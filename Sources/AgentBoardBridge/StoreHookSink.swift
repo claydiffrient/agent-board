@@ -10,6 +10,9 @@ public final class StoreHookSink: HookSink {
     private let progress: ProgressStore
     private let shutdowns: ShutdownOrderStore
     private let deliveries: ShutdownDeliveryStore
+    private let locks: FileLockStore
+    private let projectStore: ProjectStore
+    private let waitPolicy: FileLockWaitPolicy
     private let board: Board
     private let events: any BoardEventSink
     private let queue = DispatchQueue(label: "agent-board.hooks")
@@ -22,16 +25,28 @@ public final class StoreHookSink: HookSink {
         case reportQueued(projectId: String)
     }
 
+    /// A write whose file another live session holds. Carried out of `process` so the wait happens
+    /// off the hook queue, which every other session's hooks are still using.
+    private struct LockWait {
+        var projectId: String
+        var path: String
+        var sessionId: String
+        var taskId: String?
+        var holder: FileLock
+    }
+
     private struct Outcome {
         var followUps: [FollowUp] = []
         var decision: HookDecision?
+        var lockWait: LockWait?
 
         static let none = Outcome()
         static func follow(_ followUps: [FollowUp]) -> Outcome { Outcome(followUps: followUps) }
         static func deny(_ decision: HookDecision) -> Outcome { Outcome(decision: decision) }
+        static func wait(_ wait: LockWait) -> Outcome { Outcome(lockWait: wait) }
     }
 
-    public init(db: AppDatabase, events: any BoardEventSink) {
+    public init(db: AppDatabase, events: any BoardEventSink, lockWait: FileLockWaitPolicy = .default) {
         hookEvents = HookEventStore(db)
         grants = TokenGrantStore(db)
         sessions = SessionStore(db)
@@ -39,6 +54,9 @@ public final class StoreHookSink: HookSink {
         progress = ProgressStore(db)
         shutdowns = ShutdownOrderStore(db)
         deliveries = ShutdownDeliveryStore(db)
+        locks = FileLockStore(db)
+        projectStore = ProjectStore(db)
+        waitPolicy = lockWait
         board = Board(db)
         self.events = events
     }
@@ -59,7 +77,117 @@ public final class StoreHookSink: HookSink {
                 await events.reportQueued(projectId: projectId)
             }
         }
+        if let wait = outcome.lockWait {
+            return await awaitFileLock(wait)
+        }
         return outcome.decision
+    }
+
+    private func onQueue<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume(returning: work()) }
+        }
+    }
+
+    // MARK: - Per-file locks in a shared checkout
+
+    /// The lock a write has to hold before it runs, or nil when this session cannot collide with
+    /// anyone: an orchestrator, a worker in its own worktree, or a write outside the repository.
+    ///
+    /// A worktree worker never reaches here at all — the matcher that routes write tools to this
+    /// hook is only written into a shared session's settings file.
+    private func lockRequest(_ event: HookEvent, identity: TokenIdentity, sessionId: String) -> LockWait? {
+        guard identity.scope == .worker, !sessionId.isEmpty else { return nil }
+        guard let session = try? sessions.get(sessionId), session.role == .worker else { return nil }
+        guard session.worktreePath == nil else { return nil }
+        guard let project = try? projectStore.get(session.projectId) else { return nil }
+        guard let path = FileLockPolicy.key(filePath: event.toolFilePath, repoPath: project.repoPath)
+        else { return nil }
+        return LockWait(
+            projectId: session.projectId, path: path, sessionId: sessionId,
+            taskId: session.taskId ?? identity.taskId,
+            holder: FileLock(projectId: session.projectId, path: path, sessionId: sessionId)
+        )
+    }
+
+    private func isSharedWorker(_ identity: TokenIdentity, sessionId: String) -> Bool {
+        guard identity.scope == .worker, !sessionId.isEmpty else { return false }
+        guard let session = try? sessions.get(sessionId),
+              let project = try? projectStore.get(session.projectId)
+        else { return false }
+        return SharedCheckoutGroup.isMember(session, of: project)
+    }
+
+    private func claim(_ request: LockWait) -> Outcome {
+        guard let outcome = try? locks.acquire(
+            projectId: request.projectId, path: request.path,
+            sessionId: request.sessionId, taskId: request.taskId
+        ) else { return .none }
+        switch outcome {
+        case .acquired:
+            return .none
+        case .heldBy(let holder):
+            var wait = request
+            wait.holder = holder
+            return .wait(wait)
+        }
+    }
+
+    /// Re-claims on a timer rather than waiting for a signal: the holder may be a detached worker
+    /// in another process, so there is no in-process release to wake on.
+    private func pollUntilFree(_ wait: LockWait, from started: Date) async -> Bool {
+        while Date().timeIntervalSince(started) < waitPolicy.timeout {
+            try? await _Concurrency.Task.sleep(nanoseconds: UInt64(waitPolicy.pollInterval * 1_000_000_000))
+            let taken = await onQueue { [locks] in
+                guard let outcome = try? locks.acquire(
+                    projectId: wait.projectId, path: wait.path,
+                    sessionId: wait.sessionId, taskId: wait.taskId
+                ) else { return false }
+                if case .acquired = outcome { return true }
+                return false
+            }
+            if taken { return true }
+        }
+        return false
+    }
+
+    /// Holds the hook's response until the file frees or `waitPolicy.timeout` runs out. The session
+    /// sits in `waitingOnLock` for the duration, which is what keeps the idle cap and the stall
+    /// indicator off a worker that is doing exactly what it was told to do.
+    private func awaitFileLock(_ wait: LockWait) async -> HookDecision? {
+        let started = Date()
+        await onQueue { [sessions] in
+            try? sessions.setState(wait.sessionId, .waitingOnLock)
+        }
+        let acquired = await pollUntilFree(wait, from: started)
+        let waited = Date().timeIntervalSince(started)
+        return await onQueue { [sessions, progress, locks] in
+            // Only this session's own wait is being ended; anything that reached the row while it
+            // waited — a stop, a cap kill — owns the state now and must not be overwritten.
+            if (try? sessions.get(wait.sessionId))?.state == .waitingOnLock {
+                try? sessions.setState(wait.sessionId, .running)
+            }
+            // The waited seconds are not idleness, so they do not carry into the next idle window.
+            try? sessions.recordActivity(wait.sessionId, at: .nowMillis, lastTool: nil)
+            guard !acquired else {
+                if let taskId = wait.taskId {
+                    _ = try? progress.append(
+                        taskId: taskId, sessionId: wait.sessionId, kind: .status,
+                        text: "Waited \(Int(waited))s for \(wait.path) and took the lock."
+                    )
+                }
+                return nil
+            }
+            let holder = ((try? locks.holder(projectId: wait.projectId, path: wait.path)) ?? nil) ?? wait.holder
+            if let taskId = wait.taskId {
+                _ = try? progress.append(
+                    taskId: taskId, sessionId: wait.sessionId, kind: .error,
+                    text: "Gave up after \(Int(waited))s waiting for \(wait.path), held by session \(holder.sessionId)."
+                )
+                try? sessions.setBlockedOnPath(wait.sessionId, wait.path)
+            }
+            return .deny(FileLockPolicy.waitReason(path: wait.path, holder: holder, waited: waited))
+        }
     }
 
     /// SPEC §12: denying `PreToolUse` is the only way into a busy `--bg` worker mid-turn. It fires
@@ -103,8 +231,21 @@ public final class StoreHookSink: HookSink {
                 }
                 return .deny(.deny(violation.reason(for: identity.scope)))
             }
+            if SharedCheckoutGuard.deniesCommit(toolName: event.toolName, command: event.toolCommand),
+               isSharedWorker(identity, sessionId: sessionId) {
+                if let taskId = (try? sessions.get(sessionId))?.taskId ?? identity.taskId {
+                    _ = try? progress.append(
+                        taskId: taskId, sessionId: sessionId, kind: .error,
+                        text: "Blocked `git commit` in the shared checkout: \(event.toolCommand ?? "")"
+                    )
+                }
+                return .deny(.deny(SharedCheckoutGuard.commitReason))
+            }
             if let order = windDownToDeliver(sessionId: sessionId, identity: identity) {
                 return .deny(.deny(ShutdownOrder.windDownOrder(reason: order.reason, via: .hook)))
+            }
+            if FileLockPolicy.locks(toolName: event.toolName), let request = lockRequest(event, identity: identity, sessionId: sessionId) {
+                return claim(request)
             }
             return .none
         }
@@ -170,6 +311,7 @@ public final class StoreHookSink: HookSink {
             if session.state != .completed && session.state != .failed {
                 try? sessions.setState(sessionId, .stopped, endedAt: .nowMillis)
             }
+            try? locks.releaseAll(sessionId: sessionId)
 
         default:
             break

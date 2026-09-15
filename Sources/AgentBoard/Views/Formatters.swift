@@ -52,6 +52,7 @@ extension SessionState {
     var label: String {
         switch self {
         case .setup: "setting up"
+        case .waitingOnLock: "waiting on a file"
         default: rawValue
         }
     }
@@ -59,6 +60,7 @@ extension SessionState {
     var help: String? {
         switch self {
         case .setup: "The worktree is ready; the repository is still being prepared and the worker cannot work yet."
+        case .waitingOnLock: "Another agent in this shared checkout holds a file this worker is about to write."
         default: nil
         }
     }
@@ -70,6 +72,7 @@ extension SessionState {
         case .running: .green
         case .idle: .blue
         case .blocked: .orange
+        case .waitingOnLock: .yellow
         case .stopped: .secondary
         case .failed: .red
         case .completed: .teal
