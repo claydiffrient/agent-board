@@ -57,6 +57,16 @@ struct MainWindow: View {
             Text("Its projects stay in the sidebar and become ungrouped.")
         }
         .errorAlert($errorMessage)
+        .onChange(of: env.router.sequence) { openRoutedProject() }
+    }
+
+    /// A banner click selects its project through `select`, the same funnel the sidebar uses, so
+    /// the orchestrator starts exactly as it does on a click. The screen is `ProjectDetailView`'s.
+    private func openRoutedProject() {
+        guard let route = env.router.route,
+              projects.value.contains(where: { $0.id == route.projectId })
+        else { return }
+        select(.project(route.projectId))
     }
 
     private var sections: [ProjectSection] {
@@ -102,6 +112,7 @@ struct MainWindow: View {
                     workspaceMenu
                 }
                 .padding(8)
+                NotificationsOffNotice()
                 AccountUsageFooter()
             }
         }
@@ -276,6 +287,8 @@ struct MainWindow: View {
 struct ProjectDetailView: View {
     let project: Project
 
+    @Environment(AppEnvironment.self) private var env
+
     enum Screen: String, CaseIterable, Identifiable {
         case orchestrator = "Orchestrator"
         case board = "Task Board"
@@ -299,6 +312,9 @@ struct ProjectDetailView: View {
             }
         }
         .navigationTitle(project.name)
+        .task(id: env.router.sequence) {
+            if let route = env.router.route, route.projectId == project.id { screen = route.screen }
+        }
         .toolbar {
             ToolbarItem(placement: .principal) {
                 Picker("Screen", selection: $screen) {

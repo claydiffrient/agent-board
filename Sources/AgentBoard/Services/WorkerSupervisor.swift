@@ -1270,19 +1270,40 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     // MARK: - BoardEventSink
 
+    func notify(projectId: String, title: String, body: String) async {
+        await notify(projectId: projectId, sessionId: nil, title: title, body: body)
+    }
+
     /// The only producer of this event is the hook sink's "Agent needs input" path, which fires
     /// when a worker asked for input and nothing marked a task blocked — the blocked-worker
     /// category by any other name.
-    func notify(projectId: String, title: String, body: String) async {
-        post(title, body: body, projectId: projectId, category: .blockedWorkers)
+    func notify(projectId: String, sessionId: String?, title: String, body: String) async {
+        post(
+            title, body: body, projectId: projectId, category: .blockedWorkers,
+            subject: sessionId.map(NotificationRoute.Subject.session) ?? .project
+        )
     }
 
     /// Every banner Agent Board raises goes through here, so none of them can reach the human
-    /// without saying which project it is about, and none of them can ignore that project's
-    /// notification preferences.
-    private func post(_ title: String, body: String, projectId: String?, category: NotificationCategory) {
+    /// without saying which project it is about, without carrying the route a click follows back
+    /// to it, or against that project's notification preferences.
+    private func post(
+        _ title: String, body: String, projectId: String?, category: NotificationCategory,
+        subject: NotificationRoute.Subject = .project
+    ) {
         guard shouldNotify(projectId: projectId, category: category) else { return }
-        MacNotifier.post(title: notificationTitle(title, projectId: projectId), body: body)
+        postBanner(
+            notificationTitle(title, projectId: projectId),
+            body,
+            projectId.map { NotificationRoute(projectId: $0, subject: subject) }
+        )
+    }
+
+    /// `MacNotifier.post` is inert under `xctest`, because the runner is not an app bundle. Every
+    /// banner leaves through here so a test can see which ones the categories let past and what
+    /// route each one carries.
+    @ObservationIgnored var postBanner: @MainActor (String, String, NotificationRoute?) -> Void = {
+        MacNotifier.shared.post(title: $0, body: $1, route: $2)
     }
 
     /// The gating decision for every banner that is not driven by the attention signal.
@@ -1390,7 +1411,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             preferences: { preferences[$0] ?? NotificationPreferences() }
         )
         for notice in raised {
-            MacNotifier.post(title: notice.title, body: notice.body)
+            postBanner(notice.title, notice.body, NotificationRoute(notice))
         }
         return raised
     }
