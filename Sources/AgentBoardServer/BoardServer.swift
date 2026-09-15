@@ -13,6 +13,7 @@ public final class BoardServer: Sendable {
     private let tokens: any TokenResolver
     private let hooks: any HookSink
     private let tools: any ToolHandler
+    private let prompts: (any PromptHandler)?
     private let logger: Logger
     private let runState = RunState()
 
@@ -20,10 +21,17 @@ public final class BoardServer: Sendable {
     private static let supportedProtocolVersions: Set<String> = ["2024-11-05", "2025-03-26", "2025-06-18"]
     private static let latestProtocolVersion = "2025-06-18"
 
-    public init(tokens: any TokenResolver, hooks: any HookSink, tools: any ToolHandler, logger: Logger? = nil) {
+    public init(
+        tokens: any TokenResolver,
+        hooks: any HookSink,
+        tools: any ToolHandler,
+        prompts: (any PromptHandler)? = nil,
+        logger: Logger? = nil
+    ) {
         self.tokens = tokens
         self.hooks = hooks
         self.tools = tools
+        self.prompts = prompts
         if let logger {
             self.logger = logger
         } else {
@@ -156,9 +164,13 @@ public final class BoardServer: Sendable {
         switch method {
         case "initialize":
             let requested = params["protocolVersion"] as? String ?? ""
+            var capabilities: [String: Any] = ["tools": [String: Any]()]
+            if prompts != nil {
+                capabilities["prompts"] = ["listChanged": false]
+            }
             return rpcResult(id: id, [
                 "protocolVersion": Self.supportedProtocolVersions.contains(requested) ? requested : Self.latestProtocolVersion,
-                "capabilities": ["tools": [String: Any]()],
+                "capabilities": capabilities,
                 "serverInfo": ["name": "agent-board", "version": "0.1.0"],
             ])
         case "ping":
@@ -179,9 +191,53 @@ public final class BoardServer: Sendable {
             } catch {
                 return rpcError(id: id, code: -32603, message: String(describing: error))
             }
+        case "prompts/list":
+            guard let prompts else { return rpcError(id: id, code: -32601, message: "Method not found") }
+            let descriptors = await prompts.prompts(for: identity)
+            return rpcResult(id: id, ["prompts": descriptors.map(render)])
+        case "prompts/get":
+            guard let prompts else { return rpcError(id: id, code: -32601, message: "Method not found") }
+            guard let name = params["name"] as? String else {
+                return rpcError(id: id, code: -32602, message: "Missing prompt name")
+            }
+            var arguments: [String: String] = [:]
+            for (key, value) in params["arguments"] as? [String: Any] ?? [:] {
+                guard let string = value as? String else {
+                    return rpcError(id: id, code: -32602, message: "Argument \(key) must be a string")
+                }
+                arguments[key] = string
+            }
+            do {
+                let result = try await prompts.get(name, arguments: arguments, identity: identity)
+                return rpcResult(id: id, promptResult(result))
+            } catch let error as PromptError {
+                return rpcError(id: id, code: -32602, message: error.message)
+            } catch {
+                return rpcError(id: id, code: -32603, message: String(describing: error))
+            }
         default:
             return rpcError(id: id, code: -32601, message: "Method not found")
         }
+    }
+
+    private func render(_ descriptor: PromptDescriptor) -> [String: Any] {
+        [
+            "name": descriptor.name,
+            "title": descriptor.title,
+            "description": descriptor.description,
+            "arguments": descriptor.arguments.map {
+                ["name": $0.name, "description": $0.description, "required": $0.required]
+            },
+        ]
+    }
+
+    private func promptResult(_ result: PromptResult) -> [String: Any] {
+        [
+            "description": result.description,
+            "messages": result.messages.map {
+                ["role": $0.role.rawValue, "content": ["type": "text", "text": $0.text]]
+            },
+        ]
     }
 
     private func render(_ descriptor: ToolDescriptor) -> [String: Any] {

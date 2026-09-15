@@ -166,3 +166,68 @@ public protocol ToolHandler: Sendable {
     func tools(for identity: TokenIdentity) async -> [ToolDescriptor]
     func call(_ name: String, arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult
 }
+
+public struct PromptArgumentDescriptor: Sendable, Equatable {
+    public var name: String
+    public var description: String
+    public var required: Bool
+
+    public init(name: String, description: String, required: Bool) {
+        self.name = name
+        self.description = description
+        self.required = required
+    }
+}
+
+public struct PromptDescriptor: Sendable, Equatable {
+    public var name: String
+    public var title: String
+    public var description: String
+    public var arguments: [PromptArgumentDescriptor]
+
+    public init(name: String, title: String, description: String, arguments: [PromptArgumentDescriptor]) {
+        self.name = name
+        self.title = title
+        self.description = description
+        self.arguments = arguments
+    }
+}
+
+public struct PromptMessage: Sendable, Equatable {
+    public enum Role: String, Sendable, Equatable {
+        case user
+        case assistant
+    }
+
+    public var role: Role
+    public var text: String
+
+    public init(role: Role = .user, text: String) {
+        self.role = role
+        self.text = text
+    }
+}
+
+public struct PromptResult: Sendable, Equatable {
+    public var description: String
+    public var messages: [PromptMessage]
+
+    public init(description: String, messages: [PromptMessage]) {
+        self.description = description
+        self.messages = messages
+    }
+}
+
+/// An unknown prompt name or a missing required argument. Surfaces as JSON-RPC -32602 per the
+/// prompts specification, not as a result with `isError` — a prompt has no equivalent of a tool's
+/// soft failure.
+public struct PromptError: Error, Sendable {
+    public var message: String
+    public init(_ message: String) { self.message = message }
+}
+
+/// Prompt list is rendered per identity, in the same way the tool list is.
+public protocol PromptHandler: Sendable {
+    func prompts(for identity: TokenIdentity) async -> [PromptDescriptor]
+    func get(_ name: String, arguments: [String: String], identity: TokenIdentity) async throws -> PromptResult
+}

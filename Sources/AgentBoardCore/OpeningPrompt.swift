@@ -46,7 +46,19 @@ public enum OpeningPrompt {
         if let notesSection = renderNotes(notes) {
             sections.append(notesSection)
         }
-        sections.append("""
+        sections.append(howToWork(branch: branch))
+        sections.append(closeout)
+        return sections.joined(separator: "\n\n")
+    }
+
+    /// The two sections that do not vary with the task. `workingProtocol` is what a session fetches
+    /// back when its opening prompt has fallen out of context; `compose` emits the same text.
+    public static func workingProtocol(branch: String) -> String {
+        [howToWork(branch: branch), closeout].joined(separator: "\n\n")
+    }
+
+    public static func howToWork(branch: String) -> String {
+        """
         ## How to work
         - You are in a dedicated git worktree on branch `\(branch)`. Work only in this directory.
         - The `agent-board` MCP server holds your assignment. Call `get_my_task` if you need the details again.
@@ -58,8 +70,10 @@ public enum OpeningPrompt {
         - Use `log_progress` sparingly, at meaningful milestones rather than after every step.
         - If you are stuck on something that needs a human decision or information you do not have, \
         call `report_blocked(reason)` and stop.
-        """)
-        sections.append("""
+        """
+    }
+
+    public static let closeout = """
         ## When you are done
         1. Commit on the current branch. Write the message in imperative mood, with no conventional-commit prefix.
         2. Write down one durable finding as a note, if this task produced one. The bar is something a later \
@@ -77,9 +91,7 @@ public enum OpeningPrompt {
         3. Do not push. Do not open a PR. Both are denied at the tool layer; do not spend a turn discovering that.
         4. Call `report_complete(summary, files_changed, tests_run, caveats)`. That ends your task; \
         do not start further work afterwards.
-        """)
-        return sections.joined(separator: "\n\n")
-    }
+        """
 
     static func renderNotes(_ notes: [InjectedNote]) -> String? {
         guard !notes.isEmpty else { return nil }
