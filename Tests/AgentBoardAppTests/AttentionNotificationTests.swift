@@ -107,6 +107,93 @@ final class AttentionNotificationTests: XCTestCase {
         XCTAssertEqual(supervisor.raiseAttentionBanners().count, 1)
     }
 
+    private func setPreferences(_ change: (inout NotificationPreferences) -> Void) throws {
+        var settings = fixture.project.settings
+        change(&settings.notifications)
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+    }
+
+    // MARK: - Per-project notification preferences
+
+    func testATurnedOffCategorySuppressesItsBannerAndLeavesTheAttentionSignalAlone() throws {
+        try pendingApproval()
+        try setPreferences { $0.setEnabled(.approvals, false) }
+
+        XCTAssertEqual(supervisor.raiseAttentionBanners(), [])
+
+        let attention = try XCTUnwrap(ProjectAttentionStore(fixture.db).attention(projectId: fixture.project.id))
+        XCTAssertTrue(attention.needsAttention)
+        XCTAssertEqual(attention.badgeCount, 1)
+        XCTAssertEqual(attention.summary, "1 approval waiting.")
+    }
+
+    func testTurningApprovalsOffLeavesBlockedWorkersBannering() throws {
+        try pendingApproval()
+        try blockedWorker()
+        try setPreferences { $0.setEnabled(.approvals, false) }
+
+        XCTAssertEqual(supervisor.raiseAttentionBanners().map(\.reason), [.blockedWorker])
+    }
+
+    func testAMutedProjectRaisesNoBannerAndStillBadges() throws {
+        try pendingApproval()
+        try blockedWorker()
+        try setPreferences { $0.mute = .indefinite }
+
+        XCTAssertEqual(supervisor.raiseAttentionBanners(), [])
+
+        let attention = try XCTUnwrap(ProjectAttentionStore(fixture.db).attention(projectId: fixture.project.id))
+        XCTAssertEqual(attention.badgeCount, 2)
+        XCTAssertEqual(attention.reasons, [.pendingApproval, .blockedWorker])
+    }
+
+    func testATimedMuteStopsStoppingBannersWhenItExpires() throws {
+        let now = Int64.nowMillis
+        try pendingApproval()
+        try setPreferences { $0.mute = .until(now + 3_600_000) }
+
+        XCTAssertEqual(supervisor.raiseAttentionBanners(now: now), [])
+        XCTAssertEqual(supervisor.raiseAttentionBanners(now: now + 3_600_000).map(\.reason), [.pendingApproval])
+    }
+
+    func testTurningACategoryBackOnRaisesTheApprovalItWasHiding() throws {
+        try pendingApproval()
+        try setPreferences { $0.setEnabled(.approvals, false) }
+        XCTAssertEqual(supervisor.raiseAttentionBanners(), [])
+
+        try setPreferences { $0.setEnabled(.approvals, true) }
+
+        XCTAssertEqual(supervisor.raiseAttentionBanners().map(\.reason), [.pendingApproval])
+    }
+
+    func testTheOtherBannersAskTheSameQuestionPerCategory() throws {
+        for category in NotificationCategory.allCases {
+            XCTAssertTrue(supervisor.shouldNotify(projectId: fixture.project.id, category: category), category.rawValue)
+        }
+
+        try setPreferences { $0.setEnabled(.capsAndStalls, false) }
+
+        XCTAssertFalse(supervisor.shouldNotify(projectId: fixture.project.id, category: .capsAndStalls))
+        XCTAssertTrue(supervisor.shouldNotify(projectId: fixture.project.id, category: .workerFailures))
+        XCTAssertTrue(supervisor.shouldNotify(projectId: fixture.project.id, category: .blockedWorkers))
+    }
+
+    func testAMuteSilencesTheCapAndFailureBannersToo() throws {
+        let now = Int64.nowMillis
+        try setPreferences { $0.mute = .until(now + 60_000) }
+
+        XCTAssertFalse(supervisor.shouldNotify(projectId: fixture.project.id, category: .capsAndStalls, now: now))
+        XCTAssertFalse(supervisor.shouldNotify(projectId: fixture.project.id, category: .workerFailures, now: now))
+        XCTAssertTrue(supervisor.shouldNotify(projectId: fixture.project.id, category: .capsAndStalls, now: now + 60_000))
+    }
+
+    /// A banner with no project behind it has no preferences to read, and silence would be the
+    /// wrong default for something nothing else announces.
+    func testABannerForAMissingProjectStillNotifies() {
+        XCTAssertTrue(supervisor.shouldNotify(projectId: "gone", category: .workerFailures))
+        XCTAssertTrue(supervisor.shouldNotify(projectId: nil, category: .capsAndStalls))
+    }
+
     func testTheFourExistingBannersNameTheirProject() {
         for headline in ["Worker never started", "Worker may be stuck", "Worker stopped at cap", "Agent needs input"] {
             XCTAssertEqual(

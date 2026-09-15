@@ -18,6 +18,11 @@ final class VerificationCommandsTests: XCTestCase {
         XCTAssertNil(settings.buildCommand)
         XCTAssertNil(settings.testCommand)
         XCTAssertTrue(settings.verification.isEmpty)
+        XCTAssertEqual(settings.notifications, NotificationPreferences())
+        for category in NotificationCategory.allCases {
+            XCTAssertTrue(settings.notifications.isEnabled(category), category.rawValue)
+        }
+        XCTAssertEqual(settings.notifications.mute, NotificationMute.none)
         XCTAssertEqual(settings.caps.maxConcurrentWorkers, 2)
         XCTAssertEqual(settings.defaultModel, "claude-opus-5")
         XCTAssertEqual(settings.modelGuidance, "Sonnet for docs")

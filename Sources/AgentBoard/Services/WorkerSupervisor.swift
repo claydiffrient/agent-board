@@ -342,7 +342,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let queued = (try? board.terminate(sessionId: sessionId, cause: .setupFailed(detail))) ?? nil
         guard queued != nil else { return }
         announceReports(projectId: projectId)
-        post("Worker never started", body: detail, projectId: projectId)
+        post("Worker never started", body: detail, projectId: projectId, category: .workerFailures)
     }
 
     /// A setup that was still running when Agent Board quit has no process behind it any more, and
@@ -1270,14 +1270,35 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     // MARK: - BoardEventSink
 
+    /// The only producer of this event is the hook sink's "Agent needs input" path, which fires
+    /// when a worker asked for input and nothing marked a task blocked — the blocked-worker
+    /// category by any other name.
     func notify(projectId: String, title: String, body: String) async {
-        post(title, body: body, projectId: projectId)
+        post(title, body: body, projectId: projectId, category: .blockedWorkers)
     }
 
     /// Every banner Agent Board raises goes through here, so none of them can reach the human
-    /// without saying which project it is about.
-    private func post(_ title: String, body: String, projectId: String?) {
+    /// without saying which project it is about, and none of them can ignore that project's
+    /// notification preferences.
+    private func post(_ title: String, body: String, projectId: String?, category: NotificationCategory) {
+        guard shouldNotify(projectId: projectId, category: category) else { return }
         MacNotifier.post(title: notificationTitle(title, projectId: projectId), body: body)
+    }
+
+    /// The gating decision for every banner that is not driven by the attention signal.
+    /// `MacNotifier.post` is inert under `xctest`, so this is what the tests assert on.
+    /// A project that has gone missing keeps the default, which is to notify.
+    func shouldNotify(
+        projectId: String?, category: NotificationCategory, now: Int64 = .nowMillis
+    ) -> Bool {
+        notificationPreferences(projectId).allows(category, now: now)
+    }
+
+    private func notificationPreferences(_ projectId: String?) -> NotificationPreferences {
+        guard let projectId, let project = (try? projects.get(projectId)) ?? nil else {
+            return NotificationPreferences()
+        }
+        return project.settings.notifications
     }
 
     /// `MacNotifier.post` is inert under `xctest`, so the naming is asserted here instead.
@@ -1355,14 +1376,28 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// A pending approval and a blocked worker each stop work outright and nothing else announces
     /// them, so the same signal the sidebar badge reads raises the banner. `AttentionNotifier` owns
     /// the once-per-transition rule, so a queue nobody has answered does not banner every 5s.
+    /// Each project's own notification preferences decide which of its banners survive. They gate
+    /// the banner alone: `attention.all` is read unchanged, so a muted project's sidebar badge and
+    /// At a Glance row say exactly what they said before.
     @discardableResult
     func raiseAttentionBanners(now: Int64 = .nowMillis) -> [AttentionNotice] {
         guard let projects = try? attention.all(now: now) else { return [] }
-        let raised = attentionNotifier.notices(for: projects, focused: onScreenProject)
+        let preferences = notificationPreferencesByProject()
+        let raised = attentionNotifier.notices(
+            for: projects,
+            focused: onScreenProject,
+            now: now,
+            preferences: { preferences[$0] ?? NotificationPreferences() }
+        )
         for notice in raised {
             MacNotifier.post(title: notice.title, body: notice.body)
         }
         return raised
+    }
+
+    private func notificationPreferencesByProject() -> [String: NotificationPreferences] {
+        guard let all = try? projects.list() else { return [:] }
+        return Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.settings.notifications) })
     }
 
     /// A banner for the project already filling the screen is noise. Only the frontmost app counts:
@@ -1468,7 +1503,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         post(
             "Worker may be stuck",
             body: "\(session.displayShortId) has made no tool call in \(stallSeconds)s — \(title ?? "no task"). Attach to check.",
-            projectId: session.projectId
+            projectId: session.projectId,
+            category: .capsAndStalls
         )
     }
 
@@ -1479,7 +1515,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description))
         announceReports(projectId: session.projectId)
-        post("Worker stopped at cap", body: description, projectId: session.projectId)
+        post("Worker stopped at cap", body: description, projectId: session.projectId, category: .capsAndStalls)
     }
 
     private static func capLimits(_ caps: Caps) -> CapLimits {
