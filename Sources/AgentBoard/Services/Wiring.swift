@@ -24,7 +24,8 @@ enum Wiring {
             tools: ScopedToolHandler(
                 worker: WorkerToolHandler(db: db, events: sink),
                 orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink)
-            )
+            ),
+            resources: NoteResourceHandler(db: db)
         )
         let supervisor = WorkerSupervisor(
             db: db,

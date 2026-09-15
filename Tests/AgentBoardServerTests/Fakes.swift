@@ -80,3 +80,31 @@ actor FakeToolHandler: ToolHandler {
         }
     }
 }
+
+actor FakeResourceHandler: ResourceHandler {
+    private(set) var reads: [String] = []
+    private var bodies: [String: String] = [:]
+
+    func put(uri: String, body: String) {
+        bodies[uri] = body
+    }
+
+    func resources(for identity: TokenIdentity) async throws -> [ResourceDescriptor] {
+        [
+            ResourceDescriptor(
+                uri: "note://\(identity.projectId)/n1",
+                name: "Build gotchas",
+                description: "2 sections: The trap · What to do. Version 3, updated 2026-09-14.",
+                mimeType: "application/json"
+            ),
+        ]
+    }
+
+    func read(_ uri: String, identity: TokenIdentity) async throws -> [ResourceContents] {
+        reads.append(uri)
+        guard let body = bodies[uri] else {
+            throw ResourceError(uri: uri, message: "No note for \(uri).")
+        }
+        return [ResourceContents(uri: uri, mimeType: "application/json", text: body)]
+    }
+}
