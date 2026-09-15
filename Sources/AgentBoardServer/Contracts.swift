@@ -35,12 +35,17 @@ public struct HookEvent: Sendable {
     public var notificationType: String?
     public var notificationMessage: String?
     public var lastAssistantMessage: String?
+    /// `SessionStart.source`: `startup`, `resume`, `clear`, or `compact`.
+    public var sessionSource: String?
+    /// `PreCompact.trigger`: `manual` or `auto`.
+    public var compactTrigger: String?
     public var rawJSON: String
     public var receivedAt: Date
 
     public init(name: String, sessionId: String, transcriptPath: String? = nil, cwd: String? = nil, toolName: String? = nil,
                 toolCommand: String? = nil, notificationType: String? = nil, notificationMessage: String? = nil,
-                lastAssistantMessage: String? = nil, rawJSON: String, receivedAt: Date = Date()) {
+                lastAssistantMessage: String? = nil, sessionSource: String? = nil, compactTrigger: String? = nil,
+                rawJSON: String, receivedAt: Date = Date()) {
         self.name = name
         self.sessionId = sessionId
         self.transcriptPath = transcriptPath
@@ -50,6 +55,8 @@ public struct HookEvent: Sendable {
         self.notificationType = notificationType
         self.notificationMessage = notificationMessage
         self.lastAssistantMessage = lastAssistantMessage
+        self.sessionSource = sessionSource
+        self.compactTrigger = compactTrigger
         self.rawJSON = rawJSON
         self.receivedAt = receivedAt
     }

@@ -57,6 +57,10 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         await target?.reportQueued(projectId: projectId)
     }
 
+    func orchestratorCompacted(projectId: String, sessionId: String, manual: Bool) async {
+        await target?.orchestratorCompacted(projectId: projectId, sessionId: sessionId, manual: manual)
+    }
+
     func workerAcknowledgedShutdown(projectId: String, sessionId: String) async {
         await target?.workerAcknowledgedShutdown(projectId: projectId, sessionId: sessionId)
     }

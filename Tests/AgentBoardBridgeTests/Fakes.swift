@@ -9,6 +9,7 @@ actor RecordingEventSink: BoardEventSink {
         case notify(title: String, body: String)
         case orchestratorTurnEnded(projectId: String, sessionId: String)
         case reportQueued(projectId: String)
+        case orchestratorCompacted(projectId: String, sessionId: String, manual: Bool)
         case workerAcknowledgedShutdown(projectId: String, sessionId: String)
     }
 
@@ -24,6 +25,10 @@ actor RecordingEventSink: BoardEventSink {
 
     func reportQueued(projectId: String) async {
         events.append(.reportQueued(projectId: projectId))
+    }
+
+    func orchestratorCompacted(projectId: String, sessionId: String, manual: Bool) async {
+        events.append(.orchestratorCompacted(projectId: projectId, sessionId: sessionId, manual: manual))
     }
 
     func workerAcknowledgedShutdown(projectId: String, sessionId: String) async {

@@ -93,9 +93,11 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   `/compact` emits, all under the *same* `session_id` and the same
   `transcript_path`, and with no `SessionEnd`:
   `PreCompact {"trigger":"manual"}` → `SessionStart {"source":"compact"}`.
-  `/clear` forks and `/compact` does not, so `StoreHookSink.adoptFork` is a
-  no-op here (the payload id is already a known session) and nothing needs to
-  be re-bound or re-pinned across a compaction.
+  Re-measured 2026-09-15 on 2.1.272 with the same result. `/clear` forks and
+  `/compact` does not, so there is no fork to adopt: the `agent_session` row,
+  its bound grant and `project.orch_session_id` all survive untouched, and
+  Agent Board's whole reaction to that `SessionStart` is to tell the console
+  (`CompactedSessionTests` pins each of those three).
 - **Claude Code auto-compacts on its own, mid-turn.** Measured with
   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=3` to pull the threshold down to a reachable
   value: `UserPromptSubmit` → `PreCompact {"trigger":"auto"}` → (later)
@@ -114,6 +116,37 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   `CLAUDE_CODE_AUTO_COMPACT_WINDOW` move it; `DISABLE_COMPACT` turns it off.
   Agent Board compacting at a chosen fraction fires *before* this and at a
   moment it picks, rather than mid-dispatch.
+- **`effectiveWindow` is 980,000 for every model measured.** Measured
+  2026-09-15 on 2.1.272 by running one turn per model under `--debug` and
+  grepping the debug file (`~/.claude/debug/<session>.txt`, *not* the PTY) for
+  `autocompact: tokens=… level=ok effectiveWindow=`:
+
+  | Model | `effectiveWindow` |
+  |---|---|
+  | `claude-fable-5-1` | 980000 |
+  | `claude-opus-5` | 980000 |
+  | `claude-sonnet-5` | 980000 |
+  | `claude-haiku-4-5` | not measured — the run died on `Error: Refresh token is invalid or has already been claimed by another client` before any turn completed |
+
+  `ModelCatalog.effectiveContextWindow(for:)` carries the three measured values
+  and reads anything else, Haiku included, as the same 980,000 rather than
+  guessing a smaller one.
+- **A slash command injected into a PTY needs its Enter as a separate write.**
+  Measured 2026-09-15, three runs in the same harness. Writing
+  `"/compact <instructions>\r"` as **one** burst leaves the carriage return in
+  the prompt as a literal `^M`: no compaction fires, and the following
+  injection is appended to it — the `PreCompact` payload that eventually
+  arrived carried
+  `custom_instructions: "…write this down'.^MReply with only the word mango."`.
+  Writing the text and then `"\r"` as **two** writes fires it cleanly, with
+  `custom_instructions` exactly the instruction text and the next turn its own
+  `UserPromptSubmit`. It is the leading slash, not the length: a 470-character
+  plain message with a trailing `\r` in one burst submitted normally, while a
+  short `"/compact keep decisions\r"` in one burst produced no `PreCompact` at
+  all — only `Notification {"notification_type":"idle_prompt"}`. Claude Code's
+  slash-command autocomplete consumes the Enter. The existing report notice
+  (§9.1) has no leading slash and is unaffected, but `OrchestratorConsole`
+  splits every injection the same way so nothing depends on remembering this.
 - **Context pressure = `input_tokens + cache_read_input_tokens +
   cache_creation_input_tokens` of the last assistant message.** Calibrated
   against the TUI's own `N% until auto-compact` readout on a session started
@@ -811,6 +844,63 @@ without a manual `move_task`. A cap or idle kill also sets `failed` and
 No agent-generated text is ever written into the orchestrator's user turn. The
 orchestrator holds spawn, assign, and integration authority; a worker that echoes
 a malicious file into its report must not be able to drive it.
+
+### 9.2 Compaction
+
+The orchestrator is a long-lived session whose context only grows. Claude Code
+compacts it eventually — at `effectiveWindow - 33000`, about 96.6% — but it does
+so mid-turn, at whatever moment it happens to reach, which for an orchestrator is
+usually mid-dispatch. Agent Board compacts earlier and at a moment it chooses.
+
+**Trigger.** The metering tick already reads every session's transcript every 5s
+(§7). For the orchestrator it also computes
+`ContextPressure(used: last assistant message's input + cache_read + cache_write,
+limit: ModelCatalog.effectiveContextWindow(for: model))` and asks the gate to
+compact once that passes `OrchestratorCompaction.threshold` — 0.80. No new timer,
+and no per-project setting: the window is a property of the model, not of the
+project, and nothing about a project changes where the safe margin is.
+
+**Injection.** The compaction command goes through `ReportNoticeGate`, the same
+gate as the report notice and for the same reason — it is bytes in the PTY the
+human types into (§9.1). The gate holds at most one notice and at most one of
+each app-authored line, so a held compaction and a held report notice both
+survive; it writes **at most one line per pass**, compaction first, and whatever
+is left waits out the turn that line started.
+
+**Never mid-turn.** `Stop` clears the gate's in-flight flag; the human's Enter
+and every line the gate writes set it. A compaction is refused while it is set
+and delivered at the next `Stop`, so it can never land part-way through a
+dispatch.
+
+**Instructions.** `/compact` takes free-form instructions and the default
+summariser keeps the wrong half for an orchestrator — the narrative of what
+happened rather than the decisions that shaped it. Almost everything an
+orchestrator appears to know is in SQLite and comes back from `list_tasks`,
+`list_epics`, `list_agents`, `list_reports` and `get_task`; what is
+unrecoverable is the conversation with the human. So
+`OrchestratorCompaction.instructions` preserves eight things — standing
+instructions, decisions with their reasons, unanswered questions, anything
+suspending normal behaviour, facts established by measurement, corrections, git
+state the board does not show, and failure modes — deletes every enumeration and
+every tool result outright, and ends with a section headed "unrecorded — write
+this down" whose job is to convert conversational knowledge into durable board
+state before the next pass eats it.
+
+**Re-orientation.** A manual compaction leaves the session idle waiting for
+input, exactly like a resume (§2), so the gate follows it with one fixed
+app-authored line pointing the session back at the board. An **auto**-compaction
+resumes its own turn, so it gets nothing written into it: `PreCompact.trigger`
+distinguishes the two, and the trigger of the most recent `PreCompact` row is
+what `SessionStart {"source":"compact"}` is read against.
+
+Both lines are fixed constants. No agent text enters the orchestrator's
+user-authority turn here any more than in §9.1 (D9).
+
+**Visibility.** The orchestrator header shows the current context percentage,
+amber once it is over the threshold, and how long ago the last compaction was,
+with its tooltip saying whether Agent Board or Claude Code did it and how many
+there have been. A session that silently forgot what it was doing is worse than
+one that says so.
 
 ---
 

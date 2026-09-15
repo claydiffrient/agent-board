@@ -24,9 +24,9 @@ final class ReportNoticeGateTests: XCTestCase {
         )
 
         /// The prompt emptying — a submit or a cancel — as the terminal view reports it.
-        func clearPrompt() {
+        func clearPrompt(submitted: Bool = true) {
             promptIsDirty = false
-            gate.promptCleared()
+            gate.promptCleared(submitted: submitted)
         }
     }
 

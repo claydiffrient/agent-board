@@ -132,6 +132,25 @@ private struct OrchestratorHeader: View {
                     .help(error)
             }
             Spacer()
+            if let pressure = console.contextPressure {
+                Text("Context \(pressure.percent)%")
+                    .foregroundStyle(pressure.exceeds(OrchestratorCompaction.threshold) ? .orange : .secondary)
+                    .help("\(pressure.usedTokens) of \(pressure.limitTokens) tokens; Agent Board compacts at "
+                        + "\(Int(OrchestratorCompaction.threshold * 100))%")
+            }
+            if let at = console.lastCompactionAt {
+                TimelineView(.periodic(from: .now, by: 30)) { _ in
+                    Label(
+                        "Compacted \(Format.relative(at))",
+                        systemImage: "arrow.down.right.and.arrow.up.left"
+                    )
+                    .foregroundStyle(.secondary)
+                    .help(console.lastCompactionWasAutomatic
+                        ? "Claude Code compacted this session itself (\(console.compactionCount) so far)"
+                        : "Agent Board compacted this session and pointed it back at the board "
+                            + "(\(console.compactionCount) so far)")
+                }
+            }
             if let at = console.lastNoticeAt {
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
                     Text("Noticed \(Format.relative(at))")

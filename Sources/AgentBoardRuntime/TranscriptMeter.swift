@@ -52,20 +52,33 @@ public struct UsageTotals: Sendable, Equatable {
 
 public struct TranscriptSummary: Sendable, Equatable {
     public var totals: UsageTotals
+    /// The usage of the last assistant message alone. `totals` sums the whole session and answers
+    /// "what has this cost"; this one answers "how full is the context right now", which after a
+    /// compaction is a far smaller number than the sum.
+    public var lastMessage: UsageTotals
     public var model: String?
     public var lastActivity: Date?
     public var lastToolName: String?
     /// Distinct assistant API responses (streamed chunks sharing a `requestId` count once).
     public var messageCount: Int
 
+    /// Everything the model re-reads on the next request: the fresh input plus whatever the cache
+    /// serves and whatever this turn wrote into it. Dropping the cache write reads ~40% low
+    /// immediately after a compaction, which is exactly when the trigger matters (SPEC §2).
+    public var contextTokens: Int {
+        lastMessage.inputTokens + lastMessage.cacheReadTokens + lastMessage.cacheWriteTokens
+    }
+
     public init(
         totals: UsageTotals = .zero,
+        lastMessage: UsageTotals = .zero,
         model: String? = nil,
         lastActivity: Date? = nil,
         lastToolName: String? = nil,
         messageCount: Int = 0
     ) {
         self.totals = totals
+        self.lastMessage = lastMessage
         self.model = model
         self.lastActivity = lastActivity
         self.lastToolName = lastToolName
@@ -137,10 +150,13 @@ struct TranscriptAccumulator: Sendable {
     private var lastToolName: String?
     private var lastActivity: Date?
     private var anonymousCount = 0
+    /// Transcript order, not timestamp order: the last `usage` in the file is the current context.
+    private var lastMessage: UsageTotals = .zero
 
     var summary: TranscriptSummary {
         TranscriptSummary(
             totals: usageByKey.values.reduce(.zero, +),
+            lastMessage: lastMessage,
             model: model,
             lastActivity: lastActivity,
             lastToolName: lastToolName,
@@ -175,7 +191,9 @@ struct TranscriptAccumulator: Sendable {
             anonymousCount += 1
             key = "anon:\(anonymousCount)"
         }
-        usageByKey[key] = Self.parseUsage(usage)
+        let parsed = Self.parseUsage(usage)
+        usageByKey[key] = parsed
+        lastMessage = parsed
     }
 
     static func parseUsage(_ usage: [String: Any]) -> UsageTotals {

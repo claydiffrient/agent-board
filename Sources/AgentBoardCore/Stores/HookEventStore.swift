@@ -25,6 +25,16 @@ public struct HookEventStore: Sendable {
         }
     }
 
+    public func mostRecent(sessionId: String, event: String) throws -> HookEventRecord? {
+        try db.reader.read { db in
+            try HookEventRecord.fetchOne(
+                db,
+                sql: "SELECT * FROM hook_event WHERE session_id = ? AND event = ? ORDER BY at DESC, id DESC LIMIT 1",
+                arguments: [sessionId, event]
+            )
+        }
+    }
+
     public func prune(olderThan cutoff: Int64) throws {
         try db.writer.write { db in
             try db.execute(sql: "DELETE FROM hook_event WHERE at < ?", arguments: [cutoff])
