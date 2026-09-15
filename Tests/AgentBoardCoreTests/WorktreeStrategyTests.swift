@@ -36,10 +36,15 @@ final class SharedCheckoutGroupTests: XCTestCase {
         XCTAssertNotEqual(epicBranch, SharedCheckoutGroup.branch(epicId: "e2"))
     }
 
-    func testTheGroupHoldsOneAgentUntilLockingLands() {
-        XCTAssertEqual(SharedCheckoutGroup.maxMembers, 1)
-        XCTAssertTrue(SharedCheckoutGroup(branch: looseBranch, memberSessionIds: ["s1"]).isFull)
-        XCTAssertFalse(SharedCheckoutGroup(branch: looseBranch, memberSessionIds: []).isFull)
+    func testTheGroupHoldsThreeAgentsByDefaultAndTakesItsSizeFromTheProject() {
+        XCTAssertEqual(ProjectSettings().sharedCheckoutMaxAgents, 3)
+        let defaultSized = SharedCheckoutGroup(branch: looseBranch, memberSessionIds: ["s1", "s2"])
+        XCTAssertFalse(defaultSized.isFull)
+        XCTAssertTrue(SharedCheckoutGroup(branch: looseBranch, memberSessionIds: ["s1", "s2", "s3"]).isFull)
+        XCTAssertTrue(
+            SharedCheckoutGroup(branch: looseBranch, memberSessionIds: ["s1"], maxMembers: 1).isFull,
+            "a project that configures a group of one must still get a group of one"
+        )
     }
 
     func testWorktreeStrategyNeverShares() {
@@ -62,7 +67,7 @@ final class SharedCheckoutGroupTests: XCTestCase {
     }
 
     func testSharedFallsBackToAWorktreeWhenTheGroupIsFull() {
-        let full = SharedCheckoutGroup(branch: looseBranch, memberSessionIds: ["s1"])
+        let full = SharedCheckoutGroup(branch: looseBranch, memberSessionIds: ["s1"], maxMembers: 1)
 
         XCTAssertEqual(
             WorkerPlacementDecision.decide(strategy: .shared, wantedSharedBranch: looseBranch, group: full),
@@ -97,7 +102,7 @@ final class SharedCheckoutGroupTests: XCTestCase {
         XCTAssertEqual(
             WorkerPlacementDecision.decide(
                 strategy: .auto, wantedSharedBranch: looseBranch,
-                group: SharedCheckoutGroup(branch: looseBranch, memberSessionIds: ["s1"])
+                group: SharedCheckoutGroup(branch: looseBranch, memberSessionIds: ["s1"], maxMembers: 1)
             ),
             .worktree
         )
@@ -148,7 +153,8 @@ final class SharedCheckoutGroupTests: XCTestCase {
         let group = try XCTUnwrap(try SharedCheckoutGroup.current(db: db, projectId: project.id))
         XCTAssertEqual(group.branch, looseBranch)
         XCTAssertEqual(group.memberSessionIds, ["s1"])
-        XCTAssertTrue(group.isFull)
+        XCTAssertEqual(group.maxMembers, ProjectSettings().sharedCheckoutMaxAgents)
+        XCTAssertFalse(group.isFull, "one member does not fill a group of \(group.maxMembers)")
     }
 
     /// A worker still being set up already owns the checkout; counting only running ones would let

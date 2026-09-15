@@ -253,6 +253,9 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     public var model: String?
     public var lastTool: String?
     public var stopReason: String?
+    /// Set when a shared-checkout write gave up waiting for another session's lock. `report_blocked`
+    /// reads it to decide that the task belongs back in `ready` rather than held in `running`.
+    public var blockedOnPath: String?
 
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -277,6 +280,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case model
         case lastTool = "last_tool"
         case stopReason = "stop_reason"
+        case blockedOnPath = "blocked_on_path"
     }
 
     public init(
@@ -285,7 +289,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         startedAt: Int64 = .nowMillis, endedAt: Int64? = nil, lastActivity: Int64? = nil,
         transcriptPath: String? = nil, tokensIn: Int = 0, tokensOut: Int = 0, cacheRead: Int = 0,
         cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil,
-        lastTool: String? = nil, stopReason: String? = nil
+        lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -309,6 +313,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.model = model
         self.lastTool = lastTool
         self.stopReason = stopReason
+        self.blockedOnPath = blockedOnPath
     }
 
     public var id: String { sessionId }

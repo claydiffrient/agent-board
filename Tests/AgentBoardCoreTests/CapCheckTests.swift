@@ -23,6 +23,18 @@ final class CapCheckTests: XCTestCase {
         XCTAssertFalse(decision.isAllowed)
     }
 
+    /// A worker held at a file lock is occupying a slot in the shared checkout, so it must keep
+    /// counting: it is not free capacity just because it is not making tool calls.
+    func testAWorkerWaitingOnAFileLockStillCountsAgainstConcurrency() throws {
+        let f = try Fixture.make()
+        try f.sessions.insert(f.session("w1", state: .running))
+        try f.sessions.insert(f.session("w2", state: .running))
+        try f.sessions.insert(f.session("w3", state: .waitingOnLock))
+        guard case .refused = try CapCheck(f.db).canSpawn(projectId: f.project.id) else {
+            return XCTFail("a session waiting on a lock did not count against maxConcurrentWorkers")
+        }
+    }
+
     func testEndedWorkersAndOrchestratorDoNotCount() throws {
         let f = try Fixture.make()
         try f.sessions.insert(f.session("w1", state: .completed))

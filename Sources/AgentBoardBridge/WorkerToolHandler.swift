@@ -141,10 +141,25 @@ public final class WorkerToolHandler: ToolHandler {
             return ToolResult(text: "acknowledged — stop now")
         case "report_blocked":
             let reason = try ToolArguments.requiredString("reason", in: arguments)
-            try board.block(taskId: task.id, sessionId: try requiredSession(identity), reason: reason)
+            let sessionId = try requiredSession(identity)
+            let lockedPath = try sessions.get(sessionId)?.blockedOnPath
+            if let lockedPath {
+                _ = try board.blockOnFileLock(
+                    taskId: task.id, sessionId: sessionId,
+                    reason: "\(reason)\n\nAgent Board gave up waiting for \(lockedPath), held by another agent in this shared checkout."
+                )
+            } else {
+                try board.block(taskId: task.id, sessionId: sessionId, reason: reason)
+            }
             await events.notify(title: "Worker blocked: \(task.title)", body: reason)
             await events.reportQueued(projectId: identity.projectId)
-            return ToolResult(text: "Task flagged blocked. A person has been notified; wait for direction.")
+            guard let lockedPath else {
+                return ToolResult(text: "Task flagged blocked. A person has been notified; wait for direction.")
+            }
+            return ToolResult(
+                text: "Task flagged blocked and returned to ready; it will be dispatched again once "
+                    + "\(lockedPath) is free. Stop now."
+            )
         default:
             throw ToolError("Unknown tool: \(name)")
         }

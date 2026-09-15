@@ -37,21 +37,20 @@ public enum WorkerPlacement: Sendable, Equatable {
 /// persisted, and a detached `claude --bg` worker that outlives the app is still found on the next
 /// launch, because its row is still in the database.
 public struct SharedCheckoutGroup: Sendable, Equatable {
-    /// One agent at a time in the checkout. Two co-resident agents would overwrite each other's
-    /// edits until per-file locking lands; raising this belongs to that change.
-    public static let maxMembers = 1
-
     public static let branchPrefix = "agentboard/shared"
 
     public var branch: String
     public var memberSessionIds: [String]
+    /// From `ProjectSettings.sharedCheckoutMaxAgents`; per-file locks are what make anything above 1 safe.
+    public var maxMembers: Int
 
-    public init(branch: String, memberSessionIds: [String]) {
+    public init(branch: String, memberSessionIds: [String], maxMembers: Int = ProjectSettings().sharedCheckoutMaxAgents) {
         self.branch = branch
         self.memberSessionIds = memberSessionIds
+        self.maxMembers = maxMembers
     }
 
-    public var isFull: Bool { memberSessionIds.count >= Self.maxMembers }
+    public var isFull: Bool { memberSessionIds.count >= maxMembers }
 
     /// A shared branch is cut once from one base, so its name carries that base's identity: every
     /// member is in the same epic, or in no epic at all. A task whose base differs asks for a
@@ -62,11 +61,14 @@ public struct SharedCheckoutGroup: Sendable, Equatable {
     }
 
     /// The group holding `projectId`'s checkout, or nil when no worker is in it.
-    public static func current(db: AppDatabase, projectId: String) throws -> SharedCheckoutGroup? {
+    public static func current(db: AppDatabase, projectId: String, maxMembers: Int? = nil) throws -> SharedCheckoutGroup? {
         let members = try SessionStore(db).active(projectId: projectId)
             .filter { $0.role == .worker && $0.worktreePath == nil }
         guard let branch = members.first?.branch else { return nil }
-        return SharedCheckoutGroup(branch: branch, memberSessionIds: members.map(\.sessionId))
+        let limit = try maxMembers
+            ?? ProjectStore(db).get(projectId)?.settings.sharedCheckoutMaxAgents
+            ?? ProjectSettings().sharedCheckoutMaxAgents
+        return SharedCheckoutGroup(branch: branch, memberSessionIds: members.map(\.sessionId), maxMembers: limit)
     }
 
     /// Whether a task wanting `wanted` can join this group: same branch means same base, and the

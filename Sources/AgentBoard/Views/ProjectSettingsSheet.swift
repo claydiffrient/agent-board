@@ -122,7 +122,8 @@ struct ProjectSettingsSheet: View {
                             Text(strategy.title).tag(strategy)
                         }
                     }
-                    Text("A worktree per task is the default and always isolates. Shared runs workers in this project's own checkout on one branch, skipping a full repository setup per task; Auto shares only when a compatible group already holds the checkout. No more than \(SharedCheckoutGroup.maxMembers) can occupy the checkout at once, and a task that cannot join gets a worktree.")
+                    TextField("Agents in the shared checkout", value: $settings.sharedCheckoutMaxAgents, format: .number)
+                    Text("A worktree per task is the default and always isolates. Shared runs workers in this project's own checkout on one branch, skipping a full repository setup per task; Auto shares only when a compatible group already holds the checkout. A task that cannot join gets a worktree. Co-resident agents take a per-file lock before every write, so a collision is a wait rather than an overwrite.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

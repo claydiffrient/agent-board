@@ -147,9 +147,10 @@ struct SupervisorFixture {
         )
     }
 
-    func setWorktreeStrategy(_ strategy: WorktreeStrategy) throws {
+    func setWorktreeStrategy(_ strategy: WorktreeStrategy, maxAgents: Int? = nil) throws {
         var settings = project.settings
         settings.worktreeStrategy = strategy
+        if let maxAgents { settings.sharedCheckoutMaxAgents = maxAgents }
         try ProjectStore(db).updateSettings(project.id, settings)
     }
 

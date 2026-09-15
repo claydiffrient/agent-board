@@ -153,21 +153,26 @@ final class SharedCheckoutSpawnTests: XCTestCase {
 
     // MARK: - the group and its cap
 
-    func testAtMostOneAgentOccupiesTheCheckout() async throws {
-        try fixture.setWorktreeStrategy(.shared)
+    /// The group size is the project's, not a constant: two agents share here and the third is sent
+    /// to a worktree, and neither number is the shipped default of three.
+    func testTheCheckoutFillsToTheConfiguredGroupSizeAndThenIsolates() async throws {
+        try fixture.setWorktreeStrategy(.shared, maxAgents: 2)
         let first = try makeTask("First")
         let second = try makeTask("Second")
+        let third = try makeTask("Third")
 
         try await assign(first)
         try await assign(second)
+        try await assign(third)
 
-        XCTAssertEqual(SharedCheckoutGroup.maxMembers, 1)
         XCTAssertNil(try session(of: first).worktreePath)
-        let secondSession = try session(of: second)
-        let worktree = try XCTUnwrap(secondSession.worktreePath, "a second agent moved into the occupied checkout")
+        XCTAssertNil(try session(of: second).worktreePath, "the second agent was isolated although the group had room")
+        XCTAssertEqual(try session(of: second).branch, "agentboard/shared")
+        let thirdSession = try session(of: third)
+        let worktree = try XCTUnwrap(thirdSession.worktreePath, "a third agent moved into a full checkout")
         XCTAssertTrue(worktree.hasPrefix(fixture.project.worktreeRoot), worktree)
-        XCTAssertEqual(secondSession.branch, "agentboard/\(second.id)")
-        XCTAssertEqual(secondSession.cwd, worktree)
+        XCTAssertEqual(thirdSession.branch, "agentboard/\(third.id)")
+        XCTAssertEqual(thirdSession.cwd, worktree)
     }
 
     func testTheCheckoutIsSharedAgainOnceItsOccupantFinishes() async throws {
@@ -220,8 +225,10 @@ final class SharedCheckoutSpawnTests: XCTestCase {
 
     /// The group is the session rows, so a worker that outlived the app is still holding the
     /// checkout when a new supervisor comes up over the same database.
+    /// Pinned to a group of one so the second spawn's placement is the assertion: if the relaunched
+    /// supervisor could not see the member, the checkout would read as free and it would share.
     func testTheGroupSurvivesARelaunch() async throws {
-        try fixture.setWorktreeStrategy(.shared)
+        try fixture.setWorktreeStrategy(.shared, maxAgents: 1)
         let first = try makeTask("First")
         try await assign(first)
 

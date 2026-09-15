@@ -32,6 +32,8 @@ public struct HookEvent: Sendable {
     public var cwd: String?
     public var toolName: String?
     public var toolCommand: String?
+    /// The file a write tool is about to touch, when the tool names one.
+    public var toolFilePath: String?
     public var notificationType: String?
     public var notificationMessage: String?
     public var lastAssistantMessage: String?
@@ -39,7 +41,8 @@ public struct HookEvent: Sendable {
     public var receivedAt: Date
 
     public init(name: String, sessionId: String, transcriptPath: String? = nil, cwd: String? = nil, toolName: String? = nil,
-                toolCommand: String? = nil, notificationType: String? = nil, notificationMessage: String? = nil,
+                toolCommand: String? = nil, toolFilePath: String? = nil, notificationType: String? = nil,
+                notificationMessage: String? = nil,
                 lastAssistantMessage: String? = nil, rawJSON: String, receivedAt: Date = Date()) {
         self.name = name
         self.sessionId = sessionId
@@ -47,6 +50,7 @@ public struct HookEvent: Sendable {
         self.cwd = cwd
         self.toolName = toolName
         self.toolCommand = toolCommand
+        self.toolFilePath = toolFilePath
         self.notificationType = notificationType
         self.notificationMessage = notificationMessage
         self.lastAssistantMessage = lastAssistantMessage

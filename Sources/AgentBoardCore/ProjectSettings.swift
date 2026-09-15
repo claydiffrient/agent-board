@@ -101,6 +101,9 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var archivePolicy: ArchivePolicy = .afterEpicMerge
     /// Whether a worker gets its own worktree, shares the project's checkout, or is decided per spawn.
     public var worktreeStrategy: WorktreeStrategy = .worktree
+    /// How many agents may be co-resident in the project's own checkout at once. Matches
+    /// `caps.maxConcurrentWorkers` so shared mode adds no second, tighter ceiling to discover.
+    public var sharedCheckoutMaxAgents: Int = 3
 
     public init(
         caps: Caps = Caps(),
@@ -112,7 +115,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         buildCommand: String? = nil,
         testCommand: String? = nil,
         archivePolicy: ArchivePolicy = .afterEpicMerge,
-        worktreeStrategy: WorktreeStrategy = .worktree
+        worktreeStrategy: WorktreeStrategy = .worktree,
+        sharedCheckoutMaxAgents: Int = 3
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -124,6 +128,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.testCommand = testCommand
         self.archivePolicy = archivePolicy
         self.worktreeStrategy = worktreeStrategy
+        self.sharedCheckoutMaxAgents = sharedCheckoutMaxAgents
     }
 
     public init(from decoder: Decoder) throws {
@@ -138,6 +143,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
         archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge
         worktreeStrategy = try c.decodeIfPresent(WorktreeStrategy.self, forKey: .worktreeStrategy) ?? .worktree
+        sharedCheckoutMaxAgents = try c.decodeIfPresent(Int.self, forKey: .sharedCheckoutMaxAgents)
+            ?? ProjectSettings().sharedCheckoutMaxAgents
     }
 
     public static func decode(_ json: String) -> ProjectSettings {

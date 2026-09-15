@@ -40,6 +40,39 @@ final class SessionConfigTests: XCTestCase {
         XCTAssertEqual(hookList[0]["timeout"] as? Int, 5)
     }
 
+    /// A worktree worker cannot collide with anyone, so the write matcher is never written into its
+    /// settings at all — there is no round trip to pay on its edits.
+    func testWriteToolsAreNotHookedWithoutFileLocks() throws {
+        let files = try SessionConfigWriter.write(configDir: dir, configId: "abc", port: 4321, token: "tok")
+        let settings = try readJSON(files.settingsURL)
+        let hooks = try XCTUnwrap(settings["hooks"] as? [String: Any])
+        let groups = try XCTUnwrap(hooks["PreToolUse"] as? [[String: Any]])
+        XCTAssertEqual(groups.compactMap { $0["matcher"] as? String }, ["Bash"])
+    }
+
+    func testFileLocksAddAWriteMatcherThatOutlastsTheWait() throws {
+        let files = try SessionConfigWriter.write(
+            configDir: dir, configId: "abc", port: 4321, token: "tok", fileLocks: true
+        )
+        let settings = try readJSON(files.settingsURL)
+        let hooks = try XCTUnwrap(settings["hooks"] as? [String: Any])
+        let groups = try XCTUnwrap(hooks["PreToolUse"] as? [[String: Any]])
+        XCTAssertEqual(groups.count, 2)
+
+        let guarded = try XCTUnwrap(groups.first { $0["matcher"] as? String == "Bash" })
+        XCTAssertEqual(try XCTUnwrap(guarded["hooks"] as? [[String: Any]])[0]["timeout"] as? Int, 5)
+
+        let locking = try XCTUnwrap(groups.first { $0["matcher"] as? String != "Bash" })
+        let matcher = try XCTUnwrap(locking["matcher"] as? String)
+        for tool in FileLockPolicy.lockedTools {
+            XCTAssertTrue(matcher.contains(tool), matcher)
+        }
+        let hookList = try XCTUnwrap(locking["hooks"] as? [[String: Any]])
+        let timeout = try XCTUnwrap(hookList[0]["timeout"] as? Int)
+        XCTAssertGreaterThan(Double(timeout), FileLockPolicy.waitTimeout)
+        XCTAssertEqual(hookList[0]["url"] as? String, "http://127.0.0.1:4321/hooks?token=tok")
+    }
+
     func testFileNamesAndShape() throws {
         let files = try SessionConfigWriter.write(configDir: dir, configId: "abc", port: 4321, token: "tok")
         XCTAssertEqual(files.settingsURL.lastPathComponent, "settings-abc.json")

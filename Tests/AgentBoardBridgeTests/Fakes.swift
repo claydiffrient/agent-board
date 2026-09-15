@@ -72,7 +72,7 @@ struct BridgeFixture {
         TokenIdentity(token: "orch", scope: .orchestrator, projectId: project.id, sessionId: "orch-session")
     }
 
-    static func make() throws -> BridgeFixture {
+    static func make(lockWait: FileLockWaitPolicy = .default) throws -> BridgeFixture {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
             name: "Demo",
@@ -93,7 +93,7 @@ struct BridgeFixture {
             orchestrator: orchestrator,
             worker: worker,
             scoped: ScopedToolHandler(worker: worker, orchestrator: orchestrator),
-            hooks: StoreHookSink(db: db, events: events)
+            hooks: StoreHookSink(db: db, events: events, lockWait: lockWait)
         )
     }
 
@@ -118,8 +118,14 @@ struct BridgeFixture {
     }
 
     @discardableResult
-    func session(_ id: String, role: SessionRole = .worker, state: SessionState = .running, taskId: String? = nil) throws -> AgentSession {
-        let session = AgentSession(sessionId: id, projectId: project.id, taskId: taskId, role: role, cwd: "/tmp", state: state)
+    func session(
+        _ id: String, role: SessionRole = .worker, state: SessionState = .running, taskId: String? = nil,
+        worktreePath: String? = nil
+    ) throws -> AgentSession {
+        let session = AgentSession(
+            sessionId: id, projectId: project.id, taskId: taskId, role: role,
+            worktreePath: worktreePath, cwd: worktreePath ?? "/tmp", state: state
+        )
         try sessions.insert(session)
         return session
     }
@@ -172,6 +178,20 @@ struct BridgeFixture {
     func preToolUse(_ command: String, sessionId: String, identity: TokenIdentity, tool: String = "Bash") async -> HookDecision? {
         let event = HookEvent(name: "PreToolUse", sessionId: sessionId, toolName: tool, toolCommand: command, rawJSON: "{}")
         return await hooks.handle(event, identity: identity)
+    }
+
+    /// A write the way Claude Code reports one: the tool name plus the file it is about to touch.
+    func preToolUseWrite(
+        _ filePath: String, sessionId: String, identity: TokenIdentity, tool: String = "Edit"
+    ) async -> HookDecision? {
+        let event = HookEvent(
+            name: "PreToolUse", sessionId: sessionId, toolName: tool, toolFilePath: filePath, rawJSON: "{}"
+        )
+        return await hooks.handle(event, identity: identity)
+    }
+
+    func repoFile(_ relative: String) -> String {
+        project.repoPath + "/" + relative
     }
 }
 

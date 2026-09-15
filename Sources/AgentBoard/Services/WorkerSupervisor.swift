@@ -79,6 +79,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let notes: NoteStore
     @ObservationIgnored private let board: Board
     @ObservationIgnored private let archives: ArchiveSweep
+    @ObservationIgnored private let fileLocks: FileLockStore
     @ObservationIgnored private var meteringTask: _Concurrency.Task<Void, Never>?
     /// Millis of the last archive sweep; 0 means none yet, so the first tick after launch sweeps
     /// and picks up whatever came due while the app was closed.
@@ -124,6 +125,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         notes = NoteStore(db)
         board = Board(db)
         archives = ArchiveSweep(db)
+        fileLocks = FileLockStore(db)
     }
 
     private var sessionConfigDir: URL { appSupportDir.appendingPathComponent("sessions") }
@@ -140,6 +142,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             lastError = describe(error)
         }
         failInterruptedSetups()
+        sweepStaleFileLocks()
         await migrateWorktreeRoots()
         startMetering()
     }
@@ -398,6 +401,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         MacNotifier.post(title: "Worker never started", body: detail)
     }
 
+    /// A lock held by a session the last run of the app never saw end — a killed process, a crash —
+    /// would keep a file in the shared checkout claimed by nobody. Same shape as
+    /// `failInterruptedSetups`: sweep it at launch, before any worker can contend for it.
+    @discardableResult
+    func sweepStaleFileLocks() -> [FileLock] {
+        let swept = (try? fileLocks.sweepStale()) ?? []
+        for lock in swept {
+            FileHandle.standardError.write(
+                Data("stale file lock released: \(lock.path) (session \(lock.sessionId))\n".utf8)
+            )
+        }
+        return swept
+    }
+
     /// A setup that was still running when Agent Board quit has no process behind it any more, and
     /// its task would otherwise sit in `running` forever behind a session that will never start.
     private func failInterruptedSetups() {
@@ -445,7 +462,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 port: port,
                 token: grant.token,
                 autoModeJSON: project.settings.autoModeJSON,
-                extraMcpServers: nil
+                extraMcpServers: nil,
+                fileLocks: plan.worktreePath == nil
             )
             let request = SpawnRequest(
                 cwd: plan.cwd,
@@ -1461,9 +1479,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             startedAt: current.startedDate,
             lastActivity: lastActivity,
             now: Date(),
-            limits: limits
+            limits: limits,
+            state: current.state
         ) else { return }
-        if case .idle = breach, current.state == .blocked || current.state == .setup { return }
         await enforce(breach, on: current)
     }
 

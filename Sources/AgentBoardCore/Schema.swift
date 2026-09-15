@@ -203,9 +203,23 @@ enum Schema {
     ALTER TABLE project ADD COLUMN workspace_id TEXT REFERENCES workspace(id);
     """
 
+    static let fileLock = """
+    CREATE TABLE file_lock (
+      project_id TEXT NOT NULL REFERENCES project(id),
+      path       TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      task_id    TEXT,
+      held_since INTEGER NOT NULL,
+      PRIMARY KEY (project_id, path)
+    );
+    CREATE INDEX file_lock_session ON file_lock(session_id);
+
+    ALTER TABLE agent_session ADD COLUMN blocked_on_path TEXT;
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
-        "approval", "shutdown_order", "shutdown_delivery", "workspace",
+        "approval", "shutdown_order", "shutdown_delivery", "workspace", "file_lock",
     ]
 }

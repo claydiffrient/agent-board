@@ -89,7 +89,10 @@ public enum OpeningPrompt {
         case .shared:
             return "You are in the project's own checkout on shared branch `\(branch)`, not in a worktree "
                 + "of your own. Work only in this directory, and touch only the files your task needs: "
-                + "another agent may join this same checkout."
+                + "another agent may join this same checkout. Your first write to a file claims it "
+                + "until your session ends. If another agent already holds a file, your write is held "
+                + "for up to \(Int(FileLockPolicy.waitTimeout))s and then refused — do the rest of your "
+                + "task first, and call `report_blocked` naming the file only when nothing else is left."
         }
     }
 
