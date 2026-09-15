@@ -190,8 +190,10 @@ final class OrchestratorConsole {
         )
     }
 
+    /// SwiftTerm hands `exitCode` as the raw `waitpid` status, not the exit code; decoded through
+    /// `WaitStatus` so `exit 7` reports 7, not the shifted 1792 (shared with `ShellConsole`).
     private func processExited(code: Int32?) {
-        state = .exited(code)
+        state = .exited(code.map(WaitStatus.exitCode(fromWaitStatus:)))
         if let sessionId, let row = try? sessions.get(sessionId), row.state.isActive {
             try? sessions.setState(sessionId, .stopped, endedAt: .nowMillis)
         }

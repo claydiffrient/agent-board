@@ -89,6 +89,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
     @ObservationIgnored private var stallNotified: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
+    @ObservationIgnored private var shellConsoles: [String: ShellConsole] = [:]
     /// Keyed by setup session id, so a test — or a human stopping a worker mid-setup — can wait on
     /// or cancel the half of a spawn that outlives the call.
     @ObservationIgnored private var setupTasks: [String: _Concurrency.Task<Void, Never>] = [:]
@@ -1052,6 +1053,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             currentPort: { [weak self] in self?.serverPort }
         )
         consoles[projectId] = console
+        return console
+    }
+
+    func shellConsole(projectId: String) throws -> ShellConsole {
+        if let existing = shellConsoles[projectId] { return existing }
+        guard try projects.get(projectId) != nil else { throw SupervisorError.projectNotFound(projectId) }
+        let console = ShellConsole(projectId: projectId, db: db)
+        shellConsoles[projectId] = console
         return console
     }
 

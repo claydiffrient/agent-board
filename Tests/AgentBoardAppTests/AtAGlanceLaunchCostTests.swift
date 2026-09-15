@@ -117,6 +117,8 @@ private final class ConsoleRecordingSupervisor: WorkerSupervising {
         throw StubError.notWired
     }
 
+    func shellConsole(projectId: String) throws -> ShellConsole { throw StubError.notWired }
+
     var serverPort: Int? { nil }
     var lastError: String? { nil }
     var shutdownProgress: [String: ShutdownProgress] { [:] }
