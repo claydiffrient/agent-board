@@ -20,34 +20,53 @@ private func glance(_ name: String, running: Int = 0, review: Int = 0, ready: In
 
 final class GlanceHeadlineTests: XCTestCase {
     func testAnEmptyBoardReadsAsReassuranceNotAsZeroes() {
-        let text = GlanceHeadline.text(workingSessions: 0, tasksInReview: 0)
+        let text = GlanceHeadline.text(workingSessions: 0, tasksInReview: 0, projectsNeedingYou: 0)
         XCTAssertEqual(text, "Nothing running, and nothing is waiting on you.")
         XCTAssertFalse(text.contains("0"), "zero must never be rendered as a digit in the headline")
     }
 
     func testOneOfEachIsSingular() {
         XCTAssertEqual(
-            GlanceHeadline.text(workingSessions: 1, tasksInReview: 1),
+            GlanceHeadline.text(workingSessions: 1, tasksInReview: 1, projectsNeedingYou: 0),
             "1 agent working, 1 task awaiting your review."
         )
     }
 
     func testSeveralOfEachIsPlural() {
         XCTAssertEqual(
-            GlanceHeadline.text(workingSessions: 4, tasksInReview: 3),
+            GlanceHeadline.text(workingSessions: 4, tasksInReview: 3, projectsNeedingYou: 0),
             "4 agents working, 3 tasks awaiting your review."
         )
     }
 
     func testEitherHalfCanBeZeroWithoutADigit() {
         XCTAssertEqual(
-            GlanceHeadline.text(workingSessions: 0, tasksInReview: 2),
+            GlanceHeadline.text(workingSessions: 0, tasksInReview: 2, projectsNeedingYou: 0),
             "Nothing running, 2 tasks awaiting your review."
         )
         XCTAssertEqual(
-            GlanceHeadline.text(workingSessions: 2, tasksInReview: 0),
+            GlanceHeadline.text(workingSessions: 2, tasksInReview: 0, projectsNeedingYou: 0),
             "2 agents working, nothing awaiting your review."
         )
+    }
+
+    func testAWaitingProjectLeadsTheSentenceWithoutTouchingTheReviewCount() {
+        XCTAssertEqual(
+            GlanceHeadline.text(workingSessions: 3, tasksInReview: 4, projectsNeedingYou: 2),
+            "2 projects need you. 3 agents working, 4 tasks awaiting your review."
+        )
+        XCTAssertEqual(
+            GlanceHeadline.text(workingSessions: 1, tasksInReview: 1, projectsNeedingYou: 1),
+            "1 project needs you. 1 agent working, 1 task awaiting your review."
+        )
+    }
+
+    /// The gap this closes: a pending approval blocks work outright and never lands in the review
+    /// column, so the old headline reassured the human that nothing was waiting on them.
+    func testAQuietBoardWithAWaitingProjectDoesNotClaimNothingIsWaiting() {
+        let text = GlanceHeadline.text(workingSessions: 0, tasksInReview: 0, projectsNeedingYou: 1)
+        XCTAssertEqual(text, "1 project needs you. Nothing running, nothing awaiting your review.")
+        XCTAssertFalse(text.contains("nothing is waiting on you"))
     }
 }
 
