@@ -47,6 +47,6 @@ final class OrchestratorPTYIsolationTests: XCTestCase {
         for constant in ["OrchestratorCompaction.command", "OrchestratorCompaction.reorientation"] {
             XCTAssertTrue(console.contains("inject(\(constant))"), "\(constant) is not what gets injected")
         }
-        XCTAssertTrue(console.contains(#"inject("[agent-board] \(count) worker reports pending. Call list_reports.")"#))
+        XCTAssertTrue(console.contains(#"inject("[agent-board] \(count) reports pending. Call list_reports.")"#))
     }
 }
