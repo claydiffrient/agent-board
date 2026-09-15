@@ -28,7 +28,7 @@ struct ApprovalsSidebar: View {
         AttentionSelection.needingAttention(
             tasks: tasks.value,
             sessions: sessions.value,
-            now: now,
+            awake: SleepLedger.shared.reading(asOf: now),
             stallThreshold: TimeInterval(project.settings.caps.stallSeconds)
         )
     }

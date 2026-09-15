@@ -114,22 +114,26 @@ public struct ShutdownDeliveryStore: Sendable {
     }
 
     public func progress(
-        orderId: String, graceSeconds: Int = defaultGraceSeconds, now: Int64 = .nowMillis
+        orderId: String, graceSeconds: Int = defaultGraceSeconds, awake: AwakeElapsed = SleepLedger.shared.reading()
     ) throws -> ShutdownProgress {
         try db.reader.read { db in
-            Self.progress(try Self.all(db, orderId: orderId), orderId: orderId, graceSeconds: graceSeconds, now: now)
+            Self.progress(try Self.all(db, orderId: orderId), orderId: orderId, graceSeconds: graceSeconds, awake: awake)
         }
     }
 
+    /// The grace period is awake time, not elapsed time: a worker on a sleeping machine has not
+    /// failed to answer, it never got the chance.
     static func progress(
-        _ rows: [ShutdownDelivery], orderId: String, graceSeconds: Int, now: Int64
+        _ rows: [ShutdownDelivery], orderId: String, graceSeconds: Int, awake: AwakeElapsed
     ) -> ShutdownProgress {
         let deadline = Int64(graceSeconds) * 1000
         return ShutdownProgress(
             orderId: orderId,
             total: rows.count,
             acknowledged: rows.filter(\.isAcknowledged).count,
-            overdue: rows.filter { !$0.isAcknowledged && now - $0.orderedAt >= deadline }.map(\.sessionId)
+            overdue: rows
+                .filter { !$0.isAcknowledged && awake.millisAwake(since: $0.orderedAt) >= deadline }
+                .map(\.sessionId)
         )
     }
 
@@ -141,7 +145,10 @@ public struct ShutdownDeliveryStore: Sendable {
         orderId: String, graceSeconds: Int = defaultGraceSeconds
     ) -> ValueObservation<ValueReducers.Fetch<ShutdownProgress>> {
         ValueObservation.tracking { db in
-            Self.progress(try Self.all(db, orderId: orderId), orderId: orderId, graceSeconds: graceSeconds, now: .nowMillis)
+            Self.progress(
+                try Self.all(db, orderId: orderId), orderId: orderId, graceSeconds: graceSeconds,
+                awake: SleepLedger.shared.reading()
+            )
         }
     }
 }

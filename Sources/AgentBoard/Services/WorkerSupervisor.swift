@@ -67,6 +67,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let appSupportDir: URL
     @ObservationIgnored private let worktreeBase: URL
     @ObservationIgnored private let projectsRoot: URL
+    /// Sampled once per metering tick. Every cap and grace deadline is measured against it so a
+    /// suspended machine does not count against a worker.
+    @ObservationIgnored private let sleepLedger: SleepLedger
     @ObservationIgnored private let projects: ProjectStore
     @ObservationIgnored private let tasks: TaskStore
     @ObservationIgnored private let sessions: SessionStore
@@ -104,7 +107,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         server: BoardServer,
         appSupportDir: URL,
         worktreeBase: URL,
-        projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot
+        projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
+        sleepLedger: SleepLedger = .shared
     ) {
         self.db = db
         self.runtime = runtime
@@ -112,6 +116,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         self.appSupportDir = appSupportDir
         self.worktreeBase = worktreeBase
         self.projectsRoot = projectsRoot
+        self.sleepLedger = sleepLedger
         projects = ProjectStore(db)
         tasks = TaskStore(db)
         sessions = SessionStore(db)
@@ -1181,7 +1186,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func refreshShutdownProgress(projectId: String, order: ShutdownOrder) -> ShutdownProgress {
         let grace = (try? projects.get(projectId))??.settings.caps.shutdownGraceSeconds
             ?? ShutdownDeliveryStore.defaultGraceSeconds
-        let progress = (try? deliveries.progress(orderId: order.id, graceSeconds: grace))
+        let progress = (try? deliveries.progress(orderId: order.id, graceSeconds: grace, awake: sleepLedger.reading()))
             ?? ShutdownProgress(orderId: order.id, total: 0, acknowledged: 0)
         shutdownProgress[projectId] = progress
         return progress
@@ -1309,9 +1314,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
-    private func meterTick() async {
+    func meterTick() async {
         guard let all = try? projects.list() else { return }
-        let now = Int64.nowMillis
+        let awake = sleepLedger.reading()
+        let now = awake.nowMillis
         if now - lastArchiveSweep >= Self.archiveSweepIntervalMillis {
             lastArchiveSweep = now
             sweepArchives(all, now: now)
@@ -1322,7 +1328,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let projectSessions = try? sessions.all(projectId: project.id) else { continue }
             let stallSeconds = project.settings.caps.stallSeconds
             for session in projectSessions where Self.shouldMeter(session, now: now) {
-                await meter(session, limits: limits, stallSeconds: stallSeconds)
+                await meter(session, limits: limits, stallSeconds: stallSeconds, awake: awake)
             }
         }
     }
@@ -1350,7 +1356,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return now - endedAt < finalSpendWindowMillis
     }
 
-    private func meter(_ session: AgentSession, limits: CapLimits, stallSeconds: Int) async {
+    private func meter(_ session: AgentSession, limits: CapLimits, stallSeconds: Int, awake: AwakeElapsed) async {
         var totals = UsageTotals(
             inputTokens: session.tokensIn,
             outputTokens: session.tokensOut,
@@ -1384,25 +1390,25 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             stallNotified.remove(session.sessionId)
             return
         }
-        noteStall(current, lastActivity: lastActivity, stallSeconds: stallSeconds)
+        noteStall(current, lastActivity: lastActivity, stallSeconds: stallSeconds, awake: awake)
         guard let breach = CapEvaluator.evaluate(
             totals: totals,
             startedAt: current.startedDate,
             lastActivity: lastActivity,
-            now: Date(),
+            awake: awake,
             limits: limits
         ) else { return }
         if case .idle = breach, current.state == .blocked || current.state == .setup { return }
-        await enforce(breach, on: current)
+        await enforce(breach, on: current, awake: awake)
     }
 
     /// SPEC §12 case 2: a grandchild process waiting on stdin fires no hook, so a `running` worker whose
     /// activity clock has frozen is only surfaced — never killed. The idle cap still decides that.
-    private func noteStall(_ session: AgentSession, lastActivity: Date?, stallSeconds: Int) {
+    private func noteStall(_ session: AgentSession, lastActivity: Date?, stallSeconds: Int, awake: AwakeElapsed) {
         let stalled = session.state == .running && AttentionSelection.isStalled(
             lastActivity: lastActivity,
             startedAt: session.startedDate,
-            now: Date(),
+            awake: awake,
             threshold: TimeInterval(stallSeconds)
         )
         guard stalled else {
@@ -1418,8 +1424,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
     }
 
-    private func enforce(_ breach: CapBreach, on session: AgentSession) async {
-        let description = Self.describe(breach)
+    private func enforce(_ breach: CapBreach, on session: AgentSession, awake: AwakeElapsed) async {
+        let description = Self.describe(breach, awake: awake)
         if let shortId = session.shortId {
             try? await runtime.stop(shortId: shortId)
         }
@@ -1436,14 +1442,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
     }
 
-    private static func describe(_ breach: CapBreach) -> String {
+    private static func describe(_ breach: CapBreach, awake: AwakeElapsed) -> String {
         switch breach {
         case .tokens(let used, let limit):
             return "token cap reached: \(used) of \(limit) tokens"
         case .wallClock(let elapsed, let limit):
-            return "wall clock cap reached: \(Int(elapsed / 60)) of \(Int(limit / 60)) minutes"
+            return "elapsed cap reached: \(Int(elapsed / 60)) of \(Int(limit / 60)) awake minutes"
         case .idle(let since, let limit):
-            let idleFor = Int(Date().timeIntervalSince(since) / 60)
+            let idleFor = Int(awake.secondsAwake(since: since) / 60)
             return "idle cap reached: no activity for \(idleFor) minutes (limit \(Int(limit / 60)))"
         }
     }

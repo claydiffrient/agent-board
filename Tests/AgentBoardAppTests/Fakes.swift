@@ -103,7 +103,7 @@ struct SupervisorFixture {
 
     /// `gitRepo` lays down a real git repository at `repoPath`, which every test that exercises
     /// spawning, worktrees, or branch teardown needs.
-    static func make(gitRepo: Bool = false) throws -> SupervisorFixture {
+    static func make(gitRepo: Bool = false, sleepLedger: SleepLedger = SleepLedger()) throws -> SupervisorFixture {
         let db = try AppDatabase.inMemory()
         let supportDir = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
@@ -137,7 +137,8 @@ struct SupervisorFixture {
         let supervisor = WorkerSupervisor(
             db: db, runtime: runtime, server: server, appSupportDir: supportDir,
             worktreeBase: worktreeBase,
-            projectsRoot: supportDir.appendingPathComponent("claude-projects")
+            projectsRoot: supportDir.appendingPathComponent("claude-projects"),
+            sleepLedger: sleepLedger
         )
         sink.target = supervisor
         return SupervisorFixture(

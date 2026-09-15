@@ -61,7 +61,7 @@ final class GlobalShutdownSheetRenderTests: XCTestCase {
 
         let snapshot = try GlobalShutdownStore(db).snapshot()
         XCTAssertEqual(snapshot.projectCount, 2)
-        XCTAssertEqual(GlobalShutdown.rows(snapshot, now: .nowMillis).count, 2)
+        XCTAssertEqual(GlobalShutdown.rows(snapshot, awake: .init(nowMillis: .nowMillis)).count, 2)
         XCTAssertEqual(
             supervisor.consolesStopped, 0,
             "the sheet took the quit path while two workers were still winding down"

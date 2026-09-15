@@ -21,7 +21,7 @@ struct GlobalShutdownSheet: View {
     @State private var errorMessage: String?
 
     private var rows: [ShutdownRow] {
-        GlobalShutdown.rows(snapshot.value, now: .nowMillis)
+        GlobalShutdown.rows(snapshot.value, awake: SleepLedger.shared.reading())
     }
 
     var body: some View {

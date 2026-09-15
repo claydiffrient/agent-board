@@ -39,7 +39,7 @@ final class AttentionSelectionTests: XCTestCase {
         XCTAssertTrue(
             AttentionSelection.isStalled(
                 lastActivity: now.addingTimeInterval(-120), startedAt: now.addingTimeInterval(-600),
-                now: now, threshold: 120
+                awake: .init(now: now), threshold: 120
             )
         )
     }
@@ -48,7 +48,7 @@ final class AttentionSelectionTests: XCTestCase {
         XCTAssertFalse(
             AttentionSelection.isStalled(
                 lastActivity: now.addingTimeInterval(-119), startedAt: now.addingTimeInterval(-600),
-                now: now, threshold: 120
+                awake: .init(now: now), threshold: 120
             )
         )
     }
@@ -56,12 +56,12 @@ final class AttentionSelectionTests: XCTestCase {
     func testNeverActiveSessionIsMeasuredFromItsStart() {
         XCTAssertTrue(
             AttentionSelection.isStalled(
-                lastActivity: nil, startedAt: now.addingTimeInterval(-300), now: now, threshold: 120
+                lastActivity: nil, startedAt: now.addingTimeInterval(-300), awake: .init(now: now), threshold: 120
             )
         )
         XCTAssertFalse(
             AttentionSelection.isStalled(
-                lastActivity: nil, startedAt: now.addingTimeInterval(-30), now: now, threshold: 120
+                lastActivity: nil, startedAt: now.addingTimeInterval(-30), awake: .init(now: now), threshold: 120
             )
         )
     }
@@ -69,7 +69,25 @@ final class AttentionSelectionTests: XCTestCase {
     func testNonPositiveThresholdNeverStalls() {
         XCTAssertFalse(
             AttentionSelection.isStalled(
-                lastActivity: nil, startedAt: now.addingTimeInterval(-99_999), now: now, threshold: 0
+                lastActivity: nil, startedAt: now.addingTimeInterval(-99_999), awake: .init(now: now), threshold: 0
+            )
+        )
+    }
+
+    /// The stall suspicion is measured on the same clock as the cap, so waking the machine does
+    /// not fill the sidebar with workers accused of being stuck.
+    func testASuspendedWorkerIsNotStalled() {
+        let slept = ObservedSleep(endedAtMillis: Int64(now.timeIntervalSince1970 * 1000) - 5_000, millis: 1_195_000)
+        XCTAssertTrue(
+            AttentionSelection.isStalled(
+                lastActivity: now.addingTimeInterval(-1200), startedAt: now.addingTimeInterval(-1800),
+                awake: .init(now: now), threshold: 120
+            )
+        )
+        XCTAssertFalse(
+            AttentionSelection.isStalled(
+                lastActivity: now.addingTimeInterval(-1200), startedAt: now.addingTimeInterval(-1800),
+                awake: .init(now: now, sleeps: [slept]), threshold: 120
             )
         )
     }
@@ -81,7 +99,7 @@ final class AttentionSelectionTests: XCTestCase {
         let session = session("f9047594-aaaa", taskId: "t1", state: .blocked, startedAt: now.addingTimeInterval(-600), lastActivity: now.addingTimeInterval(-90))
 
         let items = AttentionSelection.needingAttention(
-            tasks: [blocked, task("t2")], sessions: [session], now: now, stallThreshold: 120
+            tasks: [blocked, task("t2")], sessions: [session], awake: .init(now: now), stallThreshold: 120
         )
 
         XCTAssertEqual(items.map(\.id), ["t1"])
@@ -94,7 +112,7 @@ final class AttentionSelectionTests: XCTestCase {
     func testHealthyRunningWorkerIsAbsent() {
         let session = session("s1", taskId: "t1", startedAt: now.addingTimeInterval(-600), lastActivity: now.addingTimeInterval(-10))
         let items = AttentionSelection.needingAttention(
-            tasks: [task("t1")], sessions: [session], now: now, stallThreshold: 120
+            tasks: [task("t1")], sessions: [session], awake: .init(now: now), stallThreshold: 120
         )
         XCTAssertTrue(items.isEmpty)
     }
@@ -103,7 +121,7 @@ final class AttentionSelectionTests: XCTestCase {
         let session = session("b2b3848d-bbbb", taskId: "t1", startedAt: now.addingTimeInterval(-600), lastActivity: now.addingTimeInterval(-400))
 
         let items = AttentionSelection.needingAttention(
-            tasks: [task("t1")], sessions: [session], now: now, stallThreshold: 120
+            tasks: [task("t1")], sessions: [session], awake: .init(now: now), stallThreshold: 120
         )
 
         XCTAssertEqual(items.map(\.kind), [.stalled])
@@ -116,7 +134,7 @@ final class AttentionSelectionTests: XCTestCase {
         let session = session("s1", taskId: "t1", startedAt: now.addingTimeInterval(-900), lastActivity: now.addingTimeInterval(-500))
 
         let items = AttentionSelection.needingAttention(
-            tasks: [blocked], sessions: [session], now: now, stallThreshold: 120
+            tasks: [blocked], sessions: [session], awake: .init(now: now), stallThreshold: 120
         )
 
         XCTAssertEqual(items.map(\.kind), [.blocked])
@@ -126,7 +144,7 @@ final class AttentionSelectionTests: XCTestCase {
         for state in [SessionState.idle, .starting, .stopped, .completed, .failed] {
             let session = session("s-\(state.rawValue)", taskId: "t1", state: state, startedAt: now.addingTimeInterval(-900))
             let items = AttentionSelection.needingAttention(
-                tasks: [task("t1")], sessions: [session], now: now, stallThreshold: 120
+                tasks: [task("t1")], sessions: [session], awake: .init(now: now), stallThreshold: 120
             )
             XCTAssertTrue(items.isEmpty, "\(state.rawValue) should not be reported as stalled")
         }
@@ -135,7 +153,7 @@ final class AttentionSelectionTests: XCTestCase {
     func testOrchestratorSessionIsNeverReported() {
         let session = session("orch", taskId: "t1", role: .orchestrator, startedAt: now.addingTimeInterval(-900))
         let items = AttentionSelection.needingAttention(
-            tasks: [task("t1")], sessions: [session], now: now, stallThreshold: 120
+            tasks: [task("t1")], sessions: [session], awake: .init(now: now), stallThreshold: 120
         )
         XCTAssertTrue(items.isEmpty)
     }
@@ -145,7 +163,7 @@ final class AttentionSelectionTests: XCTestCase {
         let dead = session("s1", taskId: "t1", state: .stopped, startedAt: now.addingTimeInterval(-900))
 
         let items = AttentionSelection.needingAttention(
-            tasks: [blocked], sessions: [dead], now: now, stallThreshold: 120
+            tasks: [blocked], sessions: [dead], awake: .init(now: now), stallThreshold: 120
         )
 
         XCTAssertEqual(items.map(\.kind), [.blocked])
@@ -166,7 +184,7 @@ final class AttentionSelectionTests: XCTestCase {
             session("s4", taskId: "blocked-old", state: .blocked, startedAt: now.addingTimeInterval(-900)),
         ]
 
-        let items = AttentionSelection.needingAttention(tasks: tasks, sessions: sessions, now: now, stallThreshold: 120)
+        let items = AttentionSelection.needingAttention(tasks: tasks, sessions: sessions, awake: .init(now: now), stallThreshold: 120)
 
         XCTAssertEqual(items.map(\.id), ["blocked-old", "blocked-new", "stale-old", "stale-new"])
     }
@@ -176,7 +194,7 @@ final class AttentionSelectionTests: XCTestCase {
         let second = session("attempt-2", taskId: "t1", startedAt: now.addingTimeInterval(-400), lastActivity: now.addingTimeInterval(-390))
 
         let items = AttentionSelection.needingAttention(
-            tasks: [task("t1")], sessions: [first, second], now: now, stallThreshold: 120
+            tasks: [task("t1")], sessions: [first, second], awake: .init(now: now), stallThreshold: 120
         )
 
         XCTAssertEqual(items.map(\.session?.sessionId), ["attempt-2"])

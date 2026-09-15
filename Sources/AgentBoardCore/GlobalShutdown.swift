@@ -48,7 +48,7 @@ public enum ShutdownQuitDecision: Sendable, Equatable {
 public enum GlobalShutdown {
     /// Every ordered session across every project, each row carrying the project it belongs to and
     /// measured against that project's own grace period — the projects do not share one.
-    public static func rows(_ snapshot: GlobalShutdownSnapshot, now: Int64) -> [ShutdownRow] {
+    public static func rows(_ snapshot: GlobalShutdownSnapshot, awake: AwakeElapsed) -> [ShutdownRow] {
         let projectByOrder = Dictionary(
             snapshot.orders.map { ($0.id, $0.projectId) }, uniquingKeysWith: { first, _ in first }
         )
@@ -61,7 +61,7 @@ public enum GlobalShutdown {
                     sessions: sessionsByProject[projectId] ?? [],
                     taskTitles: snapshot.taskTitles,
                     graceSeconds: snapshot.graceSeconds[projectId] ?? ShutdownDeliveryStore.defaultGraceSeconds,
-                    now: now,
+                    awake: awake,
                     projectName: snapshot.projectNames[projectId]
                 )
             }
