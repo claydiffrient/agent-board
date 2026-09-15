@@ -6,6 +6,7 @@ struct MainWindow: View {
     @Environment(AppEnvironment.self) private var env
     @State private var projects = Observed<[Project]>([])
     @State private var workspaces = Observed<[Workspace]>([])
+    @State private var attention = Observed<[ProjectAttention]>([])
     @State private var selection: SidebarSelection = .atAGlance
     @State private var settingsProject: Project?
     @State private var workspaceEdit: WorkspaceEdit?
@@ -32,6 +33,9 @@ struct MainWindow: View {
         .task {
             await workspaces.run(WorkspaceStore(env.db).observe(), in: env.db.reader)
         }
+        .task {
+            await attention.run(ProjectAttentionStore(env.db).observeAll(), in: env.db.reader)
+        }
         .sheet(item: $settingsProject) { project in
             ProjectSettingsSheet(project: project, workspaces: workspaces.value) {
                 if selection == .project(project.id) { select(.atAGlance) }
@@ -56,6 +60,13 @@ struct MainWindow: View {
 
     private var sections: [ProjectSection] {
         ProjectGrouping.sections(projects: projects.value, workspaces: workspaces.value)
+    }
+
+    /// One observation feeds every row and every header. `List` rebuilds a row on any scroll or
+    /// selection change, so a row that started its own observation would open and tear one down
+    /// per project per rebuild.
+    private var attentionById: [String: ProjectAttention] {
+        Dictionary(attention.value.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     /// The only writer of `selection`. Adding a project, deselecting in the sidebar, deleting the
@@ -116,33 +127,35 @@ struct MainWindow: View {
     }
 
     private func sectionHeader(_ section: ProjectSection) -> some View {
-        Text(section.workspace?.name ?? "Ungrouped")
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .dropDestination(for: String.self) { projectIds, _ in
-                assign(projectIds, to: section.workspace?.id)
+        HStack(spacing: 4) {
+            Text(section.workspace?.name ?? "Ungrouped")
+            Spacer(minLength: 4)
+            // Only while collapsed: expanded, the rows carry their own badges, and a second mark
+            // saying the same thing would just be noise.
+            if collapsed.contains(section.id),
+               let summary = collapsedSectionSummary(section, attention: attentionById) {
+                AttentionBadge(reason: summary)
             }
-            .contextMenu {
-                if let workspace = section.workspace {
-                    Button("Rename…") { workspaceEdit = .rename(workspace) }
-                    Button("Delete Workspace…", role: .destructive) { workspaceToDelete = workspace }
-                }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .dropDestination(for: String.self) { projectIds, _ in
+            assign(projectIds, to: section.workspace?.id)
+        }
+        .contextMenu {
+            if let workspace = section.workspace {
+                Button("Rename…") { workspaceEdit = .rename(workspace) }
+                Button("Delete Workspace…", role: .destructive) { workspaceToDelete = workspace }
             }
+        }
     }
 
     private func projectRow(_ project: Project) -> some View {
-        HStack {
-            Label(project.name, systemImage: "folder")
-                .help(project.repoPath)
-            Spacer()
-            Button {
-                settingsProject = project
-            } label: {
-                Image(systemName: "gearshape")
-            }
-            .buttonStyle(.borderless)
-            .help("Project settings")
-        }
+        ProjectRow(
+            project: project,
+            attention: attentionById[project.id],
+            openSettings: { settingsProject = project }
+        )
         .tag(SidebarSelection.project(project.id))
         .draggable(project.id)
     }
