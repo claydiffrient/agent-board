@@ -401,7 +401,11 @@ public final class OrchestratorToolHandler: ToolHandler {
 
     private func listTasks(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
         let column = try ToolArguments.optionalString("column", in: arguments).map(parseColumn)
-        let epicId = ToolArguments.optionalString("epic_id", in: arguments)
+        // Scoped, not just filtered: passing the id through would answer "no tasks" for another
+        // project's epic, which reads as "that epic is empty" rather than "that epic is not yours".
+        let epicId = try ToolArguments.optionalString("epic_id", in: arguments)
+            .flatMap { $0.isEmpty ? nil : $0 }
+            .map { try projectEpic($0, identity: identity).id }
         let includeArchived = arguments["include_archived"]?.boolValue ?? false
         let list = try tasks.list(
             projectId: identity.projectId, column: column, epicId: epicId, includeArchived: includeArchived
