@@ -27,7 +27,7 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D10 | Epics group tasks and own the integration branch | Merge scope becomes a lookup, not a judgment call | Flat tasks |
 | D11 | One orchestrator per project | cwd determines which CLAUDE.md, skills, and MCP servers load | One global orchestrator |
 | D12 | Notes are Agent Board's own store, Solo-scratchpad-shaped | Notes are a working surface, not Claude Code memory | View over `~/.claude/.../memory/` |
-| D13 | Pinned notes + task/epic-attached notes injected at spawn; rest pull-only | Stops three workers rediscovering the same constraint | Seed every note title |
+| D13 | Task/epic-attached notes injected in full at spawn; every other note indexed by title and `note://` uri, fetched on demand | Stops three workers rediscovering the same constraint without charging every worker for every pinned note | Inject pinned notes in full too |
 | D14 | Workers run `--permission-mode auto` | The shipped classifier already encodes 70 soft-deny rules | Hand-rolled PreToolUse denylist |
 | D15 | Blocked agents are answered by attaching to their real terminal | Auto mode's prompt text is written to be read; don't reproduce it | Native approval dialog |
 | D16 | Workers are `claude --bg` background sessions | Deletes process supervision, crash recovery, and scrollback from scope | App owns the PTYs |
@@ -164,7 +164,8 @@ For a task `T` in project `P`:
    `Authorization: Bearer <token>`, where the token carries scope `worker` and
    is bound to `(session, task)`.
 6. Compose the opening prompt: task title, body, acceptance criteria, epic goal,
-   pinned notes in full, attached notes in full, the project's build and test
+   task- and epic-attached notes in full, a one-line index of every other note in
+   the project naming its `note://` resource uri, the project's build and test
    commands when `settings_json` records them, and the completion protocol
    (commit, record one durable finding as a note, do not push, call
    `report_complete`). Injection alone left D13 half-built: notes flowed in and
@@ -620,7 +621,7 @@ Everything in worker scope over any task in the project, plus:
 | `set_epic(task_id, epic_id)` | Moves an existing task into an epic, between epics, or — with `epic_id` omitted — out of its epic. Refused for a task that has ever been spawned, and for a `done` destination epic. Dependencies are left alone |
 | `create_epic(title, goal, tasks[])` | Records a decomposition; cuts the epic branch |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
-| `pin_note(note_id, pinned)` | Every future agent sees it in full |
+| `pin_note(note_id, pinned)` | Every future agent sees it in its note index and can fetch it |
 | `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting |
 | `stop_worker(session_id)` | `claude stop` |
 | `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |

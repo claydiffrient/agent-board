@@ -6,7 +6,7 @@ import Foundation
 /// without paying for what it does not read. `search_notes` and `read_note` still work and are the
 /// faster route for an agent that already knows which note it wants.
 public struct NoteResourceHandler: ResourceHandler {
-    public static let scheme = "note"
+    public static let scheme = NoteResourceURI.scheme
     public static let mimeType = "application/json"
 
     private let notes: NoteStore
@@ -15,10 +15,8 @@ public struct NoteResourceHandler: ResourceHandler {
         notes = NoteStore(db)
     }
 
-    /// `note://<project-id>/<note-id>` — both ids are immutable, so the uri survives a retitle,
-    /// an edit and a pin.
     public static func uri(projectId: String, noteId: String) -> String {
-        "\(scheme)://\(projectId)/\(noteId)"
+        NoteResourceURI.uri(projectId: projectId, noteId: noteId)
     }
 
     public func resources(for identity: TokenIdentity) async throws -> [ResourceDescriptor] {

@@ -15,6 +15,12 @@ public enum NoteInjectionReason: String, Sendable, Equatable, CaseIterable {
         case .epic: "attached to this task's epic"
         }
     }
+
+    /// Attaching a note to a task or an epic is a judgement about *this* work, so the body
+    /// travels with the prompt: a note that says "do not do X" only works if it is read before
+    /// X, and a worker free to skip the fetch will sometimes skip it. Pinning is a standing bet
+    /// about the project rather than about this task, so a pinned note earns an index entry.
+    var warrantsFullBody: Bool { self != .pinned }
 }
 
 public struct InjectedNote: Sendable, Equatable {
@@ -29,11 +35,44 @@ public struct InjectedNote: Sendable, Equatable {
     }
 }
 
+/// One line of the spawn prompt's note index: enough for a worker to decide whether the body is
+/// worth a `resources/read` on `uri`, and nothing more.
+public struct NoteIndexEntry: Sendable, Equatable {
+    public let id: String
+    public let title: String
+    public let uri: String
+    public let headings: [String]
+    public let pinned: Bool
+
+    public init(id: String, title: String, uri: String, headings: [String], pinned: Bool) {
+        self.id = id
+        self.title = title
+        self.uri = uri
+        self.headings = headings
+        self.pinned = pinned
+    }
+}
+
+/// What a spawning worker is told about its project's notes: the few written for this work in
+/// full, and every other note as a title and a resource uri.
+public struct SpawnNotes: Sendable, Equatable {
+    public let full: [InjectedNote]
+    public let index: [NoteIndexEntry]
+
+    public init(full: [InjectedNote] = [], index: [NoteIndexEntry] = []) {
+        self.full = full
+        self.index = index
+    }
+
+    public var isEmpty: Bool { full.isEmpty && index.isEmpty }
+}
+
 extension NoteStore {
-    /// The notes a worker on `taskId` is given in full: every pinned note in the project plus
-    /// every note attached to the task or its epic, each appearing once. Everything else stays
-    /// pull-only behind `search_notes`.
-    public func notesForSpawn(projectId: String, taskId: String, epicId: String?) throws -> [InjectedNote] {
+    /// What a worker on `taskId` is told about this project's notes. A note the orchestrator
+    /// attached to the task or to its epic arrives in full; every other note in the project —
+    /// pinned ones included — arrives as an index entry naming the resource the worker can read
+    /// it from.
+    public func notesForSpawn(projectId: String, taskId: String, epicId: String?) throws -> SpawnNotes {
         try db.reader.read { db in
             var reasons: [String: [NoteInjectionReason]] = [:]
             var order: [String] = []
@@ -59,13 +98,30 @@ extension NoteStore {
                 absorb(try Self.notes(db, column: "epic_id", value: epicId), .epic)
             }
 
-            return try order.map { id in
+            let fullIds = order.filter { reasons[$0]!.contains { $0.warrantsFullBody } }
+            let full = try fullIds.map { id in
                 InjectedNote(
                     note: byId[id]!,
                     sections: try Self.sections(db, noteId: id),
-                    reasons: reasons[id] ?? []
+                    reasons: reasons[id]!
                 )
             }
+
+            let injected = Set(fullIds)
+            let headings = try Self.headings(db, projectId: projectId)
+            let index = try Self.list(db, projectId: projectId)
+                .filter { !injected.contains($0.id) }
+                .map { note in
+                    NoteIndexEntry(
+                        id: note.id,
+                        title: note.title,
+                        uri: NoteResourceURI.uri(projectId: note.projectId, noteId: note.id),
+                        headings: headings[note.id] ?? [],
+                        pinned: note.pinned
+                    )
+                }
+
+            return SpawnNotes(full: full, index: index)
         }
     }
 }

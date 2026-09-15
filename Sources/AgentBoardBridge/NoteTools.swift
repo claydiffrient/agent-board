@@ -105,8 +105,9 @@ struct NoteTools: Sendable {
         ),
         ToolDescriptor(
             name: "pin_note",
-            description: "Pin or unpin a note. A pinned note is injected in full into every future agent on this project, "
-                + "so pin only what every agent must know; unpin it once it stops being true.",
+            description: "Pin or unpin a note. A pinned note is named, with its resource uri, in the note index "
+                + "every future agent on this project is spawned with, so an agent can fetch it when the subject "
+                + "comes up; its text is not pasted into the prompt. Unpin it once it stops being true.",
             inputSchema: ToolSchema.object(
                 properties: ["note_id": ToolSchema.string(), "pinned": ToolSchema.boolean()],
                 required: ["note_id", "pinned"]
