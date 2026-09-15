@@ -584,7 +584,45 @@ than one that is finished; they merge nothing and are not part of this sequence.
 
 Served at `http://127.0.0.1:<port>/mcp`. Scope comes from the bearer token, not
 from the request. A worker calling an orchestrator tool gets a tool-not-found
-error, because the tool list is rendered per scope.
+error, because the tool list is rendered per scope. Resources and prompts are
+not scoped this way — any valid token in the project sees the full resource
+and prompt lists, worker and orchestrator alike. `initialize`'s advertised
+`capabilities` includes `resources` and `prompts` only when a handler for it is
+wired, so `tools: {}` alone still means what it used to.
+
+### Resources
+
+One resource per note in the caller's project, at
+`note://<project-id>/<note-id>` (D13) — both ids are immutable, so the uri
+survives a retitle, an edit and a pin. `resources/list`'s `description` gives
+enough to decide whether a `resources/read` is worth it without doing one:
+pin state, section headings (the first 8, then a count of the rest), and the
+note's version and last-updated date. `resources/read` returns exactly what
+`read_note` returns. An unknown or malformed uri is refused with JSON-RPC
+`-32002` and the offending uri in `data`, never with empty contents.
+`search_notes` and `read_note` are unaffected and remain the faster route for
+an agent that already knows which note it wants. Neither `subscribe` nor
+`listChanged` is advertised: responses are plain JSON over POST and GET `/mcp`
+is 405, so there is no channel a server notification could arrive on.
+
+### Prompts
+
+Two standing texts, fetchable by a session that has fallen out of context —
+after a resume, after a compaction, or when a hook delivered a shortened
+version and the session needs it verbatim:
+
+| Prompt | Arguments | Returns |
+|---|---|---|
+| `wind_down_order` | `via`: `hook` \| `resume` (required); `reason` (optional) | The full wind-down order text (§8.1) |
+| `worker_protocol` | `branch` (required) | The standing *How to work* / *When you are done* sections a worker is spawned with (§3.1 step 6) |
+
+Both render through the same function the push path already calls —
+`ShutdownOrder.windDownOrder` and `OpeningPrompt.workingProtocol` — so a prompt
+and what a session was handed at spawn cannot say something different. This is
+additive, not a replacement: a busy worker is still reached by the
+`PreToolUse` deny (§8.1) and an idle one by a resume; a prompt only helps a
+session that is actively asking for one, and a worker that asks for nothing
+is reached by neither.
 
 ### Worker scope
 
