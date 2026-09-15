@@ -105,6 +105,8 @@ private final class RowStubSupervisor: WorkerSupervising {
     func worktreeDiffstat(taskId: String) async -> String? { nil }
     func worktreeDiffSummary(taskId: String) async -> DiffSummary? { nil }
     func orchestratorConsole(projectId: String) throws -> OrchestratorConsole { throw StubError.notWired }
+
+    func shellConsole(projectId: String) throws -> ShellConsole { throw StubError.notWired }
     func approve(approvalId: String) async throws {}
     func deny(approvalId: String, reason: String?) async throws {}
     func promote(taskId: String) async throws {}
