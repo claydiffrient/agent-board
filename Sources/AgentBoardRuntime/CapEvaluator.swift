@@ -34,12 +34,17 @@ public enum CapEvaluator {
     /// Both time caps bound how long an agent has been *working*, so they are measured on
     /// `AwakeElapsed` rather than the wall clock. A worker on a sleeping laptop is suspended, not
     /// idle: closing the lid used to execute every running worker at the idle cap.
+    ///
+    /// `state` only excuses the idle check. A session that is waiting on a file lock, blocked, or
+    /// still in setup makes no tool call by design, and killing it would throw away exactly the work
+    /// it is waiting to do; the token and elapsed caps still apply to it unchanged.
     public static func evaluate(
         totals: UsageTotals,
         startedAt: Date,
         lastActivity: Date?,
         awake: AwakeElapsed,
-        limits: CapLimits
+        limits: CapLimits,
+        state: SessionState = .running
     ) -> CapBreach? {
         let used = countedTokens(totals)
         if let maxTokens = limits.maxTokens, used >= maxTokens {
@@ -49,6 +54,7 @@ public enum CapEvaluator {
         if elapsed >= TimeInterval(limits.maxWallClockSeconds) {
             return .wallClock(elapsed: elapsed, limit: TimeInterval(limits.maxWallClockSeconds))
         }
+        guard !state.idlesByDesign else { return nil }
         let since = lastActivity ?? startedAt
         if awake.secondsAwake(since: since) >= TimeInterval(limits.maxIdleSeconds) {
             return .idle(since: since, limit: TimeInterval(limits.maxIdleSeconds))

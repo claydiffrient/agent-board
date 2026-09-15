@@ -53,14 +53,26 @@ public enum SessionState: String, Codable, Sendable, CaseIterable, Equatable, Da
     case running
     case idle
     case blocked
+    /// Held at `PreToolUse` because another session in the same shared checkout holds the file this
+    /// write is about to touch. Like `setup`, it holds a concurrency slot and can do no work, so the
+    /// idle cap and the stall indicator must not read it as a wedge.
+    case waitingOnLock = "waiting_on_lock"
     case stopped
     case failed
     case completed
 
     public var isActive: Bool {
         switch self {
-        case .setup, .starting, .running, .idle, .blocked: return true
+        case .setup, .starting, .running, .idle, .blocked, .waitingOnLock: return true
         case .stopped, .failed, .completed: return false
+        }
+    }
+
+    /// States in which making no tool call is the design rather than a symptom.
+    public var idlesByDesign: Bool {
+        switch self {
+        case .setup, .blocked, .waitingOnLock: return true
+        case .starting, .running, .idle, .stopped, .failed, .completed: return false
         }
     }
 

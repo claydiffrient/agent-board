@@ -27,7 +27,7 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D10 | Epics group tasks and own the integration branch | Merge scope becomes a lookup, not a judgment call | Flat tasks |
 | D11 | One orchestrator per project | cwd determines which CLAUDE.md, skills, and MCP servers load | One global orchestrator |
 | D12 | Notes are Agent Board's own store, Solo-scratchpad-shaped | Notes are a working surface, not Claude Code memory | View over `~/.claude/.../memory/` |
-| D13 | Pinned notes + task/epic-attached notes injected at spawn; rest pull-only | Stops three workers rediscovering the same constraint | Seed every note title |
+| D13 | Task/epic-attached notes injected in full at spawn; every other note indexed by title and `note://` uri, fetched on demand | Stops three workers rediscovering the same constraint without charging every worker for every pinned note | Inject pinned notes in full too |
 | D14 | Workers run `--permission-mode auto` | The shipped classifier already encodes 70 soft-deny rules | Hand-rolled PreToolUse denylist |
 | D15 | Blocked agents are answered by attaching to their real terminal | Auto mode's prompt text is written to be read; don't reproduce it | Native approval dialog |
 | D16 | Workers are `claude --bg` background sessions | Deletes process supervision, crash recovery, and scrollback from scope | App owns the PTYs |
@@ -251,7 +251,8 @@ For a task `T` in project `P`:
    `Authorization: Bearer <token>`, where the token carries scope `worker` and
    is bound to `(session, task)`.
 6. Compose the opening prompt: task title, body, acceptance criteria, epic goal,
-   pinned notes in full, attached notes in full, the project's build and test
+   task- and epic-attached notes in full, a one-line index of every other note in
+   the project naming its `note://` resource uri, the project's build and test
    commands when `settings_json` records them, and the completion protocol
    (commit, record one durable finding as a note, do not push, call
    `report_complete`). Injection alone left D13 half-built: notes flowed in and
@@ -691,7 +692,45 @@ than one that is finished; they merge nothing and are not part of this sequence.
 
 Served at `http://127.0.0.1:<port>/mcp`. Scope comes from the bearer token, not
 from the request. A worker calling an orchestrator tool gets a tool-not-found
-error, because the tool list is rendered per scope.
+error, because the tool list is rendered per scope. Resources and prompts are
+not scoped this way — any valid token in the project sees the full resource
+and prompt lists, worker and orchestrator alike. `initialize`'s advertised
+`capabilities` includes `resources` and `prompts` only when a handler for it is
+wired, so `tools: {}` alone still means what it used to.
+
+### Resources
+
+One resource per note in the caller's project, at
+`note://<project-id>/<note-id>` (D13) — both ids are immutable, so the uri
+survives a retitle, an edit and a pin. `resources/list`'s `description` gives
+enough to decide whether a `resources/read` is worth it without doing one:
+pin state, section headings (the first 8, then a count of the rest), and the
+note's version and last-updated date. `resources/read` returns exactly what
+`read_note` returns. An unknown or malformed uri is refused with JSON-RPC
+`-32002` and the offending uri in `data`, never with empty contents.
+`search_notes` and `read_note` are unaffected and remain the faster route for
+an agent that already knows which note it wants. Neither `subscribe` nor
+`listChanged` is advertised: responses are plain JSON over POST and GET `/mcp`
+is 405, so there is no channel a server notification could arrive on.
+
+### Prompts
+
+Two standing texts, fetchable by a session that has fallen out of context —
+after a resume, after a compaction, or when a hook delivered a shortened
+version and the session needs it verbatim:
+
+| Prompt | Arguments | Returns |
+|---|---|---|
+| `wind_down_order` | `via`: `hook` \| `resume` (required); `reason` (optional) | The full wind-down order text (§8.1) |
+| `worker_protocol` | `branch` (required) | The standing *How to work* / *When you are done* sections a worker is spawned with (§3.1 step 6) |
+
+Both render through the same function the push path already calls —
+`ShutdownOrder.windDownOrder` and `OpeningPrompt.workingProtocol` — so a prompt
+and what a session was handed at spawn cannot say something different. This is
+additive, not a replacement: a busy worker is still reached by the
+`PreToolUse` deny (§8.1) and an idle one by a resume; a prompt only helps a
+session that is actively asking for one, and a worker that asks for nothing
+is reached by neither.
 
 ### Worker scope
 
@@ -730,7 +769,7 @@ Everything in worker scope over any task in the project, plus:
 | `list_epics()` | Every epic on the project with its state, branch, and done/total task count |
 | `get_epic(id)` | One epic in full: goal, branch, its tasks grouped by column, and whether it is ready for integration |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
-| `pin_note(note_id, pinned)` | Every future agent sees it in full |
+| `pin_note(note_id, pinned)` | Every future agent sees it in its note index and can fetch it |
 | `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting |
 | `stop_worker(session_id)` | `claude stop` |
 | `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |

@@ -139,6 +139,45 @@ final class CapEvaluatorTests: XCTestCase {
         )
     }
 
+    /// A session waiting on another agent's file lock makes no tool call by design. Under the
+    /// accounting this replaces — idle measured from `lastActivity` regardless of state — each of
+    /// these returned `.idle` and the worker was killed holding exactly the work the lock protects.
+    func testAWaitingSessionIsNotIdleButIsStillSubjectToTheOtherCaps() {
+        let last = start.addingTimeInterval(100)
+        let now = last.addingTimeInterval(61)
+        XCTAssertEqual(
+            CapEvaluator.evaluate(totals: .zero, startedAt: start, lastActivity: last, awake: .init(now: now), limits: limits),
+            .idle(since: last, limit: 60),
+            "a running session with the same clock must still breach"
+        )
+        for state in [SessionState.waitingOnLock, .blocked, .setup] {
+            XCTAssertNil(
+                CapEvaluator.evaluate(
+                    totals: .zero, startedAt: start, lastActivity: last, awake: .init(now: now), limits: limits, state: state
+                ),
+                "\(state) was killed by the idle cap"
+            )
+        }
+
+        let late = start.addingTimeInterval(600)
+        XCTAssertEqual(
+            CapEvaluator.evaluate(
+                totals: .zero, startedAt: start, lastActivity: last, awake: .init(now: late), limits: limits,
+                state: .waitingOnLock
+            ),
+            .wallClock(elapsed: 600, limit: 600),
+            "the wall clock must still reach a waiting session"
+        )
+        XCTAssertEqual(
+            CapEvaluator.evaluate(
+                totals: UsageTotals(inputTokens: 500, outputTokens: 600, cacheReadTokens: 0, cacheWrite5mTokens: 0),
+                startedAt: start, lastActivity: last, awake: .init(now: now), limits: limits, state: .waitingOnLock
+            ),
+            .tokens(used: 1100, limit: 1000),
+            "the token cap must still reach a waiting session"
+        )
+    }
+
     func testDefaultsMatchSpec() {
         XCTAssertEqual(CapLimits.default, CapLimits(maxTokens: nil, maxWallClockSeconds: 1800, maxIdleSeconds: 300))
     }

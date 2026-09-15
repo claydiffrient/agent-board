@@ -72,6 +72,17 @@ public enum IntegrationGuard {
         return nil
     }
 
+    /// Whether the command invokes `git <subcommand>` anywhere in it, by the same scan `match` uses,
+    /// so a chained or env-prefixed invocation is seen too.
+    public static func invokesGit(_ subcommand: String, toolName: String?, command: String?) -> Bool {
+        guard toolName == "Bash", let command, !command.isEmpty else { return false }
+        let words = tokens(command)
+        for index in words.indices where words[index] == "git" {
+            if self.subcommand(after: index, in: words)?.word == Substring(subcommand) { return true }
+        }
+        return false
+    }
+
     private static func subcommand(after index: Int, in words: [Substring]) -> (word: Substring, index: Int)? {
         var cursor = index + 1
         while cursor < words.count {

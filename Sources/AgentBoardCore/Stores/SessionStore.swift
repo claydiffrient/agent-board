@@ -179,6 +179,17 @@ public struct SessionStore: Sendable {
         )
     }
 
+    /// Records that this session gave up waiting for another session's lock on `path`, so the
+    /// `report_blocked` that follows knows to send the task back to `ready`.
+    public func setBlockedOnPath(_ sessionId: String, _ path: String?) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE agent_session SET blocked_on_path = ? WHERE session_id = ?",
+                arguments: [path, sessionId]
+            )
+        }
+    }
+
     public func observe(projectId: String) -> ValueObservation<ValueReducers.Fetch<[AgentSession]>> {
         ValueObservation.tracking { db in
             try Self.all(db, projectId: projectId)

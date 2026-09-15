@@ -100,6 +100,32 @@ public struct WorktreeManager: Sendable {
         return path
     }
 
+    /// Puts the project's own checkout on the shared branch, cutting it from `base` the first time.
+    /// Throws rather than switching when the checkout carries uncommitted work or git refuses the
+    /// switch — that work belongs to whoever is using the repository, and the caller falls back to
+    /// a worktree instead.
+    public func adoptSharedBranch(_ branch: String, from base: String) throws {
+        if try currentBranch(at: repoPath) == branch { return }
+        if try hasUncommittedChanges(worktree: repoPath) {
+            throw AgentRuntimeError(
+                "\(repoPath.path) has uncommitted changes, so it cannot be switched to \(branch)"
+            )
+        }
+        if try branchExists(branch) {
+            try gitChecked(["checkout", branch], cwd: repoPath)
+        } else {
+            try gitChecked(["checkout", "-b", branch, base], cwd: repoPath)
+        }
+    }
+
+    /// The branch checked out at `path`, or nil when its HEAD is detached.
+    public func currentBranch(at path: URL) throws -> String? {
+        let result = try gitRaw(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd: path)
+        guard result.status == 0 else { return nil }
+        let name = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
+    }
+
     public func ensureBranch(_ name: String, from base: String) throws {
         if try branchExists(name) { return }
         try git(["branch", name, base])
@@ -150,7 +176,7 @@ public struct WorktreeManager: Sendable {
 
     /// A merge commit needs a committer identity and must never stop on a GPG passphrase prompt —
     /// the app has no terminal to answer one. The repository's own identity wins when it has one.
-    private func mergeConfig() throws -> [String] {
+    func mergeConfig() throws -> [String] {
         var config = ["-c", "commit.gpgsign=false"]
         let email = try gitRaw(["config", "user.email"], cwd: repoPath)
         if email.status != 0 || email.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -429,7 +455,8 @@ public struct WorktreeManager: Sendable {
         try gitChecked(args, cwd: repoPath)
     }
 
-    private func gitChecked(_ args: [String], cwd: URL) throws -> CommandResult {
+    @discardableResult
+    func gitChecked(_ args: [String], cwd: URL) throws -> CommandResult {
         let result = try gitRaw(args, cwd: cwd)
         guard result.status == 0 else { throw AgentRuntimeError(Self.failure(args, result)) }
         return result
@@ -450,7 +477,7 @@ public struct WorktreeManager: Sendable {
         "git \(args.joined(separator: " ")) exited \(result.status)\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)"
     }
 
-    private func gitRaw(_ args: [String], cwd: URL) throws -> CommandResult {
+    func gitRaw(_ args: [String], cwd: URL) throws -> CommandResult {
         var env = ProcessInfo.processInfo.environment
         env["GIT_TERMINAL_PROMPT"] = "0"
         return try ProcessRunner.run(

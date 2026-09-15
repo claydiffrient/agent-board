@@ -66,6 +66,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("approval_payload") { db in
             try db.execute(sql: Schema.approvalPayload)
         }
+        migrator.registerMigration("file_lock") { db in
+            try db.execute(sql: Schema.fileLock)
+        }
         return migrator
     }
 }

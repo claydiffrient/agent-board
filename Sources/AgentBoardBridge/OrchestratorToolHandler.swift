@@ -487,9 +487,11 @@ public final class OrchestratorToolHandler: ToolHandler {
             let placement = destination.map { "already in epic \($0.id)" } ?? "already outside any epic"
             return ToolResult(text: "Task \(task.id) is \(placement); nothing changed.")
         }
-        guard try sessions.forTask(task.id).isEmpty else {
+        let spawned = try sessions.forTask(task.id)
+        guard spawned.isEmpty else {
+            let branch = spawned.compactMap(\.branch).first ?? TaskStore.branchName(for: task.id)
             throw ToolError(
-                "Task \(task.id) has already been spawned: its branch \(TaskStore.branchName(for: task.id)) was cut "
+                "Task \(task.id) has already been spawned: its branch \(branch) was cut "
                     + "from the base its epic had at spawn time, and moving the task now would not move the commits. "
                     + "Integrating the new epic would merge a branch the work was never based on."
             )
@@ -566,10 +568,13 @@ public final class OrchestratorToolHandler: ToolHandler {
         case .proceed:
             let spawn = try await control.spawnWorker(taskId: task.id)
             let warnings = spawn.warnings.isEmpty ? "" : "\n\n" + spawn.warnings.joined(separator: "\n")
+            let site = spawn.sharesCheckout
+                ? "It runs in the project's own checkout at \(spawn.worktreePath)"
+                : "Its worktree is ready at \(spawn.worktreePath)"
             return ToolResult(text: """
-            Worker dispatched for \(task.id); the task is now running. Its worktree is ready at \
-            \(spawn.worktreePath) on branch \(spawn.branch), but setup is still running, so the \
-            worker cannot do anything yet and has no session id.
+            Worker dispatched for \(task.id); the task is now running. \(site) on branch \
+            \(spawn.branch), but setup is still running, so the worker cannot do anything yet and \
+            has no session id.
 
             Nothing to do but wait. The session shows as `setup` in list_agents and turns to \
             `running` once the agent starts; if setup fails instead, the task goes back to ready \

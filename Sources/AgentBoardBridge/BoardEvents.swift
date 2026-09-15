@@ -20,16 +20,23 @@ public struct WorkerSpawn: Sendable, Equatable {
     /// The `agent_session` row holding the slot during setup. Claude's own session id replaces it
     /// once the agent registers, so this identifies the spawn, not the session that comes out of it.
     public var setupSessionId: String
+    /// The worker's working directory: its own worktree, or the project's checkout under `shared`.
     public var worktreePath: String
     public var branch: String
+    /// True when the worker runs in the project's own checkout rather than a worktree of its own.
+    public var sharesCheckout: Bool
     /// Raised before any git work, so a worktree path a repository's setup cannot survive is named
     /// while the orchestrator can still act on it rather than after setup has already failed.
     public var warnings: [String]
 
-    public init(setupSessionId: String, worktreePath: String, branch: String, warnings: [String] = []) {
+    public init(
+        setupSessionId: String, worktreePath: String, branch: String, sharesCheckout: Bool = false,
+        warnings: [String] = []
+    ) {
         self.setupSessionId = setupSessionId
         self.worktreePath = worktreePath
         self.branch = branch
+        self.sharesCheckout = sharesCheckout
         self.warnings = warnings
     }
 }

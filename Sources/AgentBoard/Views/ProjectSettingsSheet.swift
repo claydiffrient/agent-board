@@ -116,6 +116,18 @@ struct ProjectSettingsSheet: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Isolation") {
+                    Picker("Worktree strategy", selection: $settings.worktreeStrategy) {
+                        ForEach(WorktreeStrategy.allCases, id: \.self) { strategy in
+                            Text(strategy.title).tag(strategy)
+                        }
+                    }
+                    TextField("Agents in the shared checkout", value: $settings.sharedCheckoutMaxAgents, format: .number)
+                    Text("A worktree per task is the default and always isolates. Shared runs workers in this project's own checkout on one branch, skipping a full repository setup per task; Auto shares only when a compatible group already holds the checkout. A task that cannot join gets a worktree. Co-resident agents take a per-file lock before every write, so a collision is a wait rather than an overwrite.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Archive") {
                     Picker("Archive done tasks", selection: $archiveMode) {
                         ForEach(ArchivePolicyMode.allCases, id: \.self) { mode in
