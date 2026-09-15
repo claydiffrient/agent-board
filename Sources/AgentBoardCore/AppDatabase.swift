@@ -69,6 +69,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("file_lock") { db in
             try db.execute(sql: Schema.fileLock)
         }
+        migrator.registerMigration("message") { db in
+            try db.execute(sql: Schema.message)
+        }
         return migrator
     }
 }

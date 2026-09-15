@@ -11,6 +11,7 @@ struct ApprovalsSidebar: View {
     @State private var tasks = Observed<[BoardTask]>([])
     @State private var sessions = Observed<[AgentSession]>([])
     @State private var reports = Observed<[Report]>([])
+    @State private var messages = Observed<[MessageEntry]>([])
     @State private var now = Date.now
     @State private var denying: Approval?
     @State private var denyReason = ""
@@ -90,6 +91,15 @@ struct ApprovalsSidebar: View {
                         proposalRow(task)
                     }
                 }
+                Section("Messages") {
+                    if messages.value.isEmpty {
+                        Text("No messages with other projects.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(messages.value) { entry in
+                        MessageRow(entry: entry, projectName: project.name)
+                    }
+                }
             }
             .listStyle(.sidebar)
             Divider()
@@ -106,6 +116,9 @@ struct ApprovalsSidebar: View {
         }
         .task(id: project.id) {
             await reports.run(ReportStore(env.db).observeUnconsumed(projectId: project.id), in: env.db.reader)
+        }
+        .task(id: project.id) {
+            await messages.run(MessageStore(env.db).observeConversation(projectId: project.id), in: env.db.reader)
         }
         .task {
             while !_Concurrency.Task.isCancelled {

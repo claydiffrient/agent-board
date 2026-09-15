@@ -52,7 +52,7 @@ final class OrchestratorTerminalViewTests: XCTestCase {
         type(view, "half a thought")
 
         view.isInjecting = true
-        type(view, "[agent-board] 2 worker reports pending. Call list_reports.\r")
+        type(view, "[agent-board] 2 reports pending. Call list_reports.\r")
         view.isInjecting = false
 
         XCTAssertTrue(view.promptIsDirty, "an injection cleared the flag that protects the human's text")

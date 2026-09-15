@@ -223,7 +223,7 @@ final class OrchestratorConsole {
     }
 
     private func sendNotice(count: Int) {
-        inject("[agent-board] \(count) worker reports pending. Call list_reports.")
+        inject("[agent-board] \(count) reports pending. Call list_reports.")
         lastNoticeAt = Date()
     }
 

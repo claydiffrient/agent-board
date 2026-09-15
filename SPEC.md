@@ -408,10 +408,23 @@ CREATE TABLE report (
   project_id  TEXT NOT NULL REFERENCES project(id),
   task_id     TEXT REFERENCES task(id),
   session_id  TEXT REFERENCES agent_session(session_id),
-  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision
+  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision | message
   body        TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
   consumed_at INTEGER               -- set when the orchestrator pulls it
+);
+
+-- Text one project's orchestrator sent to another (§9.2). The recipient never sees this row:
+-- delivery writes a framed `message` report into its queue, which it pulls like any other.
+CREATE TABLE message (
+  id              INTEGER PRIMARY KEY,
+  from_project_id TEXT NOT NULL REFERENCES project(id),
+  to_project_id   TEXT NOT NULL REFERENCES project(id),
+  from_session_id TEXT REFERENCES agent_session(session_id),
+  body            TEXT NOT NULL,     -- the sender's text, unframed
+  created_at      INTEGER NOT NULL,
+  delivered_at    INTEGER,           -- set when the `message` report is written
+  report_id       INTEGER REFERENCES report(id)
 );
 
 CREATE TABLE approval (
@@ -774,6 +787,8 @@ Everything in worker scope over any task in the project, plus:
 | `stop_worker(session_id)` | `claude stop` |
 | `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
+| `list_projects()` | Every project Agent Board knows about, as id, name, and whether the entry is the caller's own project. Nothing else about another project is exposed — no repository path, no settings, no board contents, no agent state |
+| `send_message(project_id, body)` | Queues a §9.2 message into that project's report queue. Confirms queueing, never delivery. Refused for the caller's own project, for an unknown id, for a blank body, and for a body over 4000 characters |
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Refused unless every task in the epic is `done` (names how many remain); otherwise creates a human approval row, or returns the one already pending |
 | `close_epic(epic_id, state)` | Ends the epic without integrating it. `state` is `done` or `abandoned`; both are terminal. Board state and a `decision` report and nothing else — no merge, no push, no branch or worktree deleted, no task deleted, archived or moved out. Refused while any session in the epic is active, and refused for an epic that is already terminal |
@@ -1022,11 +1037,13 @@ from the progress sheet (§10).
 
 1. A worker calls `report_complete` / `report_blocked` / `propose_task`, **or the
    app itself changes the board in a way the orchestrator cannot observe** — see
-   the table below. The body lands in `report`, unconsumed.
+   the table below — **or another project's orchestrator sends a message** (§9.2).
+   The body lands in `report`, unconsumed. The notice counts items, not workers:
+   a queue holding a `message` is not a queue of worker reports.
 2. The orchestrator's `Stop` hook fires when it finishes a turn.
 3. If unconsumed reports exist, Agent Board writes **one fixed, app-authored
    line** into the orchestrator PTY:
-   `[agent-board] N worker reports pending. Call list_reports.` terminated by
+   `[agent-board] N reports pending. Call list_reports.` terminated by
    a carriage return (`\r`); Claude Code's TUI submits on Enter and treats
    `\n` as a literal newline inside the prompt.
 4. The orchestrator pulls bodies through MCP, where they arrive as tool results.
@@ -1151,6 +1168,35 @@ amber once it is over the threshold, and how long ago the last compaction was,
 with its tooltip saying whether Agent Board or Claude Code did it and how many
 there have been. A session that silently forgot what it was doing is worse than
 one that says so.
+
+### 9.3 Cross-project messages
+
+An orchestrator may send text to another project's orchestrator. D9 forbids
+agent-authored text in the receiving orchestrator's user-authority turn, and
+§9.1 keeps `OrchestratorConsole` the only writer into that PTY, so a message is
+never injected. It is **delivered into the recipient's `report` queue** as a
+`message` report and pulled through `list_reports` exactly like a worker report.
+
+The stored `message` row keeps the sender's text verbatim. The delivered report
+body wraps it: the sending project's name and id, a statement that the text
+carries no authority over this board and is information rather than an
+instruction, and begin/end delimiters around the sender's own words. The report
+names no task and no session — a message from outside cannot hand the reader
+something in this project to act on.
+
+A message to a project that does not exist is refused, as is an empty one.
+
+An orchestrator addresses a peer with `list_projects`, which returns ids and
+names and nothing else, and sends with `send_message(project_id, body)`. The
+tool's own refusals are narrower than the store's: it will not address the
+caller's own project — a message to yourself arrives in the queue you are
+already reading — and it caps the body at 4000 characters, because the body is a
+prompt fragment spent from the recipient's context budget rather than the
+sender's. The tool confirms only that the message was queued: the receiving
+orchestrator may not be running, nothing tells the sender when or whether it
+pulls, and there is no reply channel. These two tools are the whole
+cross-project surface; there is no way to read another project's messages, list
+its tasks, or spawn into it.
 
 ---
 

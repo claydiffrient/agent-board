@@ -14,6 +14,7 @@ struct Fixture {
     var reports: ReportStore { ReportStore(db) }
     var hooks: HookEventStore { HookEventStore(db) }
     var notes: NoteStore { NoteStore(db) }
+    var messages: MessageStore { MessageStore(db) }
     var board: Board { Board(db) }
 
     static func make() throws -> Fixture {

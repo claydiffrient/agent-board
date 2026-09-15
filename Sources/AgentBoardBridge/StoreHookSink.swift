@@ -212,7 +212,7 @@ public final class StoreHookSink: HookSink {
     private func windDownToDeliver(sessionId: String, identity: TokenIdentity) -> ShutdownOrder? {
         guard identity.scope == .worker, !sessionId.isEmpty else { return nil }
         guard let order = (try? shutdowns.outstanding(projectId: identity.projectId)) ?? nil else { return nil }
-        let taskId = (try? sessions.get(sessionId))?.taskId ?? identity.taskId
+        let taskId = projectSession(sessionId, identity: identity)?.taskId ?? identity.taskId
         let claimed = (try? deliveries.claimDelivery(
             orderId: order.id, sessionId: sessionId, taskId: taskId, via: .hook
         )) ?? false
@@ -300,6 +300,14 @@ public final class StoreHookSink: HookSink {
         }
     }
 
+    /// A hook payload names whatever session id it likes, and the grant in the query string decides
+    /// the project. Every session lookup here goes through this, so another project's session reads
+    /// as absent rather than as one this grant may write to.
+    private func projectSession(_ sessionId: String, identity: TokenIdentity) -> AgentSession? {
+        guard let session = try? sessions.get(sessionId), session.projectId == identity.projectId else { return nil }
+        return session
+    }
+
     private func process(_ event: HookEvent, identity: TokenIdentity) -> Outcome {
         let sessionId = event.sessionId
         _ = try? hookEvents.append(sessionId: sessionId, event: event.name, payload: event.rawJSON)
@@ -310,7 +318,7 @@ public final class StoreHookSink: HookSink {
             ) {
                 // The deny is decided before any lookup; the row is best-effort so an unrecognized
                 // session can never turn a block into a pass.
-                let session = try? sessions.get(sessionId)
+                let session = projectSession(sessionId, identity: identity)
                 if let taskId = session?.taskId ?? identity.taskId {
                     _ = try? progress.append(
                         taskId: taskId,
@@ -342,11 +350,13 @@ public final class StoreHookSink: HookSink {
 
         guard !sessionId.isEmpty else { return .none }
 
+        let known = try? sessions.get(sessionId)
+        if let known, known.projectId != identity.projectId { return .none }
         if identity.sessionId == nil {
             try? grants.bind(token: identity.token, sessionId: sessionId)
         }
         adoptFork(newSessionId: sessionId, identity: identity)
-        guard let session = try? sessions.get(sessionId) else { return .none }
+        guard let session = projectSession(sessionId, identity: identity) else { return .none }
         let taskId = session.taskId ?? identity.taskId
 
         switch event.name {
