@@ -227,7 +227,14 @@ struct TaskInspectorView: View {
                     } label: {
                         Image(systemName: "terminal")
                     }
-                    .help("Open Terminal")
+                    .help("Attach to this agent's own Claude session")
+                    Button {
+                        openWindow(id: "worktree-shell", value: session.sessionId)
+                    } label: {
+                        Image(systemName: "apple.terminal")
+                    }
+                    .disabled(!WorktreeShellAvailability.canOpen(session))
+                    .help(WorktreeShellAvailability.buttonHelp(session))
                 }
                 .controlSize(.small)
                 .padding(6)
