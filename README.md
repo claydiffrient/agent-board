@@ -1,7 +1,7 @@
 # Agent Board
 
 Native macOS app that manages work for Claude Code agents. See `SPEC.md` for the
-design and `IDEA.md` for the origin. Status: M0, M1, and M2 complete.
+design and `IDEA.md` for the origin. Status: M0, M1, M2, and M3 complete.
 
 ## Layout
 

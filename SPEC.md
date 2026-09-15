@@ -341,7 +341,7 @@ CREATE TABLE task (
   failed         INTEGER NOT NULL DEFAULT 0,
   failure_reason TEXT,
   ordering       REAL NOT NULL,
-  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal
+  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
@@ -441,6 +441,7 @@ CREATE TABLE note_section (
   heading     TEXT NOT NULL,
   body        TEXT NOT NULL,
   ordering    REAL NOT NULL,
+  written_by  TEXT,             -- session_id of the agent that last wrote it; NULL if a human wrote it in the app
   PRIMARY KEY (note_id, heading)
 );
 
@@ -600,8 +601,15 @@ A worker's closing instructions, injected at spawn:
 
 ### 5.2 Epic integration
 
-Integration is the orchestrator's job and is gated on your approval regardless
-of the autonomy setting.
+Integration is gated on your approval regardless of the autonomy setting, and
+can be requested two ways that land on the same row: the orchestrator's
+`request_integration(epic_id)` tool, or the epic lane's **Request integration**
+button. The tool refuses until `epicReadyForIntegration` holds — the epic is
+non-empty and every task in it is `done` — naming how many tasks remain; the
+button only appears once that is already true, so neither path can jump the
+gate. Either call reaches `Board.requestIntegration`; a repeat request while
+one is already pending returns the existing approval rather than queuing a
+second.
 
 This is the path that ends an epic by *finishing* it. §10's **Close as done**
 and **Abandon** are the other way out, for an epic you are finished with rather
@@ -639,6 +647,19 @@ than one that is finished; they merge nothing and are not part of this sequence.
    drop verification: it tells the integrator to work out how this project
    builds and tests itself, run both, and name in its report exactly what it
    ran. Nothing in the prompt assumes a language or a build tool.
+   `spawnIntegrator` runs the same launch path as any task worker (§3.1 steps
+   3-8: memory symlink, generated `--settings`/`--mcp-config`, a worker-scoped
+   token, `--permission-mode auto`, `--strict-mcp-config`, the push/PR
+   `--disallowedTools`), bound to the epic instead of a task. The worktree is
+   `<worktree-root>/epic-<epic-id>` via `WorktreeManager.createForBranch`,
+   reused if a previous attempt already created it rather than cut fresh. The
+   epic's tasks — excluding any earlier integration task — are ordered so each
+   is listed after every task it depends on before their branches are
+   classified. A synthetic task titled `Integrate epic <title>` with
+   `origin = integration` is created and the session assigned to it, so the
+   integrator gets a real board card, token scope and report channel like any
+   worker; if the spawn fails, that task is deleted and the epic is left where
+   it was.
 4. The integrator reports. Under the default `afterEpicMerge` archive policy
    (§4), the epic's merge is itself the trigger: `Board.complete` moves the
    epic to `done` and archives every `done` task of it, the synthetic
@@ -705,7 +726,9 @@ Everything in worker scope over any task in the project, plus:
 | `unarchive_task(task_id)` | Returns the task to the visible board in the column it was archived from |
 | `set_deps(task_id, depends_on[])` | Dependency graph |
 | `set_epic(task_id, epic_id)` | Moves an existing task into an epic, between epics, or — with `epic_id` omitted — out of its epic. Refused for a task that has ever been spawned, and for a `done` destination epic. Dependencies are left alone |
-| `create_epic(title, goal, tasks[])` | Records a decomposition; cuts the epic branch |
+| `create_epic(title, goal, tasks[])` | One transaction: the epic (state `planning`) plus every task in `tasks`. Each task's `depends_on` is a zero-based index into this same array, validated before anything is written |
+| `list_epics()` | Every epic on the project with its state, branch, and done/total task count |
+| `get_epic(id)` | One epic in full: goal, branch, its tasks grouped by column, and whether it is ready for integration |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
 | `pin_note(note_id, pinned)` | Every future agent sees it in full |
 | `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting |
@@ -713,7 +736,7 @@ Everything in worker scope over any task in the project, plus:
 | `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
 | `promote_proposal(task_id)` | Only when autonomy is on |
-| `request_integration(epic_id)` | Always creates a human approval row |
+| `request_integration(epic_id)` | Refused unless every task in the epic is `done` (names how many remain); otherwise creates a human approval row, or returns the one already pending |
 | `close_epic(epic_id, state)` | Ends the epic without integrating it. `state` is `done` or `abandoned`; both are terminal. Board state and a `decision` report and nothing else — no merge, no push, no branch or worktree deleted, no task deleted, archived or moved out. Refused while any session in the epic is active, and refused for an epic that is already terminal |
 | `push_branch(branch)` | Always creates a human approval row. Refused for any branch that is not `agentboard/<something>` or the project's base branch |
 | `open_pull_request(epic_id \| branch, title, body, base?)` | Always creates a human approval row. Same branch rule; `base` defaults to the project's base branch. On approval the branch is pushed if the remote lacks it, the pull request is opened, and its URL lands in `progress` and in a `decision` report |
@@ -1269,8 +1292,19 @@ caps. Useful without any orchestrator.
 **M2 — orchestrator. DONE 2026-09-11 (report channel verified live: Stop → notice → `list_reports` → consumed).** Orchestrator PTY, per-scope MCP tokens, `spawn_worker`,
 the report channel, approvals sidebar, autonomy toggle.
 
-**M3 — epics and integration.** Epic entity, epic branches, task branching from
-epic branches, integration worktree and integrator, human-opened PR.
+**M3 — epics and integration. DONE 2026-09-12 (418/418 tests pass; the
+approve → spawn → merge → report → PR flow verified in `EpicIntegrationTests`
+against a fixture runtime — real worktrees and git operations, a fake
+`claude --bg` process): approving an integration request spawns exactly one
+integrator on the epic branch with the standard worker guards
+(`--permission-mode auto`, `--strict-mcp-config`, the push/PR
+`--disallowedTools`); its prompt lists task branches in dependency order and
+skips ones already merged into the epic branch; the epic moves `active` →
+`integrating` on spawn and to `done` in the same transaction as its
+`report_complete`; and nothing on the path pushes or opens a PR).** Epic
+entity, epic branches cut lazily at first task spawn into them, task
+branches from the epic branch, integration worktree and integrator, human-
+opened PR.
 
 **M4 — notes.** Note store, section ops, FTS, pinning, attachment, spawn-time
 injection.
@@ -1398,6 +1432,12 @@ from knowing how the agents actually behave first.
   even when stdout is a pipe, so `ClaudeCLI.parseShortId` rejected the hex id
   and every spawn failed with "exited 0 but no short id was found" while the
   session kept running orphaned. ANSI escapes are now stripped before parsing.
+- **Specified but not built: abandoning an epic.** `EpicState.abandoned` and
+  its badge color have existed since M3's schema landed, but nothing in the
+  app ever writes it — there is no action that moves an epic there. A
+  decomposition that turns out wrong currently has no path except letting its
+  tasks sit unfinished forever; an epic can only ever reach `done`, via
+  integration.
 - **Unresolved:** the localhost port is ephemeral per app launch, but
   `--bg --resume` reuses the saved `--settings`/`--mcp-config` paths. Either
   rewrite both files before every resume (current plan) or pick a stable
