@@ -71,7 +71,7 @@ final class CrossProjectHookTests: XCTestCase {
 
     func testABlockedPushByOneProjectsWorkerIsNotLoggedOnAnotherProjectsTask() async throws {
         let mine = try f.task("mine", column: .running)
-        try f.workerSession("w-mine", taskId: mine.id)
+        _ = try f.workerSession("w-mine", taskId: mine.id)
         let worker = f.workerIdentity(sessionId: "w-mine", taskId: mine.id)
 
         let decision = await f.preToolUse("git " + "push origin HEAD", sessionId: theirSession, identity: worker)
@@ -83,7 +83,7 @@ final class CrossProjectHookTests: XCTestCase {
 
     func testAWindDownOrderIsNotDeliveredThroughAnotherProjectsSession() async throws {
         let mine = try f.task("mine", column: .running)
-        try f.workerSession("w-mine", taskId: mine.id)
+        _ = try f.workerSession("w-mine", taskId: mine.id)
         let worker = f.workerIdentity(sessionId: "w-mine", taskId: mine.id)
         try f.board.requestShutdown(projectId: f.project.id, requestedBy: "human", reason: "spend")
 
@@ -107,7 +107,7 @@ final class CrossProjectHookTests: XCTestCase {
 
     func testTheSameHooksStillDriveTheCallersOwnSession() async throws {
         let mine = try f.task("mine", column: .running)
-        try f.workerSession("w-mine", taskId: mine.id)
+        _ = try f.workerSession("w-mine", taskId: mine.id)
         try f.tasks.setBlocked(mine.id, true, reason: "waiting")
         let worker = f.workerIdentity(sessionId: "w-mine", taskId: mine.id)
 
