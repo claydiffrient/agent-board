@@ -1271,13 +1271,26 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     // MARK: - BoardEventSink
 
     func notify(projectId: String, title: String, body: String) async {
-        post(title, body: body, projectId: projectId)
+        await notify(projectId: projectId, sessionId: nil, title: title, body: body)
+    }
+
+    func notify(projectId: String, sessionId: String?, title: String, body: String) async {
+        post(
+            title, body: body, projectId: projectId,
+            subject: sessionId.map(NotificationRoute.Subject.session) ?? .project
+        )
     }
 
     /// Every banner Agent Board raises goes through here, so none of them can reach the human
-    /// without saying which project it is about.
-    private func post(_ title: String, body: String, projectId: String?) {
-        MacNotifier.post(title: notificationTitle(title, projectId: projectId), body: body)
+    /// without saying which project it is about or carrying the route a click follows back to it.
+    private func post(
+        _ title: String, body: String, projectId: String?, subject: NotificationRoute.Subject = .project
+    ) {
+        MacNotifier.shared.post(
+            title: notificationTitle(title, projectId: projectId),
+            body: body,
+            route: projectId.map { NotificationRoute(projectId: $0, subject: subject) }
+        )
     }
 
     /// `MacNotifier.post` is inert under `xctest`, so the naming is asserted here instead.
@@ -1360,7 +1373,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard let projects = try? attention.all(now: now) else { return [] }
         let raised = attentionNotifier.notices(for: projects, focused: onScreenProject)
         for notice in raised {
-            MacNotifier.post(title: notice.title, body: notice.body)
+            MacNotifier.shared.post(
+                title: notice.title, body: notice.body, route: NotificationRoute(notice)
+            )
         }
         return raised
     }

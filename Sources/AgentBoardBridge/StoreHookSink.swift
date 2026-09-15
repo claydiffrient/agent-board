@@ -17,7 +17,7 @@ public final class StoreHookSink: HookSink {
     public static let blockingNotificationTypes: Set<String> = ["permission_prompt", "agent_needs_input"]
 
     private enum FollowUp {
-        case notify(projectId: String, title: String, body: String)
+        case notify(projectId: String, sessionId: String?, title: String, body: String)
         case orchestratorTurnEnded(projectId: String, sessionId: String)
         case reportQueued(projectId: String)
     }
@@ -51,8 +51,10 @@ public final class StoreHookSink: HookSink {
         }
         for followUp in outcome.followUps {
             switch followUp {
-            case .notify(let projectId, let title, let body):
-                await events.notify(projectId: projectId, title: title, body: body)
+            case .notify(let projectId, let sessionId, let title, let body):
+                await events.notify(
+                    projectId: projectId, sessionId: sessionId, title: title, body: body
+                )
             case .orchestratorTurnEnded(let projectId, let sessionId):
                 await events.orchestratorTurnEnded(projectId: projectId, sessionId: sessionId)
             case .reportQueued(let projectId):
@@ -150,7 +152,10 @@ public final class StoreHookSink: HookSink {
                     // and will not raise the banner that owns every blocked worker.
                     try? sessions.setState(sessionId, .blocked)
                     followUps.append(
-                        .notify(projectId: session.projectId, title: "Agent needs input", body: reason)
+                        .notify(
+                            projectId: session.projectId, sessionId: sessionId,
+                            title: "Agent needs input", body: reason
+                        )
                     )
                 }
                 return .follow(followUps)
