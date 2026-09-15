@@ -263,6 +263,7 @@ struct ProjectDetailView: View {
 
     enum Screen: String, CaseIterable, Identifiable {
         case orchestrator = "Orchestrator"
+        case terminal = "Terminal"
         case board = "Task Board"
         case status = "Status"
         case notes = "Notes"
@@ -281,6 +282,7 @@ struct ProjectDetailView: View {
             case .status: StatusView(project: project)
             case .notes: NotesView(project: project)
             case .orchestrator: OrchestratorView(project: project)
+            case .terminal: TerminalScreenView(project: project)
             }
         }
         .navigationTitle(project.name)
