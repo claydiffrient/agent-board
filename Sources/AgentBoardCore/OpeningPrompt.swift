@@ -93,8 +93,8 @@ public enum OpeningPrompt {
     public static let briefCharacterBudget = 10_000
 
     /// Handed back to a worker after its context is compacted. Built from the same sections as the
-    /// spawn prompt; the standing instructions are left out because they survive compaction in
-    /// CLAUDE.md and the MCP tool list, while the task material does not.
+    /// spawn prompt; the standing instructions are left out to stay inside `briefCharacterBudget`,
+    /// which the task material has the stronger claim on.
     public static func postCompactionBrief(
         task: BoardTask,
         branch: String,
