@@ -6,6 +6,7 @@ public final class StoreHookSink: HookSink {
     private let hookEvents: HookEventStore
     private let grants: TokenGrantStore
     private let sessions: SessionStore
+    private let projects: ProjectStore
     private let tasks: TaskStore
     private let progress: ProgressStore
     private let shutdowns: ShutdownOrderStore
@@ -45,6 +46,7 @@ public final class StoreHookSink: HookSink {
         hookEvents = HookEventStore(db)
         grants = TokenGrantStore(db)
         sessions = SessionStore(db)
+        projects = ProjectStore(db)
         tasks = TaskStore(db)
         progress = ProgressStore(db)
         shutdowns = ShutdownOrderStore(db)
@@ -137,6 +139,39 @@ public final class StoreHookSink: HookSink {
         return object["trigger"] as? String
     }
 
+    /// `/clear` ends the session and starts a new one under a new id, and the fork payload does not
+    /// name its parent. The grant is the only link back, so an unknown session id arriving on a live
+    /// grant bound to a known session is the fork signal. The old row keeps its state and its spend —
+    /// the fork writes its own transcript, and metering reads transcripts.
+    private func adoptFork(newSessionId: String, identity: TokenIdentity) {
+        guard let priorId = identity.sessionId, priorId != newSessionId,
+              (try? sessions.get(newSessionId)) == nil,
+              let prior = try? sessions.get(priorId),
+              prior.projectId == identity.projectId,
+              prior.role.rawValue == identity.scope.rawValue
+        else { return }
+
+        let adopted = AgentSession(
+            sessionId: newSessionId,
+            shortId: prior.shortId,
+            projectId: identity.projectId,
+            taskId: prior.taskId,
+            role: prior.role,
+            worktreePath: prior.worktreePath,
+            branch: prior.branch,
+            cwd: prior.cwd,
+            state: .running,
+            attempt: prior.attempt,
+            model: prior.model
+        )
+        guard (try? sessions.insert(adopted)) != nil else { return }
+
+        try? grants.bind(token: identity.token, sessionId: newSessionId)
+        if prior.role == .orchestrator {
+            try? projects.setOrchestratorSession(identity.projectId, sessionId: newSessionId)
+        }
+    }
+
     private func process(_ event: HookEvent, identity: TokenIdentity) -> Outcome {
         let sessionId = event.sessionId
         _ = try? hookEvents.append(sessionId: sessionId, event: event.name, payload: event.rawJSON)
@@ -169,6 +204,7 @@ public final class StoreHookSink: HookSink {
         if identity.sessionId == nil {
             try? grants.bind(token: identity.token, sessionId: sessionId)
         }
+        adoptFork(newSessionId: sessionId, identity: identity)
         guard let session = try? sessions.get(sessionId) else { return .none }
         let taskId = session.taskId ?? identity.taskId
 
