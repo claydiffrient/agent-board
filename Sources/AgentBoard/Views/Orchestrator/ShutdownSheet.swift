@@ -2,9 +2,10 @@ import AgentBoardCore
 import AppKit
 import SwiftUI
 
-/// SPEC §9: the wind-down sheet. Nothing here polls — the delivery rows and sessions come from GRDB
-/// observations, and `WorkerSupervisor.shutdownProgress` republishes on every metering tick, which
-/// is what moves a silent worker past its grace period while the sheet is open.
+/// SPEC §9: the wind-down sheet for one project. Nothing here polls — the delivery rows and
+/// sessions come from GRDB observations, and `WorkerSupervisor.shutdownProgress` republishes on
+/// every metering tick, which is what moves a silent worker past its grace period while the sheet
+/// is open.
 struct ShutdownSheet: View {
     let project: Project
     let order: ShutdownOrder
@@ -34,21 +35,22 @@ struct ShutdownSheet: View {
 
     var body: some View {
         let progress = counts
-        return VStack(alignment: .leading, spacing: 0) {
-            header(progress)
-            Divider()
-            List(rows) { row in
-                ShutdownRowView(
-                    row: row,
-                    attach: { openWindow(id: "terminal", value: row.sessionId) },
-                    stop: { run { try await env.supervisor.stop(sessionId: row.sessionId) } }
-                )
+        return ShutdownSheetBody(
+            headline: progress.headline,
+            detail: headerDetail(progress),
+            isComplete: progress.isComplete,
+            rows: rows,
+            footerNote: "Spawning is refused while this order stands.",
+            attach: { openWindow(id: "terminal", value: $0) },
+            stop: { sessionId in run { try await env.supervisor.stop(sessionId: sessionId) } }
+        ) {
+            Button("Cancel Shutdown") { cancel() }
+                .help("Lets the orchestrator spawn again. Workers that already stopped stay stopped.")
+            if progress.isComplete {
+                Button("Quit Agent Board") { quit() }
+                    .keyboardShortcut(.defaultAction)
             }
-            .listStyle(.inset)
-            Divider()
-            footer(progress)
         }
-        .frame(minWidth: 560, minHeight: 460)
         .task(id: order.id) {
             await deliveries.run(ShutdownDeliveryStore(env.db).observeAll(orderId: order.id), in: env.db.reader)
         }
@@ -59,28 +61,6 @@ struct ShutdownSheet: View {
             await tasks.run(TaskStore(env.db).observe(projectId: project.id), in: env.db.reader)
         }
         .errorAlert($errorMessage)
-    }
-
-    private func header(_ counts: ShutdownCounts) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                if counts.isComplete {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                } else {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-                Text(counts.headline)
-                    .font(.title3.weight(.semibold))
-            }
-            Text(headerDetail(counts))
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
     }
 
     private func headerDetail(_ counts: ShutdownCounts) -> String {
@@ -98,22 +78,6 @@ struct ShutdownSheet: View {
             lines.append("\(counts.notResponding) is past its grace period. Stop it to kill the process; its task still goes back to ready.")
         }
         return lines.joined(separator: " ")
-    }
-
-    private func footer(_ counts: ShutdownCounts) -> some View {
-        HStack {
-            Text("Spawning is refused while this order stands.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Button("Cancel Shutdown") { cancel() }
-                .help("Lets the orchestrator spawn again. Workers that already stopped stay stopped.")
-            if counts.isComplete {
-                Button("Quit Agent Board") { quit() }
-                    .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(16)
     }
 
     /// Cancelling lifts the standing refusal; it does not restart anything. A worker that already
@@ -144,6 +108,71 @@ struct ShutdownSheet: View {
     }
 }
 
+/// The chrome both wind-down sheets share: the progress header, the per-session rows and their
+/// state rules, and the footer. The wording itself is computed in `ShutdownSheetModel` and
+/// `GlobalShutdown` and handed in, so the two sheets cannot drift apart.
+struct ShutdownSheetBody<Actions: View>: View {
+    let headline: String
+    let detail: String
+    let isComplete: Bool
+    let rows: [ShutdownRow]
+    let footerNote: String
+    let attach: (String) -> Void
+    let stop: (String) -> Void
+    @ViewBuilder let actions: () -> Actions
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            List(rows) { row in
+                ShutdownRowView(
+                    row: row,
+                    attach: { attach(row.sessionId) },
+                    stop: { stop(row.sessionId) }
+                )
+            }
+            .listStyle(.inset)
+            Divider()
+            footer
+        }
+        .frame(minWidth: 560, minHeight: 460)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                if isComplete {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Text(headline)
+                    .font(.title3.weight(.semibold))
+            }
+            Text(detail)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+    }
+
+    private var footer: some View {
+        HStack {
+            Text(footerNote)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            actions()
+        }
+        .padding(16)
+    }
+}
+
 private struct ShutdownRowView: View {
     let row: ShutdownRow
     let attach: () -> Void
@@ -151,9 +180,19 @@ private struct ShutdownRowView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(row.taskTitle ?? "No task")
-                .fontWeight(.medium)
-                .lineLimit(2)
+            HStack(spacing: 6) {
+                Text(row.taskTitle ?? "No task")
+                    .fontWeight(.medium)
+                    .lineLimit(2)
+                if let projectName = row.projectName {
+                    Text(projectName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                }
+            }
             HStack(spacing: 6) {
                 Text(row.state.label)
                     .padding(.horizontal, 6)

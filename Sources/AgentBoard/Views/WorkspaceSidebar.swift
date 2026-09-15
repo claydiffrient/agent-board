@@ -70,3 +70,15 @@ enum SidebarCollapseState {
         UserDefaults.standard.set(Array(collapsed).sorted(), forKey: key)
     }
 }
+
+/// What the sidebar has selected. There is no "nothing selected" case: deselecting falls back to
+/// `atAGlance`, which is the app's landing view, so the detail pane is never empty.
+enum SidebarSelection: Hashable {
+    case atAGlance
+    case project(String)
+
+    var projectId: String? {
+        if case .project(let id) = self { return id }
+        return nil
+    }
+}

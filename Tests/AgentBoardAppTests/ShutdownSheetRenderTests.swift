@@ -76,11 +76,11 @@ final class ShutdownSheetRenderTests: XCTestCase {
                 .environment(AppEnvironment(db: db, supervisor: supervisor))
         )
         NSApplication.shared.setActivationPolicy(.accessory)
-        // Placed far offscreen: the sheet needs a window to lay out, and nothing may appear on a
-        // machine that has no display.
+        // Borderless and far offscreen: AppKit constrains a `.titled` window back onto a screen,
+        // which put this fixture in front of the human during unrelated test runs.
         let window = NSWindow(
             contentRect: NSRect(x: -10_000, y: -10_000, width: 620, height: 520),
-            styleMask: [.titled], backing: .buffered, defer: false
+            styleMask: [.borderless], backing: .buffered, defer: false
         )
         window.contentView = host
         window.orderFront(nil)
@@ -170,8 +170,12 @@ final class ShutdownSheetRenderTests: XCTestCase {
 
 @MainActor
 @Observable
-private final class RenderStubSupervisor: WorkerSupervising {
+final class RenderStubSupervisor: WorkerSupervising {
     @ObservationIgnored private(set) var progressReads = 0
+    @ObservationIgnored private(set) var consolesStopped = 0
+    /// What `requestGlobalShutdown` answers with, so a sheet under test sees the orders its
+    /// database already holds rather than an empty list.
+    @ObservationIgnored var globalOrders: [ShutdownOrder] = []
     @ObservationIgnored private var progress: [String: ShutdownProgress]
 
     init(progress: [String: ShutdownProgress]) {
@@ -215,4 +219,7 @@ private final class RenderStubSupervisor: WorkerSupervising {
     func cancelShutdown(projectId: String, by: String) async throws -> ShutdownOrder? { nil }
     func isShuttingDown(projectId: String) -> Bool { true }
     func deliverShutdownOrder(projectId: String) async throws -> ShutdownProgress { throw StubError.notWired }
+    func requestGlobalShutdown(requestedBy: String, reason: String?) async throws -> [ShutdownOrder] { globalOrders }
+    func cancelGlobalShutdown(by: String) async throws -> [ShutdownOrder] { globalOrders }
+    func stopOrchestratorConsoles() { consolesStopped += 1 }
 }

@@ -58,6 +58,15 @@ protocol WorkerSupervising: AnyObject {
     /// Stops nothing: a worker ends its own session by calling `acknowledge_shutdown`.
     @discardableResult
     func deliverShutdownOrder(projectId: String) async throws -> ShutdownProgress
+    /// Raises an order on every project — including ones with no active session — and delivers
+    /// them all, so no project can spawn into the gap while the others are being wound down.
+    @discardableResult
+    func requestGlobalShutdown(requestedBy: String, reason: String?) async throws -> [ShutdownOrder]
+    /// Lifts the order on every project, attempting all of them before reporting any failure.
+    @discardableResult
+    func cancelGlobalShutdown(by: String) async throws -> [ShutdownOrder]
+    /// Ends every orchestrator PTY this process owns, before the app terminates.
+    func stopOrchestratorConsoles()
     /// Wind-down counts per project id, so the progress sheet observes rather than polls.
     var shutdownProgress: [String: ShutdownProgress] { get }
 }
