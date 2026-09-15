@@ -7,6 +7,7 @@ import Foundation
 
 actor FakeRuntime: AgentRuntime {
     private(set) var stopped: [String] = []
+    private(set) var removed: [String] = []
     private(set) var resumed: [String] = []
     private(set) var resumePrompts: [String] = []
     private(set) var spawns: [SpawnRequest] = []
@@ -65,9 +66,21 @@ actor FakeRuntime: AgentRuntime {
         return SpawnedAgent(shortId: "short-\(sessionId)", sessionId: sessionId)
     }
 
+    /// What `claude agents --json --all` answers. A sweep may read this to skip short ids the
+    /// runtime no longer carries; it must never be the source of a target.
+    private var listed: [AgentInfo] = []
+    private var listFailure: Error?
+
+    func setListed(_ agents: [AgentInfo]) { listed = agents }
+    func failListing(_ error: Error) { listFailure = error }
+
     func stop(shortId: String) async throws { stopped.append(shortId) }
-    func remove(shortId: String) async throws {}
-    func listSessions() async throws -> [AgentInfo] { [] }
+    func remove(shortId: String) async throws { removed.append(shortId) }
+
+    func listSessions() async throws -> [AgentInfo] {
+        if let listFailure { throw listFailure }
+        return listed
+    }
     nonisolated func attachCommand(shortId: String) -> (executable: String, arguments: [String]) {
         ("claude", ["attach", shortId])
     }
@@ -295,6 +308,21 @@ struct SupervisorFixture {
             try? FileManager.default.removeItem(at: ClaudeProjectPaths.projectDir(forPath: worktree))
         }
         try? FileManager.default.removeItem(at: supportDir)
+    }
+
+    /// A worker tool handler wired to this fixture's supervisor, so a tool call reaches the same
+    /// event path the real server uses rather than a sink that drops everything.
+    func workerHandler() -> WorkerToolHandler {
+        let sink = LateBoundSink()
+        sink.target = supervisor
+        return WorkerToolHandler(db: db, events: sink)
+    }
+
+    func identity(token: String) async throws -> TokenIdentity {
+        guard let identity = await resolver.resolve(token: token) else {
+            throw FixtureError("token \(token) did not resolve")
+        }
+        return identity
     }
 
     /// A running worker session for a fresh task, holding a bound, unrevoked grant.

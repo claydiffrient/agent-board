@@ -127,6 +127,9 @@ public final class WorkerToolHandler: ToolHandler {
             return .json(.object(["id": .string(proposed.id), "column": .string(proposed.column.rawValue)]))
         case "report_complete":
             let result = try reportComplete(task, arguments: arguments, identity: identity)
+            if let sessionId = identity.sessionId {
+                await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
+            }
             await events.reportQueued(projectId: identity.projectId)
             return result
         case "acknowledge_shutdown":

@@ -140,6 +140,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             lastError = describe(error)
         }
         failInterruptedSetups()
+        await sweepLeakedAgents()
         await migrateWorktreeRoots()
         startMetering()
     }
@@ -1289,6 +1290,67 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if let order = try? shutdowns.outstanding(projectId: projectId) {
             refreshShutdownProgress(projectId: projectId, order: order)
         }
+    }
+
+    /// The orderly end of a worker's life, and until now the only one that left its process running:
+    /// the agent is told to take no further turns, so the session sits `idle` holding its whole
+    /// context forever. Stopping it frees ~300 MB and costs nothing — `claude --bg --resume` reads
+    /// the transcript, which a stop leaves intact, so the task in `review` can still be reopened
+    /// and attached to.
+    func workerCompleted(projectId: String, sessionId: String) async {
+        guard let session = try? sessions.get(sessionId), let shortId = session.shortId else { return }
+        try? await runtime.stop(shortId: shortId)
+    }
+
+    /// Stops the agent of every session this board's own rows say is finished — the backlog left by
+    /// every worker that completed before `report_complete` learned to stop its own session.
+    ///
+    /// Every target comes from `agent_session`, and the runtime list read afterwards can only
+    /// subtract. A `claude` session with no row here is never a candidate, whatever its process
+    /// looks like: argv and environment cannot tell a parked spare from a session doing real work.
+    @discardableResult
+    func sweepLeakedAgents(dryRun: Bool = false) async -> AgentSweepReport {
+        var report = AgentSweepReport(dryRun: dryRun)
+        let rows = ((try? projects.list()) ?? []).flatMap { (try? sessions.all(projectId: $0.id)) ?? [] }
+        let listed = try? await runtime.listSessions()
+        // A registry entry without a pid has no process to free. Measured on this machine: of 124
+        // inactive rows `claude stop` accepted, the 8 carrying a pid were the whole 1,311 MB, and
+        // the other 116 cost 60s of the 71s the sweep took and moved nothing.
+        let resident = listed.map { Set($0.filter { $0.pid != nil }.compactMap(\.id)) }
+        report.runtimeListed = listed != nil
+        for decision in LeakedAgentSweep.plan(rows) {
+            guard decision.outcome == .stop, let shortId = decision.shortId else {
+                report.kept.append(decision)
+                continue
+            }
+            if let resident, !resident.contains(shortId) {
+                report.kept.append(LeakedAgentSweep.Decision(
+                    sessionId: decision.sessionId, shortId: shortId, outcome: .keep,
+                    reason: "the runtime reports no process for this short id"
+                ))
+                continue
+            }
+            if dryRun {
+                report.wouldStop.append(decision)
+                continue
+            }
+            do {
+                try await runtime.stop(shortId: shortId)
+                report.stopped.append(decision)
+            } catch {
+                report.failed.append(LeakedAgentSweep.Decision(
+                    sessionId: decision.sessionId, shortId: shortId, outcome: .stop,
+                    reason: describe(error)
+                ))
+            }
+        }
+        if let listed {
+            let known = Set(rows.compactMap(\.shortId))
+            report.untracked = listed
+                .filter { $0.pid != nil && $0.id.map { !known.contains($0) } ?? true }
+                .count
+        }
+        return report
     }
 
     /// The orchestrator only learns of a queued report through the console notice.
