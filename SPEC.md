@@ -682,7 +682,7 @@ Generated into each managed session's `--settings`. All post to
 | `SessionStart` | Mark `agent_session.state = running`; record transcript path |
 | `PreToolUse` (matcher `Bash`) | Deny `git push`, `gh pr create`, `gh pr merge`; append an `error` progress row (§8) |
 | `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row |
-| `Notification` | Set `blocked` + reason on the task and session; macOS notification; the task appears in the orchestrator's **Blocked** section (§10) |
+| `Notification` | Set `blocked` + reason on the task and session; the task appears in the orchestrator's **Blocked** section (§10) and raises the project's attention signal, which posts the banner |
 | `Stop` | Mark session idle. **On the orchestrator, this is the trigger for the report notice** (§9) |
 | `SessionEnd` | Mark stopped/completed; reconcile final spend from the transcript |
 | `WorktreeRemove` | Chain to the user's existing hook, then clear the worktree row |
@@ -702,10 +702,25 @@ hooks, since hooks do not carry `usage`.
 
 The blocking `Notification` types are `permission_prompt`, `agent_needs_input`,
 and anything prefixed `elicitation`. Each sets `task.blocked` with the
-notification message as `blocked_reason`, moves the session to `blocked`, files
-a `blocked` report for the orchestrator, and raises a macOS notification titled
-"Agent needs input". The next `PostToolUse` clears `blocked` again, so a worker
-that was answered leaves the section without anyone pressing anything.
+notification message as `blocked_reason`, moves the session to `blocked`, and
+files a `blocked` report for the orchestrator. The banner comes from the
+attention signal below rather than from the hook, so the badge and the banner
+cannot disagree; a session with no task cannot raise that signal, and only that
+case still posts its own "Agent needs input" banner. The next `PostToolUse`
+clears `blocked` again, so a worker that was answered leaves the section without
+anyone pressing anything.
+
+**Attention banners.** A pending approval and a blocked worker each stop work
+outright, so both notify. Both are read from `ProjectAttentionStore` — the same
+per-project signal behind the sidebar badge — on the metering tick, and
+`AttentionNotifier` posts each one only on the transition into that condition,
+keyed by project and reason. A queue nobody has answered does not banner every
+5s; a growing queue is a bigger badge, not a second banner. The key clears when
+the condition clears, so the same condition occurring again notifies again, and
+a relaunch re-announces whatever is still waiting. Stranded reports and an
+unacknowledged shutdown badge without interrupting. Nothing notifies for the
+project the human has open while Agent Board is frontmost. Every banner Agent
+Board raises names its project.
 
 **Stall detection.** Some prompts fire no hook at all — a grandchild process
 reading stdin (`cp -i`, `ssh` asking for a passphrase) belongs to neither

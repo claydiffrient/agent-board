@@ -142,7 +142,6 @@ public final class WorkerToolHandler: ToolHandler {
         case "report_blocked":
             let reason = try ToolArguments.requiredString("reason", in: arguments)
             try board.block(taskId: task.id, sessionId: try requiredSession(identity), reason: reason)
-            await events.notify(title: "Worker blocked: \(task.title)", body: reason)
             await events.reportQueued(projectId: identity.projectId)
             return ToolResult(text: "Task flagged blocked. A person has been notified; wait for direction.")
         default:

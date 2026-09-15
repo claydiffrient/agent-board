@@ -62,6 +62,7 @@ struct MainWindow: View {
     /// open project and clicking an At a Glance card all land here, so no two paths can disagree.
     private func select(_ next: SidebarSelection) {
         selection = next
+        env.supervisor.focusChanged(projectId: next.projectId)
     }
 
     private var sidebarSelection: Binding<SidebarSelection?> {
