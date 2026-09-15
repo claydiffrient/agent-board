@@ -926,12 +926,21 @@ outside them. A headline answers "is anything happening, and does anything need
 me?" from one cross-project observation (`GlanceStore`) — how many agents are
 working and how many tasks await review, worded so zero reads as rest
 ("Nothing running, and nothing is waiting on you.") rather than as a count of
-absent things. Below it, one card per project — every project, including idle
-ones — grouped into the same workspace sections in the same order as the
-sidebar, so a project sits in the same relative place in both. A card carries
-the project name and its running, in-review and ready counts, or reads **Idle**
-when all three are zero. Clicking anywhere on a card selects that project
-through the same write the sidebar uses, landing on Orchestrator and starting
+absent things. When any project needs a human the headline leads with how many
+do — "2 projects need you." — *beside* the review count rather than in place of
+it: the review clause counts tasks in one board column, while attention counts
+projects that cannot proceed, and a pending approval raises the second without
+ever touching the first. Below it, one card per project — every project,
+including idle ones — grouped into the same workspace sections in the same order
+as the sidebar, so a project sits in the same relative place in both. A card
+carries the project name and its running, in-review and ready counts, or reads
+**Idle** when all three are zero. A project whose attention signal is raised
+shows the same dot the sidebar row shows, beside its name, carrying the signal's
+reason as its tooltip; it suppresses **Idle**, because a board with nothing on it
+and an approval waiting is not idle. The page starts no observation of its own
+for that: it is handed the one `ProjectAttentionStore.observeAll` the sidebar
+already runs, so the two surfaces cannot disagree. Clicking anywhere on a card
+selects that project through the same write the sidebar uses, landing on Orchestrator and starting
 its console (§9) — which is the only way a console ever starts, so this page
 itself costs nothing.
 

@@ -23,7 +23,8 @@ struct MainWindow: View {
                     .id(project.id)
             } else {
                 AtAGlanceView(
-                    projects: projects.value, workspaces: workspaces.value, select: select
+                    projects: projects.value, workspaces: workspaces.value,
+                    attention: attention.value, select: select
                 )
             }
         }

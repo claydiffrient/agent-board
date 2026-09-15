@@ -9,12 +9,26 @@ extension ProjectGlance {
 ///
 /// Zero is a resting state, not a failure, so it is worded as reassurance ("Nothing running")
 /// rather than as a count of absent things ("0 agents working").
+///
+/// `projectsNeedingYou` joins the review count rather than replacing it, because the two count
+/// different things: the review clause counts tasks sitting in one board column, while attention
+/// counts projects that cannot proceed without a human — a project with a pending approval and an
+/// empty review column raises one and not the other. Repointing the familiar review number at the
+/// attention total would silently change what it means.
 public enum GlanceHeadline {
-    public static func text(workingSessions: Int, tasksInReview: Int) -> String {
+    public static func text(workingSessions: Int, tasksInReview: Int, projectsNeedingYou: Int) -> String {
+        if projectsNeedingYou > 0 {
+            return "\(Self.projectsNeedingYou(projectsNeedingYou)). \(agents(workingSessions)), \(review(tasksInReview))."
+        }
         if workingSessions == 0 && tasksInReview == 0 {
             return "Nothing running, and nothing is waiting on you."
         }
         return "\(agents(workingSessions)), \(review(tasksInReview))."
+    }
+
+    /// Leads the sentence when it is non-zero: it is the only clause the human has to act on.
+    public static func projectsNeedingYou(_ count: Int) -> String {
+        count == 1 ? "1 project needs you" : "\(count) projects need you"
     }
 
     public static func agents(_ count: Int) -> String {
