@@ -66,6 +66,7 @@ struct BridgeFixture {
     var approvals: ApprovalStore { ApprovalStore(db) }
     var notes: NoteStore { NoteStore(db) }
     var progress: ProgressStore { ProgressStore(db) }
+    var hookEvents: HookEventStore { HookEventStore(db) }
     var board: Board { Board(db) }
 
     var orchestratorIdentity: TokenIdentity {

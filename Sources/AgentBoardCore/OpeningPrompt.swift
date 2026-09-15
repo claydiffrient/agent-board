@@ -17,21 +17,7 @@ public enum OpeningPrompt {
         notes: [InjectedNote] = [],
         verification: VerificationCommands = VerificationCommands()
     ) -> String {
-        var sections: [String] = []
-        sections.append("# Task: \(task.title)")
-        sections.append(task.body?.isEmpty == false ? task.body! : "(No further description was given.)")
-        sections.append("## Acceptance criteria\n\(task.acceptance?.isEmpty == false ? task.acceptance! : "None given beyond the description above; use your judgment and say what you verified.")")
-        if let epicGoal, !epicGoal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            sections.append("""
-            ## Epic goal
-            This task is one of several in an epic. Your branch was cut from the epic branch, and your work \
-            will be merged with the other tasks' work. The epic's goal:
-
-            \(epicGoal)
-
-            Stay inside your own task; the goal is context for the choices you make, not extra scope.
-            """)
-        }
+        var sections = taskSections(task: task, epicGoal: epicGoal)
         if attempt > 1 {
             sections.append("""
             ## Attempt \(attempt)
@@ -81,7 +67,65 @@ public enum OpeningPrompt {
         return sections.joined(separator: "\n\n")
     }
 
-    static func renderNotes(_ notes: [InjectedNote]) -> String? {
+    /// The task material a worker is handed: what the task is, what counts as done, and the epic it
+    /// sits in. Shared with `postCompactionBrief` so a re-brief cannot drift from the spawn prompt.
+    public static func taskSections(task: BoardTask, epicGoal: String? = nil) -> [String] {
+        var sections: [String] = []
+        sections.append("# Task: \(task.title)")
+        sections.append(task.body?.isEmpty == false ? task.body! : "(No further description was given.)")
+        sections.append("## Acceptance criteria\n\(task.acceptance?.isEmpty == false ? task.acceptance! : "None given beyond the description above; use your judgment and say what you verified.")")
+        if let epicGoal, !epicGoal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            sections.append("""
+            ## Epic goal
+            This task is one of several in an epic. Your branch was cut from the epic branch, and your work \
+            will be merged with the other tasks' work. The epic's goal:
+
+            \(epicGoal)
+
+            Stay inside your own task; the goal is context for the choices you make, not extra scope.
+            """)
+        }
+        return sections
+    }
+
+    /// Claude Code caps any one hook's injected string at 10,000 characters and spills the rest to a
+    /// file, so the brief drops whole sections from the end — the notes first — rather than overflow.
+    public static let briefCharacterBudget = 10_000
+
+    /// Handed back to a worker after its context is compacted. Built from the same sections as the
+    /// spawn prompt; the standing instructions are left out because they survive compaction in
+    /// CLAUDE.md and the MCP tool list, while the task material does not.
+    public static func postCompactionBrief(
+        task: BoardTask,
+        branch: String,
+        epicGoal: String? = nil,
+        notes: [InjectedNote] = [],
+        budget: Int = briefCharacterBudget
+    ) -> String {
+        var sections = [
+            """
+            Your conversation was just compacted, so the assignment below may have been summarized \
+            away. It is reproduced in full. You are still on branch `\(branch)`, and the task is not \
+            finished until you commit and call `report_complete`.
+            """,
+        ]
+        sections.append(contentsOf: taskSections(task: task, epicGoal: epicGoal))
+        if let notesSection = renderNotes(notes) {
+            sections.append(notesSection)
+        }
+
+        var kept: [String] = []
+        var used = 0
+        for section in sections {
+            let cost = section.count + (kept.isEmpty ? 0 : 2)
+            guard used + cost <= budget else { break }
+            kept.append(section)
+            used += cost
+        }
+        return kept.joined(separator: "\n\n")
+    }
+
+    public static func renderNotes(_ notes: [InjectedNote]) -> String? {
         guard !notes.isEmpty else { return nil }
         var lines = ["## Project notes"]
         lines.append("""

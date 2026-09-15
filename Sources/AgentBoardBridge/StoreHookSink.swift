@@ -10,9 +10,15 @@ public final class StoreHookSink: HookSink {
     private let progress: ProgressStore
     private let shutdowns: ShutdownOrderStore
     private let deliveries: ShutdownDeliveryStore
+    private let notes: NoteStore
+    private let epics: EpicStore
     private let board: Board
     private let events: any BoardEventSink
     private let queue = DispatchQueue(label: "agent-board.hooks")
+    /// Sessions whose context was just compacted and that have not yet been handed their task back.
+    /// Touched only from `queue`. Deliberately not persisted: the re-brief is worth nothing to a
+    /// session that has since ended, and Agent Board restarting mid-compaction loses nothing else.
+    nonisolated(unsafe) private var awaitingReBrief: Set<String> = []
 
     public static let blockingNotificationTypes: Set<String> = ["permission_prompt", "agent_needs_input"]
 
@@ -29,6 +35,9 @@ public final class StoreHookSink: HookSink {
         static let none = Outcome()
         static func follow(_ followUps: [FollowUp]) -> Outcome { Outcome(followUps: followUps) }
         static func deny(_ decision: HookDecision) -> Outcome { Outcome(decision: decision) }
+        static func respond(_ decision: HookDecision, _ followUps: [FollowUp] = []) -> Outcome {
+            Outcome(followUps: followUps, decision: decision)
+        }
     }
 
     public init(db: AppDatabase, events: any BoardEventSink) {
@@ -39,6 +48,8 @@ public final class StoreHookSink: HookSink {
         progress = ProgressStore(db)
         shutdowns = ShutdownOrderStore(db)
         deliveries = ShutdownDeliveryStore(db)
+        notes = NoteStore(db)
+        epics = EpicStore(db)
         board = Board(db)
         self.events = events
     }
@@ -80,6 +91,36 @@ public final class StoreHookSink: HookSink {
             )
         }
         return order
+    }
+
+    /// `PreCompact`'s own response cannot carry context: per the hook reference its only decision
+    /// field is a top-level `decision: "block"`, which would block the compaction itself, and it is
+    /// not one of the events that accept `hookSpecificOutput.additionalContext`. So the brief is
+    /// armed here and delivered on the session's next `PostToolUse`, which does accept it and fires
+    /// within one tool call of the compacted session resuming.
+    private func preCompact(_ event: HookEvent, session: AgentSession, taskId: String?) -> Outcome {
+        guard session.role == .worker, let taskId else { return .none }
+        awaitingReBrief.insert(session.sessionId)
+        let trigger = event.compactTrigger == "manual" ? "manually" : "automatically"
+        _ = try? progress.append(
+            taskId: taskId, sessionId: session.sessionId, kind: .status,
+            text: "Context compacted \(trigger); re-sending the task brief."
+        )
+        return .none
+    }
+
+    private func reBrief(session: AgentSession, taskId: String?) -> String? {
+        guard let taskId, let task = try? tasks.get(taskId) else { return nil }
+        let epic = task.epicId.flatMap { try? epics.get($0) } ?? nil
+        let injected = (try? notes.notesForSpawn(
+            projectId: task.projectId, taskId: taskId, epicId: task.epicId
+        )) ?? []
+        return OpeningPrompt.postCompactionBrief(
+            task: task,
+            branch: session.branch ?? TaskStore.branchName(for: taskId),
+            epicGoal: epic?.goal,
+            notes: injected
+        )
     }
 
     private func process(_ event: HookEvent, identity: TokenIdentity) -> Outcome {
@@ -137,6 +178,17 @@ public final class StoreHookSink: HookSink {
             if [.starting, .idle, .blocked].contains(session.state) {
                 try? sessions.setState(sessionId, .running)
             }
+            if awaitingReBrief.remove(sessionId) != nil, let brief = reBrief(session: session, taskId: taskId) {
+                return .respond(.context(brief))
+            }
+
+        case "SubagentStop":
+            // A subagent can run for many minutes without the parent making a tool call of its own,
+            // so without this the idle clock reads the session as asleep while it is working.
+            try? sessions.recordActivity(sessionId, at: .nowMillis, lastTool: session.lastTool)
+
+        case "PreCompact":
+            return preCompact(event, session: session, taskId: taskId)
 
         case "Notification":
             guard let type = event.notificationType else { return .none }
