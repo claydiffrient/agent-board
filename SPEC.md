@@ -536,6 +536,17 @@ than one that is finished; they merge nothing and are not part of this sequence.
    the epic branch was checked out here — plus getting the build green across
    the whole epic. Both cases arrive as `decision` reports before integration is
    requested; integration is no longer the first time task branches meet.
+   A task branch that is gone is not reported as missing. Agent Board writes two
+   refs outside `refs/heads` — `refs/agentboard/base/<task-id>` when the branch
+   is cut and `refs/agentboard/reaped/<task-id>` before the ref is dropped — so
+   the plan can tell a branch deleted *because* its work merged from one that
+   never carried a commit. `IntegrationPlan.classify` reads them into three
+   claims: work on the epic branch and the branch gone ("nothing to do"),
+   nothing ever committed (the existing wording), and anything the ledger cannot
+   settle, which is reported as unknown with an instruction to check rather than
+   asserted either way. None of this changes which branches the integrator is
+   told to merge; the prompt's merge instruction names that section rather
+   than pointing at everything listed above it.
    "Green" is the project's own `settings_json.buildCommand` and `testCommand`
    (§4), interpolated into the prompt. When either is unset the prompt does not
    drop verification: it tells the integrator to work out how this project
