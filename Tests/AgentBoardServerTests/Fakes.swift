@@ -108,3 +108,24 @@ actor FakeResourceHandler: ResourceHandler {
         return [ResourceContents(uri: uri, mimeType: "application/json", text: body)]
     }
 }
+
+actor FakePromptHandler: PromptHandler {
+    private(set) var gets: [String] = []
+
+    func prompts(for identity: TokenIdentity) async -> [PromptDescriptor] {
+        [
+            PromptDescriptor(
+                name: "worker_protocol",
+                title: "Worker protocol",
+                description: "How a worker reports",
+                arguments: []
+            ),
+        ]
+    }
+
+    func get(_ name: String, arguments: [String: String], identity: TokenIdentity) async throws -> PromptResult {
+        gets.append(name)
+        guard name == "worker_protocol" else { throw PromptError("Unknown prompt: \(name)") }
+        return PromptResult(description: "How a worker reports", messages: [PromptMessage(text: "Commit, then report.")])
+    }
+}
