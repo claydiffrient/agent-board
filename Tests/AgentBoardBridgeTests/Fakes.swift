@@ -6,7 +6,7 @@ import XCTest
 
 actor RecordingEventSink: BoardEventSink {
     enum Event: Equatable {
-        case notify(title: String, body: String)
+        case notify(projectId: String, title: String, body: String)
         case orchestratorTurnEnded(projectId: String, sessionId: String)
         case reportQueued(projectId: String)
         case orchestratorCompacted(projectId: String, sessionId: String, manual: Bool)
@@ -15,8 +15,8 @@ actor RecordingEventSink: BoardEventSink {
 
     private(set) var events: [Event] = []
 
-    func notify(title: String, body: String) async {
-        events.append(.notify(title: title, body: body))
+    func notify(projectId: String, title: String, body: String) async {
+        events.append(.notify(projectId: projectId, title: title, body: body))
     }
 
     func orchestratorTurnEnded(projectId: String, sessionId: String) async {
@@ -175,7 +175,7 @@ struct BridgeFixture {
         return epic
     }
 
-    func workerIdentity(sessionId: String, taskId: String) -> TokenIdentity {
+    func workerIdentity(sessionId: String, taskId: String?) -> TokenIdentity {
         TokenIdentity(token: "worker-\(sessionId)", scope: .worker, projectId: project.id, sessionId: sessionId, taskId: taskId)
     }
 

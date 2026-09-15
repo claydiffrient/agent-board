@@ -71,4 +71,11 @@ protocol WorkerSupervising: AnyObject {
     func stopOrchestratorConsoles()
     /// Wind-down counts per project id, so the progress sheet observes rather than polls.
     var shutdownProgress: [String: ShutdownProgress] { get }
+    /// The project the human has open, or nil for At a Glance. Attention banners for it are
+    /// suppressed while Agent Board is frontmost.
+    func focusChanged(projectId: String?)
+}
+
+extension WorkerSupervising {
+    func focusChanged(projectId: String?) {}
 }

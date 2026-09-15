@@ -1,0 +1,259 @@
+import AgentBoardCore
+import AppKit
+import SwiftUI
+import XCTest
+@testable import AgentBoard
+
+/// The attention indicator on a single At a Glance card, rasterized on its own.
+///
+/// What this proves: a card for a project that needs a human draws differently from the same card
+/// without the signal, at the grid's 220-point minimum and at its 320-point maximum, and for a
+/// busy board as well as an idle one. A card is a plain `VStack`, not a `List` row, so
+/// `cacheDisplay` reaches it — the same route `ProjectRowBadgeRenderTests` uses for the sidebar row.
+///
+/// What it cannot prove: that the dot is the right size or colour, that it reads as separate from
+/// the name, or that its tooltip appears on hover. Nobody has looked at these pixels — they have
+/// only been compared, and `.help()` leaves no readable string in the AppKit or accessibility
+/// trees on this machine.
+@MainActor
+final class GlanceCardAttentionRenderTests: XCTestCase {
+    private func glance(_ name: String, running: Int = 0, review: Int = 0, ready: Int = 0) -> ProjectGlance {
+        ProjectGlance(id: "p-\(name)", name: name, running: running, review: review, ready: ready)
+    }
+
+    private func waiting(_ glance: ProjectGlance, _ causes: [AttentionCause]) -> ProjectAttention {
+        ProjectAttention(id: glance.id, name: glance.name, causes: causes)
+    }
+
+    private func pixels(_ glance: ProjectGlance, _ attention: ProjectAttention?, width: CGFloat) throws -> Data {
+        let hosting = NSHostingView(
+            rootView: ProjectGlanceCard(glance: glance, attention: attention)
+                .frame(width: width, alignment: .leading)
+                .background(Color(nsColor: .controlBackgroundColor))
+        )
+        hosting.layoutSubtreeIfNeeded()
+        hosting.frame = NSRect(
+            origin: .zero, size: CGSize(width: width, height: max(hosting.fittingSize.height, 1))
+        )
+        hosting.layoutSubtreeIfNeeded()
+        let rep = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+        hosting.cacheDisplay(in: hosting.bounds, to: rep)
+        return try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+    }
+
+    /// The control: without it a pixel inequality proves nothing, because two mounts could differ
+    /// for any reason at all.
+    func testTwoMountsOfTheSameQuietCardAreIdentical() throws {
+        let alpha = glance("Alpha", running: 2, review: 1, ready: 3)
+        XCTAssertEqual(try pixels(alpha, nil, width: 220), try pixels(alpha, nil, width: 220))
+    }
+
+    func testACardThatNeedsTheHumanDoesNotDrawLikeOneThatDoesNot() throws {
+        let alpha = glance("Alpha", running: 2, review: 1, ready: 3)
+        XCTAssertNotEqual(
+            try pixels(alpha, waiting(alpha, [AttentionCause(reason: .pendingApproval, count: 1)]), width: 220),
+            try pixels(alpha, nil, width: 220),
+            "a project needing attention must not draw the same as one that does not"
+        )
+    }
+
+    /// A project needing attention but carrying no causes is not needing attention. The card must
+    /// tell those apart, or an empty roll-up would mark every project.
+    func testAnEmptyCauseListDrawsExactlyLikeNoSignalAtAll() throws {
+        let alpha = glance("Alpha", running: 2, review: 1, ready: 3)
+        XCTAssertEqual(
+            try pixels(alpha, waiting(alpha, []), width: 220), try pixels(alpha, nil, width: 220)
+        )
+    }
+
+    /// `LazyVGrid(.adaptive(minimum: 220, maximum: 320))`: the indicator has to survive both ends,
+    /// and a long name is what squeezes it at the narrow one.
+    func testTheIndicatorSurvivesBothEndsOfTheAdaptiveGrid() throws {
+        let long = glance("a-project-with-a-name-long-enough-to-truncate", running: 1)
+        let signal = waiting(long, [AttentionCause(reason: .blockedWorker, count: 1, detail: "Wire the thing")])
+        for width in [CGFloat(220), 320] {
+            XCTAssertNotEqual(
+                try pixels(long, signal, width: width), try pixels(long, nil, width: width),
+                "the indicator must survive a \(Int(width))-point card"
+            )
+        }
+    }
+
+    /// An idle board with a pending approval is the case the review-count proxy missed entirely.
+    func testAnIdleCardStillShowsTheIndicator() throws {
+        let quiet = glance("Quiet")
+        XCTAssertTrue(quiet.isIdle)
+        XCTAssertNotEqual(
+            try pixels(quiet, waiting(quiet, [AttentionCause(reason: .pendingApproval, count: 1)]), width: 220),
+            try pixels(quiet, nil, width: 220)
+        )
+    }
+}
+
+/// The tooltip string is a pure value, so it is checked as one: `.help()` does not reach
+/// `NSView.toolTip`, so the fact that the card *carries* it is verified by reading
+/// `ProjectGlanceCard`, not by a test.
+final class GlanceCardAttentionReasonTests: XCTestCase {
+    /// The card, the sidebar badge and the notification body all read `ProjectAttention.summary`.
+    /// This pins the string the card hands to `.help()` so a divergence would fail here.
+    func testTheCardsTooltipIsTheSignalsOwnSummary() {
+        let attention = ProjectAttention(
+            id: "p1", name: "Alpha",
+            causes: [
+                AttentionCause(reason: .pendingApproval, count: 2),
+                AttentionCause(reason: .blockedWorker, count: 1, detail: "Wire the thing"),
+            ]
+        )
+        XCTAssertEqual(attention.summary, "2 approvals waiting, 1 worker blocked: Wire the thing.")
+    }
+
+    func testAQuietProjectHasNoTooltipAndThereforeNoIndicator() {
+        XCTAssertNil(ProjectAttention(id: "p1", name: "Alpha", causes: []).summary)
+    }
+}
+
+/// The page against a real database, to prove it is wired to the signal and not to an empty array.
+///
+/// `MainWindow` lands on At a Glance, so mounting it and capturing everything to the right of the
+/// sidebar captures the page. A pending approval written into the live database must change those
+/// pixels with no manual re-render, and resolving it must restore them.
+///
+/// What this proves: the page reads `ProjectAttentionStore` through the observation `MainWindow`
+/// already runs, and reacts to it live. What it cannot prove: which of the headline and the card
+/// changed, or what either now says — the capture is a comparison, not a reading.
+@MainActor
+final class AtAGlanceAttentionLiveTests: XCTestCase {
+    /// The 220-point sidebar, doubled by the backing scale of the capture. Everything past it is
+    /// the detail pane, which is the At a Glance page.
+    private static let detailStartsAt = 460
+
+    @MainActor
+    private final class Mount {
+        let window: NSWindow
+
+        init(db: AppDatabase) {
+            let host = NSHostingView(
+                rootView: MainWindow().environment(AppEnvironment(db: db, supervisor: StubSupervisor()))
+            )
+            NSApplication.shared.setActivationPolicy(.accessory)
+            // Borderless and far offscreen: AppKit constrains a `.titled` window back onto a
+            // visible screen, and this machine has none.
+            window = NSWindow(
+                contentRect: NSRect(x: -20_000, y: -20_000, width: 1100, height: 700),
+                styleMask: [.borderless], backing: .buffered, defer: false
+            )
+            window.contentView = host
+            window.orderBack(nil)
+        }
+
+        func close() { window.orderOut(nil) }
+
+        func capture() throws -> NSBitmapImageRep {
+            for _ in 0..<80 {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+                window.layoutIfNeeded()
+                window.displayIfNeeded()
+            }
+            let image = try XCTUnwrap(
+                CGWindowListCreateImage(
+                    .null, .optionIncludingWindow, CGWindowID(window.windowNumber),
+                    [.boundsIgnoreFraming, .bestResolution]
+                ),
+                "the window server produced no image for the offscreen window"
+            )
+            return NSBitmapImageRep(cgImage: image)
+        }
+    }
+
+    private func detailDiff(_ a: NSBitmapImageRep, _ b: NSBitmapImageRep) -> Int {
+        var count = 0
+        for y in 0..<min(a.pixelsHigh, b.pixelsHigh) {
+            for x in Self.detailStartsAt..<min(a.pixelsWide, b.pixelsWide) {
+                guard let left = a.colorAt(x: x, y: y), let right = b.colorAt(x: x, y: y) else { continue }
+                let apart = abs(left.redComponent - right.redComponent)
+                    + abs(left.greenComponent - right.greenComponent)
+                    + abs(left.blueComponent - right.blueComponent)
+                if apart > 0.02 { count += 1 }
+            }
+        }
+        return count
+    }
+
+    private func register(_ db: AppDatabase, _ name: String) throws -> Project {
+        try ProjectStore(db).register(
+            name: name, repoPath: "/tmp/glance-attention-\(UUID().uuidString)", baseBranch: "main",
+            worktreeRoot: "/tmp/glance-attention-worktrees", memoryDir: nil
+        )
+    }
+
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: SidebarCollapseState.key)
+        super.tearDown()
+    }
+
+    /// The control: without it a pixel difference proves only that two captures are not equal.
+    func testTwoMountsOfTheSameQuietPageAreIdentical() throws {
+        let db = try AppDatabase.inMemory()
+        _ = try register(db, "Alpha")
+        SidebarCollapseState.save([])
+
+        let first = Mount(db: db)
+        let second = Mount(db: db)
+        defer { first.close(); second.close() }
+        XCTAssertEqual(
+            detailDiff(try first.capture(), try second.capture()), 0,
+            "the page must render deterministically"
+        )
+    }
+
+    func testAPendingApprovalChangesThePageAndResolvingItRestoresIt() throws {
+        let db = try AppDatabase.inMemory()
+        let alpha = try register(db, "Alpha")
+        _ = try register(db, "Beta")
+        SidebarCollapseState.save([])
+
+        let mount = Mount(db: db)
+        defer { mount.close() }
+        let quiet = try mount.capture()
+
+        let approval = try ApprovalStore(db).create(
+            projectId: alpha.id, kind: .spawn, taskId: nil, epicId: nil,
+            requestedBy: "orchestrator", reason: "spawn a worker"
+        )
+        XCTAssertGreaterThan(
+            detailDiff(quiet, try mount.capture()), 0,
+            "a pending approval must reach the page, which is what the review-column proxy missed"
+        )
+
+        try ApprovalStore(db).resolve(approval.id, .denied)
+        XCTAssertEqual(
+            detailDiff(quiet, try mount.capture()), 0,
+            "resolving the approval must restore the quiet page exactly"
+        )
+    }
+
+    /// The test above cannot tell the headline changing from a card being marked, because a pending
+    /// approval moves both. Two boards with one waiting project each render the same headline word
+    /// for word — "1 project needs you. Nothing running, nothing awaiting your review." — so any
+    /// difference between them is the indicator sitting on a different card.
+    func testTheIndicatorLandsOnTheWaitingProjectsOwnCard() throws {
+        func board(waiting: Int) throws -> AppDatabase {
+            let db = try AppDatabase.inMemory()
+            let projects = try ["Alpha", "Beta"].map { try register(db, $0) }
+            _ = try ApprovalStore(db).create(
+                projectId: projects[waiting].id, kind: .spawn, taskId: nil, epicId: nil,
+                requestedBy: "orchestrator", reason: nil
+            )
+            return db
+        }
+        SidebarCollapseState.save([])
+
+        let first = Mount(db: try board(waiting: 0))
+        let second = Mount(db: try board(waiting: 1))
+        defer { first.close(); second.close() }
+        XCTAssertGreaterThan(
+            detailDiff(try first.capture(), try second.capture()), 0,
+            "the same headline over a differently-marked card must not render identically"
+        )
+    }
+}

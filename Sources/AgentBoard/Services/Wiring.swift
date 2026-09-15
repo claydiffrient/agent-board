@@ -53,8 +53,12 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         set { lock.withLock { storedTarget = newValue } }
     }
 
-    func notify(title: String, body: String) async {
-        await target?.notify(title: title, body: body)
+    func notify(projectId: String, title: String, body: String) async {
+        await target?.notify(projectId: projectId, title: title, body: body)
+    }
+
+    func notify(projectId: String, sessionId: String?, title: String, body: String) async {
+        await target?.notify(projectId: projectId, sessionId: sessionId, title: title, body: body)
     }
 
     func orchestratorTurnEnded(projectId: String, sessionId: String) async {

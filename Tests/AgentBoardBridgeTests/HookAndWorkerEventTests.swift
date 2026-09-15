@@ -35,7 +35,9 @@ final class HookAndWorkerEventTests: XCTestCase {
         XCTAssertEqual(events, [])
     }
 
-    func testBlockingNotificationPostsThroughEventSink() async throws {
+    /// The blocked task is the notification: `ProjectAttentionStore` sees it and the banner comes
+    /// from there, so the sink raises none of its own and the badge cannot disagree with the banner.
+    func testBlockingNotificationBlocksTheTaskWithoutItsOwnBanner() async throws {
         let task = try f.task("t", column: .running)
         try f.session("w1", taskId: task.id)
         let event = HookEvent(
@@ -45,11 +47,28 @@ final class HookAndWorkerEventTests: XCTestCase {
         _ = await f.hooks.handle(event, identity: f.workerIdentity(sessionId: "w1", taskId: task.id))
 
         let events = await f.events.events
-        XCTAssertEqual(events, [
-            .notify(title: "Agent needs input", body: "May I run rm?"),
-            .reportQueued(projectId: f.project.id),
-        ])
+        XCTAssertEqual(events, [.reportQueued(projectId: f.project.id)])
         XCTAssertEqual(try f.tasks.get(task.id)?.blocked, true)
+
+        let attention = try XCTUnwrap(ProjectAttentionStore(f.db).attention(projectId: f.project.id))
+        XCTAssertEqual(attention.cause(.blockedWorker)?.count, 1)
+    }
+
+    /// A blocking notification on a session with no task cannot raise the attention signal, which
+    /// counts blocked *tasks*, so this is the one path that still posts its own banner.
+    func testBlockingNotificationWithNoTaskStillNotifies() async throws {
+        try f.session("w1", taskId: nil)
+        let event = HookEvent(
+            name: "Notification", sessionId: "w1", notificationType: "permission_prompt",
+            notificationMessage: "May I run rm?", rawJSON: "{}"
+        )
+        _ = await f.hooks.handle(event, identity: f.workerIdentity(sessionId: "w1", taskId: nil))
+
+        let events = await f.events.events
+        XCTAssertEqual(events, [
+            .notify(projectId: f.project.id, title: "Agent needs input", body: "May I run rm?")
+        ])
+        XCTAssertEqual(try f.sessions.get("w1")?.state, .blocked)
     }
 
     /// SPEC §7 → §10: the `Notification` hook is the only thing that puts a worker in the
@@ -70,9 +89,9 @@ final class HookAndWorkerEventTests: XCTestCase {
         XCTAssertEqual(blocked.blockedReason, "Claude needs your permission")
         XCTAssertEqual(try f.sessions.get("f9047594")?.state, .blocked)
 
-        // A macOS notification is raised for the transition (WorkerSupervisor.notify → MacNotifier).
+        // The banner for this comes from the project's attention signal, not from the sink.
         let events = await f.events.events
-        XCTAssertTrue(events.contains(.notify(title: "Agent needs input", body: "Claude needs your permission")))
+        XCTAssertEqual(events, [.reportQueued(projectId: f.project.id)])
 
         let items = AttentionSelection.needingAttention(
             tasks: try f.tasks.list(projectId: f.project.id),
@@ -123,7 +142,7 @@ final class HookAndWorkerEventTests: XCTestCase {
         XCTAssertEqual(try f.reports.unconsumedCount(projectId: f.project.id), 1)
     }
 
-    func testReportBlockedNotifiesAndQueues() async throws {
+    func testReportBlockedQueuesAndRaisesTheAttentionSignal() async throws {
         let task = try f.task("t", column: .running)
         try f.session("w1", taskId: task.id)
         let identity = f.workerIdentity(sessionId: "w1", taskId: task.id)
@@ -131,10 +150,10 @@ final class HookAndWorkerEventTests: XCTestCase {
         _ = try await f.scoped.call("report_blocked", arguments: .object(["reason": .string("need creds")]), identity: identity)
 
         let events = await f.events.events
-        XCTAssertEqual(events, [
-            .notify(title: "Worker blocked: t", body: "need creds"),
-            .reportQueued(projectId: f.project.id),
-        ])
+        XCTAssertEqual(events, [.reportQueued(projectId: f.project.id)])
+
+        let attention = try XCTUnwrap(ProjectAttentionStore(f.db).attention(projectId: f.project.id))
+        XCTAssertEqual(attention.cause(.blockedWorker)?.detail, "t")
     }
 
     func testProposeTaskQueuesReport() async throws {

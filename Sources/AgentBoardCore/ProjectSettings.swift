@@ -104,6 +104,9 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// How many agents may be co-resident in the project's own checkout at once. Matches
     /// `caps.maxConcurrentWorkers` so shared mode adds no second, tighter ceiling to discover.
     public var sharedCheckoutMaxAgents: Int = 3
+    /// What this project may interrupt the human for. Banners only — the sidebar badge and the
+    /// rest of the attention signal are unaffected by it.
+    public var notifications: NotificationPreferences = NotificationPreferences()
 
     public init(
         caps: Caps = Caps(),
@@ -116,7 +119,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         testCommand: String? = nil,
         archivePolicy: ArchivePolicy = .afterEpicMerge,
         worktreeStrategy: WorktreeStrategy = .worktree,
-        sharedCheckoutMaxAgents: Int = 3
+        sharedCheckoutMaxAgents: Int = 3,
+        notifications: NotificationPreferences = NotificationPreferences()
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -129,6 +133,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.archivePolicy = archivePolicy
         self.worktreeStrategy = worktreeStrategy
         self.sharedCheckoutMaxAgents = sharedCheckoutMaxAgents
+        self.notifications = notifications
     }
 
     public init(from decoder: Decoder) throws {
@@ -145,6 +150,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         worktreeStrategy = try c.decodeIfPresent(WorktreeStrategy.self, forKey: .worktreeStrategy) ?? .worktree
         sharedCheckoutMaxAgents = try c.decodeIfPresent(Int.self, forKey: .sharedCheckoutMaxAgents)
             ?? ProjectSettings().sharedCheckoutMaxAgents
+        notifications = try c.decodeIfPresent(NotificationPreferences.self, forKey: .notifications)
+            ?? NotificationPreferences()
     }
 
     public static func decode(_ json: String) -> ProjectSettings {

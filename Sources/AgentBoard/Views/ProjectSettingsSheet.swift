@@ -17,6 +17,7 @@ struct ProjectSettingsSheet: View {
     @State private var archiveMode: ArchivePolicyMode
     @State private var archiveDays: Int
     @State private var workspaceId: String?
+    @State private var muteChoice: NotificationMuteChoice
     @State private var confirmDelete = false
     @State private var errorMessage: String?
 
@@ -32,6 +33,7 @@ struct ProjectSettingsSheet: View {
         _extraServers = State(initialValue: settings.extraMcpServers.joined(separator: ", "))
         _archiveMode = State(initialValue: settings.archivePolicy.mode)
         _archiveDays = State(initialValue: settings.archivePolicy.days ?? ArchivePolicy.defaultDays)
+        _muteChoice = State(initialValue: NotificationMuteChoice(settings.notifications.mute))
         let assigned = project.workspaceId
         _workspaceId = State(initialValue: workspaces.contains { $0.id == assigned } ? assigned : nil)
     }
@@ -142,6 +144,23 @@ struct ProjectSettingsSheet: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Notifications") {
+                    ForEach(NotificationCategory.allCases) { category in
+                        Toggle(category.title, isOn: Binding(
+                            get: { settings.notifications.isEnabled(category) },
+                            set: { settings.notifications.setEnabled(category, $0) }
+                        ))
+                    }
+                    Picker("Mute this project", selection: $muteChoice) {
+                        ForEach(NotificationMuteChoice.allCases) { choice in
+                            Text(choice.title).tag(choice)
+                        }
+                    }
+                    Text("Every category is on by default. Turning one off, or muting the project, stops the banner only — this project keeps its sidebar badge and its place in At a Glance, so you can still find what is waiting.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Autonomy") {
                     Toggle("Autonomy (spawn without approval)", isOn: $settings.autonomyEnabled)
                     Text("Off by default. While off, every orchestrator spawn waits for your approval.")
@@ -202,6 +221,7 @@ struct ProjectSettingsSheet: View {
         updated.buildCommand = VerificationCommands(build: settings.buildCommand).build
         updated.testCommand = VerificationCommands(test: settings.testCommand).test
         updated.archivePolicy = ArchivePolicy.make(mode: archiveMode, days: archiveDays)
+        updated.notifications.mute = muteChoice.mute(existing: settings.notifications.mute)
         let trimmedJSON = autoModeJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.autoModeJSON = trimmedJSON.isEmpty ? nil : trimmedJSON
         updated.extraMcpServers = extraServers

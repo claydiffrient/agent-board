@@ -26,7 +26,7 @@ public final class StoreHookSink: HookSink {
     public static let blockingNotificationTypes: Set<String> = ["permission_prompt", "agent_needs_input"]
 
     private enum FollowUp {
-        case notify(title: String, body: String)
+        case notify(projectId: String, sessionId: String?, title: String, body: String)
         case orchestratorTurnEnded(projectId: String, sessionId: String)
         case reportQueued(projectId: String)
         case orchestratorCompacted(projectId: String, sessionId: String, manual: Bool)
@@ -81,8 +81,10 @@ public final class StoreHookSink: HookSink {
         }
         for followUp in outcome.followUps {
             switch followUp {
-            case .notify(let title, let body):
-                await events.notify(title: title, body: body)
+            case .notify(let projectId, let sessionId, let title, let body):
+                await events.notify(
+                    projectId: projectId, sessionId: sessionId, title: title, body: body
+                )
             case .orchestratorTurnEnded(let projectId, let sessionId):
                 await events.orchestratorTurnEnded(projectId: projectId, sessionId: sessionId)
             case .reportQueued(let projectId):
@@ -393,13 +395,19 @@ public final class StoreHookSink: HookSink {
             guard let type = event.notificationType else { return .none }
             if Self.blockingNotificationTypes.contains(type) || type.hasPrefix("elicitation") {
                 let reason = event.notificationMessage ?? type
-                var followUps: [FollowUp] = [.notify(title: "Agent needs input", body: reason)]
-                if let taskId {
-                    if (try? board.block(taskId: taskId, sessionId: sessionId, reason: reason)) != nil {
-                        followUps.append(.reportQueued(projectId: session.projectId))
-                    }
+                var followUps: [FollowUp] = []
+                if let taskId, (try? board.block(taskId: taskId, sessionId: sessionId, reason: reason)) != nil {
+                    followUps.append(.reportQueued(projectId: session.projectId))
                 } else {
+                    // Nothing was marked blocked, so the project's attention signal cannot see this
+                    // and will not raise the banner that owns every blocked worker.
                     try? sessions.setState(sessionId, .blocked)
+                    followUps.append(
+                        .notify(
+                            projectId: session.projectId, sessionId: sessionId,
+                            title: "Agent needs input", body: reason
+                        )
+                    )
                 }
                 return .follow(followUps)
             } else if type == "idle_prompt", session.state.isActive {

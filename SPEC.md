@@ -831,7 +831,7 @@ Generated into each managed session's `--settings`. All post to
 | `SessionStart` | Mark `agent_session.state = running`; record transcript path |
 | `PreToolUse` (matcher `Bash`) | Deny `git push`, `gh pr create`, `gh pr merge`; append an `error` progress row (§8) |
 | `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row |
-| `Notification` | Set `blocked` + reason on the task and session; macOS notification; the task appears in the orchestrator's **Blocked** section (§10) |
+| `Notification` | Set `blocked` + reason on the task and session; the task appears in the orchestrator's **Blocked** section (§10) and raises the project's attention signal, which posts the banner |
 | `Stop` | Mark session idle. **On the orchestrator, this is the trigger for the report notice** (§9) |
 | `SessionEnd` | Mark stopped/completed; reconcile final spend from the transcript |
 | `WorktreeRemove` | Chain to the user's existing hook, then clear the worktree row |
@@ -851,10 +851,25 @@ hooks, since hooks do not carry `usage`.
 
 The blocking `Notification` types are `permission_prompt`, `agent_needs_input`,
 and anything prefixed `elicitation`. Each sets `task.blocked` with the
-notification message as `blocked_reason`, moves the session to `blocked`, files
-a `blocked` report for the orchestrator, and raises a macOS notification titled
-"Agent needs input". The next `PostToolUse` clears `blocked` again, so a worker
-that was answered leaves the section without anyone pressing anything.
+notification message as `blocked_reason`, moves the session to `blocked`, and
+files a `blocked` report for the orchestrator. The banner comes from the
+attention signal below rather than from the hook, so the badge and the banner
+cannot disagree; a session with no task cannot raise that signal, and only that
+case still posts its own "Agent needs input" banner. The next `PostToolUse`
+clears `blocked` again, so a worker that was answered leaves the section without
+anyone pressing anything.
+
+**Attention banners.** A pending approval and a blocked worker each stop work
+outright, so both notify. Both are read from `ProjectAttentionStore` — the same
+per-project signal behind the sidebar badge — on the metering tick, and
+`AttentionNotifier` posts each one only on the transition into that condition,
+keyed by project and reason. A queue nobody has answered does not banner every
+5s; a growing queue is a bigger badge, not a second banner. The key clears when
+the condition clears, so the same condition occurring again notifies again, and
+a relaunch re-announces whatever is still waiting. Stranded reports and an
+unacknowledged shutdown badge without interrupting. Nothing notifies for the
+project the human has open while Agent Board is frontmost. Every banner Agent
+Board raises names its project.
 
 **Stall detection.** Some prompts fire no hook at all — a grandchild process
 reading stdin (`cp -i`, `ssh` asking for a passphrase) belongs to neither
@@ -1148,12 +1163,21 @@ outside them. A headline answers "is anything happening, and does anything need
 me?" from one cross-project observation (`GlanceStore`) — how many agents are
 working and how many tasks await review, worded so zero reads as rest
 ("Nothing running, and nothing is waiting on you.") rather than as a count of
-absent things. Below it, one card per project — every project, including idle
-ones — grouped into the same workspace sections in the same order as the
-sidebar, so a project sits in the same relative place in both. A card carries
-the project name and its running, in-review and ready counts, or reads **Idle**
-when all three are zero. Clicking anywhere on a card selects that project
-through the same write the sidebar uses, landing on Orchestrator and starting
+absent things. When any project needs a human the headline leads with how many
+do — "2 projects need you." — *beside* the review count rather than in place of
+it: the review clause counts tasks in one board column, while attention counts
+projects that cannot proceed, and a pending approval raises the second without
+ever touching the first. Below it, one card per project — every project,
+including idle ones — grouped into the same workspace sections in the same order
+as the sidebar, so a project sits in the same relative place in both. A card
+carries the project name and its running, in-review and ready counts, or reads
+**Idle** when all three are zero. A project whose attention signal is raised
+shows the same dot the sidebar row shows, beside its name, carrying the signal's
+reason as its tooltip; it suppresses **Idle**, because a board with nothing on it
+and an approval waiting is not idle. The page starts no observation of its own
+for that: it is handed the one `ProjectAttentionStore.observeAll` the sidebar
+already runs, so the two surfaces cannot disagree. Clicking anywhere on a card
+selects that project through the same write the sidebar uses, landing on Orchestrator and starting
 its console (§9) — which is the only way a console ever starts, so this page
 itself costs nothing.
 

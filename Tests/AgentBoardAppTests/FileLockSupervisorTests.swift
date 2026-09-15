@@ -194,7 +194,8 @@ final class FileLockSupervisorTests: XCTestCase {
 }
 
 private actor SilentEventSink: BoardEventSink {
-    func notify(title: String, body: String) async {}
+    func notify(projectId: String, title: String, body: String) async {}
+    func notify(projectId: String, sessionId: String?, title: String, body: String) async {}
     func orchestratorTurnEnded(projectId: String, sessionId: String) async {}
     func reportQueued(projectId: String) async {}
     func orchestratorCompacted(projectId: String, sessionId: String, manual: Bool) async {}

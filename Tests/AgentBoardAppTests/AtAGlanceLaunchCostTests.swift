@@ -86,7 +86,7 @@ final class AtAGlanceLaunchCostTests: XCTestCase {
             priority: nil, column: .running, origin: .human, epicId: nil
         )
         var selected: [SidebarSelection] = []
-        let page = AtAGlanceView(projects: all, workspaces: [], select: { selected.append($0) })
+        let page = AtAGlanceView(projects: all, workspaces: [], attention: [], select: { selected.append($0) })
         let mounted = mount(page, db: db, supervisor: ConsoleRecordingSupervisor())
         mounted.settle()
 

@@ -83,6 +83,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let board: Board
     @ObservationIgnored private let archives: ArchiveSweep
     @ObservationIgnored private let fileLocks: FileLockStore
+    @ObservationIgnored private let attention: ProjectAttentionStore
+    /// Which project needs a human and which of those has already been announced. Polled on the
+    /// metering tick rather than observed, because `overdueShutdown` and any future deadline cause
+    /// only become true as the clock moves, and a `ValueObservation` re-fires on writes alone.
+    @ObservationIgnored private var attentionNotifier = AttentionNotifier()
+    /// The project whose screen is open, pushed by `MainWindow`. Nil when the window is on At a
+    /// Glance; combined with `NSApp.isActive` it decides which banners are redundant.
+    @ObservationIgnored private var focusedProject: String?
     @ObservationIgnored private var meteringTask: _Concurrency.Task<Void, Never>?
     /// Millis of the last archive sweep; 0 means none yet, so the first tick after launch sweeps
     /// and picks up whatever came due while the app was closed.
@@ -132,6 +140,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         board = Board(db)
         archives = ArchiveSweep(db)
         fileLocks = FileLockStore(db)
+        attention = ProjectAttentionStore(db)
     }
 
     private var sessionConfigDir: URL { appSupportDir.appendingPathComponent("sessions") }
@@ -405,7 +414,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let queued = (try? board.terminate(sessionId: sessionId, cause: .setupFailed(detail))) ?? nil
         guard queued != nil else { return }
         announceReports(projectId: projectId)
-        MacNotifier.post(title: "Worker never started", body: detail)
+        post("Worker never started", body: detail, projectId: projectId, category: .workerFailures)
     }
 
     /// A lock held by a session the last run of the app never saw end — a killed process, a crash —
@@ -1464,8 +1473,65 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     // MARK: - BoardEventSink
 
-    func notify(title: String, body: String) async {
-        MacNotifier.post(title: title, body: body)
+    func notify(projectId: String, title: String, body: String) async {
+        await notify(projectId: projectId, sessionId: nil, title: title, body: body)
+    }
+
+    /// The only producer of this event is the hook sink's "Agent needs input" path, which fires
+    /// when a worker asked for input and nothing marked a task blocked — the blocked-worker
+    /// category by any other name.
+    func notify(projectId: String, sessionId: String?, title: String, body: String) async {
+        post(
+            title, body: body, projectId: projectId, category: .blockedWorkers,
+            subject: sessionId.map(NotificationRoute.Subject.session) ?? .project
+        )
+    }
+
+    /// Every banner Agent Board raises goes through here, so none of them can reach the human
+    /// without saying which project it is about, without carrying the route a click follows back
+    /// to it, or against that project's notification preferences.
+    private func post(
+        _ title: String, body: String, projectId: String?, category: NotificationCategory,
+        subject: NotificationRoute.Subject = .project
+    ) {
+        guard shouldNotify(projectId: projectId, category: category) else { return }
+        postBanner(
+            notificationTitle(title, projectId: projectId),
+            body,
+            projectId.map { NotificationRoute(projectId: $0, subject: subject) }
+        )
+    }
+
+    /// `MacNotifier.post` is inert under `xctest`, because the runner is not an app bundle. Every
+    /// banner leaves through here so a test can see which ones the categories let past and what
+    /// route each one carries.
+    @ObservationIgnored var postBanner: @MainActor (String, String, NotificationRoute?) -> Void = {
+        MacNotifier.shared.post(title: $0, body: $1, route: $2)
+    }
+
+    /// The gating decision for every banner that is not driven by the attention signal.
+    /// `MacNotifier.post` is inert under `xctest`, so this is what the tests assert on.
+    /// A project that has gone missing keeps the default, which is to notify.
+    func shouldNotify(
+        projectId: String?, category: NotificationCategory, now: Int64 = .nowMillis
+    ) -> Bool {
+        notificationPreferences(projectId).allows(category, now: now)
+    }
+
+    private func notificationPreferences(_ projectId: String?) -> NotificationPreferences {
+        guard let projectId, let project = (try? projects.get(projectId)) ?? nil else {
+            return NotificationPreferences()
+        }
+        return project.settings.notifications
+    }
+
+    /// `MacNotifier.post` is inert under `xctest`, so the naming is asserted here instead.
+    func notificationTitle(_ headline: String, projectId: String?) -> String {
+        NotificationText.title(headline, project: projectId.flatMap(projectName))
+    }
+
+    private func projectName(_ id: String) -> String? {
+        (try? projects.get(id))??.name
     }
 
     func orchestratorTurnEnded(projectId: String, sessionId: String) async {
@@ -1521,6 +1587,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard let all = try? projects.list() else { return }
         let awake = sleepLedger.reading()
         let now = awake.nowMillis
+        raiseAttentionBanners(now: now)
         if now - lastArchiveSweep >= Self.archiveSweepIntervalMillis {
             lastArchiveSweep = now
             sweepArchives(all, now: now)
@@ -1535,6 +1602,48 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 await meter(session, limits: limits, stallSeconds: stallSeconds, awake: awake)
             }
         }
+    }
+
+    /// A pending approval and a blocked worker each stop work outright and nothing else announces
+    /// them, so the same signal the sidebar badge reads raises the banner. `AttentionNotifier` owns
+    /// the once-per-transition rule, so a queue nobody has answered does not banner every 5s.
+    /// Each project's own notification preferences decide which of its banners survive. They gate
+    /// the banner alone: `attention.all` is read unchanged, so a muted project's sidebar badge and
+    /// At a Glance row say exactly what they said before.
+    @discardableResult
+    func raiseAttentionBanners(now: Int64 = .nowMillis) -> [AttentionNotice] {
+        guard let projects = try? attention.all(now: now) else { return [] }
+        let preferences = notificationPreferencesByProject()
+        let raised = attentionNotifier.notices(
+            for: projects,
+            focused: onScreenProject,
+            now: now,
+            preferences: { preferences[$0] ?? NotificationPreferences() }
+        )
+        for notice in raised {
+            postBanner(notice.title, notice.body, NotificationRoute(notice))
+        }
+        return raised
+    }
+
+    private func notificationPreferencesByProject() -> [String: NotificationPreferences] {
+        guard let all = try? projects.list() else { return [:] }
+        return Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.settings.notifications) })
+    }
+
+    /// A banner for the project already filling the screen is noise. Only the frontmost app counts:
+    /// a selection left behind a browser window is not something the human is looking at.
+    /// An `xctest` process runs at activation policy `.prohibited`, so `NSApplication.shared
+    /// .isActive` is false there and can never be true; a test that needs the suppressed case
+    /// replaces `isFrontmost`.
+    private var onScreenProject: String? {
+        isFrontmost() ? focusedProject : nil
+    }
+
+    @ObservationIgnored var isFrontmost: @MainActor () -> Bool = { NSApplication.shared.isActive }
+
+    func focusChanged(projectId: String?) {
+        focusedProject = projectId
     }
 
     /// The tick is what moves a silent worker into `overdue` once its grace period expires. It only
@@ -1636,9 +1745,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard stallNotified.insert(session.sessionId).inserted else { return }
         var title: String?
         if let taskId = session.taskId { title = try? tasks.get(taskId)?.title }
-        MacNotifier.post(
-            title: "Worker may be stuck",
-            body: "\(session.displayShortId) has made no tool call in \(stallSeconds)s — \(title ?? "no task"). Attach to check."
+        post(
+            "Worker may be stuck",
+            body: "\(session.displayShortId) has made no tool call in \(stallSeconds)s — \(title ?? "no task"). Attach to check.",
+            projectId: session.projectId,
+            category: .capsAndStalls
         )
     }
 
@@ -1650,7 +1761,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let salvage = await branchSalvage(taskId: session.taskId)
         _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description), salvage: salvage)
         announceReports(projectId: session.projectId)
-        MacNotifier.post(title: "Worker stopped at cap", body: description)
+        post("Worker stopped at cap", body: description, projectId: session.projectId, category: .capsAndStalls)
     }
 
     private static func capLimits(_ caps: Caps) -> CapLimits {

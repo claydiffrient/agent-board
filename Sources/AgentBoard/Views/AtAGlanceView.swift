@@ -3,9 +3,14 @@ import SwiftUI
 
 /// The landing view: every project's board in one page, with no project open and no orchestrator
 /// started. One observation covers the whole page — cards do not each query.
+///
+/// `attention` is handed down rather than observed here: `MainWindow` already runs the one
+/// cross-project `ProjectAttentionStore.observeAll` that feeds the sidebar badges, so the page adds
+/// no second observation of the same signal and cannot disagree with the sidebar about it.
 struct AtAGlanceView: View {
     let projects: [Project]
     let workspaces: [Workspace]
+    let attention: [ProjectAttention]
     let select: (SidebarSelection) -> Void
 
     @Environment(AppEnvironment.self) private var env
@@ -15,6 +20,10 @@ struct AtAGlanceView: View {
 
     private var sections: [GlanceGrouping.Section] {
         GlanceGrouping.sections(projects: projects, workspaces: workspaces, summary: summary.value)
+    }
+
+    private var attentionById: [String: ProjectAttention] {
+        Dictionary(attention.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     var body: some View {
@@ -52,7 +61,8 @@ struct AtAGlanceView: View {
         HStack(alignment: .firstTextBaseline) {
             Text(GlanceHeadline.text(
                 workingSessions: summary.value.workingSessions,
-                tasksInReview: summary.value.tasksInReview
+                tasksInReview: summary.value.tasksInReview,
+                projectsNeedingYou: attention.filter(\.needsAttention).count
             ))
             .font(.title2)
             .fontWeight(.medium)
@@ -84,7 +94,7 @@ struct AtAGlanceView: View {
                     Button {
                         select(.project(card.id))
                     } label: {
-                        ProjectGlanceCard(glance: card)
+                        ProjectGlanceCard(glance: card, attention: attentionById[card.id])
                     }
                     .buttonStyle(.plain)
                 }
@@ -95,17 +105,25 @@ struct AtAGlanceView: View {
 
 struct ProjectGlanceCard: View {
     let glance: ProjectGlance
+    let attention: ProjectAttention?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(glance.name)
-                .font(.headline)
-                .lineLimit(1)
-            if glance.isIdle {
+            HStack(spacing: 4) {
+                Text(glance.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                if let reason = attention?.summary {
+                    AttentionBadge(reason: reason)
+                }
+            }
+            // A project waiting on an approval has an idle board and still needs a human, so the
+            // badge stands alone rather than sitting beside "Idle".
+            if glance.isIdle && attention?.needsAttention != true {
                 Text("Idle")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-            } else {
+            } else if !glance.isIdle {
                 HStack(spacing: 12) {
                     count(glance.running, "running")
                     count(glance.review, "in review")
