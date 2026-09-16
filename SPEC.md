@@ -199,6 +199,25 @@ proven by the runtime spike in `spike/` on 2026-09-11.
 - `~/.claude/projects/<worktree-slug>/memory/` is created empty for each new
   worktree. The existing convention on this machine symlinks it to the canonical
   project memory dir (confirmed across ~20 Derivita checkouts).
+- **A worker survives its board endpoint going away, and recovers with no
+  handshake.** Measured 2026-09-16 against 2.1.273 by `spike/outage-probe/`.
+  With the port refused an MCP tool call returns `is_error` in ~3s carrying
+  `Unable to connect. Is the computer able to access the url?`; with the socket
+  accepted but never answered it hangs ~62s and returns `The operation timed
+  out.`. The session stays `busy`/`working` through either, the model records
+  the error and moves to its next step without retrying the call or abandoning
+  the task, and the first call after the endpoint returns succeeds. The client
+  handshakes once and reuses the `Mcp-Session-Id` it was given before the outage
+  for the life of the session; `BoardServer` writes that header and never reads
+  it, so no board restart invalidates a live worker, and adding validation would
+  break every worker alive across one.
+- **An unreachable hook endpoint fails open exactly like a slow one**, and every
+  hook posted during an outage is lost with none replayed. A hook held open is
+  abandoned at its declared `timeout` and the tool then runs, so a blackholed
+  endpoint costs 5s per `PreToolUse` and 5s per `PostToolUse` — and
+  `FileLockPolicy.hookTimeoutSeconds` (120) twice per write in a shared
+  checkout, with the lock not actually held. A refused endpoint costs nothing
+  measurable.
 
 ---
 
