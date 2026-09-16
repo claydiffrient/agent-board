@@ -1442,6 +1442,20 @@ beside the board rather than in front of it. Every release in the bundled
 three entries need no navigation, and a version list beside a detail pane is what
 this wants once there are twenty.
 
+`RELEASES.md` at the repo root is the one source: one `## <version>` heading per
+release, optionally ` — YYYY-MM-DD`, free Markdown beneath, newest first, with
+everything above the first heading a preamble `ReleaseNotesParser` skips.
+`Scripts/bundle.sh` copies it byte for byte into `Contents/Resources` alongside
+`Info.plist` and the icon — nothing about the file is generated or rewritten at
+build time. `AppBundle.isAppBundle` (a bundle identifier and a `.app` path
+extension) gates every read: the `.build/debug/AgentBoard` binary `README.md`
+documents for E2E runs has neither, so `ReleaseNotesLoader` returns
+`.unavailable` before it looks for a version or a file at all. That is a
+deliberate silence, not a hidden error — the same predicate `MacNotifier`
+already used for the same reason — and the Help item still opens the window,
+which says plainly that this run has no notes to show rather than pretending
+the menu item isn't there.
+
 Markdown is rendered by splitting each release body into blocks
 (`ReleaseNotesMarkdown`) and handing only the inline markup of each block to
 `AttributedString(markdown:)`. Passing a whole body instead loses every block
