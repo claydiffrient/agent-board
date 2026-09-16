@@ -1201,6 +1201,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return console
     }
 
+    /// The live shell pid per project, for anything that has to recognise a process the board
+    /// started. Not on `WorkerSupervising`: a stub conformer has no shell to report, and the one
+    /// caller holds the concrete supervisor.
+    func shellConsolePIDs() -> [String: pid_t] {
+        shellConsoles.compactMapValues(\.shellPID)
+    }
+
     func shellConsole(projectId: String) throws -> ShellConsole {
         if let existing = shellConsoles[projectId] { return existing }
         guard try projects.get(projectId) != nil else { throw SupervisorError.projectNotFound(projectId) }
