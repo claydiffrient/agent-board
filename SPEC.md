@@ -687,7 +687,7 @@ than one that is finished; they merge nothing and are not part of this sequence.
    implementation detail: under the default policy, the integrator's own
    completion produces no review-queue entry. Every other archive policy
    leaves it in `review` for a human, exactly as before this feature existed.
-5. The PR from `agentboard/epic-<id>` → base is opened either **by you**, from
+5. The PR from the epic branch → base is opened either **by you**, from
    the button on the epic, or by the orchestrator calling `open_pull_request`
    (§6) — which does not open one either. It creates an approval row, exactly
    as `request_integration` does, and the branch is pushed and the pull request
@@ -695,6 +695,10 @@ than one that is finished; they merge nothing and are not part of this sequence.
    The resulting URL is written to `progress` against the epic's integrator
    task, so the board records that the pull request exists without anyone
    reading a terminal, and reaches the orchestrator as a `decision` report.
+
+   The pull request's head is the **published** name (§6.1), not the local
+   `agentboard/epic-<id>`, on both routes — the button's compare page and the
+   approved `open_pull_request` aim at the same ref.
 
    An epic whose tasks are not all `done` is **not** refused here, unlike
    `request_integration`. Opening a pull request early for review is a real
@@ -795,8 +799,41 @@ Everything in worker scope over any task in the project, plus:
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Refused unless every task in the epic is `done` (names how many remain); otherwise creates a human approval row, or returns the one already pending |
 | `close_epic(epic_id, state)` | Ends the epic without integrating it. `state` is `done` or `abandoned`; both are terminal. Board state and a `decision` report and nothing else — no merge, no push, no branch or worktree deleted, no task deleted, archived or moved out. Refused while any session in the epic is active, and refused for an epic that is already terminal |
-| `push_branch(branch)` | Always creates a human approval row. Refused for any branch that is not `agentboard/<something>` or the project's base branch |
-| `open_pull_request(epic_id \| branch, title, body, base?)` | Always creates a human approval row. Same branch rule; `base` defaults to the project's base branch. On approval the branch is pushed if the remote lacks it, the pull request is opened, and its URL lands in `progress` and in a `decision` report |
+| `push_branch(branch)` | Always creates a human approval row. Refused for any branch that is not `agentboard/<something>` or the project's base branch. The approval carries both the local branch and the name it takes on the remote (§6.1) |
+| `open_pull_request(epic_id \| branch, title, body, base?)` | Always creates a human approval row. Same branch rule; `base` defaults to the project's base branch. On approval the branch is pushed if the remote lacks it, the pull request is opened from the **published** name (§6.1), and its URL lands in `progress` and in a `decision` report |
+
+### 6.1 Remote branch naming
+
+The local branch is always `agentboard/<task-id>` or `agentboard/epic-<epic-id>`:
+it is the ownership marker `PublishPolicy` checks, and nothing renames it. What
+reaches the remote is a separate question, because those names leak the tool and
+then spend themselves on a UUID that means nothing to a reviewer.
+
+`ProjectSettings.remoteBranchTemplate` names the published branch, e.g.
+`clay/{slug}`. Two placeholders and no more: `{slug}`, required, from the epic's
+or task's **title**, and `{id}`, optional, a short id. Everything else in the
+template is literal, and the literal text before the first placeholder is the
+**namespace** the published name must sit inside.
+
+- The slug is lowercase ASCII words joined by hyphens, capped at 48 characters
+  on a word boundary. Canonical decomposition folds `é` to `e`; nothing is
+  transliterated, so a wholly non-Latin title slugs to nothing and the short id
+  is used instead. The same title always produces the same slug.
+- Two records that slug identically are separated by creation order: the older
+  keeps the bare slug, every later one takes `-<short id>`. A third colliding
+  record never renames the first two, so a branch is stable for the life of the
+  board. A template carrying `{id}` is unique by construction and never takes a
+  suffix.
+- With **no template set**, the local name is published unchanged — what every
+  project did before this existed.
+- The base branch is published under its own name; it is the one ref on the
+  remote Agent Board does not rename.
+
+`RemoteRefPolicy` guards the destination side of the refspec, which is a
+different question from `PublishPolicy`'s. It refuses a name that is not
+well-formed, is a fully-qualified ref, is the base branch, or sits outside the
+template's namespace. Both policies apply to every publish; neither weakens the
+other. The rename itself is native git — `refs/heads/<local>:refs/heads/<published>`.
 
 While a shutdown order is outstanding (§8), `spawn_worker` refuses immediately
 — before caps are even checked — with the fixed string `"shutdown in progress;
