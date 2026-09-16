@@ -118,6 +118,10 @@ final class GlanceCardAttentionReasonTests: XCTestCase {
 /// sidebar captures the page. A pending approval written into the live database must change those
 /// pixels with no manual re-render, and resolving it must restore them.
 ///
+/// The mount and the capture are `OffscreenMount`'s: it captures only once the picture has stopped
+/// moving, rather than after a fixed pump, and `renderEnvironment` keeps the sidebar footer from
+/// drawing so no background read can land mid-capture.
+///
 /// What this proves: the page reads `ProjectAttentionStore` through the observation `MainWindow`
 /// already runs, and reacts to it live. What it cannot prove: which of the headline and the card
 /// changed, or what either now says — the capture is a comparison, not a reading.
@@ -125,58 +129,14 @@ final class GlanceCardAttentionReasonTests: XCTestCase {
 final class AtAGlanceAttentionLiveTests: XCTestCase {
     /// The 220-point sidebar, doubled by the backing scale of the capture. Everything past it is
     /// the detail pane, which is the At a Glance page.
-    private static let detailStartsAt = 460
+    private static let detail = 460..<Int.max
 
-    @MainActor
-    private final class Mount {
-        let window: NSWindow
-
-        init(db: AppDatabase) {
-            let host = NSHostingView(
-                rootView: MainWindow().environment(AppEnvironment(db: db, supervisor: StubSupervisor()))
-            )
-            NSApplication.shared.setActivationPolicy(.accessory)
-            // Borderless and far offscreen: AppKit constrains a `.titled` window back onto a
-            // visible screen, and this machine has none.
-            window = NSWindow(
-                contentRect: NSRect(x: -20_000, y: -20_000, width: 1100, height: 700),
-                styleMask: [.borderless], backing: .buffered, defer: false
-            )
-            window.contentView = host
-            window.orderBack(nil)
-        }
-
-        func close() { window.orderOut(nil) }
-
-        func capture() throws -> NSBitmapImageRep {
-            for _ in 0..<80 {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-            let image = try XCTUnwrap(
-                CGWindowListCreateImage(
-                    .null, .optionIncludingWindow, CGWindowID(window.windowNumber),
-                    [.boundsIgnoreFraming, .bestResolution]
-                ),
-                "the window server produced no image for the offscreen window"
-            )
-            return NSBitmapImageRep(cgImage: image)
-        }
+    private func mount(_ db: AppDatabase) -> OffscreenMount {
+        OffscreenMount(MainWindow().environment(renderEnvironment(db: db)))
     }
 
-    private func detailDiff(_ a: NSBitmapImageRep, _ b: NSBitmapImageRep) -> Int {
-        var count = 0
-        for y in 0..<min(a.pixelsHigh, b.pixelsHigh) {
-            for x in Self.detailStartsAt..<min(a.pixelsWide, b.pixelsWide) {
-                guard let left = a.colorAt(x: x, y: y), let right = b.colorAt(x: x, y: y) else { continue }
-                let apart = abs(left.redComponent - right.redComponent)
-                    + abs(left.greenComponent - right.greenComponent)
-                    + abs(left.blueComponent - right.blueComponent)
-                if apart > 0.02 { count += 1 }
-            }
-        }
-        return count
+    private func detailDiff(_ a: Capture, _ b: Capture) -> Int {
+        a.diff(b, columns: Self.detail).count
     }
 
     private func register(_ db: AppDatabase, _ name: String) throws -> Project {
@@ -197,11 +157,11 @@ final class AtAGlanceAttentionLiveTests: XCTestCase {
         _ = try register(db, "Alpha")
         SidebarCollapseState.save([])
 
-        let first = Mount(db: db)
-        let second = Mount(db: db)
+        let first = mount(db)
+        let second = mount(db)
         defer { first.close(); second.close() }
         XCTAssertEqual(
-            detailDiff(try first.capture(), try second.capture()), 0,
+            detailDiff(try first.capture(columns: Self.detail), try second.capture(columns: Self.detail)), 0,
             "the page must render deterministically"
         )
     }
@@ -212,22 +172,22 @@ final class AtAGlanceAttentionLiveTests: XCTestCase {
         _ = try register(db, "Beta")
         SidebarCollapseState.save([])
 
-        let mount = Mount(db: db)
-        defer { mount.close() }
-        let quiet = try mount.capture()
+        let page = mount(db)
+        defer { page.close() }
+        let quiet = try page.capture(columns: Self.detail)
 
         let approval = try ApprovalStore(db).create(
             projectId: alpha.id, kind: .spawn, taskId: nil, epicId: nil,
             requestedBy: "orchestrator", reason: "spawn a worker"
         )
         XCTAssertGreaterThan(
-            detailDiff(quiet, try mount.capture()), 0,
+            detailDiff(quiet, try page.capture(columns: Self.detail) { self.detailDiff(quiet, $0) > 0 }), 0,
             "a pending approval must reach the page, which is what the review-column proxy missed"
         )
 
         try ApprovalStore(db).resolve(approval.id, .denied)
         XCTAssertEqual(
-            detailDiff(quiet, try mount.capture()), 0,
+            detailDiff(quiet, try page.capture(columns: Self.detail) { self.detailDiff(quiet, $0) == 0 }), 0,
             "resolving the approval must restore the quiet page exactly"
         )
     }
@@ -248,11 +208,11 @@ final class AtAGlanceAttentionLiveTests: XCTestCase {
         }
         SidebarCollapseState.save([])
 
-        let first = Mount(db: try board(waiting: 0))
-        let second = Mount(db: try board(waiting: 1))
+        let first = mount(try board(waiting: 0))
+        let second = mount(try board(waiting: 1))
         defer { first.close(); second.close() }
         XCTAssertGreaterThan(
-            detailDiff(try first.capture(), try second.capture()), 0,
+            detailDiff(try first.capture(columns: Self.detail), try second.capture(columns: Self.detail)), 0,
             "the same headline over a differently-marked card must not render identically"
         )
     }
