@@ -1473,8 +1473,10 @@ entity, epic branches cut lazily at first task spawn into them, task
 branches from the epic branch, integration worktree and integrator, human-
 opened PR.
 
-**M4 — notes.** Note store, section ops, FTS, pinning, attachment, spawn-time
-injection.
+**M4 — notes. DONE 2026-09-15 (70 tests across `NoteStoreTests`,
+`OpeningPromptNoteTests`, `OpeningPromptNoteWritingTests`, `NoteResourceTests`,
+`WorkerNoteToolTests`, `SpawnNoteIndexTests`).** Note store, section ops, FTS,
+pinning, attachment, spawn-time injection.
 
 Notes is last deliberately: it is the lowest-risk screen and it benefits most
 from knowing how the agents actually behave first.
@@ -1599,18 +1601,34 @@ from knowing how the agents actually behave first.
   even when stdout is a pipe, so `ClaudeCLI.parseShortId` rejected the hex id
   and every spawn failed with "exited 0 but no short id was found" while the
   session kept running orphaned. ANSI escapes are now stripped before parsing.
-- **Specified but not built: abandoning an epic.** `EpicState.abandoned` and
-  its badge color have existed since M3's schema landed, but nothing in the
-  app ever writes it — there is no action that moves an epic there. A
-  decomposition that turns out wrong currently has no path except letting its
-  tasks sit unfinished forever; an epic can only ever reach `done`, via
-  integration.
-- **Unresolved:** the localhost port is ephemeral per app launch, but
-  `--bg --resume` reuses the saved `--settings`/`--mcp-config` paths. Either
-  rewrite both files before every resume (current plan) or pick a stable
-  per-project port.
+- **Resolved: abandoning an epic is built.** `EpicState.abandoned`, present
+  since M3's schema, is now reachable: `Board.closeEpic(epicId:as:)` writes
+  it, exposed both as the `close_epic` MCP tool (`state: "abandoned"`) and as
+  the epic lane header's **Abandon** menu action (§10, §5.2). A decomposition
+  that turns out wrong has a real path off the board instead of its tasks
+  sitting unfinished forever. See `EpicClosureTests`, `CloseEpicToolTests`,
+  `EpicCloseTests`, `EpicLaneTests`.
+- **Resolved: the port problem is solved by rewriting config files before
+  every resume, plus a persisted preferred port.** `WorkerSupervisor`'s
+  private `resume(_:prompt:)` calls `SessionConfigWriter.write` with the
+  session's current `serverPort` immediately before every `claude --bg
+  --resume`, so a worker's `--settings`/`--mcp-config` paths always point at
+  wherever the server is actually listening this launch, regardless of where
+  it listened when the worker was spawned. `BoardServer.start(preferredPort:)`
+  additionally persists the last bound port to an `appSupportDir`-relative
+  `server-port` file and tries that port first on the next app launch, falling
+  back to an ephemeral one only if it's taken — so the port is usually stable
+  across relaunches, and the resume rewrite covers it when it isn't. See
+  `SessionConfigTests.testRewriteOverwritesInPlaceWithNewPort`.
 - **Unresolved:** which globally configured MCP servers should be allowlisted
-  back into workers past `--strict-mcp-config`. Starting position: none.
+  back into workers past `--strict-mcp-config`. Starting position: none — and
+  still none reach a worker in practice. `ProjectSettings.extraMcpServers` and
+  a matching Project Settings field exist, and `SessionConfigWriter.write` can
+  merge named servers into a worker's `mcpServers` block, but every real
+  spawn/resume call site (`WorkerSupervisor`'s `launch` and `resume`,
+  `OrchestratorConsole`'s session start) hardcodes `extraMcpServers: nil`, so
+  the setting is stored and rendered but never consumed. The policy question
+  is still open; only the plumbing for acting on an answer has been started.
 - **Unresolved:** whether the `PostToolUse` round trip is cheap enough to leave
   on permanently, or needs a matcher narrowing it to interesting tools.
 - **Was an accepted limitation, now readable:** budgets still meter only what
