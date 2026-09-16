@@ -14,7 +14,8 @@ struct ReleaseNotes: Equatable {
 enum ReleaseNotesState: Equatable {
     /// Not running from a `.app`, so there is no `CFBundleShortVersionString` and no bundled
     /// `RELEASES.md`. This is the documented `.build/debug/AgentBoard` E2E run: nothing to show and
-    /// nothing wrong. Callers hide the entry point rather than opening an empty window.
+    /// nothing wrong. The Help item stays in place and the window says which of the three states it
+    /// is in — a missing menu entry reads as "this app has no release notes", which is false.
     case unavailable
     /// A bundled build whose notes could not be read. The string is a sentence naming the line, and
     /// must be displayed — a build that ships an unparsable file has to say so.

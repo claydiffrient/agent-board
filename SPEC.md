@@ -1433,6 +1433,36 @@ workspaces plus **None**) or by dragging its row onto a section header. Which
 sections the viewer has collapsed is a per-viewer convenience and lives in
 `UserDefaults`, not the database.
 
+**What's New in Agent Board** — the release notes, opened from the Help menu and
+from nowhere else. A `Window` scene rather than a `WindowGroup`, so choosing the
+menu item again brings the open window forward instead of stacking a second one;
+resizable, scrollable, closed with ⌘W, and never a sheet, because notes are read
+beside the board rather than in front of it. Every release in the bundled
+`RELEASES.md` is in one scroll, newest first, with the running version marked —
+three entries need no navigation, and a version list beside a detail pane is what
+this wants once there are twenty.
+
+Markdown is rendered by splitting each release body into blocks
+(`ReleaseNotesMarkdown`) and handing only the inline markup of each block to
+`AttributedString(markdown:)`. Passing a whole body instead loses every block
+boundary: measured, a paragraph, a two-item list and a heading come back as one
+run-on line with the bullets and hashes stripped, because `Text` does not consume
+the `presentationIntent` attributes the parser writes.
+
+The menu item is always present and always opens the window. A build that ships
+no readable notes — the bare `AgentBoard` binary, or an `.app` whose
+`RELEASES.md` will not parse — gets a window saying which of those it is. Hiding
+the item would read as "this app has no release notes", and a disabled item gives
+no reason at all.
+
+The Help menu is added to with `CommandGroup(after: .help)`, never
+`replacing:`. The `.help` group holds two items in this app — **AgentBoard Help**
+and **Toggle Sidebar** (⌃⌘S), which SwiftUI files under Help because the View
+menu is empty — and replacing the group deletes both, taking the shortcut with
+it. Neither placement affects the Help search field: AppKit adds that to whatever
+menu is `NSApp.helpMenu` when the menu opens, and it is never an item in the
+built menu.
+
 ---
 
 ## 11. Milestones
