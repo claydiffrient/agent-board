@@ -9,15 +9,24 @@ public final class WorkerToolHandler: ToolHandler {
     private let board: Board
     private let notes: NoteTools
     private let control: any WorkerControl
+    private let projects: ProjectStore
+    private let locks: FileLockStore
+    private let scopedCommits: (any ScopedCommitting)?
     private let events: any BoardEventSink
 
-    public init(db: AppDatabase, control: any WorkerControl, events: any BoardEventSink) {
+    public init(
+        db: AppDatabase, control: any WorkerControl, events: any BoardEventSink,
+        scopedCommits: (any ScopedCommitting)? = nil
+    ) {
         tasks = TaskStore(db)
         sessions = SessionStore(db)
         progress = ProgressStore(db)
         board = Board(db)
         notes = NoteTools(db: db)
         self.control = control
+        projects = ProjectStore(db)
+        locks = FileLockStore(db)
+        self.scopedCommits = scopedCommits
         self.events = events
     }
 
@@ -96,6 +105,16 @@ public final class WorkerToolHandler: ToolHandler {
             )
         ),
         ToolDescriptor(
+            name: "acknowledge_shutdown",
+            description: "Answer a wind-down order. Call it only after you have committed what is in your worktree. "
+                + "The note is what the next worker on this task reads, so say where you stopped and what still "
+                + "remains. Your task goes back to ready, not review, and Agent Board stops your session.",
+            inputSchema: ToolSchema.object(
+                properties: ["note": ToolSchema.string("Where you stopped and what remains.", maxLength: 4000)],
+                required: ["note"]
+            )
+        ),
+        ToolDescriptor(
             name: "report_blocked",
             description: "Declare that you cannot make progress without a human decision or information you do not have. "
                 + "State exactly what you need. The task is flagged blocked and a person is notified.",
@@ -106,8 +125,32 @@ public final class WorkerToolHandler: ToolHandler {
         ),
     ] + NoteTools.workerDescriptors
 
+    /// Only a shared-checkout worker sees this. A worktree worker commits with plain git, because
+    /// there is nobody else in its tree to scope a commit away from.
+    public static let commitDescriptor = ToolDescriptor(
+        name: "commit_my_work",
+        description: "Commit your work in this shared checkout. Agent Board commits exactly the files you have "
+            + "written — it knows them from the per-file locks your writes took — and tags the commit with your "
+            + "task id, so a reviewer sees your changes apart from the other agents' in this same tree. Another "
+            + "agent's edits are never swept in. Use this instead of `git commit`, which is refused here. You may "
+            + "call it more than once.",
+        inputSchema: ToolSchema.object(
+            properties: ["message": ToolSchema.string("Imperative mood, no conventional-commit prefix.")],
+            required: ["message"]
+        )
+    )
+
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
-        Self.descriptors
+        guard sharesCheckout(identity) else { return Self.descriptors }
+        return Self.descriptors + [Self.commitDescriptor]
+    }
+
+    private func sharesCheckout(_ identity: TokenIdentity) -> Bool {
+        guard scopedCommits != nil, let sessionId = identity.sessionId else { return false }
+        guard let session = try? sessions.get(sessionId),
+              let project = try? projects.get(session.projectId)
+        else { return false }
+        return SharedCheckoutGroup.isMember(session, of: project)
     }
 
     public func call(_ name: String, arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
@@ -135,20 +178,49 @@ public final class WorkerToolHandler: ToolHandler {
             )
             await events.reportQueued(projectId: identity.projectId)
             return .json(.object(["id": .string(proposed.id), "column": .string(proposed.column.rawValue)]))
+        case "commit_my_work":
+            return try await commitMyWork(task, arguments: arguments, identity: identity)
         case "report_complete":
             let result = try await reportComplete(task, arguments: arguments, identity: identity)
+            if let sessionId = identity.sessionId {
+                await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
+            }
             await events.reportQueued(projectId: identity.projectId)
             return result
         case "hand_off":
             let result = try handOff(task, arguments: arguments, identity: identity)
             await events.reportQueued(projectId: identity.projectId)
             return result
+        case "acknowledge_shutdown":
+            let note = try ToolArguments.requiredString("note", in: arguments)
+            let sessionId = try requiredSession(identity)
+            do {
+                _ = try board.acknowledgeShutdown(sessionId: sessionId, note: note)
+            } catch BoardError.noShutdownOrder {
+                throw ToolError("No shutdown order is outstanding on this project; keep working on your task.")
+            }
+            await events.workerAcknowledgedShutdown(projectId: identity.projectId, sessionId: sessionId)
+            return ToolResult(text: "acknowledged — stop now")
         case "report_blocked":
             let reason = try ToolArguments.requiredString("reason", in: arguments)
-            try board.block(taskId: task.id, sessionId: try requiredSession(identity), reason: reason)
-            await events.notify(title: "Worker blocked: \(task.title)", body: reason)
+            let sessionId = try requiredSession(identity)
+            let lockedPath = try sessions.get(sessionId)?.blockedOnPath
+            if let lockedPath {
+                _ = try board.blockOnFileLock(
+                    taskId: task.id, sessionId: sessionId,
+                    reason: "\(reason)\n\nAgent Board gave up waiting for \(lockedPath), held by another agent in this shared checkout."
+                )
+            } else {
+                try board.block(taskId: task.id, sessionId: sessionId, reason: reason)
+            }
             await events.reportQueued(projectId: identity.projectId)
-            return ToolResult(text: "Task flagged blocked. A person has been notified; wait for direction.")
+            guard let lockedPath else {
+                return ToolResult(text: "Task flagged blocked. A person has been notified; wait for direction.")
+            }
+            return ToolResult(
+                text: "Task flagged blocked and returned to ready; it will be dispatched again once "
+                    + "\(lockedPath) is free. Stop now."
+            )
         default:
             throw ToolError("Unknown tool: \(name)")
         }
@@ -243,6 +315,52 @@ public final class WorkerToolHandler: ToolHandler {
             text: "Handed off. The task is back in ready with your summary and the worktree is kept for the next "
                 + "agent. Stop here; do not start further work."
         )
+    }
+
+    /// The paths come from the lock store, never from the agent: a write tool in a shared checkout
+    /// cannot run without first claiming its file, and the claim is held until the session ends, so
+    /// the claims are exactly what this session has written.
+    private func commitMyWork(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+        guard let runner = scopedCommits else {
+            throw ToolError("commit_my_work is not available in this session; commit with git.")
+        }
+        let sessionId = try requiredSession(identity)
+        guard let session = try sessions.get(sessionId),
+              let project = try projects.get(session.projectId)
+        else { throw ToolError("Session is still registering; retry in a moment.") }
+        guard SharedCheckoutGroup.isMember(session, of: project) else {
+            throw ToolError("You are in your own worktree; commit with git on your branch.")
+        }
+        let message = try ToolArguments.requiredString("message", in: arguments)
+        let paths = CommitScope.paths(try locks.held(projectId: identity.projectId), sessionId: sessionId)
+        guard !paths.isEmpty else { throw ToolError(ScopedCommitError.noPathsHeld.description) }
+
+        let outcome = try await runner.commit(
+            ScopedCommitRequest(
+                repoPath: project.repoPath,
+                branch: session.branch ?? SharedCheckoutGroup.branch(epicId: task.epicId),
+                taskId: task.id,
+                paths: paths,
+                message: CommitAttribution.message(message, taskId: task.id)
+            )
+        )
+        switch outcome {
+        case .committed(let sha, let committed):
+            let text = "Committed \(String(sha.prefix(8))) on \(session.branch ?? "the shared branch"), "
+                + "tagged \(CommitAttribution.trailer(taskId: task.id)), containing only: "
+                + committed.joined(separator: ", ")
+            try progress.append(taskId: task.id, sessionId: sessionId, kind: .status, text: text)
+            return .json(.object([
+                "commit": .string(sha),
+                "paths": .array(committed.map { .string($0) }),
+                "trailer": .string(CommitAttribution.trailer(taskId: task.id)),
+            ]))
+        case .nothingToCommit(let claimed):
+            return ToolResult(
+                text: "Nothing to commit: the files you have claimed (\(claimed.joined(separator: ", "))) "
+                    + "hold no change git would record."
+            )
+        }
     }
 
     private func reportComplete(

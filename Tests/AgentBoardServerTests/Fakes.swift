@@ -80,3 +80,52 @@ actor FakeToolHandler: ToolHandler {
         }
     }
 }
+
+actor FakeResourceHandler: ResourceHandler {
+    private(set) var reads: [String] = []
+    private var bodies: [String: String] = [:]
+
+    func put(uri: String, body: String) {
+        bodies[uri] = body
+    }
+
+    func resources(for identity: TokenIdentity) async throws -> [ResourceDescriptor] {
+        [
+            ResourceDescriptor(
+                uri: "note://\(identity.projectId)/n1",
+                name: "Build gotchas",
+                description: "2 sections: The trap · What to do. Version 3, updated 2026-09-14.",
+                mimeType: "application/json"
+            ),
+        ]
+    }
+
+    func read(_ uri: String, identity: TokenIdentity) async throws -> [ResourceContents] {
+        reads.append(uri)
+        guard let body = bodies[uri] else {
+            throw ResourceError(uri: uri, message: "No note for \(uri).")
+        }
+        return [ResourceContents(uri: uri, mimeType: "application/json", text: body)]
+    }
+}
+
+actor FakePromptHandler: PromptHandler {
+    private(set) var gets: [String] = []
+
+    func prompts(for identity: TokenIdentity) async -> [PromptDescriptor] {
+        [
+            PromptDescriptor(
+                name: "worker_protocol",
+                title: "Worker protocol",
+                description: "How a worker reports",
+                arguments: []
+            ),
+        ]
+    }
+
+    func get(_ name: String, arguments: [String: String], identity: TokenIdentity) async throws -> PromptResult {
+        gets.append(name)
+        guard name == "worker_protocol" else { throw PromptError("Unknown prompt: \(name)") }
+        return PromptResult(description: "How a worker reports", messages: [PromptMessage(text: "Commit, then report.")])
+    }
+}

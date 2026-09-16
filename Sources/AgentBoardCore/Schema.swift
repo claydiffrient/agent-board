@@ -189,9 +189,81 @@ enum Schema {
     ALTER TABLE task ADD COLUMN reviewer_agent_id TEXT REFERENCES roster_agent(id);
     """
 
+    static let approvalPayload = """
+    ALTER TABLE approval ADD COLUMN payload TEXT;
+    """
+
+    static let shutdownOrder = """
+    CREATE TABLE shutdown_order (
+      id           TEXT PRIMARY KEY,
+      project_id   TEXT NOT NULL REFERENCES project(id),
+      requested_by TEXT NOT NULL,
+      reason       TEXT,
+      requested_at INTEGER NOT NULL,
+      resolved_at  INTEGER,
+      resolved_by  TEXT
+    );
+    CREATE INDEX shutdown_order_outstanding ON shutdown_order(project_id, resolved_at);
+    """
+
+    static let shutdownDelivery = """
+    CREATE TABLE shutdown_delivery (
+      order_id        TEXT NOT NULL REFERENCES shutdown_order(id),
+      session_id      TEXT NOT NULL,
+      task_id         TEXT,
+      ordered_at      INTEGER NOT NULL,
+      delivered_at    INTEGER,
+      delivered_via   TEXT,
+      acknowledged_at INTEGER,
+      note            TEXT,
+      PRIMARY KEY (order_id, session_id)
+    );
+    CREATE INDEX shutdown_delivery_session ON shutdown_delivery(session_id);
+    """
+
+    static let workspace = """
+    CREATE TABLE workspace (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      ordering   REAL NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    ALTER TABLE project ADD COLUMN workspace_id TEXT REFERENCES workspace(id);
+    """
+
+    static let fileLock = """
+    CREATE TABLE file_lock (
+      project_id TEXT NOT NULL REFERENCES project(id),
+      path       TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      task_id    TEXT,
+      held_since INTEGER NOT NULL,
+      PRIMARY KEY (project_id, path)
+    );
+    CREATE INDEX file_lock_session ON file_lock(session_id);
+
+    ALTER TABLE agent_session ADD COLUMN blocked_on_path TEXT;
+    """
+
+    static let message = """
+    CREATE TABLE message (
+      id              INTEGER PRIMARY KEY,
+      from_project_id TEXT NOT NULL REFERENCES project(id),
+      to_project_id   TEXT NOT NULL REFERENCES project(id),
+      from_session_id TEXT REFERENCES agent_session(session_id),
+      body            TEXT NOT NULL,
+      created_at      INTEGER NOT NULL,
+      delivered_at    INTEGER,
+      report_id       INTEGER REFERENCES report(id)
+    );
+    CREATE INDEX message_to_project_delivered ON message(to_project_id, delivered_at);
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
-        "approval", "roster_agent", "project_roster_agent",
+        "approval", "shutdown_order", "shutdown_delivery", "workspace", "file_lock", "message",
+        "roster_agent", "project_roster_agent",
     ]
 }

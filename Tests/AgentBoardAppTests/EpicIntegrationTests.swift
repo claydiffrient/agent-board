@@ -21,6 +21,28 @@ final class EpicIntegrationTests: XCTestCase {
         fixture = nil
     }
 
+    private func epicTask(epic: Epic, title: String) throws -> BoardTask {
+        try fixture.tasks.create(
+            projectId: fixture.project.id, title: title, body: nil, acceptance: nil,
+            priority: nil, column: .ready, origin: .orchestrator, epicId: epic.id
+        )
+    }
+
+    /// What `spawn` leaves for a task inside an epic: a worktree and a branch cut from the epic branch.
+    @discardableResult
+    private func epicWorker(task: BoardTask, epic: Epic) throws -> AgentSession {
+        let branch = "agentboard/\(task.id)"
+        let worktree = try fixture.manager.create(name: task.id, branch: branch, base: epic.branch)
+        let session = AgentSession(
+            sessionId: "session-\(UUID().uuidString)", shortId: "short-\(task.id.prefix(6))",
+            projectId: fixture.project.id, taskId: task.id, role: .worker,
+            worktreePath: worktree.path, branch: branch, cwd: worktree.path,
+            state: .completed, attempt: 1
+        )
+        try fixture.sessions.insert(session)
+        return session
+    }
+
     private func requestIntegration(epicId: String) throws -> Approval {
         try fixture.approvals.create(
             projectId: fixture.project.id, kind: .integration, taskId: nil, epicId: epicId,
@@ -33,6 +55,7 @@ final class EpicIntegrationTests: XCTestCase {
         let approval = try requestIntegration(epicId: ready.epic.id)
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         let spawns = await fixture.runtime.spawns
         XCTAssertEqual(spawns.count, 1, "expected exactly one integrator session")
@@ -61,6 +84,7 @@ final class EpicIntegrationTests: XCTestCase {
         let approval = try requestIntegration(epicId: ready.epic.id)
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         let request = try await onlySpawn()
         XCTAssertEqual(request.permissionMode, "auto")
@@ -84,6 +108,7 @@ final class EpicIntegrationTests: XCTestCase {
         let approval = try requestIntegration(epicId: ready.epic.id)
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         let prompt = try await onlySpawn().prompt
         let positions = ["schema", "api", "ui"].map { title in
@@ -103,6 +128,7 @@ final class EpicIntegrationTests: XCTestCase {
         let approval = try requestIntegration(epicId: ready.epic.id)
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         let prompt = try await onlySpawn().prompt
         XCTAssertTrue(prompt.contains("1. `agentboard/\(api.id)` — api"), prompt)
@@ -111,19 +137,76 @@ final class EpicIntegrationTests: XCTestCase {
         XCTAssertTrue(prompt.contains("- `agentboard/\(schema.id)` — schema"), prompt)
     }
 
+    /// The whole path, against the real repository: one task's work merges into the epic branch and
+    /// the reaper deletes its branch, a second commits nothing and loses its branch the same way,
+    /// and a third is still outstanding. The integrator must be told those are three different
+    /// things — the first is landed, not missing.
+    func testPromptSeparatesLandedFromNeverCommittedWhenBothBranchesAreGone() async throws {
+        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "At a Glance", goal: "see it all")
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        let landed = try epicTask(epic: epic, title: "count the board")
+        let silent = try epicTask(epic: epic, title: "document it")
+        let pending = try epicTask(epic: epic, title: "shut it down")
+        let landedSession = try epicWorker(task: landed, epic: epic)
+        try epicWorker(task: silent, epic: epic)
+        let pendingSession = try epicWorker(task: pending, epic: epic)
+        try fixture.commitInto(try XCTUnwrap(landedSession.worktreePath), file: "GlanceStore.swift")
+        try fixture.commitInto(try XCTUnwrap(pendingSession.worktreePath), file: "Shutdown.swift")
+        let landedHead = try fixture.git(["rev-parse", "agentboard/\(landed.id)"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        try await fixture.supervisor.accept(taskId: landed.id)
+        await fixture.supervisor.reconcile(projectId: fixture.project.id)
+
+        XCTAssertFalse(
+            try fixture.manager.branchExists("agentboard/\(landed.id)"),
+            "the reaper left the merged branch, so this test is not exercising the bug"
+        )
+        XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(silent.id)"))
+        XCTAssertTrue(try fixture.manager.branchExists("agentboard/\(pending.id)"))
+        XCTAssertEqual(
+            try fixture.manager.refCommit(TaskBranchLedger.tipRef(taskId: landed.id)), landedHead,
+            "the reaper dropped the branch without recording where it stood"
+        )
+
+        try fixture.epics.setState(epic.id, .active)
+        let approval = try requestIntegration(epicId: epic.id)
+        try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
+
+        let prompt = try await onlySpawn().prompt
+        XCTAssertTrue(prompt.contains("- `agentboard/\(landed.id)` — count the board (landed as"), prompt)
+        XCTAssertTrue(prompt.contains("their branches were deleted, nothing to do"), prompt)
+        XCTAssertTrue(prompt.contains("- `agentboard/\(silent.id)` — document it"), prompt)
+        XCTAssertTrue(prompt.contains("Nothing was ever committed on them."), prompt)
+        XCTAssertTrue(prompt.contains("1. `agentboard/\(pending.id)` — shut it down"), prompt)
+        XCTAssertFalse(prompt.contains("1. `agentboard/\(landed.id)`"), "the landed task was handed over to be merged")
+        XCTAssertFalse(
+            prompt.contains("- `agentboard/\(landed.id)` — count the board\n"),
+            "the landed task was still listed with nothing committed on it"
+        )
+    }
+
     func testEpicMovesActiveToIntegratingOnSpawnAndToDoneOnReport() async throws {
         let ready = try fixture.epicReadyForIntegration(["api"])
         XCTAssertEqual(try fixture.epics.get(ready.epic.id)?.state, .active)
         let approval = try requestIntegration(epicId: ready.epic.id)
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
         XCTAssertEqual(try fixture.epics.get(ready.epic.id)?.state, .integrating)
 
         let session = try XCTUnwrap(fixture.sessions.all(projectId: fixture.project.id).first)
         try await reportComplete(session: session)
 
         XCTAssertEqual(try fixture.epics.get(ready.epic.id)?.state, .done)
-        XCTAssertEqual(try fixture.tasks.get(XCTUnwrap(session.taskId))?.column, .review)
+        // afterEpicMerge is the default policy: the merged epic's tasks, integration task included,
+        // archive in the same transaction rather than piling up in review and done.
+        let integration = try XCTUnwrap(fixture.tasks.get(XCTUnwrap(session.taskId)))
+        XCTAssertEqual(integration.column, .done)
+        XCTAssertTrue(integration.isArchived)
+        XCTAssertTrue(try XCTUnwrap(fixture.tasks.get(ready.tasks[0].id)).isArchived)
+        XCTAssertEqual(try fixture.tasks.list(projectId: fixture.project.id), [])
     }
 
     func testApprovingASpawnStillSpawnsTheTaskWorker() async throws {
@@ -137,6 +220,7 @@ final class EpicIntegrationTests: XCTestCase {
         )
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         let spawns = await fixture.runtime.spawns
         XCTAssertEqual(spawns.count, 1)
@@ -161,6 +245,7 @@ final class EpicIntegrationTests: XCTestCase {
         let approval = try requestIntegration(epicId: ready.epic.id)
 
         try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
 
         let request = try await onlySpawn()
         XCTAssertTrue(request.prompt.contains("Do not push. Do not open a PR."), request.prompt)

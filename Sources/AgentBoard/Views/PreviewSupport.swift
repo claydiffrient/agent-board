@@ -41,6 +41,15 @@ enum PreviewData {
             )
             try tasks.setBlocked(running.id, true, reason: "Waiting on permission: Bash(rm -rf build)")
 
+            for title in ["Ship the password reset email", "Retire the legacy /v1 endpoint", "Add a health check"] {
+                _ = try tasks.create(
+                    projectId: project.id, title: title, body: nil, acceptance: nil, priority: nil,
+                    column: .done, origin: .human, epicId: nil
+                )
+            }
+            let done = try tasks.list(projectId: project.id, column: .done)
+            try tasks.archive(ids: done.prefix(2).map(\.id))
+
             let sessions = SessionStore(db)
             try sessions.insert(AgentSession(
                 sessionId: "3f9a1c2e-0000-4000-8000-000000000001",

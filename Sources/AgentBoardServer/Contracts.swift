@@ -35,56 +35,83 @@ public struct HookEvent: Sendable {
     public var cwd: String?
     public var toolName: String?
     public var toolCommand: String?
+    /// The file a write tool is about to touch, when the tool names one.
+    public var toolFilePath: String?
     public var notificationType: String?
     public var notificationMessage: String?
     public var lastAssistantMessage: String?
+    /// `SessionStart.source`: `startup`, `resume`, `clear`, or `compact`.
+    public var sessionSource: String?
+    /// `PreCompact.trigger`: "manual" for `/compact`, "auto" for the context-window trigger.
+    public var compactTrigger: String?
+    /// `SubagentStop`: the agent name, e.g. "Explore".
+    public var agentType: String?
     public var rawJSON: String
     public var receivedAt: Date
 
     public init(name: String, sessionId: String, transcriptPath: String? = nil, cwd: String? = nil, toolName: String? = nil,
-                toolCommand: String? = nil, notificationType: String? = nil, notificationMessage: String? = nil,
-                lastAssistantMessage: String? = nil, rawJSON: String, receivedAt: Date = Date()) {
+                toolCommand: String? = nil, toolFilePath: String? = nil, notificationType: String? = nil,
+                notificationMessage: String? = nil,
+                lastAssistantMessage: String? = nil, sessionSource: String? = nil,
+                compactTrigger: String? = nil, agentType: String? = nil,
+                rawJSON: String, receivedAt: Date = Date()) {
         self.name = name
         self.sessionId = sessionId
         self.transcriptPath = transcriptPath
         self.cwd = cwd
         self.toolName = toolName
         self.toolCommand = toolCommand
+        self.toolFilePath = toolFilePath
         self.notificationType = notificationType
         self.notificationMessage = notificationMessage
         self.lastAssistantMessage = lastAssistantMessage
+        self.sessionSource = sessionSource
+        self.compactTrigger = compactTrigger
+        self.agentType = agentType
         self.rawJSON = rawJSON
         self.receivedAt = receivedAt
     }
 }
 
-/// A `PreToolUse` verdict. Agent Board decides this in its own process, so it holds under any
-/// `--permission-mode`; see §8.
+/// What Agent Board sends back on a hook: a `PreToolUse` verdict, or context injected into the
+/// session. Decided in Agent Board's own process, so a verdict holds under any `--permission-mode`;
+/// see §8.
 public struct HookDecision: Sendable, Equatable {
-    public var permissionDecision: String
-    public var reason: String
+    public var permissionDecision: String?
+    public var reason: String?
+    public var additionalContext: String?
 
-    public init(permissionDecision: String, reason: String) {
+    public init(permissionDecision: String? = nil, reason: String? = nil, additionalContext: String? = nil) {
         self.permissionDecision = permissionDecision
         self.reason = reason
+        self.additionalContext = additionalContext
     }
 
     public static func deny(_ reason: String) -> HookDecision {
         HookDecision(permissionDecision: "deny", reason: reason)
     }
 
-    /// Both the current `hookSpecificOutput` shape and the legacy `decision`/`reason` pair, so the
-    /// deny lands whichever one the installed CLI reads.
+    /// Context only — no verdict, so the body carries no `decision` key and cannot be read as a block.
+    public static func context(_ text: String) -> HookDecision {
+        HookDecision(additionalContext: text)
+    }
+
+    /// A verdict is sent in both the current `hookSpecificOutput` shape and the legacy
+    /// `decision`/`reason` pair, so the deny lands whichever one the installed CLI reads.
     public func responseBody(hookEventName: String) -> [String: Any] {
-        [
-            "hookSpecificOutput": [
-                "hookEventName": hookEventName,
-                "permissionDecision": permissionDecision,
-                "permissionDecisionReason": reason,
-            ],
-            "decision": permissionDecision == "deny" ? "block" : "approve",
-            "reason": reason,
-        ]
+        var specific: [String: Any] = ["hookEventName": hookEventName]
+        var body: [String: Any] = [:]
+        if let permissionDecision {
+            specific["permissionDecision"] = permissionDecision
+            specific["permissionDecisionReason"] = reason ?? ""
+            body["decision"] = permissionDecision == "deny" ? "block" : "approve"
+            body["reason"] = reason ?? ""
+        }
+        if let additionalContext {
+            specific["additionalContext"] = additionalContext
+        }
+        body["hookSpecificOutput"] = specific
+        return body
     }
 }
 
@@ -153,8 +180,12 @@ public struct ToolResult: Sendable, Equatable {
         self.isError = isError
     }
 
+    /// Keys are sorted so the same value always encodes to the same bytes; a resource body and the
+    /// tool result it mirrors have to compare equal.
     public static func json(_ value: JSONValue) -> ToolResult {
-        let data = (try? JSONEncoder().encode(value)) ?? Data("null".utf8)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(value)) ?? Data("null".utf8)
         return ToolResult(text: String(decoding: data, as: UTF8.self))
     }
 }
@@ -168,4 +199,114 @@ public struct ToolError: Error, Sendable {
 public protocol ToolHandler: Sendable {
     func tools(for identity: TokenIdentity) async -> [ToolDescriptor]
     func call(_ name: String, arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult
+}
+
+/// One entry in a `resources/list` result. `title`, `size` and `annotations` are part of the MCP
+/// shape but are not served here.
+public struct ResourceDescriptor: Sendable, Equatable {
+    public var uri: String
+    public var name: String
+    public var description: String
+    public var mimeType: String
+
+    public init(uri: String, name: String, description: String, mimeType: String) {
+        self.uri = uri
+        self.name = name
+        self.description = description
+        self.mimeType = mimeType
+    }
+}
+
+public struct ResourceContents: Sendable, Equatable {
+    public var uri: String
+    public var mimeType: String
+    public var text: String
+
+    public init(uri: String, mimeType: String, text: String) {
+        self.uri = uri
+        self.mimeType = mimeType
+        self.text = text
+    }
+}
+
+public struct PromptArgumentDescriptor: Sendable, Equatable {
+    public var name: String
+    public var description: String
+    public var required: Bool
+
+    public init(name: String, description: String, required: Bool) {
+        self.name = name
+        self.description = description
+        self.required = required
+    }
+}
+
+public struct PromptDescriptor: Sendable, Equatable {
+    public var name: String
+    public var title: String
+    public var description: String
+    public var arguments: [PromptArgumentDescriptor]
+
+    public init(name: String, title: String, description: String, arguments: [PromptArgumentDescriptor]) {
+        self.name = name
+        self.title = title
+        self.description = description
+        self.arguments = arguments
+    }
+}
+
+public struct PromptMessage: Sendable, Equatable {
+    public enum Role: String, Sendable, Equatable {
+        case user
+        case assistant
+    }
+
+    public var role: Role
+    public var text: String
+
+    public init(role: Role = .user, text: String) {
+        self.role = role
+        self.text = text
+    }
+}
+
+/// Carried to the client as JSON-RPC -32002 with the offending uri in `data`.
+public struct ResourceError: Error, Sendable {
+    public var uri: String
+    public var message: String
+
+    public init(uri: String, message: String) {
+        self.uri = uri
+        self.message = message
+    }
+}
+
+/// Resources are listed per identity for the same reason tools are: a token sees its own project.
+public protocol ResourceHandler: Sendable {
+    func resources(for identity: TokenIdentity) async throws -> [ResourceDescriptor]
+    func read(_ uri: String, identity: TokenIdentity) async throws -> [ResourceContents]
+}
+
+public struct PromptResult: Sendable, Equatable {
+    public var description: String
+    public var messages: [PromptMessage]
+
+    public init(description: String, messages: [PromptMessage]) {
+        self.description = description
+        self.messages = messages
+    }
+}
+
+/// An unknown prompt name or a missing required argument. Surfaces as JSON-RPC -32602 per the
+/// prompts specification, not as a result with `isError` — a prompt has no equivalent of a tool's
+/// soft failure.
+public struct PromptError: Error, Sendable {
+    public var message: String
+    public init(_ message: String) { self.message = message }
+}
+
+/// Prompt list is rendered per identity, in the same way the tool list is.
+public protocol PromptHandler: Sendable {
+    func prompts(for identity: TokenIdentity) async -> [PromptDescriptor]
+    func get(_ name: String, arguments: [String: String], identity: TokenIdentity) async throws -> PromptResult
 }

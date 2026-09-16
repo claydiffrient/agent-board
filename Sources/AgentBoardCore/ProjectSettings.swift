@@ -9,6 +9,9 @@ public struct Caps: Codable, Sendable, Equatable {
     /// How long a running worker may go without a hook before the orchestrator sidebar calls it
     /// stalled. Deliberately below `maxIdleSeconds` so a wedge surfaces before the cap kills it.
     public var stallSeconds: Int = 120
+    /// How long a worker has to answer a wind-down order before the progress sheet calls it
+    /// unacknowledged. Expiry only counts it; killing it stays a human decision.
+    public var shutdownGraceSeconds: Int = 120
 
     public init(
         maxConcurrentWorkers: Int = 3,
@@ -16,7 +19,8 @@ public struct Caps: Codable, Sendable, Equatable {
         maxWallClockSeconds: Int = 1800,
         maxIdleSeconds: Int = 300,
         sessionCeiling: Int? = nil,
-        stallSeconds: Int = 120
+        stallSeconds: Int = 120,
+        shutdownGraceSeconds: Int = 120
     ) {
         self.maxConcurrentWorkers = maxConcurrentWorkers
         self.maxTokensPerAgent = maxTokensPerAgent
@@ -24,6 +28,7 @@ public struct Caps: Codable, Sendable, Equatable {
         self.maxIdleSeconds = maxIdleSeconds
         self.sessionCeiling = sessionCeiling
         self.stallSeconds = stallSeconds
+        self.shutdownGraceSeconds = shutdownGraceSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -35,6 +40,47 @@ public struct Caps: Codable, Sendable, Equatable {
         maxIdleSeconds = try c.decodeIfPresent(Int.self, forKey: .maxIdleSeconds) ?? defaults.maxIdleSeconds
         sessionCeiling = try c.decodeIfPresent(Int.self, forKey: .sessionCeiling)
         stallSeconds = try c.decodeIfPresent(Int.self, forKey: .stallSeconds) ?? defaults.stallSeconds
+        shutdownGraceSeconds = try c.decodeIfPresent(Int.self, forKey: .shutdownGraceSeconds) ?? defaults.shutdownGraceSeconds
+    }
+}
+
+/// When a done task leaves the board. Encoded as `{"mode":...}` with `days` only for `afterDays`.
+public enum ArchivePolicy: Codable, Sendable, Equatable {
+    case manual
+    case afterDays(Int)
+    case afterEpicMerge
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case days
+    }
+
+    enum Mode: String, Codable {
+        case manual
+        case afterDays
+        case afterEpicMerge
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(Mode.self, forKey: .mode) {
+        case .manual: self = .manual
+        case .afterDays: self = .afterDays(try c.decode(Int.self, forKey: .days))
+        case .afterEpicMerge: self = .afterEpicMerge
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .manual:
+            try c.encode(Mode.manual, forKey: .mode)
+        case .afterDays(let days):
+            try c.encode(Mode.afterDays, forKey: .mode)
+            try c.encode(days, forKey: .days)
+        case .afterEpicMerge:
+            try c.encode(Mode.afterEpicMerge, forKey: .mode)
+        }
     }
 }
 
@@ -49,6 +95,20 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var modelGuidance: String? = nil
     /// How much human acceptance a finished task needs. An epic may override it for its own tasks.
     public var reviewLevel: ReviewLevel = .task
+    /// Shell command that builds this project, e.g. `swift build` or `pnpm build`. Empty leaves the
+    /// agent to work it out from the repo.
+    public var buildCommand: String? = nil
+    /// Shell command that runs this project's tests. Empty leaves the agent to work it out.
+    public var testCommand: String? = nil
+    public var archivePolicy: ArchivePolicy = .afterEpicMerge
+    /// Whether a worker gets its own worktree, shares the project's checkout, or is decided per spawn.
+    public var worktreeStrategy: WorktreeStrategy = .worktree
+    /// How many agents may be co-resident in the project's own checkout at once. Matches
+    /// `caps.maxConcurrentWorkers` so shared mode adds no second, tighter ceiling to discover.
+    public var sharedCheckoutMaxAgents: Int = 3
+    /// What this project may interrupt the human for. Banners only — the sidebar badge and the
+    /// rest of the attention signal are unaffected by it.
+    public var notifications: NotificationPreferences = NotificationPreferences()
 
     public init(
         caps: Caps = Caps(),
@@ -57,7 +117,13 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         extraMcpServers: [String] = [],
         defaultModel: String? = nil,
         modelGuidance: String? = nil,
-        reviewLevel: ReviewLevel = .task
+        reviewLevel: ReviewLevel = .task,
+        buildCommand: String? = nil,
+        testCommand: String? = nil,
+        archivePolicy: ArchivePolicy = .afterEpicMerge,
+        worktreeStrategy: WorktreeStrategy = .worktree,
+        sharedCheckoutMaxAgents: Int = 3,
+        notifications: NotificationPreferences = NotificationPreferences()
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -66,6 +132,12 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.defaultModel = defaultModel
         self.modelGuidance = modelGuidance
         self.reviewLevel = reviewLevel
+        self.buildCommand = buildCommand
+        self.testCommand = testCommand
+        self.archivePolicy = archivePolicy
+        self.worktreeStrategy = worktreeStrategy
+        self.sharedCheckoutMaxAgents = sharedCheckoutMaxAgents
+        self.notifications = notifications
     }
 
     public init(from decoder: Decoder) throws {
@@ -77,6 +149,14 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
         modelGuidance = try c.decodeIfPresent(String.self, forKey: .modelGuidance)
         reviewLevel = try c.decodeIfPresent(ReviewLevel.self, forKey: .reviewLevel) ?? .task
+        buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
+        testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
+        archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge
+        worktreeStrategy = try c.decodeIfPresent(WorktreeStrategy.self, forKey: .worktreeStrategy) ?? .worktree
+        sharedCheckoutMaxAgents = try c.decodeIfPresent(Int.self, forKey: .sharedCheckoutMaxAgents)
+            ?? ProjectSettings().sharedCheckoutMaxAgents
+        notifications = try c.decodeIfPresent(NotificationPreferences.self, forKey: .notifications)
+            ?? NotificationPreferences()
     }
 
     public static func decode(_ json: String) -> ProjectSettings {

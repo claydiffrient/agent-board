@@ -18,6 +18,13 @@ final class ReviewLevelTests: XCTestCase {
         try fixture.projects.updateSettings(fixture.project.id, settings)
     }
 
+    private func setArchivePolicy(_ policy: ArchivePolicy, in fixture: Fixture? = nil) throws {
+        let fixture = fixture ?? f!
+        var settings = try XCTUnwrap(fixture.projects.get(fixture.project.id)).settings
+        settings.archivePolicy = policy
+        try fixture.projects.updateSettings(fixture.project.id, settings)
+    }
+
     private func complete(_ task: BoardTask, session: String = "w1") throws -> Board.CompletionOutcome {
         try f.board.assign(taskId: task.id, session: f.session(session, state: .running, taskId: task.id))
         return try f.board.complete(taskId: task.id, sessionId: session, summary: "done")
@@ -205,27 +212,42 @@ final class ReviewLevelTests: XCTestCase {
 
     // MARK: The epic's own integration gate (SPEC §5.2)
 
+    /// Two independent axes decide where a completed integration task lands, and only the review
+    /// level is this suite's subject. The level never routes it to an agent or auto-accepts it — that
+    /// is §5's unconditional override. The column is the archive policy's call: `afterEpicMerge`
+    /// (the default) sends it to `done` because the epic reaching `done` in the same transaction is
+    /// its acceptance (§5.2 step 4); every other policy leaves it in `review`.
     func testAnEpicIntegrationTaskWaitsForAHumanAtEveryLevel() throws {
         for level in ReviewLevel.allCases {
-            let f = try Fixture.make()
-            try setProjectLevel(level, in: f)
-            _ = try RosterStore(f.db).create(name: "Rowan", role: "reviewer", systemPrompt: "x")
-            try RosterStore(f.db).enable(
-                agentId: try XCTUnwrap(RosterStore(f.db).list().first).id, forProject: f.project.id
-            )
-            let epic = try EpicStore(f.db).create(projectId: f.project.id, title: "Parser", goal: nil)
-            try EpicStore(f.db).setState(epic.id, .integrating)
-            let integration = try f.tasks.create(
-                projectId: f.project.id, title: "Integrate Parser", body: nil, acceptance: nil, priority: nil,
-                column: .ready, origin: .integration, epicId: epic.id
-            )
-            try f.board.assign(taskId: integration.id, session: f.session("i1", state: .running, taskId: integration.id))
+            for policy in [ArchivePolicy.manual, .afterDays(7), .afterEpicMerge] {
+                let f = try Fixture.make()
+                try setProjectLevel(level, in: f)
+                try setArchivePolicy(policy, in: f)
+                _ = try RosterStore(f.db).create(name: "Rowan", role: "reviewer", systemPrompt: "x")
+                try RosterStore(f.db).enable(
+                    agentId: try XCTUnwrap(RosterStore(f.db).list().first).id, forProject: f.project.id
+                )
+                let epic = try EpicStore(f.db).create(projectId: f.project.id, title: "Parser", goal: nil)
+                try EpicStore(f.db).setState(epic.id, .integrating)
+                let integration = try f.tasks.create(
+                    projectId: f.project.id, title: "Integrate Parser", body: nil, acceptance: nil, priority: nil,
+                    column: .ready, origin: .integration, epicId: epic.id
+                )
+                try f.board.assign(
+                    taskId: integration.id, session: f.session("i1", state: .running, taskId: integration.id)
+                )
 
-            let outcome = try f.board.complete(taskId: integration.id, sessionId: "i1", summary: "merged")
+                let outcome = try f.board.complete(taskId: integration.id, sessionId: "i1", summary: "merged")
+                let where_ = "level \(level), policy \(policy)"
 
-            XCTAssertEqual(outcome.routing, .humanReview(reason: nil), "level \(level)")
-            XCTAssertEqual(try f.tasks.get(integration.id)?.column, .review, "level \(level)")
-            XCTAssertNil(try f.tasks.get(integration.id)?.reviewerAgentId, "level \(level)")
+                XCTAssertEqual(outcome.routing, .humanReview(reason: nil), where_)
+                XCTAssertEqual(
+                    try f.tasks.get(integration.id)?.column,
+                    policy == .afterEpicMerge ? .done : .review,
+                    where_
+                )
+                XCTAssertNil(try f.tasks.get(integration.id)?.reviewerAgentId, where_)
+            }
         }
     }
 

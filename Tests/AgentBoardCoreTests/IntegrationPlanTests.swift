@@ -3,6 +3,8 @@ import XCTest
 @testable import AgentBoardCore
 
 final class IntegrationPlanTests: XCTestCase {
+    private let swiftCommands = VerificationCommands(build: "swift build", test: "swift test")
+
     private func epic(_ f: Fixture, title: String = "Ship search", goal: String? = "make it fast") throws -> Epic {
         try f.epics.create(projectId: f.project.id, title: title, goal: goal)
     }
@@ -56,15 +58,73 @@ final class IntegrationPlanTests: XCTestCase {
 
         let branches = IntegrationPlan.classify(
             [done, pending, never],
-            merged: [IntegrationPlan.branchName(taskId: done.id): true],
-            exists: [
-                IntegrationPlan.branchName(taskId: done.id),
-                IntegrationPlan.branchName(taskId: pending.id),
+            facts: [
+                done.id: TaskBranchFacts(branchExists: true, mergedIntoEpic: true),
+                pending.id: TaskBranchFacts(branchExists: true),
+                never.id: TaskBranchFacts(everDispatched: false),
             ]
         )
 
         XCTAssertEqual(branches.map(\.disposition), [.alreadyMerged, .merge, .missing])
         XCTAssertEqual(branches.map(\.branch), [done, pending, never].map { IntegrationPlan.branchName(taskId: $0.id) })
+    }
+
+    func testClassifyCallsAReapedBranchLandedRatherThanMissing() {
+        let reaped = task("merged then reaped")
+
+        let branches = IntegrationPlan.classify(
+            [reaped],
+            facts: [reaped.id: TaskBranchFacts(
+                recordedBase: "aaaa", recordedTip: "bbbb", tipOnEpicBranch: true, ownCommits: 3
+            )]
+        )
+
+        XCTAssertEqual(branches.map(\.disposition), [.landed])
+        XCTAssertEqual(branches[0].commit, "bbbb")
+    }
+
+    func testClassifyCallsABranchThatCarriedNothingMissing() {
+        let empty = task("worker committed nothing")
+
+        let branches = IntegrationPlan.classify(
+            [empty],
+            facts: [empty.id: TaskBranchFacts(
+                recordedBase: "aaaa", recordedTip: "aaaa", tipOnEpicBranch: true, ownCommits: 0
+            )]
+        )
+
+        XCTAssertEqual(branches.map(\.disposition), [.missing])
+    }
+
+    func testClassifyWithholdsAVerdictWhenTheLedgerIsSilent() {
+        let dispatched = task("ran, branch gone, no ledger")
+        let offEpic = task("landed somewhere else")
+
+        let branches = IntegrationPlan.classify(
+            [dispatched, offEpic],
+            facts: [
+                dispatched.id: TaskBranchFacts(everDispatched: true),
+                offEpic.id: TaskBranchFacts(
+                    recordedBase: "aaaa", recordedTip: "cccc", tipOnEpicBranch: false, ownCommits: 2
+                ),
+            ]
+        )
+
+        XCTAssertEqual(branches.map(\.disposition), [.unknown, .unknown])
+        XCTAssertNil(branches[0].commit)
+        XCTAssertEqual(branches[1].commit, "cccc")
+    }
+
+    /// The branch's absence is not evidence either way, so a merged-then-deleted branch must never
+    /// reach `nothingCommitted`, whatever else the ledger is missing.
+    func testEvidenceNeverClaimsNothingWasCommittedWithoutSupport() {
+        XCTAssertEqual(TaskBranchEvidence.read(TaskBranchFacts(everDispatched: true)), .unestablished)
+        XCTAssertEqual(TaskBranchEvidence.read(TaskBranchFacts(everDispatched: false)), .nothingCommitted)
+        XCTAssertEqual(
+            TaskBranchEvidence.read(TaskBranchFacts(recordedTip: "bbbb", tipOnEpicBranch: true, everDispatched: false)),
+            .unestablished,
+            "a recorded tip with no recorded base cannot be called empty"
+        )
     }
 
     // MARK: - compose
@@ -81,7 +141,9 @@ final class IntegrationPlanTests: XCTestCase {
             IntegrationBranch(taskId: ui.id, title: "ui", branch: "agentboard/\(ui.id)", disposition: .merge),
         ]
 
-        let prompt = IntegrationPlan.compose(epic: epic, baseBranch: "main", branches: branches)
+        let prompt = IntegrationPlan.compose(
+            epic: epic, baseBranch: "main", branches: branches, verification: swiftCommands
+        )
 
         XCTAssertTrue(prompt.contains("1. `agentboard/\(api.id)` — api"), prompt)
         XCTAssertTrue(prompt.contains("2. `agentboard/\(ui.id)` — ui"), prompt)
@@ -96,13 +158,17 @@ final class IntegrationPlanTests: XCTestCase {
         let only = task("api")
         let prompt = IntegrationPlan.compose(
             epic: epic, baseBranch: "main",
-            branches: [IntegrationBranch(taskId: only.id, title: "api", branch: "agentboard/\(only.id)", disposition: .merge)]
+            branches: [IntegrationBranch(taskId: only.id, title: "api", branch: "agentboard/\(only.id)", disposition: .merge)],
+            verification: swiftCommands
         )
 
-        XCTAssertTrue(prompt.contains("swift build"), prompt)
-        XCTAssertTrue(prompt.contains("swift test"), prompt)
+        XCTAssertTrue(prompt.contains("run `swift build` and then `swift test`"), prompt)
+        XCTAssertTrue(prompt.contains("the final result of `swift build` and `swift test`"), prompt)
         XCTAssertTrue(prompt.contains("Do not push. Do not open a PR."), prompt)
-        XCTAssertTrue(prompt.contains("A human opens the pull request from `\(epic.branch)` into `main`."), prompt)
+        XCTAssertTrue(
+            prompt.contains("The pull request from `\(epic.branch)` into `main` is opened outside this session"),
+            prompt
+        )
         XCTAssertTrue(prompt.contains("report_complete"), prompt)
         XCTAssertFalse(prompt.contains("git push"), prompt)
         XCTAssertFalse(prompt.contains("gh pr create"), prompt)
@@ -114,10 +180,57 @@ final class IntegrationPlanTests: XCTestCase {
         let only = task("api")
         let prompt = IntegrationPlan.compose(
             epic: epic, baseBranch: "main",
-            branches: [IntegrationBranch(taskId: only.id, title: "api", branch: "agentboard/\(only.id)", disposition: .alreadyMerged)]
+            branches: [IntegrationBranch(taskId: only.id, title: "api", branch: "agentboard/\(only.id)", disposition: .alreadyMerged)],
+            verification: swiftCommands
         )
 
         XCTAssertTrue(prompt.contains("Nothing is left to merge."), prompt)
+    }
+
+    func testPromptTellsTheIntegratorALandedTaskNeedsNoAction() throws {
+        let f = try Fixture.make()
+        let epic = try epic(f)
+        let reaped = task("count the board")
+        let prompt = IntegrationPlan.compose(
+            epic: epic, baseBranch: "main",
+            branches: [IntegrationBranch(
+                taskId: reaped.id, title: "count the board", branch: "agentboard/\(reaped.id)",
+                disposition: .landed, commit: "2efcb12abcdef0123456"
+            )],
+            verification: swiftCommands
+        )
+
+        XCTAssertTrue(prompt.contains("their branches were deleted, nothing to do"), prompt)
+        XCTAssertTrue(prompt.contains("- `agentboard/\(reaped.id)` — count the board (landed as 2efcb12a)"), prompt)
+        XCTAssertTrue(prompt.contains("do not report them as missing"), prompt)
+        XCTAssertTrue(
+            prompt.contains("Nothing listed in any other section is yours to merge."),
+            "the merge instruction still points at everything listed above it:\n\(prompt)"
+        )
+        XCTAssertFalse(prompt.contains("Nothing was ever committed"), prompt)
+        XCTAssertFalse(prompt.contains("No branch exists for these tasks"), prompt)
+        XCTAssertFalse(prompt.contains("1. `agentboard/\(reaped.id)`"), "a landed task was handed over to be merged")
+    }
+
+    func testPromptSaysUnknownRatherThanAssertingEitherWay() throws {
+        let f = try Fixture.make()
+        let epic = try epic(f)
+        let unsure = task("no record")
+        let prompt = IntegrationPlan.compose(
+            epic: epic, baseBranch: "main",
+            branches: [IntegrationBranch(
+                taskId: unsure.id, title: "no record", branch: "agentboard/\(unsure.id)",
+                disposition: .unknown, commit: "cafebabe1234"
+            )],
+            verification: swiftCommands
+        )
+
+        XCTAssertTrue(prompt.contains("Branch gone, outcome unknown — check before you report on these"), prompt)
+        XCTAssertTrue(prompt.contains("- `agentboard/\(unsure.id)` — no record (last recorded tip cafebabe)"), prompt)
+        XCTAssertTrue(prompt.contains("A missing branch is not evidence either way"), prompt)
+        XCTAssertTrue(prompt.contains("git merge-base --is-ancestor <tip> \(epic.branch)"), prompt)
+        XCTAssertFalse(prompt.contains("Nothing was ever committed"), prompt)
+        XCTAssertFalse(prompt.contains("1. `agentboard/\(unsure.id)`"), "an unknown task was handed over to be merged")
     }
 
     func testPromptCallsOutTasksWithNoBranch() throws {
@@ -126,17 +239,85 @@ final class IntegrationPlanTests: XCTestCase {
         let never = task("never started")
         let prompt = IntegrationPlan.compose(
             epic: epic, baseBranch: "main",
-            branches: [IntegrationBranch(taskId: never.id, title: "never started", branch: "agentboard/\(never.id)", disposition: .missing)]
+            branches: [IntegrationBranch(taskId: never.id, title: "never started", branch: "agentboard/\(never.id)", disposition: .missing)],
+            verification: swiftCommands
         )
 
         XCTAssertTrue(prompt.contains("No branch exists for these tasks"), prompt)
         XCTAssertTrue(prompt.contains("- `agentboard/\(never.id)` — never started"), prompt)
     }
 
+    func testPromptUsesTheProjectsOwnBuildAndTestCommands() throws {
+        let f = try Fixture.make()
+        let epic = try epic(f)
+        let only = task("api")
+        let prompt = IntegrationPlan.compose(
+            epic: epic, baseBranch: "main",
+            branches: [IntegrationBranch(taskId: only.id, title: "api", branch: "agentboard/\(only.id)", disposition: .merge)],
+            verification: VerificationCommands(build: "pnpm build", test: "pnpm test")
+        )
+
+        XCTAssertTrue(prompt.contains("run `pnpm build` and then `pnpm test`"), prompt)
+        XCTAssertTrue(prompt.contains("the final result of `pnpm build` and `pnpm test`"), prompt)
+        XCTAssertFalse(prompt.contains("swift build"), prompt)
+        XCTAssertFalse(prompt.contains("swift test"), prompt)
+    }
+
+    func testPromptTellsTheIntegratorToWorkOutVerificationWhenNoCommandsAreSet() throws {
+        let f = try Fixture.make()
+        let epic = try epic(f)
+        let only = task("api")
+        let prompt = IntegrationPlan.compose(
+            epic: epic, baseBranch: "main",
+            branches: [IntegrationBranch(taskId: only.id, title: "api", branch: "agentboard/\(only.id)", disposition: .merge)],
+            verification: VerificationCommands()
+        )
+
+        XCTAssertTrue(prompt.contains("build and test this project"), prompt)
+        XCTAssertTrue(prompt.contains("read its build files, scripts and CI config"), prompt)
+        XCTAssertTrue(prompt.contains("Name in your report exactly what you ran."), prompt)
+        XCTAssertTrue(prompt.contains("the build and test commands you ran, named exactly"), prompt)
+        XCTAssertFalse(prompt.contains("swift build"), prompt)
+        XCTAssertFalse(prompt.contains("swift test"), prompt)
+    }
+
+    func testPromptStillDemandsTheOtherHalfWhenOnlyOneCommandIsSet() throws {
+        let f = try Fixture.make()
+        let epic = try epic(f)
+        let only = task("api")
+        let prompt = IntegrationPlan.compose(
+            epic: epic, baseBranch: "main",
+            branches: [IntegrationBranch(taskId: only.id, title: "api", branch: "agentboard/\(only.id)", disposition: .merge)],
+            verification: VerificationCommands(build: "cargo build")
+        )
+
+        XCTAssertTrue(prompt.contains("run `cargo build`, then run this project's tests"), prompt)
+        XCTAssertTrue(prompt.contains("the build and test commands you ran, named exactly"), prompt)
+    }
+
+    func testBlankCommandsCountAsUnset() throws {
+        let f = try Fixture.make()
+        let epic = try epic(f)
+        let only = task("api")
+        let prompt = IntegrationPlan.compose(
+            epic: epic, baseBranch: "main",
+            branches: [IntegrationBranch(taskId: only.id, title: "api", branch: "agentboard/\(only.id)", disposition: .merge)],
+            verification: VerificationCommands(build: "   ", test: "")
+        )
+
+        XCTAssertTrue(prompt.contains("build and test this project"), prompt)
+    }
+
     // MARK: - epic state on completion
 
+    /// Under `manual` the integration task lands in `review` for a human, as every worker report
+    /// does. `afterEpicMerge` is the one policy that sends it straight to `done` — see
+    /// `ArchiveSweepPolicyTests`.
     func testCompletingTheIntegrationTaskMovesTheEpicToDone() throws {
         let f = try Fixture.make()
+        var settings = try XCTUnwrap(f.projects.get(f.project.id)?.settings)
+        settings.archivePolicy = .manual
+        try f.projects.updateSettings(f.project.id, settings)
         let epic = try epic(f)
         try f.epics.setState(epic.id, .integrating)
         let task = try f.board.createIntegrationTask(epicId: epic.id)

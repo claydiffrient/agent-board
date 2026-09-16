@@ -14,7 +14,7 @@ final class BoardTests: XCTestCase {
         let inserted = try f.board.assign(taskId: t.id, session: f.session("s1", state: .running))
         XCTAssertEqual(inserted.taskId, t.id)
         XCTAssertEqual(inserted.role, .worker)
-        XCTAssertEqual(inserted.state, .starting)
+        XCTAssertEqual(inserted.state, .setup)
         XCTAssertEqual(inserted.attempt, 1)
         XCTAssertEqual(try f.tasks.get(t.id)?.column, .running)
         XCTAssertEqual(try f.sessions.get("s1"), inserted)

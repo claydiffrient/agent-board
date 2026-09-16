@@ -9,6 +9,14 @@ struct OrchestratorView: View {
     @Environment(AppEnvironment.self) private var env
     @State private var console: OrchestratorConsole?
     @State private var unavailable: String?
+    @State private var sessions = Observed<[AgentSession]>([])
+    @State private var confirmingStopAll = false
+    @State private var shutdown: ShutdownOrder?
+    @State private var errorMessage: String?
+
+    private var runningWorkers: Int {
+        sessions.value.filter { $0.role == .worker && $0.state.isActive }.count
+    }
 
     var body: some View {
         HSplitView {
@@ -20,13 +28,55 @@ struct OrchestratorView: View {
         .task(id: project.id) {
             await attach()
         }
+        .task(id: project.id) {
+            await sessions.run(SessionStore(env.db).observe(projectId: project.id), in: env.db.reader)
+        }
+        .task(id: project.id) {
+            shutdown = try? ShutdownOrderStore(env.db).outstanding(projectId: project.id)
+        }
+        .confirmationDialog(
+            "Stop all work on \(project.name)?",
+            isPresented: $confirmingStopAll,
+            titleVisibility: .visible
+        ) {
+            Button("Stop All", role: .destructive) { stopAll() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(stopAllConfirmation)
+        }
+        .sheet(item: $shutdown) { order in
+            ShutdownSheet(project: project, order: order, console: console)
+                .environment(env)
+        }
+        .errorAlert($errorMessage)
+    }
+
+    private var stopAllConfirmation: String {
+        let workers = runningWorkers == 1 ? "1 worker is running" : "\(runningWorkers) workers are running"
+        return "\(workers). Each is told to commit its worktree and stop, and its unfinished task goes "
+            + "back to ready with a resume note, so nothing is lost. No new worker is spawned until "
+            + "you cancel the order."
+    }
+
+    private func stopAll() {
+        _Concurrency.Task {
+            do {
+                let order = try await env.supervisor.requestShutdown(
+                    projectId: project.id, requestedBy: "human", reason: nil
+                )
+                shutdown = order
+                try await env.supervisor.deliverShutdownOrder(projectId: project.id)
+            } catch {
+                errorMessage = errorText(error)
+            }
+        }
     }
 
     @ViewBuilder
     private var consolePane: some View {
         if let console {
             VStack(spacing: 0) {
-                OrchestratorHeader(console: console)
+                OrchestratorHeader(console: console, stopAll: { confirmingStopAll = true })
                 Divider()
                 OrchestratorTerminalHost(console: console)
             }
@@ -39,7 +89,7 @@ struct OrchestratorView: View {
         }
     }
 
-    /// SPEC §9: resumed lazily on first view, after the server has a port to hand the session.
+    /// SPEC §9: resumed when the human opens the project, after the server has a port to hand the session.
     private func attach() async {
         let console: OrchestratorConsole
         do {
@@ -60,6 +110,7 @@ struct OrchestratorView: View {
 
 private struct OrchestratorHeader: View {
     let console: OrchestratorConsole
+    let stopAll: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -81,6 +132,25 @@ private struct OrchestratorHeader: View {
                     .help(error)
             }
             Spacer()
+            if let pressure = console.contextPressure {
+                Text("Context \(pressure.percent)%")
+                    .foregroundStyle(pressure.exceeds(OrchestratorCompaction.threshold) ? .orange : .secondary)
+                    .help("\(pressure.usedTokens) of \(pressure.limitTokens) tokens; Agent Board compacts at "
+                        + "\(Int(OrchestratorCompaction.threshold * 100))%")
+            }
+            if let at = console.lastCompactionAt {
+                TimelineView(.periodic(from: .now, by: 30)) { _ in
+                    Label(
+                        "Compacted \(Format.relative(at))",
+                        systemImage: "arrow.down.right.and.arrow.up.left"
+                    )
+                    .foregroundStyle(.secondary)
+                    .help(console.lastCompactionWasAutomatic
+                        ? "Claude Code compacted this session itself (\(console.compactionCount) so far)"
+                        : "Agent Board compacted this session and pointed it back at the board "
+                            + "(\(console.compactionCount) so far)")
+                }
+            }
             if let at = console.lastNoticeAt {
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
                     Text("Noticed \(Format.relative(at))")
@@ -94,6 +164,8 @@ private struct OrchestratorHeader: View {
                 .help("Stop the orchestrator and resume the same session")
             Button("Stop") { console.stop() }
                 .disabled(!console.isProcessRunning)
+            Button("Stop All") { stopAll() }
+                .help("Tell every worker to commit and stop, then quit")
         }
         .controlSize(.small)
         .font(.caption)

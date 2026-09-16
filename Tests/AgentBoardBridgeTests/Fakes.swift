@@ -6,15 +6,17 @@ import XCTest
 
 actor RecordingEventSink: BoardEventSink {
     enum Event: Equatable {
-        case notify(title: String, body: String)
+        case notify(projectId: String, title: String, body: String)
         case orchestratorTurnEnded(projectId: String, sessionId: String)
         case reportQueued(projectId: String)
+        case orchestratorCompacted(projectId: String, sessionId: String, manual: Bool)
+        case workerAcknowledgedShutdown(projectId: String, sessionId: String)
     }
 
     private(set) var events: [Event] = []
 
-    func notify(title: String, body: String) async {
-        events.append(.notify(title: title, body: body))
+    func notify(projectId: String, title: String, body: String) async {
+        events.append(.notify(projectId: projectId, title: title, body: body))
     }
 
     func orchestratorTurnEnded(projectId: String, sessionId: String) async {
@@ -23,6 +25,14 @@ actor RecordingEventSink: BoardEventSink {
 
     func reportQueued(projectId: String) async {
         events.append(.reportQueued(projectId: projectId))
+    }
+
+    func orchestratorCompacted(projectId: String, sessionId: String, manual: Bool) async {
+        events.append(.orchestratorCompacted(projectId: projectId, sessionId: sessionId, manual: manual))
+    }
+
+    func workerAcknowledgedShutdown(projectId: String, sessionId: String) async {
+        events.append(.workerAcknowledgedShutdown(projectId: projectId, sessionId: sessionId))
     }
 }
 
@@ -38,9 +48,13 @@ actor FakeWorkerControl: WorkerControl {
         self.board = board
     }
 
-    func spawnWorker(taskId: String) async throws -> String {
+    func spawnWorker(taskId: String) async throws -> WorkerSpawn {
         spawned.append(taskId)
-        return "session-for-\(taskId)"
+        return WorkerSpawn(
+            setupSessionId: "setup-for-\(taskId)",
+            worktreePath: "/tmp/worktrees/\(taskId)",
+            branch: "agentboard/\(taskId)"
+        )
     }
 
     func stopWorker(sessionId: String) async throws {
@@ -63,6 +77,7 @@ struct BridgeFixture {
     let reviewer: ReviewerToolHandler
     let scoped: ScopedToolHandler
     let hooks: StoreHookSink
+    var commits: RecordingScopedCommits?
 
     var projects: ProjectStore { ProjectStore(db) }
     var tasks: TaskStore { TaskStore(db) }
@@ -71,13 +86,16 @@ struct BridgeFixture {
     var approvals: ApprovalStore { ApprovalStore(db) }
     var notes: NoteStore { NoteStore(db) }
     var progress: ProgressStore { ProgressStore(db) }
+    var hookEvents: HookEventStore { HookEventStore(db) }
     var board: Board { Board(db) }
 
     var orchestratorIdentity: TokenIdentity {
         TokenIdentity(token: "orch", scope: .orchestrator, projectId: project.id, sessionId: "orch-session")
     }
 
-    static func make() throws -> BridgeFixture {
+    static func make(
+        lockWait: FileLockWaitPolicy = .default, scopedCommits: RecordingScopedCommits? = nil
+    ) throws -> BridgeFixture {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
             name: "Demo",
@@ -89,7 +107,7 @@ struct BridgeFixture {
         let events = RecordingEventSink()
         let control = FakeWorkerControl(board: Board(db))
         let orchestrator = OrchestratorToolHandler(db: db, control: control, events: events)
-        let worker = WorkerToolHandler(db: db, control: control, events: events)
+        let worker = WorkerToolHandler(db: db, control: control, events: events, scopedCommits: scopedCommits)
         let reviewer = ReviewerToolHandler(db: db, control: control, events: events)
         return BridgeFixture(
             db: db,
@@ -100,7 +118,8 @@ struct BridgeFixture {
             worker: worker,
             reviewer: reviewer,
             scoped: ScopedToolHandler(worker: worker, orchestrator: orchestrator, reviewer: reviewer),
-            hooks: StoreHookSink(db: db, events: events)
+            hooks: StoreHookSink(db: db, events: events, lockWait: lockWait),
+            commits: scopedCommits
         )
     }
 
@@ -115,24 +134,45 @@ struct BridgeFixture {
     }
 
     @discardableResult
-    func task(_ title: String, column: TaskColumn = .backlog, in projectId: String? = nil) throws -> BoardTask {
+    func task(
+        _ title: String, column: TaskColumn = .backlog, epicId: String? = nil, in projectId: String? = nil
+    ) throws -> BoardTask {
         try tasks.create(
             projectId: projectId ?? project.id, title: title, body: nil, acceptance: nil, priority: nil,
-            column: column, origin: .human, epicId: nil
+            column: column, origin: .human, epicId: epicId
         )
     }
 
     @discardableResult
     func session(
         _ id: String, role: SessionRole = .worker, state: SessionState = .running, taskId: String? = nil,
-        worktreePath: String? = nil, shortId: String? = nil
+        worktreePath: String? = nil, shortId: String? = nil, cwd: String? = nil, branch: String? = nil
     ) throws -> AgentSession {
         let session = AgentSession(
             sessionId: id, shortId: shortId, projectId: project.id, taskId: taskId, role: role,
-            worktreePath: worktreePath, cwd: "/tmp", state: state
+            worktreePath: worktreePath, branch: branch, cwd: cwd ?? worktreePath ?? "/tmp", state: state
         )
         try sessions.insert(session)
         return session
+    }
+
+    /// A worker co-resident in the project's own checkout: no worktree, standing in the repo.
+    @discardableResult
+    func sharedSession(
+        _ id: String, taskId: String, state: SessionState = .running,
+        branch: String = SharedCheckoutGroup.branch(epicId: nil)
+    ) throws -> AgentSession {
+        try session(id, role: .worker, state: state, taskId: taskId, cwd: project.repoPath, branch: branch)
+    }
+
+    /// A worker in its own worktree, recorded the way a spawn records one: a path of its own and
+    /// the task branch cut for it.
+    @discardableResult
+    func worktreeSession(_ id: String, taskId: String, state: SessionState = .running) throws -> AgentSession {
+        try session(
+            id, role: .worker, state: state, taskId: taskId,
+            worktreePath: "/tmp/demo-worktrees/\(taskId)", branch: TaskStore.branchName(for: taskId)
+        )
     }
 
     @discardableResult
@@ -141,10 +181,11 @@ struct BridgeFixture {
     }
 
     @discardableResult
-    func epic(_ title: String, in projectId: String? = nil) throws -> Epic {
+    func epic(_ title: String, state: EpicState = .active, in projectId: String? = nil) throws -> Epic {
+        let id = Epic.newId()
         let epic = Epic(
-            id: Epic.newId(), projectId: projectId ?? project.id, title: title, goal: nil,
-            branch: "epic/\(title)", state: .active, createdAt: .nowMillis
+            id: id, projectId: projectId ?? project.id, title: title, goal: nil,
+            branch: EpicStore.branchPrefix + id, state: state, createdAt: .nowMillis
         )
         try db.writer.write { db in try epic.insert(db) }
         return epic
@@ -171,7 +212,7 @@ struct BridgeFixture {
         return agent
     }
 
-    func workerIdentity(sessionId: String, taskId: String) -> TokenIdentity {
+    func workerIdentity(sessionId: String, taskId: String?) -> TokenIdentity {
         TokenIdentity(token: "worker-\(sessionId)", scope: .worker, projectId: project.id, sessionId: sessionId, taskId: taskId)
     }
 
@@ -196,9 +237,27 @@ struct BridgeFixture {
         return await hooks.handle(event, identity: identity)
     }
 
+    func workerSession(_ id: String, taskId: String, state: SessionState = .running) throws -> AgentSession {
+        try session(id, role: .worker, state: state, taskId: taskId)
+    }
+
     func preToolUse(_ command: String, sessionId: String, identity: TokenIdentity, tool: String = "Bash") async -> HookDecision? {
         let event = HookEvent(name: "PreToolUse", sessionId: sessionId, toolName: tool, toolCommand: command, rawJSON: "{}")
         return await hooks.handle(event, identity: identity)
+    }
+
+    /// A write the way Claude Code reports one: the tool name plus the file it is about to touch.
+    func preToolUseWrite(
+        _ filePath: String, sessionId: String, identity: TokenIdentity, tool: String = "Edit"
+    ) async -> HookDecision? {
+        let event = HookEvent(
+            name: "PreToolUse", sessionId: sessionId, toolName: tool, toolFilePath: filePath, rawJSON: "{}"
+        )
+        return await hooks.handle(event, identity: identity)
+    }
+
+    func repoFile(_ relative: String) -> String {
+        project.repoPath + "/" + relative
     }
 }
 
@@ -217,5 +276,26 @@ func XCTAssertToolError<T>(
         }
     } catch {
         XCTFail("Expected ToolError, got \(error)", file: file, line: line)
+    }
+}
+
+
+/// Stands in for `ScopedCommitRunner`, which lives in AgentBoardRuntime — a target this one does
+/// not depend on. What matters here is the request the tool builds, not what git does with it.
+final class RecordingScopedCommits: ScopedCommitting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [ScopedCommitRequest] = []
+    var outcome: ScopedCommitOutcome?
+
+    var requests: [ScopedCommitRequest] {
+        lock.lock(); defer { lock.unlock() }
+        return recorded
+    }
+
+    func commit(_ request: ScopedCommitRequest) async throws -> ScopedCommitOutcome {
+        lock.lock()
+        recorded.append(request)
+        lock.unlock()
+        return outcome ?? .committed(sha: String(repeating: "a", count: 40), paths: request.paths)
     }
 }

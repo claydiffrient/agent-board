@@ -5,13 +5,6 @@ import XCTest
 
 extension Fixture {
     var roster: RosterStore { RosterStore(db) }
-
-    func otherProject(_ name: String = "Other") throws -> Project {
-        try projects.register(
-            name: name, repoPath: "/tmp/\(name)-\(UUID().uuidString)", baseBranch: "main",
-            worktreeRoot: "/tmp/\(name)-worktrees", memoryDir: nil
-        )
-    }
 }
 
 final class RosterStoreTests: XCTestCase {

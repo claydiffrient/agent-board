@@ -1,3 +1,4 @@
+import AgentBoardCore
 import Foundation
 
 public struct WorktreeInfo: Sendable, Equatable {
@@ -44,6 +45,19 @@ public enum BranchDeletion: Sendable, Equatable {
     case noSuchBranch(String)
 }
 
+/// What `mergeIntoEpic` did to the epic branch.
+public enum EpicMerge: Sendable, Equatable {
+    /// The task branch does not exist, so the task never committed anything.
+    case nothingToMerge
+    case alreadyMerged
+    case fastForwarded(head: String)
+    case merged(head: String)
+    /// The epic branch is untouched and the temporary worktree is gone.
+    case conflicted(files: [String])
+    /// Something else — the integrator, usually — has the epic branch checked out.
+    case skippedCheckedOut(path: String)
+}
+
 public struct WorktreeManager: Sendable {
     public static let gitPath = "/usr/bin/git"
 
@@ -67,9 +81,10 @@ public struct WorktreeManager: Sendable {
         try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
         let path = worktreeRoot.appendingPathComponent(name)
         if try branchExists(branch) {
-            try git(["worktree", "add", path.path, branch])
+            try addWorktree(["worktree", "add", path.path, branch], at: path)
         } else {
-            try git(["worktree", "add", path.path, "-b", branch, base])
+            try addWorktree(["worktree", "add", path.path, "-b", branch, base], at: path)
+            recordBranchBase(branch, base: base)
         }
         return path
     }
@@ -81,8 +96,34 @@ public struct WorktreeManager: Sendable {
         }
         try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
         let path = worktreeRoot.appendingPathComponent(name)
-        try git(["worktree", "add", path.path, branch])
+        try addWorktree(["worktree", "add", path.path, branch], at: path)
         return path
+    }
+
+    /// Puts the project's own checkout on the shared branch, cutting it from `base` the first time.
+    /// Throws rather than switching when the checkout carries uncommitted work or git refuses the
+    /// switch — that work belongs to whoever is using the repository, and the caller falls back to
+    /// a worktree instead.
+    public func adoptSharedBranch(_ branch: String, from base: String) throws {
+        if try currentBranch(at: repoPath) == branch { return }
+        if try hasUncommittedChanges(worktree: repoPath) {
+            throw AgentRuntimeError(
+                "\(repoPath.path) has uncommitted changes, so it cannot be switched to \(branch)"
+            )
+        }
+        if try branchExists(branch) {
+            try gitChecked(["checkout", branch], cwd: repoPath)
+        } else {
+            try gitChecked(["checkout", "-b", branch, base], cwd: repoPath)
+        }
+    }
+
+    /// The branch checked out at `path`, or nil when its HEAD is detached.
+    public func currentBranch(at path: URL) throws -> String? {
+        let result = try gitRaw(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd: path)
+        guard result.status == 0 else { return nil }
+        let name = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
     }
 
     public func ensureBranch(_ name: String, from base: String) throws {
@@ -93,6 +134,70 @@ public struct WorktreeManager: Sendable {
     public func branchExists(_ name: String) throws -> Bool {
         let result = try gitRaw(["rev-parse", "--verify", "--quiet", "refs/heads/\(name)"], cwd: repoPath)
         return result.status == 0
+    }
+
+    /// Merges an accepted task branch into its epic branch (SPEC §5.2), without needing the epic
+    /// branch to be checked out: a fast-forward moves the ref directly, and anything else borrows a
+    /// temporary worktree that is removed again — with the epic branch kept — either way.
+    /// A conflict aborts and leaves the epic branch exactly where it was.
+    public func mergeIntoEpic(taskBranch: String, epicBranch: String, worktreeName: String) throws -> EpicMerge {
+        guard try branchExists(taskBranch) else { return .nothingToMerge }
+        guard try branchExists(epicBranch) else {
+            throw AgentRuntimeError("cannot merge \(taskBranch): no branch \(epicBranch) in \(repoPath.path)")
+        }
+        let taskRef = "refs/heads/\(taskBranch)"
+        let epicRef = "refs/heads/\(epicBranch)"
+        if try isAncestor(taskRef, of: epicRef) { return .alreadyMerged }
+        if let holder = try list().first(where: { $0.branch == epicBranch }) {
+            return .skippedCheckedOut(path: holder.path.path)
+        }
+        if try isAncestor(epicRef, of: taskRef) {
+            let head = try resolve(taskRef)
+            try git(["update-ref", epicRef, head, try resolve(epicRef)])
+            return .fastForwarded(head: head)
+        }
+
+        let worktree = try createForBranch(name: worktreeName, branch: epicBranch)
+        defer { try? remove(path: worktree) }
+        let message = "Merge \(taskBranch) into \(epicBranch)"
+        let merge = try gitRaw(mergeConfig() + ["merge", "--no-ff", "--no-edit", "-m", message, taskBranch], cwd: worktree)
+        guard merge.status == 0 else {
+            let files = conflictedFiles(in: worktree)
+            _ = try? gitRaw(["merge", "--abort"], cwd: worktree)
+            return .conflicted(files: files)
+        }
+        return .merged(head: try headCommit(worktree: worktree))
+    }
+
+    private func conflictedFiles(in worktree: URL) -> [String] {
+        guard let output = try? gitRaw(["diff", "--name-only", "--diff-filter=U"], cwd: worktree).stdout else { return [] }
+        return output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// A merge commit needs a committer identity and must never stop on a GPG passphrase prompt —
+    /// the app has no terminal to answer one. The repository's own identity wins when it has one.
+    func mergeConfig() throws -> [String] {
+        var config = ["-c", "commit.gpgsign=false"]
+        let email = try gitRaw(["config", "user.email"], cwd: repoPath)
+        if email.status != 0 || email.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            config += ["-c", "user.email=agent-board@localhost", "-c", "user.name=Agent Board"]
+        }
+        return config
+    }
+
+    private func resolve(_ ref: String) throws -> String {
+        try gitChecked(["rev-parse", "--verify", ref], cwd: repoPath)
+            .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Git records each worktree's location in `.git/worktrees/<name>/gitdir`; only `git worktree
+    /// move` rewrites that record, so a plain directory move leaves the worktree unresolvable.
+    public func move(worktree: URL, to destination: URL) throws {
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try git(["worktree", "move", worktree.path, destination.path])
     }
 
     /// Never forced: git refuses the removal rather than destroying uncommitted work.
@@ -117,8 +222,27 @@ public struct WorktreeManager: Sendable {
         guard try known.contains(where: { try isAncestor("refs/heads/\(branch)", of: $0) }) else {
             return .kept(branch: branch, reason: "it is not merged into \(known.joined(separator: " or "))")
         }
+        recordReapedTip(branch)
         try git(["update-ref", "-d", "refs/heads/\(branch)"])
         return .deleted(branch)
+    }
+
+    /// The ledger is best effort: it must never be the reason a branch survives or a spawn fails.
+    /// Nothing outside `agentboard/<task-id>` gets an entry.
+    private func recordBranchBase(_ branch: String, base: String) {
+        guard let taskId = TaskBranchLedger.taskId(ofBranch: branch) else { return }
+        let ref = TaskBranchLedger.baseRef(taskId: taskId)
+        guard (try? refCommit(ref)) == nil, let commit = try? refCommit(base) else { return }
+        _ = try? setRef(ref, to: commit)
+    }
+
+    /// Written before the ref is dropped, so a task whose work merged stays distinguishable from
+    /// one that never committed. Without it both look the same: no branch.
+    private func recordReapedTip(_ branch: String) {
+        guard let taskId = TaskBranchLedger.taskId(ofBranch: branch),
+              let tip = try? refCommit("refs/heads/\(branch)")
+        else { return }
+        _ = try? setRef(TaskBranchLedger.tipRef(taskId: taskId), to: tip)
     }
 
     public func localBranches(withPrefix prefix: String) throws -> [String] {
@@ -163,6 +287,30 @@ public struct WorktreeManager: Sendable {
         let known = try bases.filter { try commitExists($0) }
         guard !known.isEmpty else { return true }
         return try !known.contains { try isAncestor("HEAD", of: $0, cwd: worktree) }
+    }
+
+    /// Resolves any ref — including the ledger refs outside `refs/heads` — to its commit, or nil
+    /// when the ref is not there.
+    public func refCommit(_ ref: String) throws -> String? {
+        let result = try gitRaw(["rev-parse", "--verify", "--quiet", "\(ref)^{commit}"], cwd: repoPath)
+        guard result.status == 0 else { return nil }
+        let commit = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return commit.isEmpty ? nil : commit
+    }
+
+    public func setRef(_ ref: String, to commit: String) throws {
+        try git(["update-ref", ref, commit])
+    }
+
+    /// Whether `commit` is already in `ref`'s history. Both must exist.
+    public func isMerged(commit: String, into ref: String) throws -> Bool {
+        try isAncestor(commit, of: ref)
+    }
+
+    /// How many commits `tip` carries that `base` does not.
+    public func commitCount(from base: String, to tip: String) throws -> Int {
+        let output = try gitChecked(["rev-list", "--count", "\(base)..\(tip)"], cwd: repoPath).stdout
+        return Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
 
     public func commitExists(_ rev: String) throws -> Bool {
@@ -307,17 +455,29 @@ public struct WorktreeManager: Sendable {
         try gitChecked(args, cwd: repoPath)
     }
 
-    private func gitChecked(_ args: [String], cwd: URL) throws -> CommandResult {
+    @discardableResult
+    func gitChecked(_ args: [String], cwd: URL) throws -> CommandResult {
         let result = try gitRaw(args, cwd: cwd)
-        guard result.status == 0 else {
-            throw AgentRuntimeError(
-                "git \(args.joined(separator: " ")) exited \(result.status)\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)"
-            )
-        }
+        guard result.status == 0 else { throw AgentRuntimeError(Self.failure(args, result)) }
         return result
     }
 
-    private func gitRaw(_ args: [String], cwd: URL) throws -> CommandResult {
+    /// `git worktree add` runs the repository's `post-checkout` hook and exits with the hook's
+    /// status, so a repository that sets a new worktree up from that hook reports its setup failure
+    /// as this command's output — including the failure a shell-unsafe worktree path causes.
+    private func addWorktree(_ args: [String], at path: URL) throws {
+        let result = try gitRaw(args, cwd: repoPath)
+        guard result.status != 0 else { return }
+        throw AgentRuntimeError(
+            WorktreePathDiagnosis.explain(Self.failure(args, result), worktreePath: path.path)
+        )
+    }
+
+    private static func failure(_ args: [String], _ result: CommandResult) -> String {
+        "git \(args.joined(separator: " ")) exited \(result.status)\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)"
+    }
+
+    func gitRaw(_ args: [String], cwd: URL) throws -> CommandResult {
         var env = ProcessInfo.processInfo.environment
         env["GIT_TERMINAL_PROMPT"] = "0"
         return try ProcessRunner.run(

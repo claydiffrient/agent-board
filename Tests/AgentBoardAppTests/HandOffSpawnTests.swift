@@ -81,6 +81,7 @@ final class HandOffSpawnTests: XCTestCase {
         }
 
         XCTAssertEqual(try fixture.sessions.forTask(task.id).count, 1)
+        await fixture.supervisor.waitForSetup()
         let spawns = await fixture.runtime.spawns.count
         XCTAssertEqual(spawns, 1, "the refused assignment still launched a process")
     }

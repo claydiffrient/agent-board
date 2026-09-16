@@ -10,6 +10,7 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let sessions: SessionStore
     private let progress: ProgressStore
     private let reports: ReportStore
+    private let messages: MessageStore
     private let approvals: ApprovalStore
     private let epics: EpicStore
     private let board: Board
@@ -24,6 +25,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         sessions = SessionStore(db)
         progress = ProgressStore(db)
         reports = ReportStore(db)
+        messages = MessageStore(db)
         approvals = ApprovalStore(db)
         epics = EpicStore(db)
         board = Board(db)
@@ -39,11 +41,14 @@ public final class OrchestratorToolHandler: ToolHandler {
             name: "list_tasks",
             description: "List the tasks on this project's board, optionally filtered by column or epic. Each entry carries "
                 + "its dependencies and the active worker session if one is assigned. Only `ready` tasks can be given "
-                + "to a worker; `backlog` tasks have unmet dependencies or have not been groomed yet.",
+                + "to a worker; `backlog` tasks have unmet dependencies or have not been groomed yet. Archived tasks "
+                + "are hidden by default: they are still on the board and still readable through get_task, so a task "
+                + "missing from this list has been archived, not deleted. Pass `include_archived` to see them.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "column": ToolSchema.enumeration(columnNames, "Restrict to one board column."),
                     "epic_id": ToolSchema.string("Restrict to tasks in this epic."),
+                    "include_archived": ToolSchema.boolean("Include archived tasks; they are omitted by default."),
                 ],
                 required: []
             )
@@ -51,7 +56,8 @@ public final class OrchestratorToolHandler: ToolHandler {
         ToolDescriptor(
             name: "get_task",
             description: "Full detail for one task: body, acceptance criteria, flags, dependencies, and the most recent "
-                + "worker report on it if any.",
+                + "worker report on it if any. Archived tasks are returned too, carrying `archived: true` and the "
+                + "`archived_at` timestamp.",
             inputSchema: ToolSchema.object(properties: ["id": ToolSchema.string()], required: ["id"])
         ),
         ToolDescriptor(
@@ -69,6 +75,10 @@ public final class OrchestratorToolHandler: ToolHandler {
                     "column": ToolSchema.enumeration(["proposed", "backlog", "ready"], "Defaults to backlog."),
                     "model": ToolSchema.string("Claude model id for the worker on this task; omit for the project default."),
                     "depends_on": ToolSchema.stringArray("Task ids that must be done before this one is ready."),
+                    "epic_id": ToolSchema.string(
+                        "Put the task in this existing epic, so it branches from the epic's integration branch rather "
+                            + "than the project base. The epic must be in this project and must not be `done`."
+                    ),
                 ],
                 required: ["title"]
             )
@@ -93,13 +103,29 @@ public final class OrchestratorToolHandler: ToolHandler {
             name: "move_task",
             description: "Move a task to another column. `running` is entered only through spawn_worker and `done` only "
                 + "when a human accepts the work, so those two are refused. Moving into `backlog` or `ready` is "
-                + "subject to the dependency check, and the response tells you where the task actually ended up.",
+                + "subject to the dependency check, and the response tells you where the task actually ended up. "
+                + "Moving an archived task out of `done` unarchives it, so it does not sit hidden in a live column.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "id": ToolSchema.string(),
                     "column": ToolSchema.enumeration(["proposed", "backlog", "ready", "review"]),
                 ],
                 required: ["id", "column"]
+            )
+        ),
+        ToolDescriptor(
+            name: "set_epic",
+            description: "Move a task into an epic, between epics, or — by omitting `epic_id` — out of its epic "
+                + "entirely. Only a task that has never been spawned can be moved: a spawned task's branch was cut "
+                + "from whatever base its epic had at spawn time, so re-homing it would leave its commits based on a "
+                + "branch the new epic never shared. Moving into an epic that is already `done` is refused too, "
+                + "because it would make a finished epic unfinished. Dependencies are not touched.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "task_id": ToolSchema.string(),
+                    "epic_id": ToolSchema.string("Destination epic; omit to take the task out of its epic."),
+                ],
+                required: ["task_id"]
             )
         ),
         ToolDescriptor(
@@ -130,8 +156,11 @@ public final class OrchestratorToolHandler: ToolHandler {
         ToolDescriptor(
             name: "spawn_worker",
             description: "Assign a `ready` task to a new worker session in its own worktree. Subject to the project's "
-                + "concurrency caps. When autonomy is off, this creates an approval the human must grant; you will "
-                + "learn the decision through list_reports, so do not call again for the same task in the meantime.",
+                + "concurrency caps. Returns as soon as the worktree exists and the task is running, while the "
+                + "repository is still being set up — a worker in `setup` holds a concurrency slot but cannot work "
+                + "yet, and a setup that fails puts the task back in ready with a failed report. When autonomy is "
+                + "off, this creates an approval the human must grant; you will learn the decision through "
+                + "list_reports, so do not call again for the same task in the meantime.",
             inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
         ),
         ToolDescriptor(
@@ -142,8 +171,18 @@ public final class OrchestratorToolHandler: ToolHandler {
         ),
         ToolDescriptor(
             name: "list_agents",
-            description: "Every agent session on this project, newest first, with its task, state, and spend so far.",
-            inputSchema: ToolSchema.object(properties: [:], required: [])
+            description: "Agent sessions on this project, newest first, with task, state, and spend so far. Sessions "
+                + "that have ended — stopped, failed, or completed more than \(SessionVisibility.endedGraceDescription) "
+                + "ago — are left out: a worker missing from this list has finished, it has not vanished. Pass "
+                + "include_ended to get the whole roster, including sessions that ended long ago.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "include_ended": ToolSchema.boolean(
+                        "Include sessions that ended more than \(SessionVisibility.endedGraceDescription) ago. Defaults to false."
+                    ),
+                ],
+                required: []
+            )
         ),
         ToolDescriptor(
             name: "list_reports",
@@ -217,6 +256,104 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "through list_reports.",
             inputSchema: ToolSchema.object(properties: ["epic_id": ToolSchema.string()], required: ["epic_id"])
         ),
+        ToolDescriptor(
+            name: "close_epic",
+            description: "End an epic without integrating it. `state` is `done` when the epic got where it needed to "
+                + "get, or `abandoned` when it was the wrong idea. This is a board state change and nothing else: "
+                + "the epic branch is not merged, no pull request is opened, no branch or worktree is deleted, and "
+                + "no task is deleted, archived, or moved out of the epic — unfinished tasks stay in the epic's lane "
+                + "exactly as they are. Refused while any worker is still running in the epic; stop those first. "
+                + "Refused for an epic that is already `done` or `abandoned`: the two mean different things and one "
+                + "does not become the other. If work left in a closed epic still matters, take it out with "
+                + "`set_epic(task_id)` and no `epic_id` and it stands alone on the board.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "epic_id": ToolSchema.string(),
+                    "state": ToolSchema.enumeration(
+                        EpicClosure.allCases.map(\.rawValue),
+                        "`done` if the epic is finished, `abandoned` if it should not have been started."
+                    ),
+                ],
+                required: ["epic_id", "state"]
+            )
+        ),
+        ToolDescriptor(
+            name: "push_branch",
+            description: "Ask the human to push one of this project's branches to its git remote. Refused for any "
+                + "branch that is neither `agentboard/<something>` nor the project's base branch. A push is "
+                + "outward-facing and cannot be taken back, so this always waits on human approval regardless of the "
+                + "autonomy setting: the call returns a pending approval, not a finished push. You will learn the "
+                + "decision through list_reports.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "branch": ToolSchema.string("Branch to push, e.g. `agentboard/epic-<id>`."),
+                ],
+                required: ["branch"]
+            )
+        ),
+        ToolDescriptor(
+            name: "open_pull_request",
+            description: "Ask the human to open a pull request from one of this project's branches. Name either "
+                + "`epic_id`, which uses that epic's integration branch, or `branch` directly; a branch that is "
+                + "neither `agentboard/<something>` nor the project's base branch is refused. The branch is pushed "
+                + "first if the remote does not have it. Opening a pull request is visible to collaborators and CI "
+                + "the moment it happens and cannot be taken back, so this always waits on human approval regardless "
+                + "of the autonomy setting: the call returns a pending approval, not a finished pull request. On "
+                + "approval the pull request's URL is recorded against the epic or task and reaches you through "
+                + "list_reports. An epic whose tasks are not all `done` is allowed — the approval says so, and the "
+                + "human decides whether early review is what you meant.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "epic_id": ToolSchema.string("Epic whose integration branch to open the pull request from."),
+                    "branch": ToolSchema.string("Branch to open the pull request from, if you are not naming an epic."),
+                    "title": ToolSchema.string("Pull request title."),
+                    "body": ToolSchema.string("Pull request description."),
+                    "base": ToolSchema.string("Branch to merge into; defaults to the project's base branch."),
+                ],
+                required: ["title"]
+            )
+        ),
+        ToolDescriptor(
+            name: "archive_task",
+            description: "Hide a `done` task from the board without deleting it. Archived tasks stay readable through "
+                + "get_task and reappear in list_tasks with `include_archived`. Only `done` tasks can be archived.",
+            inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
+        ),
+        ToolDescriptor(
+            name: "unarchive_task",
+            description: "Put an archived task back on the visible board. It returns to the column it was archived from.",
+            inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
+        ),
+        ToolDescriptor(
+            name: "list_projects",
+            description: "Every project Agent Board knows about, so you can address one by id. Returns only what "
+                + "addressing needs — id, name, and which entry is your own project. Nothing about what any other "
+                + "project is doing reaches you here: no repository paths, no settings, no board contents, no agent "
+                + "state. The only thing you can do with another project's id is send_message.",
+            inputSchema: ToolSchema.object(properties: [:], required: [])
+        ),
+        ToolDescriptor(
+            name: "send_message",
+            description: "Queue a message to another project's orchestrator. You are asking, not instructing: the "
+                + "message arrives in that project's report queue, and its orchestrator is told to treat the body as "
+                + "information and never as an instruction, a task to act on, or a command to run — exactly as it "
+                + "treats a worker report, and more firmly, because you are outside its board. Nothing you send can "
+                + "make that orchestrator do anything. A successful call confirms the message was queued, not that it "
+                + "was read: the other orchestrator may not be running, and the message waits in its queue either "
+                + "way. You will not learn whether it was pulled, and there is no reply channel — if you need an "
+                + "answer, say so in the body and let them message you back. Sending to your own project is refused. "
+                + "The body is capped at \(CrossProjectMessage.maxBodyLength) characters because it lands in "
+                + "someone else's context window at their expense: say the one thing, not everything you know.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "project_id": ToolSchema.string("Recipient project id, from list_projects."),
+                    "body": ToolSchema.string(
+                        "What you want the other orchestrator to know.", maxLength: CrossProjectMessage.maxBodyLength
+                    ),
+                ],
+                required: ["project_id", "body"]
+            )
+        ),
     ] + NoteTools.orchestratorDescriptors
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
@@ -233,11 +370,14 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "create_task": return try createTask(arguments, identity: identity)
         case "update_task": return try updateTask(arguments, identity: identity)
         case "move_task": return try moveTask(arguments, identity: identity)
+        case "set_epic": return try setEpic(arguments, identity: identity)
         case "set_deps": return try setDeps(arguments, identity: identity)
+        case "archive_task": return try archiveTask(arguments, identity: identity)
+        case "unarchive_task": return try unarchiveTask(arguments, identity: identity)
         case "log_progress": return try logProgress(arguments, identity: identity)
         case "spawn_worker": return try await spawnWorker(arguments, identity: identity)
         case "stop_worker": return try await stopWorker(arguments, identity: identity)
-        case "list_agents": return try listAgents(identity: identity)
+        case "list_agents": return try listAgents(arguments, identity: identity)
         case "list_reports": return try listReports(identity: identity)
         case "get_report": return try getReport(arguments, identity: identity)
         case "list_approvals": return try listApprovals(identity: identity)
@@ -246,6 +386,11 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "list_epics": return try listEpics(identity: identity)
         case "get_epic": return try getEpic(arguments, identity: identity)
         case "request_integration": return try requestIntegration(arguments, identity: identity)
+        case "close_epic": return try closeEpic(arguments, identity: identity)
+        case "push_branch": return try pushBranch(arguments, identity: identity)
+        case "open_pull_request": return try openPullRequest(arguments, identity: identity)
+        case "list_projects": return try listProjects(identity: identity)
+        case "send_message": return try await sendMessage(arguments, identity: identity)
         default: throw ToolError("Unknown tool: \(name)")
         }
     }
@@ -256,15 +401,22 @@ public final class OrchestratorToolHandler: ToolHandler {
 
     private func listTasks(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
         let column = try ToolArguments.optionalString("column", in: arguments).map(parseColumn)
-        let epicId = ToolArguments.optionalString("epic_id", in: arguments)
-        let list = try tasks.list(projectId: identity.projectId, column: column, epicId: epicId)
+        // Scoped, not just filtered: passing the id through would answer "no tasks" for another
+        // project's epic, which reads as "that epic is empty" rather than "that epic is not yours".
+        let epicId = try ToolArguments.optionalString("epic_id", in: arguments)
+            .flatMap { $0.isEmpty ? nil : $0 }
+            .map { try projectEpic($0, identity: identity).id }
+        let includeArchived = arguments["include_archived"]?.boolValue ?? false
+        let list = try tasks.list(
+            projectId: identity.projectId, column: column, epicId: epicId, includeArchived: includeArchived
+        )
         return .json(.array(try list.map(renderTaskSummary)))
     }
 
     private func getTask(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
         let task = try projectTask(try ToolArguments.requiredString("id", in: arguments), identity: identity)
         let deps: [JSONValue] = try tasks.deps(of: task.id).compactMap { depId in
-            guard let dep = try tasks.get(depId) else { return nil }
+            guard let dep = try tasks.get(depId, includeArchived: true) else { return nil }
             return .object(["id": .string(dep.id), "title": .string(dep.title), "column": .string(dep.column.rawValue)])
         }
         let latestReport = try db.reader.read { db in
@@ -290,6 +442,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             "failure_reason": .optional(task.failureReason),
             "created_at": .millis(task.createdAt),
             "updated_at": .millis(task.updatedAt),
+            "archived": .bool(task.isArchived),
+            "archived_at": .millis(task.archivedAt),
             "deps": .array(deps),
             "active_session": try activeSession(for: task.id),
             "latest_report": .null,
@@ -308,6 +462,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         for dep in dependsOn {
             _ = try projectTask(dep, identity: identity)
         }
+        let epic = try destinationEpic(arguments, identity: identity)
         let task = try tasks.create(
             projectId: identity.projectId,
             title: title,
@@ -316,7 +471,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             priority: ToolArguments.optionalString("priority", in: arguments),
             column: column,
             origin: .orchestrator,
-            epicId: nil,
+            epicId: epic?.id,
             model: ToolArguments.optionalString("model", in: arguments)
         )
         if !dependsOn.isEmpty {
@@ -324,7 +479,11 @@ public final class OrchestratorToolHandler: ToolHandler {
         }
         try tasks.refreshReadiness(projectId: identity.projectId)
         let final = try tasks.get(task.id) ?? task
-        return .json(.object(["id": .string(final.id), "column": .string(final.column.rawValue)]))
+        return .json(.object([
+            "id": .string(final.id),
+            "column": .string(final.column.rawValue),
+            "epic_id": .optional(final.epicId),
+        ]))
     }
 
     private func updateTask(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
@@ -343,14 +502,56 @@ public final class OrchestratorToolHandler: ToolHandler {
         let column = try parseColumn(try ToolArguments.requiredString("column", in: arguments))
         try refuseTerminalColumns(column, verb: "move a task into")
         try tasks.move(task.id, to: column)
+        if task.isArchived {
+            try tasks.unarchive(task.id)
+        }
         if column == .backlog || column == .ready {
             try tasks.refreshReadiness(projectId: identity.projectId)
         }
-        let final = try tasks.get(task.id)?.column ?? column
+        let final = try tasks.get(task.id, includeArchived: true)?.column ?? column
+        let unarchived = task.isArchived ? " It is no longer archived." : ""
         if final != column {
-            return ToolResult(text: "Task \(task.id) is in \(final.rawValue), not \(column.rawValue): its dependencies decide readiness.")
+            return ToolResult(
+                text: "Task \(task.id) is in \(final.rawValue), not \(column.rawValue): its dependencies decide readiness.\(unarchived)"
+            )
         }
-        return ToolResult(text: "Task \(task.id) is now in \(final.rawValue).")
+        return ToolResult(text: "Task \(task.id) is now in \(final.rawValue).\(unarchived)")
+    }
+
+    private func setEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let task = try projectTask(try ToolArguments.requiredString("task_id", in: arguments), identity: identity)
+        let destination = try destinationEpic(arguments, identity: identity)
+        if task.epicId == destination?.id {
+            let placement = destination.map { "already in epic \($0.id)" } ?? "already outside any epic"
+            return ToolResult(text: "Task \(task.id) is \(placement); nothing changed.")
+        }
+        let spawned = try sessions.forTask(task.id)
+        guard spawned.isEmpty else {
+            let branch = spawned.compactMap(\.branch).first ?? TaskStore.branchName(for: task.id)
+            throw ToolError(
+                "Task \(task.id) has already been spawned: its branch \(branch) was cut "
+                    + "from the base its epic had at spawn time, and moving the task now would not move the commits. "
+                    + "Integrating the new epic would merge a branch the work was never based on."
+            )
+        }
+        let source = try task.epicId.map { try projectEpic($0, identity: identity) }
+        try tasks.setEpic(task.id, epicId: destination?.id)
+        try tasks.refreshReadiness(projectId: identity.projectId)
+        let arrival = destination.map { "into epic \($0.id) (\($0.branch))" } ?? "out of every epic"
+        let departure = source.map { " It left epic \($0.id)." } ?? ""
+        return ToolResult(text: "Task \(task.id) moved \(arrival).\(departure)")
+    }
+
+    /// A closed epic is refused as a destination: adding an unfinished task to it would leave a
+    /// finished epic reporting fewer done tasks than it has, and an abandoned one would acquire work
+    /// nobody intends to do.
+    private func destinationEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> Epic? {
+        guard let id = ToolArguments.optionalString("epic_id", in: arguments), !id.isEmpty else { return nil }
+        let epic = try projectEpic(id, identity: identity)
+        guard !epic.state.isTerminal else {
+            throw ToolError("Epic \(epic.id) is \(epic.state.rawValue): it is closed, so it takes no more tasks.")
+        }
+        return epic
     }
 
     private func setDeps(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
@@ -364,7 +565,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         }
         try tasks.setDeps(task.id, dependsOn: dependsOn)
         try tasks.refreshReadiness(projectId: identity.projectId)
-        let final = try tasks.get(task.id)?.column ?? task.column
+        let final = try tasks.get(task.id, includeArchived: true)?.column ?? task.column
         return ToolResult(text: "Task \(task.id) now depends on \(dependsOn.count) task(s) and is in \(final.rawValue).")
     }
 
@@ -375,6 +576,27 @@ public final class OrchestratorToolHandler: ToolHandler {
         return ToolResult(text: "Logged.")
     }
 
+    private func archiveTask(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let task = try projectTask(try ToolArguments.requiredString("task_id", in: arguments), identity: identity)
+        if task.isArchived {
+            return ToolResult(text: "Task \(task.id) is already archived.")
+        }
+        guard task.column == .done else {
+            throw ToolError("Task \(task.id) is in \(task.column.rawValue), not done: only done tasks can be archived.")
+        }
+        try tasks.archive(task.id)
+        return ToolResult(text: "Task \(task.id) archived. It is hidden from list_tasks but still readable with get_task.")
+    }
+
+    private func unarchiveTask(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let task = try projectTask(try ToolArguments.requiredString("task_id", in: arguments), identity: identity)
+        guard task.isArchived else {
+            return ToolResult(text: "Task \(task.id) is not archived.")
+        }
+        try tasks.unarchive(task.id)
+        return ToolResult(text: "Task \(task.id) is back on the board in \(task.column.rawValue).")
+    }
+
     // MARK: Workers
 
     private func spawnWorker(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
@@ -382,8 +604,20 @@ public final class OrchestratorToolHandler: ToolHandler {
         let requestedBy = identity.sessionId ?? "orchestrator"
         switch try board.requestSpawn(taskId: task.id, requestedBy: requestedBy) {
         case .proceed:
-            let sessionId = try await control.spawnWorker(taskId: task.id)
-            return ToolResult(text: "spawned session \(sessionId)")
+            let spawn = try await control.spawnWorker(taskId: task.id)
+            let warnings = spawn.warnings.isEmpty ? "" : "\n\n" + spawn.warnings.joined(separator: "\n")
+            let site = spawn.sharesCheckout
+                ? "It runs in the project's own checkout at \(spawn.worktreePath)"
+                : "Its worktree is ready at \(spawn.worktreePath)"
+            return ToolResult(text: """
+            Worker dispatched for \(task.id); the task is now running. \(site) on branch \
+            \(spawn.branch), but setup is still running, so the worker cannot do anything yet and \
+            has no session id.
+
+            Nothing to do but wait. The session shows as `setup` in list_agents and turns to \
+            `running` once the agent starts; if setup fails instead, the task goes back to ready \
+            and a failed report tells you why. Do not call spawn_worker for this task again.
+            """ + warnings)
         case .approvalPending(let approval):
             return ToolResult(text: "approval \(approval.id) pending; the human must approve. You will be told via list_reports.")
         case .refused(let reason):
@@ -403,9 +637,11 @@ public final class OrchestratorToolHandler: ToolHandler {
         return ToolResult(text: "stopped session \(sessionId)")
     }
 
-    private func listAgents(identity: TokenIdentity) throws -> ToolResult {
+    private func listAgents(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let includeEnded = ToolArguments.optionalBool("include_ended", in: arguments) ?? false
         let all = try sessions.all(projectId: identity.projectId)
-        return .json(.array(all.map { session in
+        let roster = SessionVisibility.roster(all, now: Date(), includeEnded: includeEnded)
+        return .json(.array(roster.visible.map { session in
             .object([
                 "session_id": .string(session.sessionId),
                 "short_id": .optional(session.shortId),
@@ -456,6 +692,49 @@ public final class OrchestratorToolHandler: ToolHandler {
         try board.promote(taskId: task.id)
         let final = try tasks.get(task.id)?.column ?? .backlog
         return ToolResult(text: "Task \(task.id) promoted to \(final.rawValue).")
+    }
+
+    // MARK: Peer projects
+
+    private func listProjects(identity: TokenIdentity) throws -> ToolResult {
+        .json(.array(try projects.list().map { project in
+            .object([
+                "id": .string(project.id),
+                "name": .string(project.name),
+                "is_self": .bool(project.id == identity.projectId),
+            ])
+        }))
+    }
+
+    private func sendMessage(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+        let recipientId = try ToolArguments.requiredString("project_id", in: arguments)
+        let body = try ToolArguments.requiredString("body", in: arguments)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { throw ToolError("Message body is blank; say something or send nothing.") }
+        guard recipientId != identity.projectId else {
+            throw ToolError(
+                "send_message cannot address your own project. A message to yourself would arrive in the queue you "
+                    + "are already reading; write it down with log_progress or a note instead."
+            )
+        }
+        guard let recipient = try projects.get(recipientId) else {
+            throw ToolError("No project has id \(recipientId). Call list_projects for the ids you can address.")
+        }
+        guard body.count <= CrossProjectMessage.maxBodyLength else {
+            throw ToolError(
+                "Message body is \(body.count) characters; the cap is \(CrossProjectMessage.maxBodyLength). It lands "
+                    + "in another project's context window at their expense, so send the point, not the transcript."
+            )
+        }
+        let sent = try messages.send(
+            fromProjectId: identity.projectId, fromSessionId: identity.sessionId, toProjectId: recipient.id, body: body
+        )
+        await events.reportQueued(projectId: recipient.id)
+        return ToolResult(
+            text: "Queued for \"\(recipient.name)\" (\(recipient.id)) as message \(sent.message.id.map(String.init) ?? "?"). "
+                + "That project's orchestrator will see it the next time it pulls its reports; it may not be running, "
+                + "and nothing tells you when or whether it reads it."
+        )
     }
 
     // MARK: Epics
@@ -529,7 +808,7 @@ public final class OrchestratorToolHandler: ToolHandler {
 
     private func getEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
         let epic = try projectEpic(try ToolArguments.requiredString("id", in: arguments), identity: identity)
-        let epicTasks = try tasks.list(projectId: identity.projectId, epicId: epic.id)
+        let epicTasks = try tasks.list(projectId: identity.projectId, epicId: epic.id, includeArchived: true)
         var columns: [String: JSONValue] = [:]
         for column in TaskColumn.allCases {
             columns[column.rawValue] = .array(try epicTasks.filter { $0.column == column }.map(renderTaskSummary))
@@ -568,6 +847,114 @@ public final class OrchestratorToolHandler: ToolHandler {
         return ToolResult(text: "integration approval \(approval.id) pending")
     }
 
+    private func closeEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let epic = try projectEpic(try ToolArguments.requiredString("epic_id", in: arguments), identity: identity)
+        let raw = try ToolArguments.requiredString("state", in: arguments)
+        guard let closure = EpicClosure(rawValue: raw) else {
+            throw ToolError(
+                "Unknown state '\(raw)'. Use one of: \(EpicClosure.allCases.map(\.rawValue).joined(separator: ", "))."
+            )
+        }
+        let plan = try board.epicClosurePlan(epicId: epic.id, as: closure)
+        if plan.isRefused { throw ToolError(plan.message) }
+        try board.closeEpic(epicId: epic.id, as: closure, by: identity.sessionId ?? "orchestrator")
+        var text = "Epic \(epic.id) is \(closure.state.rawValue). Nothing was merged, pushed or deleted; "
+            + "\(epic.branch) and every task branch are untouched."
+        if !plan.unfinished.isEmpty {
+            text += " \(plan.unfinished.count) unfinished task(s) stay in the epic as they are: "
+                + plan.unfinished.map { "\($0.id) (\($0.column.rawValue))" }.joined(separator: ", ")
+                + ". Do not plan further work into this epic."
+        }
+        return ToolResult(text: text)
+    }
+
+    // MARK: Publishing
+
+    private func pushBranch(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let project = try requireProject(identity)
+        let branch = try ownedBranch(try ToolArguments.requiredString("branch", in: arguments), project: project)
+        let target = try publishTarget(branch: branch, identity: identity)
+        let approval = try board.requestPublish(
+            projectId: project.id,
+            kind: .push,
+            request: PublishRequest(branch: branch),
+            taskId: target.taskId,
+            epicId: target.epicId,
+            requestedBy: identity.sessionId ?? "orchestrator",
+            reason: "Push \(branch) to the project's git remote."
+        )
+        return ToolResult(text: "push approval \(approval.id) pending; the human must approve before \(branch) "
+            + "reaches the remote. You will be told via list_reports.")
+    }
+
+    private func openPullRequest(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let project = try requireProject(identity)
+        let epicId = ToolArguments.optionalString("epic_id", in: arguments)
+        let epic = try epicId.map { try projectEpic($0, identity: identity) }
+        guard let requested = epic?.branch ?? ToolArguments.optionalString("branch", in: arguments) else {
+            throw ToolError("Name either epic_id or branch: open_pull_request needs to know what to open the pull request from.")
+        }
+        let branch = try ownedBranch(requested, project: project)
+        let base = try ownedBranch(
+            ToolArguments.optionalString("base", in: arguments) ?? project.baseBranch, project: project
+        )
+        guard base != branch else {
+            throw ToolError("A pull request cannot merge \(branch) into itself. Give a different `base`.")
+        }
+        let title = try ToolArguments.requiredString("title", in: arguments)
+        let body = ToolArguments.optionalString("body", in: arguments) ?? ""
+        let target = try publishTarget(branch: branch, identity: identity)
+
+        var reason = "Open a pull request from \(branch) into \(base): \(title)"
+        if let epic, !(try board.epicReadyForIntegration(epicId: epic.id)) {
+            let counts = try taskCounts(epic)
+            reason += counts.total == 0
+                ? "\nThis epic has no tasks yet."
+                : "\nThis epic is not ready for integration: \(counts.total - counts.done) of \(counts.total) task(s) are not done."
+        }
+
+        let approval = try board.requestPublish(
+            projectId: project.id,
+            kind: .pullRequest,
+            request: PublishRequest(branch: branch, base: base, title: title, body: body),
+            taskId: target.taskId,
+            epicId: epic?.id ?? target.epicId,
+            requestedBy: identity.sessionId ?? "orchestrator",
+            reason: reason
+        )
+        return ToolResult(text: "pull request approval \(approval.id) pending; nothing is pushed and no pull request "
+            + "exists until the human approves. The URL reaches you via list_reports.")
+    }
+
+    private func ownedBranch(_ raw: String, project: Project) throws -> String {
+        do {
+            return try PublishPolicy.validate(branch: raw, baseBranch: project.baseBranch)
+        } catch let error as PublishPolicyError {
+            throw ToolError(error.description)
+        }
+    }
+
+    /// What the eventual progress row hangs off: the epic that owns the branch, or the task whose
+    /// branch this is. Either may be absent — a base-branch push belongs to neither.
+    private func publishTarget(branch: String, identity: TokenIdentity) throws -> (taskId: String?, epicId: String?) {
+        if let epic = try epics.list(projectId: identity.projectId).first(where: { $0.branch == branch }) {
+            return (nil, epic.id)
+        }
+        let taskId = branch.hasPrefix(PublishPolicy.ownedPrefix)
+            ? String(branch.dropFirst(PublishPolicy.ownedPrefix.count))
+            : nil
+        guard let taskId, let task = try tasks.get(taskId, includeArchived: true), task.projectId == identity.projectId
+        else { return (nil, nil) }
+        return (task.id, task.epicId)
+    }
+
+    private func requireProject(_ identity: TokenIdentity) throws -> Project {
+        guard let project = try projects.get(identity.projectId) else {
+            throw ToolError("Project \(identity.projectId) not found.")
+        }
+        return project
+    }
+
     // MARK: Helpers
 
     private func projectEpic(_ id: String, identity: TokenIdentity) throws -> Epic {
@@ -578,12 +965,12 @@ public final class OrchestratorToolHandler: ToolHandler {
     }
 
     private func taskCounts(_ epic: Epic) throws -> (done: Int, total: Int) {
-        let list = try tasks.list(projectId: epic.projectId, epicId: epic.id)
+        let list = try tasks.list(projectId: epic.projectId, epicId: epic.id, includeArchived: true)
         return (done: list.filter { $0.column == .done }.count, total: list.count)
     }
 
     private func projectTask(_ id: String, identity: TokenIdentity) throws -> BoardTask {
-        guard let task = try tasks.get(id), task.projectId == identity.projectId else {
+        guard let task = try tasks.get(id, includeArchived: true), task.projectId == identity.projectId else {
             throw ToolError("Task \(id) is not in this project.")
         }
         return task
@@ -625,6 +1012,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             "model": .optional(task.model),
             "blocked": .bool(task.blocked),
             "failed": .bool(task.failed),
+            "archived": .bool(task.isArchived),
+            "archived_at": .millis(task.archivedAt),
             "epic_id": .optional(task.epicId),
             "deps": .array(try tasks.deps(of: task.id).map(JSONValue.string)),
             "active_session": try activeSession(for: task.id),

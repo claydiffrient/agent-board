@@ -11,9 +11,15 @@ struct StatusView: View {
     @State private var serverPort: Int?
     @State private var lastError: String?
     @State private var errorMessage: String?
+    @State private var now = Date()
+    @AppStorage("status.showEndedSessions") private var showEnded = false
 
     private var taskTitles: [String: String] {
         Dictionary(uniqueKeysWithValues: tasks.value.map { ($0.id, $0.title) })
+    }
+
+    private var roster: SessionRoster {
+        SessionVisibility.roster(sessions.value, now: now, includeEnded: showEnded)
     }
 
     private var tokenCap: Int? {
@@ -22,7 +28,7 @@ struct StatusView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            roster
+            table
             Divider()
             footer
         }
@@ -61,8 +67,8 @@ struct StatusView: View {
         .errorAlert($errorMessage)
     }
 
-    private var roster: some View {
-        Table(sessions.value) {
+    private var table: some View {
+        Table(roster.visible) {
             TableColumn("ID") { session in
                 Text(session.displayShortId)
                     .monospaced()
@@ -80,9 +86,7 @@ struct StatusView: View {
             }
 
             TableColumn("State") { session in
-                Text(session.state.rawValue)
-                    .foregroundStyle(session.state.color)
-                    .fontWeight(.medium)
+                SessionStateLabel(state: session.state)
             }
             .width(min: 70, ideal: 90)
 
@@ -130,7 +134,14 @@ struct StatusView: View {
                     } label: {
                         Image(systemName: "terminal")
                     }
-                    .help("Open Terminal")
+                    .help("Attach to this agent's own Claude session")
+                    Button {
+                        openWindow(id: "worktree-shell", value: session.sessionId)
+                    } label: {
+                        Image(systemName: "apple.terminal")
+                    }
+                    .disabled(!WorktreeShellAvailability.canOpen(session))
+                    .help(WorktreeShellAvailability.buttonHelp(session))
                     if session.state.isActive {
                         Button("Stop") { run { try await env.supervisor.stop(sessionId: session.sessionId) } }
                     } else if session.state == .stopped || session.state == .failed {
@@ -139,15 +150,23 @@ struct StatusView: View {
                 }
                 .controlSize(.small)
             }
-            .width(min: 120, ideal: 140)
+            .width(min: 150, ideal: 170)
         }
         .overlay {
-            if sessions.value.isEmpty {
-                ContentUnavailableView(
-                    "No Sessions",
-                    systemImage: "cpu",
-                    description: Text("Drag a task into Running to spawn a worker.")
-                )
+            if roster.visible.isEmpty {
+                if roster.hiddenCount > 0 {
+                    ContentUnavailableView(
+                        "No Live Sessions",
+                        systemImage: "cpu",
+                        description: Text("\(roster.hiddenCount) ended \(roster.hiddenCount == 1 ? "session" : "sessions") hidden. Turn on Show ended to see them.")
+                    )
+                } else {
+                    ContentUnavailableView(
+                        "No Sessions",
+                        systemImage: "cpu",
+                        description: Text("Drag a task into Running to spawn a worker.")
+                    )
+                }
             }
         }
     }
@@ -162,6 +181,13 @@ struct StatusView: View {
                     .help(lastError)
             }
             Spacer()
+            if roster.hiddenCount > 0 {
+                Text("\(roster.hiddenCount) ended \(roster.hiddenCount == 1 ? "session" : "sessions") hidden")
+                    .help("Ended sessions drop off the roster \(SessionVisibility.endedGraceDescription) after they finish. Nothing is deleted.")
+            }
+            Toggle("Show ended", isOn: $showEnded)
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
             Text("\(sessions.value.filter { $0.state.isActive }.count) active · \(sessions.value.count) total")
         }
         .font(.caption)
@@ -171,6 +197,7 @@ struct StatusView: View {
     }
 
     private func reconcile() async {
+        now = .now
         await env.supervisor.reconcile(projectId: project.id)
         serverPort = env.supervisor.serverPort
         lastError = env.supervisor.lastError
@@ -192,4 +219,15 @@ struct StatusView: View {
     StatusView(project: preview.project)
         .environment(preview.environment)
         .frame(width: 1100, height: 500)
+}
+
+struct SessionStateLabel: View {
+    let state: SessionState
+
+    var body: some View {
+        Text(state.label)
+            .foregroundStyle(state.color)
+            .fontWeight(.medium)
+            .help(state.help ?? "")
+    }
 }

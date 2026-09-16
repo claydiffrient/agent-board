@@ -43,13 +43,22 @@ final class EpicLaneTests: XCTestCase {
     }
 
     func testRequestIntegrationShowsOnlyWhenEveryTaskIsDone() {
-        XCTAssertEqual(EpicLane.actions(state: .active, readyForIntegration: false), [])
-        XCTAssertEqual(EpicLane.actions(state: .active, readyForIntegration: true), [.requestIntegration])
-        XCTAssertEqual(EpicLane.actions(state: .planning, readyForIntegration: true), [.requestIntegration])
+        func integration(_ state: EpicState, _ ready: Bool) -> Bool {
+            EpicLane.actions(state: state, readyForIntegration: ready).contains(.requestIntegration)
+        }
+        XCTAssertFalse(integration(.active, false))
+        XCTAssertTrue(integration(.active, true))
+        XCTAssertTrue(integration(.planning, true))
+        XCTAssertFalse(integration(.integrating, true))
+        XCTAssertFalse(integration(.done, true))
+        XCTAssertFalse(integration(.abandoned, true))
     }
 
-    func testIntegratingShowsNeitherButton() {
-        XCTAssertEqual(EpicLane.actions(state: .integrating, readyForIntegration: true), [])
+    func testIntegratingOffersOnlyTheTwoWaysToEndTheEpic() {
+        XCTAssertEqual(EpicLane.actions(state: .integrating, readyForIntegration: true), [.closeAsDone, .abandon])
+    }
+
+    func testAbandonedOffersNothing() {
         XCTAssertEqual(EpicLane.actions(state: .abandoned, readyForIntegration: true), [])
     }
 
@@ -58,11 +67,13 @@ final class EpicLaneTests: XCTestCase {
         XCTAssertEqual(EpicLane.actions(state: .done, readyForIntegration: false), [.openPullRequest])
     }
 
-    func testNoStateShowsMoreThanOneButton() {
+    /// The header draws at most one ordinary button; the two that end the epic live in a menu, so
+    /// the lane never grows a destructive button beside a routine one.
+    func testNoStateShowsMoreThanOneOrdinaryButton() {
         for state in EpicState.allCases {
             for ready in [true, false] {
-                let actions = EpicLane.actions(state: state, readyForIntegration: ready)
-                XCTAssertLessThanOrEqual(actions.count, 1, "\(state) ready=\(ready) showed \(actions)")
+                let ordinary = EpicLane.actions(state: state, readyForIntegration: ready).filter { $0.closure == nil }
+                XCTAssertLessThanOrEqual(ordinary.count, 1, "\(state) ready=\(ready) showed \(ordinary)")
             }
         }
     }

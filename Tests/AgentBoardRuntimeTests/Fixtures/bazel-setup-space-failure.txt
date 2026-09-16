@@ -1,0 +1,60 @@
+git worktree add /Users/claydiffrient/Library/Application Support/AgentBoard/worktrees/f7c95040-65a6-41e2-84a6-d5aed1d809f6/1064a204-6c7c-42ee-82f8-b1764d2c1359/.capture/worktrees/36bf1b10-2aca-4dfd-89df-57a7ecd3a570 -b agentboard/36bf1b10-2aca-4dfd-89df-57a7ecd3a570 main exited 1
+stdout:
+HEAD is now at 3904e10 repro: unquoted workspace path in setup
+
+stderr:
+Preparing worktree (new branch 'agentboard/36bf1b10-2aca-4dfd-89df-57a7ecd3a570')
+Installing JavaScript dependencies with Bazel yarn
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Invocation ID: 53a33b91-f604-4e1c-b694-f3e41cb9c008
+Computing main repo mapping: 
+Computing main repo mapping: 
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //:yarn (5 packages loaded, 6 targets configured)
+Analyzing: target //:yarn (5 packages loaded, 6 targets configured)
+
+INFO: Analyzed target //:yarn (79 packages loaded, 436 targets configured).
+INFO: Found 1 target...
+Target //:yarn up-to-date:
+  bazel-bin/yarn
+INFO: Elapsed time: 4.681s, Critical Path: 0.01s
+INFO: 6 processes: 6 internal.
+INFO: Build completed successfully, 6 total actions
+INFO: Running command line: bazel-bin/yarn <args omitted>
+yarn install v1.22.22
+[1/4] Resolving packages...
+/bin/sh: /Users/claydiffrient/Library/Application: No such file or directory
+[2/4] Fetching packages...
+setup.sh: yarn install failed
+ensuring lint-staged is installed
+INFO: Invocation ID: 9f821035-a16a-476f-bb9b-f3611f76de16
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //:yarn (0 packages loaded, 0 targets configured)
+Analyzing: target //:yarn (0 packages loaded, 0 targets configured)
+
+INFO: Analyzed target //:yarn (0 packages loaded, 0 targets configured).
+INFO: Found 1 target...
+Target //:yarn up-to-date:
+  bazel-bin/yarn
+INFO: Elapsed time: 0.165s, Critical Path: 0.00s
+INFO: 1 process: 1 internal.
+INFO: Build completed successfully, 1 total action
+Pre-building gopackagesdriver for Go LSP
+INFO: Invocation ID: 11a16bc6-fc26-421b-9c00-b4230b89721b
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //:yarn (0 packages loaded, 0 targets configured)
+Analyzing: target //:yarn (0 packages loaded, 0 targets configured)
+
+INFO: Analyzed target //:yarn (0 packages loaded, 0 targets configured).
+INFO: Found 1 target...
+Target //:yarn up-to-date:
+  bazel-bin/yarn
+INFO: Elapsed time: 0.069s, Critical Path: 0.00s
+INFO: 1 process: 1 internal.
+INFO: Build completed successfully, 1 total action

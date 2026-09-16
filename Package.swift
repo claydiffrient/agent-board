@@ -19,7 +19,7 @@ let package = Package(
         ),
         .target(
             name: "AgentBoardRuntime",
-            dependencies: []
+            dependencies: ["AgentBoardCore"]
         ),
         .target(
             name: "AgentBoardServer",
@@ -44,7 +44,11 @@ let package = Package(
             ]
         ),
         .testTarget(name: "AgentBoardCoreTests", dependencies: ["AgentBoardCore"]),
-        .testTarget(name: "AgentBoardRuntimeTests", dependencies: ["AgentBoardRuntime", "AgentBoardCore"]),
+        .testTarget(
+            name: "AgentBoardRuntimeTests",
+            dependencies: ["AgentBoardRuntime", "AgentBoardCore"],
+            resources: [.copy("Fixtures")]
+        ),
         .testTarget(name: "AgentBoardServerTests", dependencies: ["AgentBoardServer"]),
         .testTarget(name: "AgentBoardBridgeTests", dependencies: ["AgentBoardBridge"]),
         .testTarget(name: "AgentBoardAppTests", dependencies: ["AgentBoard"]),

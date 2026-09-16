@@ -16,9 +16,16 @@ struct TaskBoardView: View {
     @State private var busyMessage: String?
     @State private var errorMessage: String?
     @State private var taskPendingDelete: BoardTask?
+    @State private var closurePlan: EpicClosurePlan?
     @State private var drafts = TaskDraftCache()
+    @State private var collapseChoices: [String: Bool] = [:]
+    @State private var showArchived = false
+    @State private var confirmArchive = false
+    @State private var jumpTarget: String?
 
     private let columnWidth: CGFloat = 250
+    private let jumpRailWidth: CGFloat = 190
+    private let collapseStore = EpicCollapseStore()
 
     private struct Lane: Identifiable {
         let id: String
@@ -31,16 +38,68 @@ struct TaskBoardView: View {
         }
     }
 
+    private var partition: ArchivePartition {
+        TaskArchive.partition(tasks.value, showArchived: showArchived)
+    }
+
+    private var visibleTasks: [BoardTask] {
+        partition.visible
+    }
+
+    /// Archived tasks the board is not drawing, per lane and column, so a cell can say so rather
+    /// than letting the work disappear silently. Keyed by column too, because unarchiving is allowed
+    /// from anywhere and an archived task can be moved back out of `done`.
+    private var hiddenByEpicAndColumn: [Key: Int] {
+        partition.hidden.reduce(into: [:]) { counts, task in
+            counts[Key(epicId: task.epicId, column: task.column), default: 0] += 1
+        }
+    }
+
+    private struct Key: Hashable {
+        let epicId: String?
+        let column: TaskColumn
+    }
+
+    private var archivableTasks: [BoardTask] {
+        TaskArchive.archivable(tasks.value)
+    }
+
     private var lanes: [Lane] {
         var byEpic: [String?: [BoardTask]] = [:]
-        for task in tasks.value {
+        for task in visibleTasks {
             byEpic[task.epicId, default: []].append(task)
         }
-        var result = [Lane(id: "no-epic", title: "No epic", epic: nil, tasks: byEpic[nil] ?? [])]
-        for epic in epics.value {
+        var result = [
+            Lane(
+                id: EpicLaneOrder.noEpicLaneId,
+                title: EpicJumpRail.noEpicTitle,
+                epic: nil,
+                tasks: byEpic[nil] ?? []
+            ),
+        ]
+        for epic in EpicLaneOrder.sorted(epics.value) {
             result.append(Lane(id: epic.id, title: epic.title, epic: epic, tasks: byEpic[epic.id] ?? []))
         }
         return result
+    }
+
+    private var epicLanes: [Lane] { lanes.filter { $0.epic != nil } }
+
+    private var lanesById: [String: Lane] {
+        Dictionary(uniqueKeysWithValues: lanes.map { ($0.id, $0) })
+    }
+
+    private func isCollapsed(_ epic: Epic) -> Bool {
+        EpicLaneCollapse.isCollapsed(
+            state: epic.state,
+            userChoice: collapseChoices[epic.id] ?? collapseStore.userChoice(epicId: epic.id)
+        )
+    }
+
+    private func toggleCollapse(_ epic: Epic) {
+        let collapsed = !isCollapsed(epic)
+        collapseChoices[epic.id] = collapsed
+        collapseStore.setUserChoice(collapsed, epicId: epic.id)
     }
 
     private var sessionsByTask: [String: [AgentSession]] {
@@ -61,23 +120,12 @@ struct TaskBoardView: View {
     }
 
     var body: some View {
-        ScrollView(.horizontal) {
-            VStack(alignment: .leading, spacing: 0) {
-                columnHeaders
-                    .padding(.horizontal)
-                    .padding(.top, 12)
+        HStack(spacing: 0) {
+            if !epicLanes.isEmpty {
+                epicJumpRail
                 Divider()
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        ForEach(lanes) { lane in
-                            laneView(lane)
-                        }
-                    }
-                    .padding()
-                    .contentShape(Rectangle())
-                    .onTapGesture { selectedTaskId = nil }
-                }
             }
+            board
         }
         .background {
             Color.clear
@@ -86,12 +134,12 @@ struct TaskBoardView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .onExitCommand { selectedTaskId = nil }
-        .onChange(of: tasks.value) { _, updated in
+        .onChange(of: visibleTasks) { _, updated in
             let reconciled = TaskSelection.reconciled(current: selectedTaskId, availableIds: updated.lazy.map(\.id))
             if reconciled != selectedTaskId { selectedTaskId = reconciled }
         }
         .task(id: project.id) {
-            await tasks.run(TaskStore(env.db).observe(projectId: project.id), in: env.db.reader)
+            await tasks.run(TaskStore(env.db).observe(projectId: project.id, includeArchived: true), in: env.db.reader)
         }
         .task(id: project.id) {
             await sessions.run(SessionStore(env.db).observe(projectId: project.id), in: env.db.reader)
@@ -127,6 +175,21 @@ struct TaskBoardView: View {
                 }
                 .help("Create a task")
             }
+            ToolbarItem {
+                Button {
+                    confirmArchive = true
+                } label: {
+                    Label(TaskArchive.buttonTitle(count: archivableTasks.count), systemImage: "archivebox")
+                }
+                .disabled(archivableTasks.isEmpty)
+                .help("Hide every done task from the board. Nothing is deleted.")
+            }
+            ToolbarItem {
+                Toggle(isOn: $showArchived) {
+                    Label("Show Archived", systemImage: showArchived ? "eye" : "eye.slash")
+                }
+                .help("Draw archived tasks back into their columns, dimmed and labelled")
+            }
         }
         .sheet(isPresented: $showNewTask) {
             NewTaskSheet(projectId: project.id)
@@ -135,10 +198,10 @@ struct TaskBoardView: View {
             NewEpicSheet(projectId: project.id)
         }
         .inspector(isPresented: inspectorShown) {
-            if let task = tasks.value.first(where: { $0.id == selectedTaskId }) {
+            if let task = visibleTasks.first(where: { $0.id == selectedTaskId }) {
                 TaskInspectorView(
                     task: task,
-                    allTasks: tasks.value,
+                    allTasks: visibleTasks,
                     sessions: sessionsByTask[task.id] ?? [],
                     drafts: drafts,
                     onClose: { selectedTaskId = nil }
@@ -147,6 +210,8 @@ struct TaskBoardView: View {
             }
         }
         .background(deleteConfirmation)
+        .background(archiveConfirmation)
+        .background(closeEpicConfirmation)
         .overlay {
             if let busyMessage {
                 ZStack {
@@ -160,6 +225,89 @@ struct TaskBoardView: View {
         .errorAlert($errorMessage)
     }
 
+    private var board: some View {
+        ScrollView(.horizontal) {
+            VStack(alignment: .leading, spacing: 0) {
+                columnHeaders
+                    .padding(.horizontal)
+                    .padding(.top, 12)
+                Divider()
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            ForEach(lanes) { lane in
+                                laneView(lane)
+                            }
+                        }
+                        .padding()
+                        .contentShape(Rectangle())
+                        .onTapGesture { selectedTaskId = nil }
+                    }
+                    .onChange(of: jumpTarget) { _, target in
+                        guard let target else { return }
+                        withAnimation { proxy.scrollTo(target, anchor: .top) }
+                        jumpTarget = nil
+                    }
+                }
+            }
+        }
+    }
+
+    private var epicJumpRail: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Epics")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+            Divider()
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(EpicJumpRail.entries(epics.value)) { entry in
+                        if let lane = lanesById[entry.laneId], let epic = lane.epic {
+                            jumpRailEntry(epic: epic, lane: lane)
+                        } else {
+                            Button(entry.title) { jumpTarget = entry.laneId }
+                                .buttonStyle(.plain)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                        }
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+        }
+        .frame(width: jumpRailWidth)
+        .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
+    private func jumpRailEntry(epic: Epic, lane: Lane) -> some View {
+        Button {
+            jumpTarget = EpicJumpRail.laneId(forEpicId: epic.id)
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(epic.title)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                HStack(spacing: 6) {
+                    EpicStateBadge(state: epic.state)
+                    Text(EpicLane.taskCount(columns: lane.tasks.lazy.map(\.column)).label)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Scroll to \(epic.title)")
+    }
+
     private var inspectorShown: Binding<Bool> {
         Binding(
             get: { selectedTaskId != nil },
@@ -170,7 +318,7 @@ struct TaskBoardView: View {
     private var columnHeaders: some View {
         HStack(alignment: .top, spacing: 12) {
             ForEach(TaskColumn.allCases, id: \.self) { column in
-                columnHeader(column, count: tasks.value.filter { $0.column == column }.count)
+                columnHeader(column, count: visibleTasks.filter { $0.column == column }.count)
             }
         }
     }
@@ -189,6 +337,12 @@ struct TaskBoardView: View {
                 Image(systemName: "info.circle")
                     .foregroundStyle(.secondary)
             }
+            if let notice = TaskArchive.hiddenNotice(count: partition.hidden.count { $0.column == column }) {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help("Hidden from the board, not deleted. Turn on Show Archived to see them.")
+            }
             Spacer()
         }
         .padding(.horizontal, 8)
@@ -204,30 +358,48 @@ struct TaskBoardView: View {
 
     @ViewBuilder
     private func laneView(_ lane: Lane) -> some View {
+        let collapsed = lane.epic.map(isCollapsed) ?? false
         VStack(alignment: .leading, spacing: 8) {
             if let epic = lane.epic {
                 EpicLaneHeader(
                     epic: epic,
                     count: EpicLane.taskCount(columns: lane.tasks.lazy.map(\.column)),
                     integrationPending: epicsAwaitingIntegrationApproval.contains(epic.id),
+                    isCollapsed: collapsed,
+                    onToggleCollapse: { toggleCollapse(epic) },
                     onRequestIntegration: { requestIntegration(epic) },
-                    onOpenPullRequest: { openPullRequest(epic) }
+                    onOpenPullRequest: { openPullRequest(epic) },
+                    onClose: { planClosure(epic, as: $0) }
                 )
             } else if lanes.count > 1 {
                 Text(lane.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
-            HStack(alignment: .top, spacing: 12) {
-                ForEach(TaskColumn.allCases, id: \.self) { column in
-                    columnCell(lane: lane, column: column)
+            if !collapsed {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(TaskColumn.allCases, id: \.self) { column in
+                        columnCell(lane: lane, column: column)
+                    }
                 }
             }
         }
+        .id(lane.id)
     }
 
     private func columnCell(lane: Lane, column: TaskColumn) -> some View {
         VStack(spacing: 8) {
+            let hidden = hiddenByEpicAndColumn[Key(epicId: lane.epic?.id, column: column)] ?? 0
+            if let notice = TaskArchive.hiddenNotice(count: hidden) {
+                HStack(spacing: 4) {
+                    Image(systemName: "archivebox")
+                    Text(notice)
+                    Spacer()
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .help("Hidden from the board, not deleted. Turn on Show Archived to see them.")
+            }
             ForEach(lane.tasks(in: column)) { task in
                 let taskSessions = sessionsByTask[task.id] ?? []
                 TaskCardView(
@@ -249,6 +421,11 @@ struct TaskBoardView: View {
                         }
                     }
                     Divider()
+                    if task.isArchived {
+                        Button("Unarchive") { unarchive(task.id) }
+                    } else if task.column == .done {
+                        Button("Archive") { archive([task.id]) }
+                    }
                     Button("Delete Task…", role: .destructive) { taskPendingDelete = task }
                 }
             }
@@ -270,7 +447,7 @@ struct TaskBoardView: View {
     }
 
     private func drop(taskId: String, onto column: TaskColumn) -> Bool {
-        guard let task = tasks.value.first(where: { $0.id == taskId }), task.column != column else {
+        guard let task = visibleTasks.first(where: { $0.id == taskId }), task.column != column else {
             return false
         }
         switch column {
@@ -316,6 +493,66 @@ struct TaskBoardView: View {
             } message: { _ in
                 Text("Stops any running worker and removes its worktree. The branch is kept.")
             }
+    }
+
+    private var archiveConfirmation: some View {
+        EmptyView()
+            .confirmationDialog(
+                TaskArchive.confirmationTitle(count: archivableTasks.count),
+                isPresented: $confirmArchive,
+                titleVisibility: .visible
+            ) {
+                Button("Archive") { archive(archivableTasks.map(\.id)) }
+            } message: {
+                Text("They leave the board but are never deleted — branches, worktrees and reports are untouched. Turn on Show Archived to bring them back into view, or unarchive one from its card.")
+            }
+    }
+
+    /// The plan is read before the dialog opens, so its copy names this epic's actual leftovers and
+    /// its actual running workers rather than describing closing in general.
+    private func planClosure(_ epic: Epic, as closure: EpicClosure) {
+        do {
+            closurePlan = try env.supervisor.epicClosurePlan(epicId: epic.id, as: closure)
+        } catch {
+            errorMessage = errorText(error)
+        }
+    }
+
+    private var closeEpicConfirmation: some View {
+        EmptyView()
+            .confirmationDialog(
+                closurePlan?.title ?? "",
+                isPresented: Binding(get: { closurePlan != nil }, set: { if !$0 { closurePlan = nil } }),
+                titleVisibility: .visible,
+                presenting: closurePlan
+            ) { plan in
+                if !plan.isRefused {
+                    Button(plan.closure.confirmLabel, role: .destructive) {
+                        runSupervised("Closing epic…") {
+                            try await env.supervisor.closeEpic(epicId: plan.epicId, as: plan.closure)
+                        }
+                    }
+                }
+            } message: { plan in
+                Text(plan.message)
+            }
+    }
+
+    private func archive(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        do {
+            try TaskStore(env.db).archive(ids: ids)
+        } catch {
+            errorMessage = errorText(error)
+        }
+    }
+
+    private func unarchive(_ taskId: String) {
+        do {
+            try TaskStore(env.db).unarchive(taskId)
+        } catch {
+            errorMessage = errorText(error)
+        }
     }
 
     private func accept(_ taskId: String) {

@@ -7,27 +7,81 @@ import Foundation
 
 actor FakeRuntime: AgentRuntime {
     private(set) var stopped: [String] = []
+    private(set) var removed: [String] = []
     private(set) var resumed: [String] = []
+    private(set) var resumePrompts: [String] = []
     private(set) var spawns: [SpawnRequest] = []
+    /// True from the moment `spawn` is entered until it answers — what a slow repository's setup
+    /// looks like from the outside.
+    private(set) var isSettingUp = false
+    private var failure: Error?
+    private var gate: CheckedContinuation<Void, Never>?
+    private var delay: Duration?
+    private var holdNextSpawn = false
+    private var entered: [CheckedContinuation<Void, Never>] = []
+    private var listed: [AgentInfo] = []
+
+    /// The next spawn blocks inside `spawn` until `releaseSpawn()` — a setup that outlives the call.
+    func holdSpawn() { holdNextSpawn = true }
+
+    /// A setup that simply takes a long time, the way `yarn install` does.
+    func delaySpawn(_ duration: Duration) { delay = duration }
+
+    func failNextSpawn(_ error: Error) { failure = error }
+
+    /// Returns once the held spawn is actually inside `spawn`, so a test never races its own gate.
+    func waitUntilSettingUp() async {
+        if isSettingUp { return }
+        await withCheckedContinuation { entered.append($0) }
+    }
+
+    func releaseSpawn() {
+        holdNextSpawn = false
+        gate?.resume()
+        gate = nil
+    }
 
     func spawn(_ request: SpawnRequest) async throws -> SpawnedAgent {
+        isSettingUp = true
+        for waiter in entered { waiter.resume() }
+        entered = []
+        if holdNextSpawn {
+            await withCheckedContinuation { gate = $0 }
+        }
+        if let delay {
+            self.delay = nil
+            try? await _Concurrency.Task.sleep(for: delay)
+        }
+        isSettingUp = false
+        if let failure {
+            self.failure = nil
+            throw failure
+        }
         spawns.append(request)
         return SpawnedAgent(shortId: "short-\(spawns.count)", sessionId: "session-\(spawns.count)")
     }
 
     func resume(sessionId: String, cwd: URL, prompt: String) async throws -> SpawnedAgent {
         resumed.append(sessionId)
+        resumePrompts.append(prompt)
         return SpawnedAgent(shortId: "short-\(sessionId)", sessionId: sessionId)
     }
 
+    /// What `claude agents --json --all` answers. A sweep may read this to skip short ids the
+    /// runtime no longer carries; it must never be the source of a target.
+    private var listFailure: Error?
+
+    func listing(_ infos: [AgentInfo]) { listed = infos }
+    func setListed(_ agents: [AgentInfo]) { listed = agents }
+    func failListing(_ error: Error) { listFailure = error }
+
     func stop(shortId: String) async throws { stopped.append(shortId) }
-    func remove(shortId: String) async throws {}
+    func remove(shortId: String) async throws { removed.append(shortId) }
 
-    private var listed: [AgentInfo] = []
-
-    func setListed(_ infos: [AgentInfo]) { listed = infos }
-
-    func listSessions() async throws -> [AgentInfo] { listed }
+    func listSessions() async throws -> [AgentInfo] {
+        if let listFailure { throw listFailure }
+        return listed
+    }
     nonisolated func attachCommand(shortId: String) -> (executable: String, arguments: [String]) {
         ("claude", ["attach", shortId])
     }
@@ -47,18 +101,24 @@ struct SupervisorFixture {
     let resolver: StoreTokenResolver
     let supportDir: URL
     let repo: URL
+    /// What `SupportPaths.worktreeBase` resolves to when AGENTBOARD_SUPPORT_DIR points at `supportDir`.
+    let worktreeBase: URL
+    /// Stands in for `~`, so a test can assert nothing leaked into a real `~/.agentboard`.
+    let fakeHome: URL
 
     var epics: EpicStore { EpicStore(db) }
     var approvals: ApprovalStore { ApprovalStore(db) }
     var board: Board { Board(db) }
 
     var tasks: TaskStore { TaskStore(db) }
+    var deliveries: ShutdownDeliveryStore { ShutdownDeliveryStore(db) }
     var sessions: SessionStore { SessionStore(db) }
     var grants: TokenGrantStore { TokenGrantStore(db) }
+    var reports: ReportStore { ReportStore(db) }
 
     /// `gitRepo` lays down a real git repository at `repoPath`, which every test that exercises
     /// spawning, worktrees, or branch teardown needs.
-    static func make(gitRepo: Bool = false) throws -> SupervisorFixture {
+    static func make(gitRepo: Bool = false, sleepLedger: SleepLedger = SleepLedger()) throws -> SupervisorFixture {
         let db = try AppDatabase.inMemory()
         let supportDir = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
@@ -85,15 +145,52 @@ struct SupervisorFixture {
             )
         )
         let runtime = FakeRuntime()
+        let fakeHome = supportDir.appendingPathComponent("home")
+        let worktreeBase = SupportPaths.worktreeBase(
+            environment: [SupportPaths.supportDirEnvKey: supportDir.path],
+            home: fakeHome
+        )
         let supervisor = WorkerSupervisor(
             db: db, runtime: runtime, server: server, appSupportDir: supportDir,
-            projectsRoot: supportDir.appendingPathComponent("claude-projects")
+            worktreeBase: worktreeBase,
+            projectsRoot: supportDir.appendingPathComponent("claude-projects"),
+            sleepLedger: sleepLedger
         )
         sink.target = supervisor
         return SupervisorFixture(
             db: db, project: project, supervisor: supervisor, runtime: runtime,
-            resolver: StoreTokenResolver(db: db), supportDir: supportDir, repo: repo
+            resolver: StoreTokenResolver(db: db), supportDir: supportDir, repo: repo,
+            worktreeBase: worktreeBase, fakeHome: fakeHome
         )
+    }
+
+    func setWorktreeStrategy(_ strategy: WorktreeStrategy, maxAgents: Int? = nil) throws {
+        var settings = project.settings
+        settings.worktreeStrategy = strategy
+        if let maxAgents { settings.sharedCheckoutMaxAgents = maxAgents }
+        try ProjectStore(db).updateSettings(project.id, settings)
+    }
+
+    /// A second supervisor over the same database and support directory: what the next launch of
+    /// the app builds, with everything the previous one wrote still on disk and in the tables.
+    func relaunchedSupervisor() -> WorkerSupervisor {
+        let sink = LateBoundSink()
+        let server = BoardServer(
+            tokens: StoreTokenResolver(db: db),
+            hooks: StoreHookSink(db: db, events: sink),
+            tools: ScopedToolHandler(
+                worker: WorkerToolHandler(db: db, control: sink, events: sink),
+                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink),
+                reviewer: ReviewerToolHandler(db: db, control: sink, events: sink)
+            )
+        )
+        let supervisor = WorkerSupervisor(
+            db: db, runtime: runtime, server: server, appSupportDir: supportDir,
+            worktreeBase: worktreeBase,
+            projectsRoot: supportDir.appendingPathComponent("claude-projects")
+        )
+        sink.target = supervisor
+        return supervisor
     }
 
     var manager: WorktreeManager {
@@ -220,6 +317,22 @@ struct SupervisorFixture {
         output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    func setGraceSeconds(_ seconds: Int) throws {
+        var settings = project.settings
+        settings.caps.shutdownGraceSeconds = seconds
+        try ProjectStore(db).updateSettings(project.id, settings)
+    }
+
+    /// Backdates the enrollment so a grace period can expire without the test sleeping through it.
+    func age(orderId: String, sessionId: String, bySeconds: Int) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE shutdown_delivery SET ordered_at = ordered_at - ? WHERE order_id = ? AND session_id = ?",
+                arguments: [Int64(bySeconds) * 1000, orderId, sessionId]
+            )
+        }
+    }
+
     func cleanUp() {
         let worktreeRoot = URL(fileURLWithPath: project.worktreeRoot)
         let names = (try? FileManager.default.contentsOfDirectory(atPath: worktreeRoot.path)) ?? []
@@ -228,6 +341,21 @@ struct SupervisorFixture {
             try? FileManager.default.removeItem(at: ClaudeProjectPaths.projectDir(forPath: worktree))
         }
         try? FileManager.default.removeItem(at: supportDir)
+    }
+
+    /// A worker tool handler wired to this fixture's supervisor, so a tool call reaches the same
+    /// event path the real server uses rather than a sink that drops everything.
+    func workerHandler() -> WorkerToolHandler {
+        let sink = LateBoundSink()
+        sink.target = supervisor
+        return WorkerToolHandler(db: db, control: sink, events: sink)
+    }
+
+    func identity(token: String) async throws -> TokenIdentity {
+        guard let identity = await resolver.resolve(token: token) else {
+            throw FixtureError("token \(token) did not resolve")
+        }
+        return identity
     }
 
     /// A running worker session for a fresh task, holding a bound, unrevoked grant.

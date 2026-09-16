@@ -42,6 +42,9 @@ public enum ClaudeProjectPaths {
         try fm.createDirectory(at: canonicalMemoryDir, withIntermediateDirectories: true)
 
         let targetPath = canonicalPath(canonicalMemoryDir)
+        // A worker running in the project's own checkout already resolves to the canonical memory
+        // directory; linking it would replace that directory with a symlink to itself.
+        if canonicalPath(memory) == targetPath { return .alreadyLinked }
 
         if let attrs = try? fm.attributesOfItem(atPath: memory.path),
            attrs[.type] as? FileAttributeType == .typeSymbolicLink {

@@ -38,6 +38,38 @@ final class TranscriptMeterTests: XCTestCase {
         return String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self)
     }
 
+    /// `totals` sums the session and answers what it cost; `contextTokens` is the last message
+    /// alone and answers how full the context is. After a compaction the two diverge sharply, and
+    /// the trigger reads the second (SPEC §2).
+    func testContextTokensReadTheLastMessageNotTheRunningTotal() throws {
+        let lines = [
+            assistantLine(requestId: "req_A", timestamp: "2026-09-11T10:00:01.000Z", input: 2, output: 5, cacheRead: 60_173, creation: 69),
+            assistantLine(requestId: "req_B", timestamp: "2026-09-11T10:00:09.000Z", input: 2, output: 7, cacheRead: 32_593, creation: 21_624),
+        ]
+        try lines.joined(separator: "\n").appending("\n").write(to: file, atomically: true, encoding: .utf8)
+
+        let summary = try TranscriptMeter.summarize(transcriptAt: file)
+
+        XCTAssertEqual(summary.contextTokens, 54_219, "the post-compaction reading")
+        XCTAssertEqual(summary.totals.cacheReadTokens, 92_766, "spend still sums the whole session")
+    }
+
+    /// Dropping the cache write reads 40% low immediately after a compaction, which is exactly when
+    /// the trigger has to be right.
+    func testContextTokensIncludeTheCacheWrite() throws {
+        let line = assistantLine(requestId: "req_A", timestamp: "2026-09-11T10:00:01.000Z", input: 2, output: 5, cacheRead: 32_593, breakdown: (m5: 21_000, h1: 624))
+        try line.appending("\n").write(to: file, atomically: true, encoding: .utf8)
+
+        let summary = try TranscriptMeter.summarize(transcriptAt: file)
+
+        XCTAssertEqual(summary.contextTokens, 54_219)
+    }
+
+    func testAnEmptyTranscriptHasNoContext() throws {
+        try "".write(to: file, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try TranscriptMeter.summarize(transcriptAt: file).contextTokens, 0)
+    }
+
     func testDedupesByRequestIdAndSkipsMalformedLines() throws {
         let lines = [
             #"{"type":"user","timestamp":"2026-09-11T10:00:00.000Z","message":{"role":"user","content":"go"}}"#,

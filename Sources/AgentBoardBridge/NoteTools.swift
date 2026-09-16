@@ -105,8 +105,9 @@ struct NoteTools: Sendable {
         ),
         ToolDescriptor(
             name: "pin_note",
-            description: "Pin or unpin a note. A pinned note is injected in full into every future agent on this project, "
-                + "so pin only what every agent must know; unpin it once it stops being true.",
+            description: "Pin or unpin a note. A pinned note is named, with its resource uri, in the note index "
+                + "every future agent on this project is spawned with, so an agent can fetch it when the subject "
+                + "comes up; its text is not pasted into the prompt. Unpin it once it stops being true.",
             inputSchema: ToolSchema.object(
                 properties: ["note_id": ToolSchema.string(), "pinned": ToolSchema.boolean()],
                 required: ["note_id", "pinned"]
@@ -125,7 +126,7 @@ struct NoteTools: Sendable {
             guard let (_, sections) = try notes.read(note.id) else {
                 throw ToolError("Note \(note.id) is not in this project.")
             }
-            return .json(Self.render(note, sections: sections))
+            return ToolResult(text: Self.body(note, sections: sections))
         case "append_section":
             return try write(arguments, identity: identity) { noteId, heading, body, ifVersion in
                 try notes.appendSection(
@@ -248,6 +249,12 @@ struct NoteTools: Sendable {
             "version": .number(Double(note.version)),
             "updated_at": .millis(note.updatedAt),
         ])
+    }
+
+    /// The one assembly of a note's full text. `read_note` and the `note://` resource both call it,
+    /// so the tool and the resource cannot drift apart.
+    static func body(_ note: Note, sections: [NoteSection]) -> String {
+        ToolResult.json(render(note, sections: sections)).text
     }
 
     static func render(_ note: Note, sections: [NoteSection]) -> JSONValue {

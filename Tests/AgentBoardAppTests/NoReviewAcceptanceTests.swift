@@ -26,6 +26,12 @@ final class NoReviewAcceptanceTests: XCTestCase {
         try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
     }
 
+    private func setArchivePolicy(_ policy: ArchivePolicy) throws {
+        var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
+        settings.archivePolicy = policy
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+    }
+
     @discardableResult
     private func task(_ title: String, epicId: String? = nil) throws -> BoardTask {
         try fixture.tasks.create(
@@ -129,8 +135,13 @@ final class NoReviewAcceptanceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(worker.session.worktreePath)))
     }
 
+    /// `none` never auto-accepts an integration task: the grant survives and the worker is told to
+    /// stop. The archive policy, not the review level, decides the column, so this pins the
+    /// non-default `manual` policy — `afterEpicMerge` sends it to `done` instead (§5.2 step 4), and
+    /// `ReviewLevelTests` covers both policies against every level.
     func testAnEpicIntegrationTaskStillWaitsForAHumanUnderNoReview() async throws {
         try setReviewLevel(.none)
+        try setArchivePolicy(.manual)
         let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Parser", goal: nil)
         try fixture.epics.setState(epic.id, .integrating)
         let integration = try fixture.tasks.create(

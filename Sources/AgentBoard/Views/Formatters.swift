@@ -27,6 +27,14 @@ enum Format {
     static func relative(_ date: Date) -> String {
         date.formatted(.relative(presentation: .named, unitsStyle: .abbreviated))
     }
+
+    /// Time alone for today, weekday plus time otherwise — a sidebar column has no room for a date.
+    static func resetTime(_ date: Date, now: Date = .now) -> String {
+        if Calendar.current.isDate(date, inSameDayAs: now) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+    }
 }
 
 extension AgentSession {
@@ -40,12 +48,31 @@ extension AgentSession {
 }
 
 extension SessionState {
+    /// `setup` reads as a phase rather than a state, so it does not pass for a worker at work.
+    var label: String {
+        switch self {
+        case .setup: "setting up"
+        case .waitingOnLock: "waiting on a file"
+        default: rawValue
+        }
+    }
+
+    var help: String? {
+        switch self {
+        case .setup: "The worktree is ready; the repository is still being prepared and the worker cannot work yet."
+        case .waitingOnLock: "Another agent in this shared checkout holds a file this worker is about to write."
+        default: nil
+        }
+    }
+
     var color: Color {
         switch self {
+        case .setup: .purple
         case .starting: .orange
         case .running: .green
         case .idle: .blue
         case .blocked: .orange
+        case .waitingOnLock: .yellow
         case .stopped: .secondary
         case .failed: .red
         case .completed: .teal

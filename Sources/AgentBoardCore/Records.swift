@@ -13,6 +13,7 @@ public struct Project: Codable, FetchableRecord, PersistableRecord, Identifiable
     public var orchSessionId: String?
     public var settingsJSON: String
     public var createdAt: Int64
+    public var workspaceId: String?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -24,11 +25,13 @@ public struct Project: Codable, FetchableRecord, PersistableRecord, Identifiable
         case orchSessionId = "orch_session_id"
         case settingsJSON = "settings_json"
         case createdAt = "created_at"
+        case workspaceId = "workspace_id"
     }
 
     public init(
         id: String, name: String, repoPath: String, baseBranch: String, worktreeRoot: String,
-        memoryDir: String?, orchSessionId: String?, settingsJSON: String, createdAt: Int64
+        memoryDir: String?, orchSessionId: String?, settingsJSON: String, createdAt: Int64,
+        workspaceId: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -39,6 +42,7 @@ public struct Project: Codable, FetchableRecord, PersistableRecord, Identifiable
         self.orchSessionId = orchSessionId
         self.settingsJSON = settingsJSON
         self.createdAt = createdAt
+        self.workspaceId = workspaceId
     }
 
     public static func newId() -> String { BoardId.new() }
@@ -49,6 +53,33 @@ public struct Project: Codable, FetchableRecord, PersistableRecord, Identifiable
         get { ProjectSettings.decode(settingsJSON) }
         set { settingsJSON = newValue.encoded() }
     }
+}
+
+public struct Workspace: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
+    public static let databaseTableName = "workspace"
+
+    public var id: String
+    public var name: String
+    public var ordering: Double
+    public var createdAt: Int64
+
+    public enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case ordering
+        case createdAt = "created_at"
+    }
+
+    public init(id: String, name: String, ordering: Double, createdAt: Int64) {
+        self.id = id
+        self.name = name
+        self.ordering = ordering
+        self.createdAt = createdAt
+    }
+
+    public static func newId() -> String { BoardId.new() }
+
+    public var createdDate: Date { createdAt.asDate }
 }
 
 public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
@@ -117,6 +148,14 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var model: String?
     /// Under agent review, the rostered reviewer this task was handed to when it entered `review`.
     public var reviewerAgentId: String?
+    /// Non-nil means archived: hidden from the default board query, and when it happened.
+    public var archivedAt: Int64?
+    /// When the task most recently entered `done`, cleared when it leaves again. The archive
+    /// policy measures time-in-done from here; `updatedAt` moves for every other edit too.
+    public var doneAt: Int64?
+    /// Set when a human pulls the task back out of the archive. While it is set, no automatic
+    /// policy archives this task again — only the manual button will.
+    public var unarchivedAt: Int64?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -137,16 +176,23 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case updatedAt = "updated_at"
         case model
         case reviewerAgentId = "reviewer_agent_id"
+        case archivedAt = "archived_at"
+        case doneAt = "done_at"
+        case unarchivedAt = "unarchived_at"
     }
 
     public init(
         id: String, projectId: String, epicId: String?, title: String, body: String?, acceptance: String?,
         priority: String?, column: TaskColumn, blocked: Bool = false, blockedReason: String? = nil,
         failed: Bool = false, failureReason: String? = nil, ordering: Double, origin: TaskOrigin,
-        createdAt: Int64, updatedAt: Int64, model: String? = nil, reviewerAgentId: String? = nil
+        createdAt: Int64, updatedAt: Int64, model: String? = nil, reviewerAgentId: String? = nil,
+        archivedAt: Int64? = nil, doneAt: Int64? = nil, unarchivedAt: Int64? = nil
     ) {
         self.model = model
         self.reviewerAgentId = reviewerAgentId
+        self.archivedAt = archivedAt
+        self.doneAt = doneAt
+        self.unarchivedAt = unarchivedAt
         self.id = id
         self.projectId = projectId
         self.epicId = epicId
@@ -169,6 +215,9 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
 
     public var createdDate: Date { createdAt.asDate }
     public var updatedDate: Date { updatedAt.asDate }
+    public var archivedDate: Date? { archivedAt?.asDate }
+    public var isArchived: Bool { archivedAt != nil }
+    public var doneDate: Date? { doneAt?.asDate }
 }
 
 public typealias BoardTask = Task
@@ -215,6 +264,9 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     public var model: String?
     public var lastTool: String?
     public var stopReason: String?
+    /// Set when a shared-checkout write gave up waiting for another session's lock. `report_blocked`
+    /// reads it to decide that the task belongs back in `ready` rather than held in `running`.
+    public var blockedOnPath: String?
 
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -239,6 +291,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case model
         case lastTool = "last_tool"
         case stopReason = "stop_reason"
+        case blockedOnPath = "blocked_on_path"
     }
 
     public init(
@@ -247,7 +300,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         startedAt: Int64 = .nowMillis, endedAt: Int64? = nil, lastActivity: Int64? = nil,
         transcriptPath: String? = nil, tokensIn: Int = 0, tokensOut: Int = 0, cacheRead: Int = 0,
         cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil,
-        lastTool: String? = nil, stopReason: String? = nil
+        lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -271,6 +324,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.model = model
         self.lastTool = lastTool
         self.stopReason = stopReason
+        self.blockedOnPath = blockedOnPath
     }
 
     public var id: String { sessionId }
@@ -394,6 +448,54 @@ public struct Report: Codable, FetchableRecord, MutablePersistableRecord, Identi
     public var isConsumed: Bool { consumedAt != nil }
 }
 
+/// Text one project's orchestrator sent to another. The body is delivered into the receiving
+/// project's report queue as a `message` report; this row is the sender-side ledger of that.
+public struct Message: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Sendable, Equatable {
+    public static let databaseTableName = "message"
+
+    public var id: Int64?
+    public var fromProjectId: String
+    public var toProjectId: String
+    public var fromSessionId: String?
+    /// Exactly what the sender wrote, with no framing. The framing lives on the delivered report.
+    public var body: String
+    public var createdAt: Int64
+    public var deliveredAt: Int64?
+    public var reportId: Int64?
+
+    public enum CodingKeys: String, CodingKey {
+        case id
+        case fromProjectId = "from_project_id"
+        case toProjectId = "to_project_id"
+        case fromSessionId = "from_session_id"
+        case body
+        case createdAt = "created_at"
+        case deliveredAt = "delivered_at"
+        case reportId = "report_id"
+    }
+
+    public init(
+        id: Int64? = nil, fromProjectId: String, toProjectId: String, fromSessionId: String?,
+        body: String, createdAt: Int64, deliveredAt: Int64? = nil, reportId: Int64? = nil
+    ) {
+        self.id = id
+        self.fromProjectId = fromProjectId
+        self.toProjectId = toProjectId
+        self.fromSessionId = fromSessionId
+        self.body = body
+        self.createdAt = createdAt
+        self.deliveredAt = deliveredAt
+        self.reportId = reportId
+    }
+
+    public mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
+
+    public var createdDate: Date { createdAt.asDate }
+    public var isDelivered: Bool { deliveredAt != nil }
+}
+
 public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
     public static let databaseTableName = "approval"
 
@@ -404,6 +506,9 @@ public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiabl
     public var epicId: String?
     public var requestedBy: String
     public var reason: String?
+    /// JSON for the kinds that carry one — a `PublishRequest` on `push` and `pull_request`. Nil for
+    /// `spawn` and `integration`, which are fully described by `taskId`/`epicId`.
+    public var payload: String?
     public var createdAt: Int64
     public var resolvedAt: Int64?
     public var resolution: ApprovalResolution?
@@ -416,6 +521,7 @@ public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiabl
         case epicId = "epic_id"
         case requestedBy = "requested_by"
         case reason
+        case payload
         case createdAt = "created_at"
         case resolvedAt = "resolved_at"
         case resolution
@@ -423,8 +529,8 @@ public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiabl
 
     public init(
         id: String, projectId: String, kind: ApprovalKind, taskId: String?, epicId: String?,
-        requestedBy: String, reason: String?, createdAt: Int64, resolvedAt: Int64? = nil,
-        resolution: ApprovalResolution? = nil
+        requestedBy: String, reason: String?, payload: String? = nil, createdAt: Int64,
+        resolvedAt: Int64? = nil, resolution: ApprovalResolution? = nil
     ) {
         self.id = id
         self.projectId = projectId
@@ -433,6 +539,7 @@ public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiabl
         self.epicId = epicId
         self.requestedBy = requestedBy
         self.reason = reason
+        self.payload = payload
         self.createdAt = createdAt
         self.resolvedAt = resolvedAt
         self.resolution = resolution
@@ -443,6 +550,8 @@ public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiabl
     public var isPending: Bool { resolvedAt == nil }
     public var createdDate: Date { createdAt.asDate }
     public var resolvedDate: Date? { resolvedAt?.asDate }
+
+    public func publishRequest() throws -> PublishRequest { try PublishRequest.decode(payload) }
 }
 
 public struct Note: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
@@ -628,4 +737,141 @@ public struct ProjectRosterAgent: Codable, FetchableRecord, PersistableRecord, S
         self.rosterAgentId = rosterAgentId
         self.ordering = ordering
     }
+}
+
+/// A standing order that no new worker may be spawned on the project. Outstanding while
+/// `resolvedAt` is nil; cancelling resolves it and restores normal dispatch.
+public struct ShutdownOrder: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
+    public static let databaseTableName = "shutdown_order"
+
+    public var id: String
+    public var projectId: String
+    public var requestedBy: String
+    public var reason: String?
+    public var requestedAt: Int64
+    public var resolvedAt: Int64?
+    public var resolvedBy: String?
+
+    public enum CodingKeys: String, CodingKey {
+        case id
+        case projectId = "project_id"
+        case requestedBy = "requested_by"
+        case reason
+        case requestedAt = "requested_at"
+        case resolvedAt = "resolved_at"
+        case resolvedBy = "resolved_by"
+    }
+
+    public init(
+        id: String, projectId: String, requestedBy: String, reason: String?, requestedAt: Int64,
+        resolvedAt: Int64? = nil, resolvedBy: String? = nil
+    ) {
+        self.id = id
+        self.projectId = projectId
+        self.requestedBy = requestedBy
+        self.reason = reason
+        self.requestedAt = requestedAt
+        self.resolvedAt = resolvedAt
+        self.resolvedBy = resolvedBy
+    }
+
+    public static func newId() -> String { BoardId.new() }
+
+    /// What every refused dispatch path says, so the orchestrator can tell a shutdown from a cap breach.
+    public static let refusal = "shutdown in progress; no new workers"
+
+    /// How a worker was handed the order. A busy session can only be reached by denying its next
+    /// `PreToolUse`; an idle one may never make that call, so it gets the same text as a prompt.
+    public enum Delivery: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+        case hook
+        case resume
+    }
+
+    /// The one wind-down text, so a worker reached by the hook and a worker reached by a resume are
+    /// told to do exactly the same thing.
+    public static func windDownOrder(reason: String?, via: Delivery) -> String {
+        var lines = [
+            "Agent Board is winding down all work on this project. Stop your task now and leave it resumable.",
+        ]
+        if let reason, !reason.isEmpty {
+            lines.append("Reason: \(reason)")
+        }
+        lines.append("""
+        Do this, in order:
+        1. Commit whatever is in your worktree on the current branch. Do not push.
+        2. Call acknowledge_shutdown with a note saying where you stopped and what still remains.
+        3. Stop. Do not call report_complete: the task is unfinished and goes back to ready, not review.
+        """)
+        if via == .hook {
+            lines.append("This one tool call was blocked to hand you the order. Your next calls go through, so commit first, then acknowledge.")
+        }
+        return lines.joined(separator: "\n\n")
+    }
+
+    public var isOutstanding: Bool { resolvedAt == nil }
+    public var requestedDate: Date { requestedAt.asDate }
+    public var resolvedDate: Date? { resolvedAt?.asDate }
+}
+
+/// One worker's leg of a shutdown order: enrolled when the order reaches it, `deliveredAt` set by
+/// whichever path handed it the text, `acknowledgedAt` and `note` set when it answers.
+public struct ShutdownDelivery: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
+    public static let databaseTableName = "shutdown_delivery"
+
+    public var orderId: String
+    public var sessionId: String
+    public var taskId: String?
+    public var orderedAt: Int64
+    public var deliveredAt: Int64?
+    public var deliveredVia: ShutdownOrder.Delivery?
+    public var acknowledgedAt: Int64?
+    public var note: String?
+
+    public enum CodingKeys: String, CodingKey {
+        case orderId = "order_id"
+        case sessionId = "session_id"
+        case taskId = "task_id"
+        case orderedAt = "ordered_at"
+        case deliveredAt = "delivered_at"
+        case deliveredVia = "delivered_via"
+        case acknowledgedAt = "acknowledged_at"
+        case note
+    }
+
+    public init(
+        orderId: String, sessionId: String, taskId: String? = nil, orderedAt: Int64,
+        deliveredAt: Int64? = nil, deliveredVia: ShutdownOrder.Delivery? = nil,
+        acknowledgedAt: Int64? = nil, note: String? = nil
+    ) {
+        self.orderId = orderId
+        self.sessionId = sessionId
+        self.taskId = taskId
+        self.orderedAt = orderedAt
+        self.deliveredAt = deliveredAt
+        self.deliveredVia = deliveredVia
+        self.acknowledgedAt = acknowledgedAt
+        self.note = note
+    }
+
+    public var isDelivered: Bool { deliveredAt != nil }
+    public var isAcknowledged: Bool { acknowledgedAt != nil }
+}
+
+/// What the progress sheet reads while an order is being collected.
+public struct ShutdownProgress: Sendable, Equatable {
+    public var orderId: String
+    public var total: Int
+    public var acknowledged: Int
+    /// Ordered, past the grace period, and still silent. Counted, never killed — that is the human's call.
+    public var overdue: [String]
+
+    public init(orderId: String, total: Int, acknowledged: Int, overdue: [String] = []) {
+        self.orderId = orderId
+        self.total = total
+        self.acknowledged = acknowledged
+        self.overdue = overdue
+    }
+
+    public var unacknowledged: Int { total - acknowledged }
+    public var isComplete: Bool { total > 0 && acknowledged == total }
 }

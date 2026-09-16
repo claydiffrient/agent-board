@@ -14,6 +14,7 @@ struct Fixture {
     var reports: ReportStore { ReportStore(db) }
     var hooks: HookEventStore { HookEventStore(db) }
     var notes: NoteStore { NoteStore(db) }
+    var messages: MessageStore { MessageStore(db) }
     var board: Board { Board(db) }
 
     static func make() throws -> Fixture {
@@ -43,6 +44,13 @@ struct Fixture {
         AgentSession(
             sessionId: id, shortId: shortId, projectId: project.id, taskId: taskId, role: role,
             worktreePath: worktreePath, cwd: "/tmp", state: state
+        )
+    }
+
+    func otherProject(_ name: String = "Other") throws -> Project {
+        try projects.register(
+            name: name, repoPath: "/tmp/\(name)-\(UUID().uuidString)", baseBranch: "main",
+            worktreeRoot: "/tmp/\(name)-worktrees", memoryDir: nil
         )
     }
 }

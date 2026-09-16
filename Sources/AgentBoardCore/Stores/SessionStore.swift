@@ -169,6 +169,30 @@ public struct SessionStore: Sendable {
         }
     }
 
+    /// Swaps the placeholder id a setup row was written under for the session id Claude actually
+    /// issued, which every hook and transcript is keyed by. Nothing may reference the placeholder
+    /// yet: it is never handed to an agent, and the worker's grant binds after this returns.
+    /// Throws if the row is gone or has left `setup` — a cap kill or a human stop got there first.
+    public func promoteSetupSession(
+        _ placeholderId: String, to sessionId: String, shortId: String?, state: SessionState = .starting
+    ) throws -> AgentSession {
+        try db.writer.write { db in
+            guard let placeholder = try AgentSession.fetchOne(db, key: placeholderId) else {
+                throw BoardError.sessionNotFound(placeholderId)
+            }
+            guard placeholder.state == .setup else {
+                throw BoardError.sessionNotInSetup(placeholderId, placeholder.state)
+            }
+            try db.execute(sql: "DELETE FROM agent_session WHERE session_id = ?", arguments: [placeholderId])
+            var promoted = placeholder
+            promoted.sessionId = sessionId
+            promoted.shortId = shortId
+            promoted.state = state
+            try promoted.insert(db)
+            return promoted
+        }
+    }
+
     public func setShortId(_ sessionId: String, _ shortId: String) throws {
         try db.writer.write { db in
             try db.execute(
@@ -189,6 +213,17 @@ public struct SessionStore: Sendable {
             sql: "UPDATE agent_session SET stop_reason = ? WHERE session_id = ?",
             arguments: [reason, sessionId]
         )
+    }
+
+    /// Records that this session gave up waiting for another session's lock on `path`, so the
+    /// `report_blocked` that follows knows to send the task back to `ready`.
+    public func setBlockedOnPath(_ sessionId: String, _ path: String?) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE agent_session SET blocked_on_path = ? WHERE session_id = ?",
+                arguments: [path, sessionId]
+            )
+        }
     }
 
     public func observe(projectId: String) -> ValueObservation<ValueReducers.Fetch<[AgentSession]>> {

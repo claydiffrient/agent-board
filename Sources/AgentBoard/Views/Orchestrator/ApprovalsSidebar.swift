@@ -11,6 +11,7 @@ struct ApprovalsSidebar: View {
     @State private var tasks = Observed<[BoardTask]>([])
     @State private var sessions = Observed<[AgentSession]>([])
     @State private var reports = Observed<[Report]>([])
+    @State private var messages = Observed<[MessageEntry]>([])
     @State private var now = Date.now
     @State private var denying: Approval?
     @State private var denyReason = ""
@@ -28,7 +29,7 @@ struct ApprovalsSidebar: View {
         AttentionSelection.needingAttention(
             tasks: tasks.value,
             sessions: sessions.value,
-            now: now,
+            awake: SleepLedger.shared.reading(asOf: now),
             stallThreshold: TimeInterval(project.settings.caps.stallSeconds)
         )
     }
@@ -90,6 +91,15 @@ struct ApprovalsSidebar: View {
                         proposalRow(task)
                     }
                 }
+                Section("Messages") {
+                    if messages.value.isEmpty {
+                        Text("No messages with other projects.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(messages.value) { entry in
+                        MessageRow(entry: entry, projectName: project.name)
+                    }
+                }
             }
             .listStyle(.sidebar)
             Divider()
@@ -106,6 +116,9 @@ struct ApprovalsSidebar: View {
         }
         .task(id: project.id) {
             await reports.run(ReportStore(env.db).observeUnconsumed(projectId: project.id), in: env.db.reader)
+        }
+        .task(id: project.id) {
+            await messages.run(MessageStore(env.db).observeConversation(projectId: project.id), in: env.db.reader)
         }
         .task {
             while !_Concurrency.Task.isCancelled {
@@ -183,6 +196,12 @@ struct ApprovalsSidebar: View {
             Text(describe(approval))
                 .fontWeight(.medium)
                 .lineLimit(2)
+            if let reason = approval.reason, !reason.isEmpty {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(4)
+            }
             HStack(spacing: 6) {
                 Text(approval.kind.rawValue)
                     .padding(.horizontal, 6)
@@ -273,7 +292,15 @@ struct ApprovalsSidebar: View {
             return "Spawn a worker for \"\(title)\""
         case .integration:
             return "Integrate epic \(approval.epicId ?? "?")"
+        case .push:
+            return "Push \(branchOf(approval)) to the remote"
+        case .pullRequest:
+            return "Open a pull request from \(branchOf(approval))"
         }
+    }
+
+    private func branchOf(_ approval: Approval) -> String {
+        (try? approval.publishRequest().branch) ?? "?"
     }
 
     private func requester(_ requestedBy: String) -> String {

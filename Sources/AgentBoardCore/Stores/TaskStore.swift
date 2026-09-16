@@ -39,25 +39,37 @@ public struct TaskStore: Sendable {
             origin: origin,
             createdAt: now,
             updatedAt: now,
-            model: model
+            model: model,
+            doneAt: column == .done ? now : nil
         )
         try task.insert(db)
         return task
     }
 
-    public func get(_ id: String) throws -> Task? {
-        try db.reader.read { db in try Task.fetchOne(db, key: id) }
-    }
-
-    public func list(projectId: String, column: TaskColumn? = nil, epicId: String? = nil) throws -> [Task] {
+    public func get(_ id: String, includeArchived: Bool = true) throws -> Task? {
         try db.reader.read { db in
-            try Self.list(db, projectId: projectId, column: column, epicId: epicId)
+            guard let task = try Task.fetchOne(db, key: id) else { return nil }
+            return includeArchived || !task.isArchived ? task : nil
         }
     }
 
-    static func list(_ db: Database, projectId: String, column: TaskColumn?, epicId: String?) throws -> [Task] {
+    public func list(
+        projectId: String, column: TaskColumn? = nil, epicId: String? = nil, includeArchived: Bool = false
+    ) throws -> [Task] {
+        try db.reader.read { db in
+            try Self.list(db, projectId: projectId, column: column, epicId: epicId, includeArchived: includeArchived)
+        }
+    }
+
+
+    static func list(
+        _ db: Database, projectId: String, column: TaskColumn?, epicId: String?, includeArchived: Bool = false
+    ) throws -> [Task] {
         var sql = "SELECT * FROM task WHERE project_id = ?"
         var arguments: StatementArguments = [projectId]
+        if !includeArchived {
+            sql += " AND archived_at IS NULL"
+        }
         if let column {
             sql += " AND column_name = ?"
             arguments += [column]
@@ -66,8 +78,27 @@ public struct TaskStore: Sendable {
             sql += " AND epic_id = ?"
             arguments += [epicId]
         }
+        if !includeArchived {
+            sql += " AND archived_at IS NULL"
+        }
         sql += " ORDER BY \(TaskColumn.orderingSQL), ordering, created_at"
         return try Task.fetchAll(db, sql: sql, arguments: arguments)
+    }
+
+    public static let branchPrefix = "agentboard/"
+
+    public static func branchName(for id: String) -> String { branchPrefix + id }
+
+    public func setEpic(_ id: String, epicId: String?) throws {
+        try db.writer.write { db in
+            guard try Task.exists(db, key: id) else {
+                throw BoardError.taskNotFound(id)
+            }
+            try db.execute(
+                sql: "UPDATE task SET epic_id = ?, updated_at = ? WHERE id = ?",
+                arguments: [epicId, Int64.nowMillis, id]
+            )
+        }
     }
 
     public func update(_ task: Task) throws {
@@ -100,10 +131,26 @@ public struct TaskStore: Sendable {
         } else {
             ordering = try endOrdering(db, projectId: task.projectId, column: column, excluding: id)
         }
+        let now = Int64.nowMillis
         try db.execute(
             sql: "UPDATE task SET column_name = ?, ordering = ?, updated_at = ? WHERE id = ?",
-            arguments: [column, ordering, Int64.nowMillis, id]
+            arguments: [column, ordering, now, id]
         )
+        try stampDoneAt(db, id, entering: column, from: task.column, at: now)
+    }
+
+    /// `done_at` is the only reliable measure of time-in-done: reordering inside `done`, archiving
+    /// and every other edit move `updated_at`. Leaving `done` clears it along with the manual
+    /// unarchive, so a reopened task starts the policy clock — and the policy itself — from scratch.
+    static func stampDoneAt(_ db: Database, _ id: String, entering: TaskColumn, from: TaskColumn, at: Int64) throws {
+        switch (from, entering) {
+        case (.done, .done):
+            return
+        case (_, .done):
+            try db.execute(sql: "UPDATE task SET done_at = ? WHERE id = ?", arguments: [at, id])
+        default:
+            try db.execute(sql: "UPDATE task SET done_at = NULL, unarchived_at = NULL WHERE id = ?", arguments: [id])
+        }
     }
 
     static func endOrdering(_ db: Database, projectId: String, column: TaskColumn, excluding id: String?) throws -> Double {
@@ -215,6 +262,51 @@ public struct TaskStore: Sendable {
         )
     }
 
+    /// Hides a done task from the board by stamping `archived_at`. Nothing else changes:
+    /// the task's branch, worktree, sessions, reports and progress rows are all left in place —
+    /// archiving is a view filter, not cleanup, and reaping those belongs elsewhere.
+    /// Throws `BoardError.archiveRequiresDone` for a task outside `done`.
+    public func archive(_ id: String) throws {
+        try archive(ids: [id])
+    }
+
+    /// Archives every task in one transaction; if any is not in `done`, none are archived.
+    public func archive(ids: [String]) throws {
+        try db.writer.write { db in
+            let at = Int64.nowMillis
+            for id in ids {
+                try Self.archive(db, id, at: at)
+            }
+        }
+    }
+
+    static func archive(_ db: Database, _ id: String, at: Int64) throws {
+        guard let task = try Task.fetchOne(db, key: id) else {
+            throw BoardError.taskNotFound(id)
+        }
+        guard task.column == .done else {
+            throw BoardError.archiveRequiresDone(taskId: id, column: task.column)
+        }
+        guard task.archivedAt == nil else { return }
+        try db.execute(
+            sql: "UPDATE task SET archived_at = ?, updated_at = ? WHERE id = ?",
+            arguments: [at, at, id]
+        )
+    }
+
+    /// Clears `archived_at`. Always allowed, whatever column the task now sits in.
+    /// Stamping `unarchived_at` is what stops the next `ArchiveSweep` tick from undoing this.
+    public func unarchive(_ id: String) throws {
+        try db.writer.write { db in
+            guard try Task.exists(db, key: id) else { throw BoardError.taskNotFound(id) }
+            let now = Int64.nowMillis
+            try db.execute(
+                sql: "UPDATE task SET archived_at = NULL, unarchived_at = ?, updated_at = ? WHERE id = ?",
+                arguments: [now, now, id]
+            )
+        }
+    }
+
     public func delete(_ id: String) throws {
         try db.writer.write { db in
             try Self.delete(db, id)
@@ -231,9 +323,11 @@ public struct TaskStore: Sendable {
         try db.execute(sql: "DELETE FROM task WHERE id = ?", arguments: [id])
     }
 
-    public func observe(projectId: String) -> ValueObservation<ValueReducers.Fetch<[Task]>> {
+    public func observe(
+        projectId: String, includeArchived: Bool = false
+    ) -> ValueObservation<ValueReducers.Fetch<[Task]>> {
         ValueObservation.tracking { db in
-            try Self.list(db, projectId: projectId, column: nil, epicId: nil)
+            try Self.list(db, projectId: projectId, column: nil, epicId: nil, includeArchived: includeArchived)
         }
     }
 }
@@ -248,12 +342,22 @@ public enum BoardError: Error, Equatable, Sendable {
     case approvalAlreadyResolved(String)
     case epicNotFound(String)
     case rosterAgentNotFound(String)
-    /// `createEpic` was handed a `dependsOn` index that is out of range or points at the task itself.
-    case invalidEpicDependency(taskIndex: Int, dependsOn: Int)
     /// An active worker session already holds the task; a second one would share its worktree.
     case taskAlreadyHeld(taskId: String, sessionId: String)
     /// An active session already holds the worktree the new session was about to be launched into.
     case worktreeAlreadyHeld(path: String, sessionId: String)
     /// The session is not the one currently working the task it is acting on.
     case sessionNotOnTask(sessionId: String, taskId: String)
+    case workspaceNotFound(String)
+    /// `createEpic` was handed a `dependsOn` index that is out of range or points at the task itself.
+    case invalidEpicDependency(taskIndex: Int, dependsOn: Int)
+    case noShutdownOrder(String)
+    /// Only a task in `done` may be archived; archiving live work would hide it from the board.
+    case archiveRequiresDone(taskId: String, column: TaskColumn)
+    /// A setup row was resolved twice, or something ended it while its worktree was being prepared.
+    case sessionNotInSetup(String, SessionState)
+    /// `done` and `abandoned` are both terminal; one never silently becomes the other.
+    case epicAlreadyClosed(epicId: String, state: EpicState)
+    /// Closing would have left these sessions running against a closed epic.
+    case epicHasRunningWorkers(epicId: String, sessionIds: [String])
 }

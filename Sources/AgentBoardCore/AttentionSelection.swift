@@ -28,23 +28,24 @@ public struct AttentionItem: Sendable, Equatable, Identifiable {
 /// What the orchestrator's "Blocked" section shows: workers that have stopped making progress,
 /// either because they said so or because they stopped moving.
 public enum AttentionSelection {
-    /// A running worker whose activity clock has not moved for `threshold`. A session that has never
-    /// recorded activity is measured from its start, matching `CapEvaluator`.
+    /// A running worker whose activity clock has not moved for `threshold` of *awake* time. A
+    /// session that has never recorded activity is measured from its start, matching `CapEvaluator`
+    /// — including its clock: a suspended worker is not stalled, it is asleep.
     public static func isStalled(
         lastActivity: Date?,
         startedAt: Date,
-        now: Date,
+        awake: AwakeElapsed,
         threshold: TimeInterval
     ) -> Bool {
         guard threshold > 0 else { return false }
-        return now.timeIntervalSince(lastActivity ?? startedAt) >= threshold
+        return awake.secondsAwake(since: lastActivity ?? startedAt) >= threshold
     }
 
     /// Blocked tasks first, then suspected stalls, each longest-waiting first.
     public static func needingAttention(
         tasks: [BoardTask],
         sessions: [AgentSession],
-        now: Date,
+        awake: AwakeElapsed,
         stallThreshold: TimeInterval
     ) -> [AttentionItem] {
         let active = activeWorkerSessionsByTask(sessions)
@@ -70,7 +71,7 @@ public enum AttentionSelection {
             guard isStalled(
                 lastActivity: session.lastActivityDate,
                 startedAt: session.startedDate,
-                now: now,
+                awake: awake,
                 threshold: stallThreshold
             ) else { continue }
             items.append(

@@ -1,3 +1,4 @@
+import AgentBoardCore
 import XCTest
 @testable import AgentBoardRuntime
 
@@ -40,6 +41,25 @@ final class WorktreeManagerTests: XCTestCase {
 
     private func commit(_ message: String, cwd: URL) throws {
         try git(["-c", "user.email=test@example.com", "-c", "user.name=Test", "-c", "commit.gpgsign=false", "commit", "-q", "-m", message], cwd: cwd)
+    }
+
+    func testMoveRelocatesTheCheckoutAndGitsOwnRecordOfIt() throws {
+        let path = try manager.create(name: "task-1", branch: "agentboard/task-1", base: "main")
+        try "line\n".write(to: path.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+        try git(["add", "."], cwd: path)
+        try commit("Add new file", cwd: path)
+        let commit = try manager.headCommit(worktree: path)
+
+        let destination = sandbox.appendingPathComponent("moved/task-1")
+        try manager.move(worktree: path, to: destination)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.appendingPathComponent("new.txt").path))
+        let listed = try manager.list()
+        XCTAssertNotNil(listed.first { WorktreeManager.samePath($0.path, destination) }, "\(listed)")
+        XCTAssertNil(listed.first { WorktreeManager.samePath($0.path, path) })
+        XCTAssertEqual(try manager.headCommit(worktree: destination), commit)
+        XCTAssertFalse(try manager.hasUncommittedChanges(worktree: destination))
     }
 
     func testCreateListDiffstatAndRemove() throws {
@@ -90,6 +110,51 @@ final class WorktreeManagerTests: XCTestCase {
         let second = try manager.create(name: "attempt-2", branch: "agentboard/task-2", base: "main")
         XCTAssertEqual(try manager.headCommit(worktree: second), wipHead)
         XCTAssertTrue(FileManager.default.fileExists(atPath: second.appendingPathComponent("wip.txt").path))
+    }
+
+    // MARK: - The ledger a reaped branch leaves behind
+
+    func testDeletingAMergedBranchRecordsWhereItStood() throws {
+        let epic = "agentboard/epic-ledger"
+        try manager.ensureBranch(epic, from: "main")
+        let worktree = try manager.create(name: "task-ledger", branch: "agentboard/task-ledger", base: epic)
+        try "work\n".write(to: worktree.appendingPathComponent("work.txt"), atomically: true, encoding: .utf8)
+        try git(["add", "."], cwd: worktree)
+        try commit("Do the work", cwd: worktree)
+        let tip = try manager.headCommit(worktree: worktree)
+        let epicBase = try git(["rev-parse", epic], cwd: repo).trimmingCharacters(in: .whitespacesAndNewlines)
+        try git(["branch", "-f", epic, "agentboard/task-ledger"], cwd: repo)
+        try manager.remove(path: worktree)
+
+        XCTAssertEqual(try manager.deleteBranchIfMerged("agentboard/task-ledger", into: [epic]), .deleted("agentboard/task-ledger"))
+
+        XCTAssertFalse(try manager.branchExists("agentboard/task-ledger"))
+        XCTAssertEqual(try manager.refCommit(TaskBranchLedger.baseRef(taskId: "task-ledger")), epicBase)
+        XCTAssertEqual(try manager.refCommit(TaskBranchLedger.tipRef(taskId: "task-ledger")), tip)
+        XCTAssertEqual(try manager.commitCount(from: epicBase, to: tip), 1)
+        XCTAssertTrue(try manager.isMerged(commit: tip, into: "refs/heads/\(epic)"))
+    }
+
+    func testTheLedgerSeparatesABranchThatCarriedNothingFromOneThatDid() throws {
+        let epic = "agentboard/epic-ledger"
+        try manager.ensureBranch(epic, from: "main")
+        let worktree = try manager.create(name: "task-silent", branch: "agentboard/task-silent", base: epic)
+        try manager.remove(path: worktree)
+
+        XCTAssertEqual(try manager.deleteBranchIfMerged("agentboard/task-silent", into: [epic]), .deleted("agentboard/task-silent"))
+
+        let base = try XCTUnwrap(manager.refCommit(TaskBranchLedger.baseRef(taskId: "task-silent")))
+        let tip = try XCTUnwrap(manager.refCommit(TaskBranchLedger.tipRef(taskId: "task-silent")))
+        XCTAssertEqual(try manager.commitCount(from: base, to: tip), 0)
+    }
+
+    func testABranchOutsideTheTaskNamespaceGetsNoLedger() throws {
+        try manager.ensureBranch("keep-me", from: "main")
+
+        XCTAssertEqual(try manager.deleteBranchIfMerged("keep-me", into: ["main"]), .deleted("keep-me"))
+
+        XCTAssertNil(try manager.refCommit(TaskBranchLedger.baseRef(taskId: "keep-me")))
+        XCTAssertNil(try manager.refCommit(TaskBranchLedger.tipRef(taskId: "keep-me")))
     }
 
     func testEnsureBranchIsIdempotent() throws {
@@ -144,6 +209,130 @@ final class WorktreeManagerTests: XCTestCase {
             "agentboard/task-unmerged": false,
             "agentboard/task-ghost": false,
         ])
+    }
+
+    // MARK: - mergeIntoEpic
+
+    func testMergeIntoEpicFastForwardsWithoutAWorktree() throws {
+        try manager.ensureBranch("agentboard/epic-1", from: "main")
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "agentboard/epic-1")
+        try addCommit("feature.txt", in: work)
+        let taskHead = try manager.headCommit(worktree: work)
+        try manager.remove(path: work)
+
+        let outcome = try manager.mergeIntoEpic(
+            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+        )
+
+        XCTAssertEqual(outcome, .fastForwarded(head: taskHead))
+        XCTAssertEqual(try revParse("agentboard/epic-1"), taskHead)
+        XCTAssertEqual(try manager.list().count, 1, "a fast-forward should not have cut a worktree")
+    }
+
+    func testMergeIntoEpicUsesATemporaryWorktreeAndKeepsTheBranch() throws {
+        try manager.ensureBranch("agentboard/epic-1", from: "main")
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "agentboard/epic-1")
+        try addCommit("feature.txt", in: work)
+        try manager.remove(path: work)
+        let sibling = try manager.create(name: "sibling", branch: "agentboard/epic-1-side", base: "agentboard/epic-1")
+        try addCommit("sibling.txt", in: sibling)
+        try git(["branch", "-f", "agentboard/epic-1", "agentboard/epic-1-side"], cwd: repo)
+        try manager.remove(path: sibling)
+        let epicBefore = try revParse("agentboard/epic-1")
+
+        let outcome = try manager.mergeIntoEpic(
+            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+        )
+
+        guard case .merged(let head) = outcome else { return XCTFail("expected a merge, got \(outcome)") }
+        XCTAssertEqual(try revParse("agentboard/epic-1"), head)
+        XCTAssertNotEqual(head, epicBefore)
+        XCTAssertTrue(try manager.branchExists("agentboard/epic-1"))
+        XCTAssertEqual(try manager.list().count, 1, "the temporary merge worktree was left behind")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktrees.appendingPathComponent("merge").path))
+    }
+
+    func testMergeIntoEpicAbortsAndNamesConflictingFiles() throws {
+        try manager.ensureBranch("agentboard/epic-1", from: "main")
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "agentboard/epic-1")
+        try addCommit("schema.sql", in: work, contents: "task side\n")
+        try manager.remove(path: work)
+        let sibling = try manager.create(name: "sibling", branch: "agentboard/epic-1-side", base: "agentboard/epic-1")
+        try addCommit("schema.sql", in: sibling, contents: "epic side\n")
+        try git(["branch", "-f", "agentboard/epic-1", "agentboard/epic-1-side"], cwd: repo)
+        try manager.remove(path: sibling)
+        let epicBefore = try revParse("agentboard/epic-1")
+
+        let outcome = try manager.mergeIntoEpic(
+            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+        )
+
+        XCTAssertEqual(outcome, .conflicted(files: ["schema.sql"]))
+        XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore, "a conflict moved the epic branch")
+        XCTAssertTrue(try manager.branchExists("agentboard/epic-1"))
+        XCTAssertEqual(try manager.list().count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktrees.appendingPathComponent("merge").path))
+    }
+
+    func testMergeIntoEpicIsANoOpForAnAlreadyMergedBranch() throws {
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "main")
+        try addCommit("feature.txt", in: work)
+        try manager.remove(path: work)
+        try git(["branch", "agentboard/epic-1", "agentboard/task"], cwd: repo)
+        let epicBefore = try revParse("agentboard/epic-1")
+
+        XCTAssertEqual(
+            try manager.mergeIntoEpic(
+                taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+            ),
+            .alreadyMerged
+        )
+        XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore)
+    }
+
+    func testMergeIntoEpicReportsAMissingTaskBranchAndACheckedOutEpicBranch() throws {
+        try manager.ensureBranch("agentboard/epic-1", from: "main")
+        XCTAssertEqual(
+            try manager.mergeIntoEpic(
+                taskBranch: "agentboard/never-ran", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+            ),
+            .nothingToMerge
+        )
+
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "agentboard/epic-1")
+        try addCommit("feature.txt", in: work)
+        try manager.remove(path: work)
+        let integration = try manager.createForBranch(name: "epic-1", branch: "agentboard/epic-1")
+
+        let outcome = try manager.mergeIntoEpic(
+            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+        )
+        guard case .skippedCheckedOut(let path) = outcome else {
+            return XCTFail("expected the merge to defer to the checkout, got \(outcome)")
+        }
+        XCTAssertTrue(WorktreeManager.samePath(URL(fileURLWithPath: path), integration), path)
+    }
+
+    func testMergeIntoEpicRefusesAMissingEpicBranch() throws {
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "main")
+        try addCommit("feature.txt", in: work)
+        try manager.remove(path: work)
+
+        XCTAssertThrowsError(
+            try manager.mergeIntoEpic(
+                taskBranch: "agentboard/task", epicBranch: "agentboard/epic-missing", worktreeName: "merge"
+            )
+        )
+    }
+
+    private func addCommit(_ file: String, in worktree: URL, contents: String = "work\n") throws {
+        try contents.write(to: worktree.appendingPathComponent(file), atomically: true, encoding: .utf8)
+        try git(["add", "."], cwd: worktree)
+        try commit("Add \(file)", cwd: worktree)
+    }
+
+    private func revParse(_ ref: String) throws -> String {
+        try git(["rev-parse", "--verify", ref], cwd: repo).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func testCreateFailsForMissingBase() {
@@ -210,6 +399,76 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(WorktreeManager.worktreeRemoveHooks(settingsAt: sandbox.appendingPathComponent("nope.json")), [])
         let path = try manager.create(name: "plain", branch: "agentboard/plain", base: "main")
         XCTAssertEqual(try manager.remove(path: path).hookDiagnostics, [])
+    }
+
+    /// The whole mechanism end to end: `git worktree add` fires the repository's `post-checkout`
+    /// hook, the hook's setup interpolates the new worktree path into a shell command unquoted, and
+    /// git exits with the hook's status.
+    func testAPostCheckoutSetupThatSplitsTheWorktreePathIsExplained() throws {
+        try installPostCheckoutSetup("""
+        /bin/sh $1/scripts/preinstall.sh
+        echo "setup: build step 2"
+        exit 1
+        """)
+        let spaced = WorktreeManager(
+            repoPath: repo,
+            worktreeRoot: sandbox.appendingPathComponent("Agent Board/worktrees"),
+            hookSettingsURL: hookSettings
+        )
+
+        let error = try XCTUnwrapError {
+            _ = try spaced.create(name: "task-1", branch: "agentboard/task-1", base: "main")
+        }
+
+        let message = String(describing: error)
+        let headline = try XCTUnwrap(message.split(separator: "\n", omittingEmptySubsequences: false).first)
+        XCTAssertTrue(headline.contains("a space"), message)
+        XCTAssertTrue(headline.contains(sandbox.appendingPathComponent("Agent").path), message)
+        XCTAssertTrue(message.contains("setup: build step 2"), "the hook's own output must survive: \(message)")
+        XCTAssertTrue(message.contains("No such file or directory"), message)
+    }
+
+    func testAPostCheckoutSetupThatFailsForAnotherReasonIsNotExplained() throws {
+        try installPostCheckoutSetup("""
+        echo "setup: no such target //:lint-staged" >&2
+        exit 1
+        """)
+        let spaced = WorktreeManager(
+            repoPath: repo,
+            worktreeRoot: sandbox.appendingPathComponent("Agent Board/worktrees"),
+            hookSettingsURL: hookSettings
+        )
+
+        let error = try XCTUnwrapError {
+            _ = try spaced.create(name: "task-1", branch: "agentboard/task-1", base: "main")
+        }
+
+        let message = String(describing: error)
+        XCTAssertTrue(message.hasPrefix("git worktree add "), message)
+        XCTAssertTrue(message.contains("no such target //:lint-staged"), message)
+    }
+
+    private func installPostCheckoutSetup(_ body: String) throws {
+        let hooks = repo.appendingPathComponent(".git/hooks")
+        try FileManager.default.createDirectory(at: hooks, withIntermediateDirectories: true)
+        let hook = hooks.appendingPathComponent("post-checkout")
+        try """
+        #!/bin/sh
+        [ "$3" = "1" ] || exit 0
+        cd "$(git rev-parse --show-toplevel)"
+        set -- "$PWD"
+        \(body)
+        """.write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+    }
+
+    private func XCTUnwrapError(_ body: () throws -> Void) throws -> Error {
+        do {
+            try body()
+        } catch {
+            return error
+        }
+        throw AgentRuntimeError("expected the worktree creation to fail")
     }
 
     func testExpandTilde() {

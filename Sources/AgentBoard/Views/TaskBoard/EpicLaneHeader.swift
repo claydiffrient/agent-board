@@ -5,15 +5,29 @@ struct EpicLaneHeader: View {
     let epic: Epic
     let count: EpicTaskCount
     let integrationPending: Bool
+    let isCollapsed: Bool
+    let onToggleCollapse: () -> Void
     let onRequestIntegration: () -> Void
     let onOpenPullRequest: () -> Void
+    let onClose: (EpicClosure) -> Void
 
     private var actions: [EpicLaneAction] {
         EpicLane.actions(state: epic.state, readyForIntegration: count.readyForIntegration)
     }
 
+    private var closures: [EpicClosure] { actions.compactMap(\.closure) }
+
     var body: some View {
         HStack(spacing: 10) {
+            Button(action: onToggleCollapse) {
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 12)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isCollapsed ? "Expand \(epic.title)" : "Collapse \(epic.title)")
+            .help(isCollapsed ? "Expand this epic's lane" : "Collapse this epic's lane")
             Text(epic.title)
                 .font(.subheadline.weight(.semibold))
             EpicStateBadge(state: epic.state)
@@ -26,8 +40,22 @@ struct EpicLaneHeader: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Capsule().fill(Color.secondary.opacity(0.2)))
-            ForEach(actions, id: \.self) { action in
+            ForEach(actions.filter { $0.closure == nil }, id: \.self) { action in
                 button(action)
+            }
+            if !closures.isEmpty {
+                Menu {
+                    ForEach(closures, id: \.self) { closure in
+                        Button(closure.buttonLabel, role: .destructive) { onClose(closure) }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .accessibilityLabel("End \(epic.title)")
+                .help("Finish or abandon this epic without integrating it. Nothing is merged and no branch is deleted.")
             }
             Spacer()
         }
@@ -47,6 +75,8 @@ struct EpicLaneHeader: View {
             Button("Open PR") { onOpenPullRequest() }
                 .controlSize(.small)
                 .help("Opens a prefilled pull request page in your browser. Agent Board never creates the PR.")
+        case .closeAsDone, .abandon:
+            EmptyView()
         }
     }
 }

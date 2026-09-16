@@ -193,6 +193,15 @@ final class BoardServerTests: XCTestCase {
         XCTAssertNil(headers["Mcp-Session-Id"])
     }
 
+    func testWithoutAPromptHandlerPromptMethodsAreNotFound() async throws {
+        for method in ["prompts/list", "prompts/get"] {
+            let (status, json) = try await mcp(rpc(method, id: 9, params: ["name": "anything"]), token: Self.workerToken)
+            XCTAssertEqual(status, 200)
+            let error = (json as? [String: Any])?["error"] as? [String: Any]
+            XCTAssertEqual(error?["code"] as? Int, -32601, "\(method) should not be served")
+        }
+    }
+
     func testUnknownMethodIsMethodNotFound() async throws {
         let (status, json) = try await mcp(rpc("server/discover", id: 3), token: Self.workerToken)
         XCTAssertEqual(status, 200)

@@ -6,16 +6,28 @@ import Observation
 import SwiftTerm
 
 /// Every byte the user types reaches the child through `send(source:data:)`; the console's own
-/// notice goes through the same path, so it flags itself to keep the keystroke clock honest.
+/// notice goes through the same path, so it flags itself to stay out of its own bookkeeping.
 final class OrchestratorTerminalView: LocalProcessTerminalView {
-    private(set) var lastUserInputAt: Date?
+    private(set) var promptIsDirty = false
     var isInjecting = false
+    /// `submitted` is true for Enter and false for a cancel: only the former starts a turn.
+    var promptDidClear: ((_ submitted: Bool) -> Void)?
 
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
-        if !isInjecting {
-            lastUserInputAt = Date()
-        }
         super.send(source: source, data: data)
+        guard !isInjecting else { return }
+        switch PromptInputClassifier.classify(data) {
+        case .dirties:
+            promptIsDirty = true
+        case .submits:
+            promptIsDirty = false
+            promptDidClear?(true)
+        case .cancels:
+            promptIsDirty = false
+            promptDidClear?(false)
+        case .neutral:
+            break
+        }
     }
 }
 
@@ -30,13 +42,18 @@ final class OrchestratorConsole {
         case exited(Int32?)
     }
 
-    static let noticeQuietInterval: TimeInterval = 10
-
     let projectId: String
     private(set) var state: State = .idle
     private(set) var sessionId: String?
     private(set) var lastError: String?
     private(set) var lastNoticeAt: Date?
+    /// Surfaced in the orchestrator header (SPEC §9.2): a session that silently forgot what it was
+    /// doing is worse than one that says so.
+    private(set) var lastCompactionAt: Date?
+    private(set) var lastCompactionWasAutomatic = false
+    private(set) var compactionCount = 0
+    /// Nil until the metering tick has read the session's transcript at least once.
+    private(set) var contextPressure: ContextPressure?
 
     @ObservationIgnored let terminal: OrchestratorTerminalView
     @ObservationIgnored private let projects: ProjectStore
@@ -46,9 +63,8 @@ final class OrchestratorConsole {
     @ObservationIgnored private let sessionConfigDir: URL
     @ObservationIgnored private let currentPort: @MainActor () -> Int?
     @ObservationIgnored private let processObserver = ProcessObserver()
-    @ObservationIgnored private var lastAnnouncedReportId: Int64 = 0
-    @ObservationIgnored private var lastStopAt: Date?
     @ObservationIgnored private var restartAfterExit = false
+    @ObservationIgnored private var noticeGate: ReportNoticeGate!
 
     init(projectId: String, db: AppDatabase, sessionConfigDir: URL, currentPort: @escaping @MainActor () -> Int?) {
         self.projectId = projectId
@@ -64,6 +80,17 @@ final class OrchestratorConsole {
         terminal.caretColor = .systemGreen
         terminal.processDelegate = processObserver
         processObserver.console = self
+        noticeGate = ReportNoticeGate(
+            isRunning: { [weak self] in self?.isProcessRunning ?? false },
+            promptIsDirty: { [weak self] in self?.terminal.promptIsDirty ?? true },
+            pendingReports: { [weak self] in try? self?.pendingReports() },
+            deliver: { [weak self] count in self?.sendNotice(count: count) },
+            deliverCompaction: { [weak self] in self?.sendCompaction() },
+            deliverReorientation: { [weak self] in self?.sendReorientation() }
+        )
+        terminal.promptDidClear = { [weak self] submitted in
+            self?.noticeGate.promptCleared(submitted: submitted)
+        }
     }
 
     var isProcessRunning: Bool {
@@ -153,7 +180,7 @@ final class OrchestratorConsole {
             model: project.settings.defaultModel,
             strictMcpConfig: false
         )
-        lastStopAt = nil
+        noticeGate.processRestarted()
         terminal.startProcess(
             executable: command.executable,
             args: command.arguments(),
@@ -163,8 +190,10 @@ final class OrchestratorConsole {
         )
     }
 
+    /// SwiftTerm hands `exitCode` as the raw `waitpid` status, not the exit code; decoded through
+    /// `WaitStatus` so `exit 7` reports 7, not the shifted 1792 (shared with `ShellConsole`).
     private func processExited(code: Int32?) {
-        state = .exited(code)
+        state = .exited(code.map(WaitStatus.exitCode(fromWaitStatus:)))
         if let sessionId, let row = try? sessions.get(sessionId), row.state.isActive {
             try? sessions.setState(sessionId, .stopped, endedAt: .nowMillis)
         }
@@ -177,29 +206,15 @@ final class OrchestratorConsole {
     // MARK: - Report notice (SPEC §9.1)
 
     func turnEnded() {
-        lastStopAt = Date()
-        maybeNotice(turnEnded: true)
+        noticeGate.turnEnded()
     }
 
     func reportsChanged() {
-        maybeNotice(turnEnded: false)
+        noticeGate.reportsChanged()
     }
 
     func nudge() {
-        guard isProcessRunning, let pending = try? pendingReports(), pending.count > 0 else { return }
-        sendNotice(count: pending.count, maxId: pending.maxId)
-    }
-
-    private func maybeNotice(turnEnded: Bool) {
-        guard isProcessRunning, let pending = try? pendingReports(), pending.count > 0 else { return }
-        guard pending.maxId > lastAnnouncedReportId else { return }
-        if !turnEnded {
-            guard let lastStopAt else { return }
-            if let typed = terminal.lastUserInputAt {
-                guard typed < lastStopAt, Date().timeIntervalSince(typed) >= Self.noticeQuietInterval else { return }
-            }
-        }
-        sendNotice(count: pending.count, maxId: pending.maxId)
+        noticeGate.nudge()
     }
 
     private func pendingReports() throws -> (count: Int, maxId: Int64) {
@@ -207,12 +222,52 @@ final class OrchestratorConsole {
         return (unconsumed.count, unconsumed.compactMap(\.id).max() ?? 0)
     }
 
-    private func sendNotice(count: Int, maxId: Int64) {
-        terminal.isInjecting = true
-        terminal.send(txt: "[agent-board] \(count) worker reports pending. Call list_reports.\r")
-        terminal.isInjecting = false
-        lastAnnouncedReportId = max(lastAnnouncedReportId, maxId)
+    private func sendNotice(count: Int) {
+        inject("[agent-board] \(count) reports pending. Call list_reports.")
         lastNoticeAt = Date()
+    }
+
+    // MARK: - Compaction (SPEC §9.2)
+
+    /// The metering tick's reading of how full the context is. Crossing the threshold asks the gate
+    /// for a compaction; the gate decides when it is safe to write.
+    func contextPressureObserved(_ pressure: ContextPressure) {
+        // The tick runs every 5s and an idle session reports the same number each time; writing it
+        // back unconditionally would re-render the whole orchestrator pane on every tick.
+        if contextPressure != pressure { contextPressure = pressure }
+        guard pressure.usedTokens >= OrchestratorCompaction.minimumUsefulTokens,
+              pressure.exceeds(OrchestratorCompaction.threshold)
+        else { return }
+        noticeGate.compactionNeeded()
+    }
+
+    /// `SessionStart` with `source: compact`. The session id does not change across a compaction
+    /// (measured, SPEC §2), so nothing is rebound here — only recorded, and re-oriented.
+    func compactionCompleted(manual: Bool) {
+        compactionCount += 1
+        lastCompactionAt = Date()
+        lastCompactionWasAutomatic = !manual
+        contextPressure = nil
+        noticeGate.compactionFinished(wasOurs: manual)
+    }
+
+    private func sendCompaction() {
+        inject(OrchestratorCompaction.command)
+    }
+
+    private func sendReorientation() {
+        inject(OrchestratorCompaction.reorientation)
+    }
+
+    /// The carriage return is a **separate** write. Claude Code's slash-command autocomplete eats a
+    /// `\r` that arrives in the same burst as the text, leaving a literal `^M` in the prompt and the
+    /// command unsubmitted; measured 2026-09-15 (SPEC §2). Splitting it costs nothing for the plain
+    /// notice, so every injection takes the same path.
+    private func inject(_ line: String) {
+        terminal.isInjecting = true
+        terminal.send(txt: line)
+        terminal.send(txt: "\r")
+        terminal.isInjecting = false
     }
 
     private final class ProcessObserver: NSObject, LocalProcessTerminalViewDelegate {

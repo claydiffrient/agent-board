@@ -4,6 +4,7 @@ import SwiftUI
 
 struct ProjectSettingsSheet: View {
     let project: Project
+    let workspaces: [Workspace]
     let onDeleted: () -> Void
 
     @Environment(AppEnvironment.self) private var env
@@ -13,11 +14,16 @@ struct ProjectSettingsSheet: View {
     @State private var worktreeRoot: String
     @State private var autoModeJSON: String
     @State private var extraServers: String
+    @State private var archiveMode: ArchivePolicyMode
+    @State private var archiveDays: Int
+    @State private var workspaceId: String?
+    @State private var muteChoice: NotificationMuteChoice
     @State private var confirmDelete = false
     @State private var errorMessage: String?
 
-    init(project: Project, onDeleted: @escaping () -> Void) {
+    init(project: Project, workspaces: [Workspace], onDeleted: @escaping () -> Void) {
         self.project = project
+        self.workspaces = workspaces
         self.onDeleted = onDeleted
         let settings = project.settings
         _settings = State(initialValue: settings)
@@ -25,6 +31,20 @@ struct ProjectSettingsSheet: View {
         _worktreeRoot = State(initialValue: project.worktreeRoot)
         _autoModeJSON = State(initialValue: settings.autoModeJSON ?? "")
         _extraServers = State(initialValue: settings.extraMcpServers.joined(separator: ", "))
+        _archiveMode = State(initialValue: settings.archivePolicy.mode)
+        _archiveDays = State(initialValue: settings.archivePolicy.days ?? ArchivePolicy.defaultDays)
+        _muteChoice = State(initialValue: NotificationMuteChoice(settings.notifications.mute))
+        let assigned = project.workspaceId
+        _workspaceId = State(initialValue: workspaces.contains { $0.id == assigned } ? assigned : nil)
+    }
+
+    private var worktreeRootComplaint: String? {
+        do {
+            try WorktreeRootRule.validate(worktreeRoot)
+            return nil
+        } catch {
+            return errorText(error)
+        }
     }
 
     private var autoModeJSONIsValid: Bool {
@@ -41,6 +61,23 @@ struct ProjectSettingsSheet: View {
                     LabeledContent("Path", value: project.repoPath)
                     TextField("Base branch", text: $baseBranch)
                     TextField("Worktree root", text: $worktreeRoot)
+                    if let complaint = worktreeRootComplaint {
+                        Text(complaint)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                Section("Workspace") {
+                    Picker("Workspace", selection: $workspaceId) {
+                        Text("None").tag(String?.none)
+                        ForEach(workspaces) { workspace in
+                            Text(workspace.name).tag(String?.some(workspace.id))
+                        }
+                    }
+                    Text("Groups this project in the sidebar. Optional \u{2014} an ungrouped project works the same.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Caps") {
@@ -74,6 +111,63 @@ struct ProjectSettingsSheet: View {
                         }
                     }
                     Text(Self.reviewLevelBlurb(settings.reviewLevel))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Verification") {
+                    TextField("Build command", text: Binding(
+                        get: { settings.buildCommand ?? "" },
+                        set: { settings.buildCommand = $0.isEmpty ? nil : $0 }
+                    ), prompt: Text("e.g. swift build"))
+                    TextField("Test command", text: Binding(
+                        get: { settings.testCommand ?? "" },
+                        set: { settings.testCommand = $0.isEmpty ? nil : $0 }
+                    ), prompt: Text("e.g. swift test"))
+                    Text("How this project builds and tests itself. Handed to every worker and to the integrator; left empty, they work it out from the repo and report what they ran.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Isolation") {
+                    Picker("Worktree strategy", selection: $settings.worktreeStrategy) {
+                        ForEach(WorktreeStrategy.allCases, id: \.self) { strategy in
+                            Text(strategy.title).tag(strategy)
+                        }
+                    }
+                    TextField("Agents in the shared checkout", value: $settings.sharedCheckoutMaxAgents, format: .number)
+                    Text("A worktree per task is the default and always isolates. Shared runs workers in this project's own checkout on one branch, skipping a full repository setup per task; Auto shares only when a compatible group already holds the checkout. A task that cannot join gets a worktree. Co-resident agents take a per-file lock before every write, so a collision is a wait rather than an overwrite.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Archive") {
+                    Picker("Archive done tasks", selection: $archiveMode) {
+                        ForEach(ArchivePolicyMode.allCases, id: \.self) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    TextField("Days in done", value: $archiveDays, format: .number)
+                        .disabled(archiveMode != .afterDays)
+                        .foregroundStyle(archiveMode == .afterDays ? .primary : .secondary)
+                    Text("Archived tasks are hidden from the board, never deleted. The Task Board's Archive button works under every mode; turn on Show Archived there to bring them back into view.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Notifications") {
+                    ForEach(NotificationCategory.allCases) { category in
+                        Toggle(category.title, isOn: Binding(
+                            get: { settings.notifications.isEnabled(category) },
+                            set: { settings.notifications.setEnabled(category, $0) }
+                        ))
+                    }
+                    Picker("Mute this project", selection: $muteChoice) {
+                        ForEach(NotificationMuteChoice.allCases) { choice in
+                            Text(choice.title).tag(choice)
+                        }
+                    }
+                    Text("Every category is on by default. Turning one off, or muting the project, stops the banner only — this project keeps its sidebar badge and its place in At a Glance, so you can still find what is waiting.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -115,7 +209,7 @@ struct ProjectSettingsSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Save") { save() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!autoModeJSONIsValid || baseBranch.isEmpty || worktreeRoot.isEmpty)
+                    .disabled(!autoModeJSONIsValid || baseBranch.isEmpty || worktreeRootComplaint != nil)
             }
             .padding()
         }
@@ -135,6 +229,10 @@ struct ProjectSettingsSheet: View {
 
     private func save() {
         var updated = settings
+        updated.buildCommand = VerificationCommands(build: settings.buildCommand).build
+        updated.testCommand = VerificationCommands(test: settings.testCommand).test
+        updated.archivePolicy = ArchivePolicy.make(mode: archiveMode, days: archiveDays)
+        updated.notifications.mute = muteChoice.mute(existing: settings.notifications.mute)
         let trimmedJSON = autoModeJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.autoModeJSON = trimmedJSON.isEmpty ? nil : trimmedJSON
         updated.extraMcpServers = extraServers
@@ -142,7 +240,9 @@ struct ProjectSettingsSheet: View {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         do {
+            try WorktreeRootRule.validate(worktreeRoot)
             try ProjectStore(env.db).updateSettings(project.id, updated)
+            try WorkspaceStore(env.db).assign(projectId: project.id, workspaceId: workspaceId)
             try env.db.writer.write { db in
                 try db.execute(
                     sql: "UPDATE project SET base_branch = ?, worktree_root = ? WHERE id = ?",

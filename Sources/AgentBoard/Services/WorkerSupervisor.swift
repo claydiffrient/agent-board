@@ -17,13 +17,19 @@ enum SupervisorError: LocalizedError {
     case capRefused(String)
     case taskAlreadyHeld(title: String, sessionId: String)
     case worktreeAlreadyHeld(path: String, sessionId: String)
+    case shutdownOrdered
+    case noShutdownOrder
     case serverNotRunning
     case spawnFailed(worktree: String, underlying: String)
+    case setupInterrupted
     case approvalNotFound(String)
+    case epicCloseRefused(String)
+    case globalShutdownIncomplete([String])
 
     var errorDescription: String? {
         switch self {
         case .approvalNotFound(let id): return "approval \(id) not found"
+        case .epicCloseRefused(let reason): return reason
         case .epicNotFound(let id): return "epic \(id) not found"
         case .notAGitRepository(let path): return "\(path) is not a git repository"
         case .projectNotFound(let id): return "project \(id) not found"
@@ -36,9 +42,15 @@ enum SupervisorError: LocalizedError {
             return "\"\(title)\" is still held by session \(sessionId); a second agent would share its worktree"
         case .worktreeAlreadyHeld(let path, let sessionId):
             return "session \(sessionId) is still working in \(path); a second agent must not share it"
+        case .shutdownOrdered: return ShutdownOrder.refusal
+        case .noShutdownOrder: return "no shutdown order is outstanding on this project"
         case .serverNotRunning: return "the Agent Board server is not running"
         case .spawnFailed(let worktree, let underlying):
             return "spawn failed; worktree kept at \(worktree) for retry.\n\(underlying)"
+        case .setupInterrupted:
+            return "Agent Board quit while the worktree was still being set up"
+        case .globalShutdownIncomplete(let failures):
+            return "some projects could not be wound down:\n" + failures.joined(separator: "\n")
         }
     }
 }
@@ -48,28 +60,60 @@ enum SupervisorError: LocalizedError {
 final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private(set) var serverPort: Int?
     private(set) var lastError: String?
+    /// The last spawn's worktree path warning, raised by the preflight before that spawn touched
+    /// git. Separate from `lastError` so the spawn's own failure cannot overwrite it.
+    private(set) var lastWorktreePathWarning: String?
+    /// Wind-down progress per project id, refreshed on every delivery, every acknowledgment and
+    /// every metering tick, so the progress sheet reads it instead of polling.
+    private(set) var shutdownProgress: [String: ShutdownProgress] = [:]
 
     @ObservationIgnored private let db: AppDatabase
     @ObservationIgnored private let runtime: any AgentRuntime
     @ObservationIgnored private let server: BoardServer
     @ObservationIgnored private let appSupportDir: URL
+    @ObservationIgnored private let worktreeBase: URL
     @ObservationIgnored private let projectsRoot: URL
+    /// Sampled once per metering tick. Every cap and grace deadline is measured against it so a
+    /// suspended machine does not count against a worker.
+    @ObservationIgnored private let sleepLedger: SleepLedger
     @ObservationIgnored private let projects: ProjectStore
     @ObservationIgnored private let tasks: TaskStore
     @ObservationIgnored private let sessions: SessionStore
     @ObservationIgnored private let grants: TokenGrantStore
     @ObservationIgnored private let hookEvents: HookEventStore
     @ObservationIgnored private let approvals: ApprovalStore
+    @ObservationIgnored private let shutdowns: ShutdownOrderStore
+    @ObservationIgnored private let deliveries: ShutdownDeliveryStore
     @ObservationIgnored private let epics: EpicStore
     @ObservationIgnored private let notes: NoteStore
     @ObservationIgnored private let board: Board
+    @ObservationIgnored private let archives: ArchiveSweep
+    @ObservationIgnored private let fileLocks: FileLockStore
+    @ObservationIgnored private let attention: ProjectAttentionStore
+    /// Which project needs a human and which of those has already been announced. Polled on the
+    /// metering tick rather than observed, because `overdueShutdown` and any future deadline cause
+    /// only become true as the clock moves, and a `ValueObservation` re-fires on writes alone.
+    @ObservationIgnored private var attentionNotifier = AttentionNotifier()
+    /// The project whose screen is open, pushed by `MainWindow`. Nil when the window is on At a
+    /// Glance; combined with `NSApp.isActive` it decides which banners are redundant.
+    @ObservationIgnored private var focusedProject: String?
     @ObservationIgnored private var meteringTask: _Concurrency.Task<Void, Never>?
+    /// Millis of the last archive sweep; 0 means none yet, so the first tick after launch sweeps
+    /// and picks up whatever came due while the app was closed.
+    @ObservationIgnored private var lastArchiveSweep: Int64 = 0
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
     @ObservationIgnored private var stallNotified: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
+    @ObservationIgnored private var shellConsoles: [String: ShellConsole] = [:]
+    /// Keyed by setup session id, so a test — or a human stopping a worker mid-setup — can wait on
+    /// or cancel the half of a spawn that outlives the call.
+    @ObservationIgnored private var setupTasks: [String: _Concurrency.Task<Void, Never>] = [:]
 
-    nonisolated static let taskBranchPrefix = "agentboard/"
+    nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
+    /// The archive policies are day-granular, so they ride the metering tick at a far coarser
+    /// cadence rather than paying for a scan every 5 seconds — or a second timer.
+    static let archiveSweepIntervalMillis: Int64 = 5 * 60 * 1000
     /// Sessions that ended this recently still get one more transcript read so final spend lands.
     static let finalSpendWindowMillis: Int64 = 15_000
 
@@ -78,22 +122,31 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         runtime: any AgentRuntime,
         server: BoardServer,
         appSupportDir: URL,
-        projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot
+        worktreeBase: URL,
+        projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
+        sleepLedger: SleepLedger = .shared
     ) {
         self.db = db
         self.runtime = runtime
         self.server = server
         self.appSupportDir = appSupportDir
+        self.worktreeBase = worktreeBase
         self.projectsRoot = projectsRoot
+        self.sleepLedger = sleepLedger
         projects = ProjectStore(db)
         tasks = TaskStore(db)
         sessions = SessionStore(db)
         grants = TokenGrantStore(db)
         hookEvents = HookEventStore(db)
         approvals = ApprovalStore(db)
+        shutdowns = ShutdownOrderStore(db)
+        deliveries = ShutdownDeliveryStore(db)
         epics = EpicStore(db)
         notes = NoteStore(db)
         board = Board(db)
+        archives = ArchiveSweep(db)
+        fileLocks = FileLockStore(db)
+        attention = ProjectAttentionStore(db)
     }
 
     private var sessionConfigDir: URL { appSupportDir.appendingPathComponent("sessions") }
@@ -109,7 +162,27 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             lastError = describe(error)
         }
+        failInterruptedSetups()
+        sweepStaleFileLocks()
+        await sweepLeakedAgents()
+        await migrateWorktreeRoots()
         startMetering()
+    }
+
+    /// Idempotent: a project whose root is already space-free is left alone, so the second launch
+    /// is a no-op.
+    @discardableResult
+    func migrateWorktreeRoots() async -> WorktreeRootMigration.Outcome {
+        let migration = WorktreeRootMigration(db: db, worktreeBase: worktreeBase)
+        let outcome = await _Concurrency.Task.detached(priority: .userInitiated) { migration.run() }.value
+        for line in outcome.migrated {
+            FileHandle.standardError.write(Data("worktree root migrated: \(line)\n".utf8))
+        }
+        for line in outcome.skipped + outcome.notices {
+            FileHandle.standardError.write(Data("worktree root not migrated: \(line)\n".utf8))
+        }
+        report(outcome.skipped + outcome.notices)
+        return outcome
     }
 
     // MARK: - WorkerSupervising
@@ -130,12 +203,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 resolvedBase = try await offMain { Self.defaultBranch(repo: repo) } ?? "main"
             }
             let id = Project.newId()
+            let worktreeRoot = worktreeBase.appendingPathComponent(id)
+            try WorktreeRootRule.validate(worktreeRoot.path)
             let project = Project(
                 id: id,
                 name: name?.isEmpty == false ? name! : repo.lastPathComponent,
                 repoPath: repo.path,
                 baseBranch: resolvedBase,
-                worktreeRoot: appSupportDir.appendingPathComponent("worktrees/\(id)").path,
+                worktreeRoot: worktreeRoot.path,
                 memoryDir: ClaudeProjectPaths.memoryDir(forPath: repo.path).path,
                 orchSessionId: nil,
                 settingsJSON: ProjectSettings.forNewProject().encoded(),
@@ -154,8 +229,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording { _ = try await spawn(taskId: taskId) }
     }
 
+    /// Answers as soon as the worktree is on disk and the task is claimed; §3.1 steps 3-8 finish in
+    /// the background. On a large repository the agent's own start-up outlasts an MCP call, and an
+    /// orchestrator that cannot tell a timeout from a failure has to poll to find out what happened.
     @discardableResult
-    private func spawn(taskId: String) async throws -> AgentSession {
+    private func spawn(taskId: String) async throws -> WorkerSpawn {
         guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
         guard task.column != .running, task.column != .done else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
@@ -164,6 +242,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.projectNotFound(task.projectId)
         }
         guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        try requireNoShutdown(projectId: project.id)
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
         }
@@ -175,12 +254,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
 
         let attempt = try sessions.forTask(taskId).count + 1
-        let branch = Self.taskBranchPrefix + taskId
         let manager = WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
         )
         let epic = try task.epicId.flatMap { try epics.get($0) }
+        let placement = WorkerPlacementDecision.decide(
+            strategy: project.settings.worktreeStrategy,
+            wantedSharedBranch: SharedCheckoutGroup.branch(epicId: task.epicId),
+            group: try SharedCheckoutGroup.current(db: db, projectId: project.id)
+        )
+        // Before the first git command either way: `git worktree add` fires the repository's
+        // post-checkout hook, so a path that hook cannot survive has to be named while nothing has
+        // run yet. A shared placement creates no path, so it has nothing to judge and says nothing.
+        let warnings = placement == .worktree
+            ? preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
+            : clearedWorktreePathWarning()
         let base: String
         if let epic {
             let epicBranch = epic.branch
@@ -190,46 +279,204 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } else {
             base = project.baseBranch
         }
-        let worktree = try await offMain {
-            try Self.existingWorktree(manager, name: taskId) ?? manager.create(name: taskId, branch: branch, base: base)
-        }
-        if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
-            throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
+        let site = try await checkoutSite(
+            project: project, taskId: taskId, placement: placement, base: base, manager: manager,
+            warnings: warnings
+        )
+        let branch = site.branch
+        // A handed-off task keeps its worktree on disk, so a second agent could otherwise be launched
+        // into a checkout someone is still working in. Co-resident agents in a shared checkout are
+        // deliberate and have no worktree path, so this skips them.
+        if let path = site.worktreePath, let holder = try sessions.activeHolder(worktreePath: path) {
+            throw SupervisorError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
         }
 
         do {
-            let recorded = try await launch(
-                LaunchPlan(
-                    project: project,
-                    taskId: taskId,
-                    worktree: worktree,
-                    branch: branch,
-                    configId: Self.configId(taskId: taskId, attempt: attempt),
-                    name: Self.sessionName(for: task),
-                    prompt: Self.openingPrompt(
-                        task: task, branch: branch, attempt: attempt, epicGoal: epic?.goal,
-                        notes: try notes.notesForSpawn(
-                            projectId: project.id, taskId: taskId, epicId: task.epicId
-                        )
-                    ),
-                    model: task.model ?? project.settings.defaultModel,
-                    attempt: attempt
-                ),
-                port: port
+            let placeholder = try board.assign(
+                taskId: taskId,
+                session: Self.setupRow(
+                    projectId: project.id, taskId: taskId, site: site, attempt: attempt
+                )
             )
             if let epic, epic.state == .planning {
                 try epics.setState(epic.id, .active)
             }
-            return recorded
+            beginSetup(
+                LaunchPlan(
+                    project: project,
+                    taskId: taskId,
+                    cwd: site.cwd,
+                    worktreePath: site.worktreePath,
+                    branch: branch,
+                    configId: Self.configId(taskId: taskId, attempt: placeholder.attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: Self.openingPrompt(
+                        task: task, branch: branch, attempt: placeholder.attempt, epicGoal: epic?.goal,
+                        notes: try notes.notesForSpawn(
+                            projectId: project.id, taskId: taskId, epicId: task.epicId
+                        ),
+                        verification: project.settings.verification,
+                        placement: site.placement,
+                        workingDirectory: site.cwd.path
+                    ),
+                    model: task.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt
+                ),
+                placeholder: placeholder,
+                port: port
+            )
+            return WorkerSpawn(
+                setupSessionId: placeholder.sessionId, worktreePath: site.cwd.path, branch: branch,
+                sharesCheckout: site.placement.sharedBranch != nil, warnings: site.warnings
+            )
         } catch {
-            throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
+            throw SupervisorError.spawnFailed(worktree: site.cwd.path, underlying: describe(error))
+        }
+    }
+
+    /// Where a worker will run, once the strategy, the group holding the checkout and git have all
+    /// had their say.
+    private struct CheckoutSite {
+        var placement: WorkerPlacement
+        var cwd: URL
+        /// Nil for a shared checkout: there is no worktree to record, move, diff or tear down.
+        var worktreePath: String?
+        var branch: String
+        var warnings: [String]
+    }
+
+    /// Carries out the placement. A `shared` one that git will not accept — a dirty checkout, or a
+    /// branch another worktree holds — degrades to a worktree with a notice rather than failing the
+    /// spawn.
+    private func checkoutSite(
+        project: Project, taskId: String, placement: WorkerPlacement, base: String,
+        manager: WorktreeManager, warnings: [String]
+    ) async throws -> CheckoutSite {
+        if let sharedBranch = placement.sharedBranch {
+            let repo = URL(fileURLWithPath: project.repoPath)
+            do {
+                try await offMain { try manager.adoptSharedBranch(sharedBranch, from: base) }
+                return CheckoutSite(
+                    placement: placement, cwd: repo, worktreePath: nil, branch: sharedBranch, warnings: warnings
+                )
+            } catch {
+                report(["\(project.name): the shared checkout could not be used, so this task got a worktree. \(describe(error))"])
+            }
+        }
+        let branch = Self.taskBranchPrefix + taskId
+        let fallbackWarnings = placement == .worktree
+            ? warnings
+            : preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
+        let worktree = try await offMain {
+            try Self.existingWorktree(manager, name: taskId) ?? manager.create(name: taskId, branch: branch, base: base)
+        }
+        return CheckoutSite(
+            placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch,
+            warnings: fallbackWarnings
+        )
+    }
+
+    /// A shared placement creates no path, so a warning left over from an earlier spawn would be
+    /// read as this one's.
+    private func clearedWorktreePathWarning() -> [String] {
+        lastWorktreePathWarning = nil
+        return []
+    }
+
+    private static func setupRow(
+        projectId: String, taskId: String, site: CheckoutSite, attempt: Int
+    ) -> AgentSession {
+        AgentSession(
+            sessionId: "setup-\(UUID().uuidString)",
+            projectId: projectId,
+            taskId: taskId,
+            role: .worker,
+            worktreePath: site.worktreePath,
+            branch: site.branch,
+            cwd: site.cwd.path,
+            state: .setup,
+            attempt: attempt
+        )
+    }
+
+    /// The failure has nowhere to be thrown once `spawn` has answered, so it reaches the
+    /// orchestrator the way every other asynchronous worker outcome does: as a queued report, with
+    /// the task put back in `ready` rather than left in `running` behind a session that never ran.
+    private func beginSetup(_ plan: LaunchPlan, placeholder: AgentSession, port: Int) {
+        let sessionId = placeholder.sessionId
+        setupTasks[sessionId] = _Concurrency.Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await launch(plan, port: port, placeholder: placeholder)
+            } catch {
+                lastError = describe(error)
+                // The placeholder may already have been resolved into a real session, in which case
+                // that is the row to end — the placeholder no longer exists to be reported against.
+                let live = ((try? sessions.forTask(plan.taskId)) ?? [])
+                    .first { $0.state.isActive }?.sessionId ?? sessionId
+                failSetup(sessionId: live, projectId: plan.project.id, error: error)
+            }
+            setupTasks[sessionId] = nil
+        }
+    }
+
+    /// Waits for every spawn whose setup is still running, for callers that need the session that
+    /// comes out of it rather than the placeholder `spawn` answered with.
+    func waitForSetup() async {
+        while let task = setupTasks.values.first {
+            await task.value
+        }
+    }
+
+    private func failSetup(sessionId: String, projectId: String, error: Error) {
+        let detail = describe(error)
+        let queued = (try? board.terminate(sessionId: sessionId, cause: .setupFailed(detail))) ?? nil
+        guard queued != nil else { return }
+        announceReports(projectId: projectId)
+        // `sessionId` always names a real row (`assign` writes it before setup runs), so this could
+        // route to `.session(sessionId)` the way the stall and cap banners do. It stays on `.project`
+        // because the Status row it would land on carries no diagnosis — no transcript, no spend, a
+        // bare `failed` state — while `detail` is the actual worktree-prep failure, which only the
+        // queued report on the Orchestrator screen shows.
+        post("Worker never started", body: detail, projectId: projectId, category: .workerFailures)
+    }
+
+    /// A lock held by a session the last run of the app never saw end — a killed process, a crash —
+    /// would keep a file in the shared checkout claimed by nobody. Same shape as
+    /// `failInterruptedSetups`: sweep it at launch, before any worker can contend for it.
+    @discardableResult
+    func sweepStaleFileLocks() -> [FileLock] {
+        let swept = (try? fileLocks.sweepStale()) ?? []
+        for lock in swept {
+            FileHandle.standardError.write(
+                Data("stale file lock released: \(lock.path) (session \(lock.sessionId))\n".utf8)
+            )
+        }
+        return swept
+    }
+
+    /// A setup that was still running when Agent Board quit has no process behind it any more, and
+    /// its task would otherwise sit in `running` forever behind a session that will never start.
+    private func failInterruptedSetups() {
+        guard let all = try? projects.list() else { return }
+        for project in all {
+            let stale = ((try? sessions.all(projectId: project.id)) ?? []).filter { $0.state == .setup }
+            for session in stale {
+                failSetup(
+                    sessionId: session.sessionId,
+                    projectId: project.id,
+                    error: SupervisorError.setupInterrupted
+                )
+            }
         }
     }
 
     private struct LaunchPlan {
         var project: Project
         var taskId: String
-        var worktree: URL
+        var cwd: URL
+        /// Nil when the worker runs in the project's own checkout.
+        var worktreePath: String?
         var branch: String
         var configId: String
         var name: String
@@ -238,48 +485,53 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var attempt: Int
     }
 
-    /// §3.1 steps 3-8, shared by task workers and the epic integrator: memory symlink, generated
-    /// settings and MCP config, a worker-scoped token bound to the session, and the board row.
-    private func launch(_ plan: LaunchPlan, port: Int) async throws -> AgentSession {
+    /// §3.1 steps 3-8, shared by task workers and the epic integrator, and the whole of what runs
+    /// after `spawn` has answered: memory symlink, generated settings and MCP config, the agent
+    /// itself, and the setup row resolved into the session Claude issued.
+    private func launch(_ plan: LaunchPlan, port: Int, placeholder: AgentSession) async throws -> AgentSession {
         let project = plan.project
         let memoryDir = URL(fileURLWithPath: project.memoryDir
             ?? ClaudeProjectPaths.memoryDir(forPath: project.repoPath, projectsRoot: projectsRoot).path)
-        _ = try ClaudeProjectPaths.linkMemory(worktreePath: plan.worktree.path, to: memoryDir, projectsRoot: projectsRoot)
+        _ = try ClaudeProjectPaths.linkMemory(worktreePath: plan.cwd.path, to: memoryDir, projectsRoot: projectsRoot)
 
         let grant = try grants.issue(projectId: project.id, scope: .worker, taskId: plan.taskId)
-        let configFiles = try SessionConfigWriter.write(
-            configDir: sessionConfigDir,
-            configId: plan.configId,
-            port: port,
-            token: grant.token,
-            autoModeJSON: project.settings.autoModeJSON,
-            extraMcpServers: nil
-        )
-        let request = SpawnRequest(
-            cwd: plan.worktree,
-            name: plan.name,
-            prompt: plan.prompt,
-            configFiles: configFiles,
-            model: plan.model
-        )
-        let spawned = try await runtime.spawn(request)
-        let session = AgentSession(
-            sessionId: spawned.sessionId,
-            shortId: spawned.shortId,
-            projectId: project.id,
-            taskId: plan.taskId,
-            role: .worker,
-            worktreePath: plan.worktree.path,
-            branch: plan.branch,
-            cwd: plan.worktree.path,
-            startedAt: .nowMillis,
-            attempt: plan.attempt
-        )
-        let recorded = try board.assign(taskId: plan.taskId, session: session)
-        // §3.1 step 8: the grant binds after the session row exists, or the foreign key rejects it.
-        try grants.bind(token: grant.token, sessionId: spawned.sessionId)
-        try replayEarlyHooks(sessionId: spawned.sessionId)
-        return recorded
+        do {
+            let configFiles = try SessionConfigWriter.write(
+                configDir: sessionConfigDir,
+                configId: plan.configId,
+                port: port,
+                token: grant.token,
+                autoModeJSON: project.settings.autoModeJSON,
+                extraMcpServers: nil,
+                fileLocks: plan.worktreePath == nil
+            )
+            let request = SpawnRequest(
+                cwd: plan.cwd,
+                name: plan.name,
+                prompt: plan.prompt,
+                configFiles: configFiles,
+                model: plan.model
+            )
+            let spawned = try await runtime.spawn(request)
+            let recorded: AgentSession
+            do {
+                recorded = try sessions.promoteSetupSession(
+                    placeholder.sessionId, to: spawned.sessionId, shortId: spawned.shortId
+                )
+            } catch {
+                // Something ended the setup row while the agent was starting, so nothing owns the
+                // agent that just came up. Leaving it running would be an untracked worker.
+                try? await runtime.stop(shortId: spawned.shortId)
+                throw error
+            }
+            // §3.1 step 8: the grant binds after the session row exists, or the foreign key rejects it.
+            try grants.bind(token: grant.token, sessionId: spawned.sessionId)
+            try replayEarlyHooks(sessionId: spawned.sessionId)
+            return recorded
+        } catch {
+            try? grants.revoke(token: grant.token)
+            throw error
+        }
     }
 
     /// §5.2 step 3. The integrator is an ordinary worker on a worktree checked out on the epic
@@ -291,6 +543,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.projectNotFound(epic.projectId)
         }
         guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        try requireNoShutdown(projectId: project.id)
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
         }
@@ -300,6 +553,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
         )
         let worktreeName = "epic-\(epicId)"
+        _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(worktreeName))
         let epicBranch = epic.branch
         let worktree = try await offMain {
             try Self.existingWorktree(manager, name: worktreeName)
@@ -309,7 +563,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
         }
 
-        let members = try tasks.list(projectId: project.id, epicId: epicId)
+        let members = try tasks.list(projectId: project.id, epicId: epicId, includeArchived: true)
             .filter { $0.origin != .integration }
         var deps: [String: [String]] = [:]
         for member in members {
@@ -317,35 +571,58 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         let ordered = IntegrationPlan.order(members, deps: deps)
         let branchNames = ordered.map { IntegrationPlan.branchName(taskId: $0.id) }
-        let repoState = try await offMain { () -> (merged: [String: Bool], exists: Set<String>) in
+        let dispatched = Set(ordered.filter { ((try? sessions.forTask($0.id)) ?? []).isEmpty == false }.map(\.id))
+        let taskIds = ordered.map(\.id)
+        let facts = try await offMain { () -> [String: TaskBranchFacts] in
             let merged = try manager.mergeStatus(worktree: worktree, branches: branchNames)
-            let exists = try branchNames.filter { try manager.branchExists($0) }
-            return (merged, Set(exists))
+            return try Self.branchFacts(
+                manager, taskIds: taskIds, epicBranch: epicBranch, merged: merged, dispatched: dispatched
+            )
         }
-        let branches = IntegrationPlan.classify(ordered, merged: repoState.merged, exists: repoState.exists)
+        let branches = IntegrationPlan.classify(ordered, facts: facts)
 
         let task = try board.createIntegrationTask(epicId: epicId)
-        var recorded: AgentSession?
+        var assigned: AgentSession?
         do {
-            let session = try await launch(
+            let placeholder = try board.assign(
+                taskId: task.id,
+                session: Self.setupRow(
+                    projectId: project.id,
+                    taskId: task.id,
+                    site: CheckoutSite(
+                        placement: .worktree, cwd: worktree, worktreePath: worktree.path,
+                        branch: epicBranch, warnings: []
+                    ),
+                    attempt: 1
+                )
+            )
+            assigned = placeholder
+            try epics.setState(epicId, .integrating)
+            beginSetup(
                 LaunchPlan(
                     project: project,
                     taskId: task.id,
-                    worktree: worktree,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
                     branch: epicBranch,
-                    configId: Self.configId(taskId: task.id, attempt: 1),
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
                     name: Self.sessionName(for: task),
-                    prompt: IntegrationPlan.compose(epic: epic, baseBranch: project.baseBranch, branches: branches),
+                    prompt: IntegrationPlan.compose(
+                        epic: epic,
+                        baseBranch: project.baseBranch,
+                        branches: branches,
+                        verification: project.settings.verification
+                    ),
                     model: project.settings.defaultModel,
-                    attempt: 1
+                    attempt: placeholder.attempt
                 ),
+                placeholder: placeholder,
                 port: port
             )
-            recorded = session
-            try epics.setState(epicId, .integrating)
-            return session
+            return placeholder
         } catch {
-            if recorded == nil { try? tasks.delete(task.id) }
+            // A task with a session row on it cannot be deleted; the failure path below owns it.
+            if assigned == nil { try? tasks.delete(task.id) }
             throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
         }
     }
@@ -353,9 +630,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func stop(sessionId: String) async throws {
         try await recording {
             let session = try requireSession(sessionId)
-            guard let shortId = session.shortId else { throw SupervisorError.sessionHasNoShortId(sessionId) }
-            try await runtime.stop(shortId: shortId)
-            try board.terminate(sessionId: sessionId, cause: .stoppedByHuman)
+            if let shortId = session.shortId {
+                try await runtime.stop(shortId: shortId)
+            } else if session.state == .setup {
+                // No agent to stop yet; `launch` finds the row gone and stops whatever it started.
+                setupTasks[sessionId]?.cancel()
+            } else {
+                throw SupervisorError.sessionHasNoShortId(sessionId)
+            }
+            let salvage = await branchSalvage(taskId: session.taskId)
+            try board.terminate(sessionId: sessionId, cause: .stoppedByHuman, salvage: salvage)
             try grants.revokeAll(sessionId: sessionId)
             announceReports(projectId: session.projectId)
         }
@@ -364,6 +648,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func resume(sessionId: String) async throws {
         try await recording {
             let session = try requireSession(sessionId)
+            let placement = try projects.get(session.projectId).map {
+                WorkerStanding.recorded(session: session, project: $0, taskId: session.taskId ?? "").placement
+            } ?? .worktree
+            try await resume(
+                session,
+                prompt: Self.resumePrompt(previousStop: session.stopReason, placement: placement)
+            )
+        }
+    }
+
+    private func resume(_ session: AgentSession, prompt: String) async throws {
+        do {
+            let sessionId = session.sessionId
             guard let port = serverPort else { throw SupervisorError.serverNotRunning }
             guard let taskId = session.taskId else { throw SupervisorError.taskNotFound("(none for session \(sessionId))") }
             guard let project = try projects.get(session.projectId) else {
@@ -388,7 +685,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let resumed = try await runtime.resume(
                 sessionId: sessionId,
                 cwd: URL(fileURLWithPath: session.cwd),
-                prompt: Self.resumePrompt(previousStop: session.stopReason)
+                prompt: prompt
             )
             if resumed.shortId != session.shortId {
                 try sessions.setShortId(sessionId, resumed.shortId)
@@ -398,6 +695,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 if task.failed { try tasks.setFailed(taskId, false, reason: nil) }
                 if task.column != .running { try tasks.move(taskId, to: .running) }
             }
+        } catch {
+            lastError = describe(error)
+            throw error
         }
     }
 
@@ -406,8 +706,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             var firstFailure: Error?
             for session in try sessions.active(projectId: projectId) where session.role == .worker {
                 do {
-                    guard let shortId = session.shortId else { throw SupervisorError.sessionHasNoShortId(session.sessionId) }
-                    try await runtime.stop(shortId: shortId)
+                    if let shortId = session.shortId {
+                        try await runtime.stop(shortId: shortId)
+                    } else if session.state == .setup {
+                        setupTasks[session.sessionId]?.cancel()
+                    } else {
+                        throw SupervisorError.sessionHasNoShortId(session.sessionId)
+                    }
                     try board.terminate(sessionId: session.sessionId, cause: .stoppedByHuman)
                 } catch {
                     firstFailure = firstFailure ?? error
@@ -433,9 +738,71 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             for session in taskSessions {
                 try grants.revokeAll(sessionId: session.sessionId)
             }
-            announceReports(projectId: task.projectId)
+            // Teardown runs first so `deleteBranchIfMerged` still sees the task branch as unmerged
+            // and keeps it; the integrator reads the surviving branch as its ledger of what is in.
             await tearDownWorktrees(of: taskSessions, task: task, project: project)
+            await mergeIntoEpicBranch(task: task, project: project)
+            announceReports(projectId: task.projectId)
         }
+    }
+
+    /// §5.2: the epic branch accumulates each accepted task, so a sibling spawned afterwards branches
+    /// from work that is already in. Deliberately outside the acceptance transaction — the human
+    /// accepted the task, and no git failure may put it back.
+    private func mergeIntoEpicBranch(task: BoardTask, project: Project) async {
+        guard let epicId = task.epicId, let epic = try? epics.get(epicId) else { return }
+        let manager = Self.worktreeManager(for: project)
+        let taskBranch = Self.taskBranchPrefix + task.id
+        let epicBranch = epic.branch
+        let projectBase = project.baseBranch
+        let worktreeName = "merge-\(task.id)"
+        let outcome: EpicMerge
+        do {
+            outcome = try await offMain {
+                try manager.ensureBranch(epicBranch, from: projectBase)
+                return try manager.mergeIntoEpic(
+                    taskBranch: taskBranch, epicBranch: epicBranch, worktreeName: worktreeName
+                )
+            }
+        } catch {
+            queueEpicMergeReport(
+                task: task, epic: epic,
+                body: "could not be merged into the epic branch `\(epicBranch)`: \(describe(error))"
+                    + "\nThe epic branch is behind. Dispatch a task to merge `\(taskBranch)` into it by hand."
+            )
+            return
+        }
+        switch outcome {
+        case .alreadyMerged, .fastForwarded, .merged, .nothingToMerge:
+            return
+        case .conflicted(let files):
+            let listed = files.isEmpty ? "(git reported no paths)" : files.map { "- `\($0)`" }.joined(separator: "\n")
+            queueEpicMergeReport(
+                task: task, epic: epic,
+                body: "conflicts with the epic branch `\(epicBranch)`, which is unchanged and now behind."
+                    + "\n\nConflicting files:\n\(listed)"
+                    + "\n\nDispatch a task to merge `\(taskBranch)` into `\(epicBranch)` and resolve these."
+            )
+        case .skippedCheckedOut(let path):
+            queueEpicMergeReport(
+                task: task, epic: epic,
+                body: "was not merged into the epic branch `\(epicBranch)`: that branch is checked out at \(path)."
+                    + "\nWhoever holds it — the integrator, normally — must merge `\(taskBranch)` themselves."
+            )
+        }
+    }
+
+    private func queueEpicMergeReport(task: BoardTask, epic: Epic, body: String) {
+        let text = "Task \(task.id) (\(task.title)) was accepted into done, but its branch \(body)"
+        do {
+            try ReportStore(db).insert(
+                projectId: task.projectId, taskId: task.id, sessionId: nil, kind: .decision, body: text
+            )
+        } catch {
+            report(["could not queue the epic merge report for \(task.id): \(describe(error))"])
+            return
+        }
+        report(["epic \(epic.id): \(text)"])
     }
 
     func reopen(taskId: String) async throws {
@@ -485,12 +852,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         var queuedReport = false
         for session in ours {
+            // Its id is Agent Board's own placeholder, so `claude agents` cannot list it and the
+            // vanished check below would kill every worker whose repository is still being set up.
+            if session.state == .setup { continue }
             guard let info = byId[session.sessionId] else {
                 if session.state.isActive {
                     if session.role == .orchestrator, consoles[session.projectId]?.isProcessRunning == true {
                         continue
                     }
-                    let report = (try? board.terminate(sessionId: session.sessionId, cause: .vanished)) ?? nil
+                    let salvage = await branchSalvage(taskId: session.taskId)
+                    let report = (try? board.terminate(
+                        sessionId: session.sessionId, cause: .vanished, salvage: salvage
+                    )) ?? nil
                     queuedReport = queuedReport || report != nil
                 }
                 continue
@@ -502,7 +875,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let status = info.status?.lowercased()
             if state == "stopped" || status == "stopped" {
                 if session.state.isActive {
-                    let report = (try? board.terminate(sessionId: session.sessionId, cause: .vanished)) ?? nil
+                    let salvage = await branchSalvage(taskId: session.taskId)
+                    let report = (try? board.terminate(
+                        sessionId: session.sessionId, cause: .vanished, salvage: salvage
+                    )) ?? nil
                     queuedReport = queuedReport || report != nil
                 }
             } else if status == "running" {
@@ -516,6 +892,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
         }
         if queuedReport { announceReports(projectId: projectId) }
+        await recoverStrandedTasks(projectId: projectId)
         await reapOrphanedWorktrees(projectId: projectId, keeping: liveWorktrees)
     }
 
@@ -527,29 +904,147 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func worktreeDiffstat(taskId: String) async -> String? {
         guard let context = diffContext(taskId: taskId) else { return nil }
         return try? await offMain {
-            try context.manager.diffstat(worktree: context.worktree, against: context.base)
+            switch context.site {
+            case .worktree(let path):
+                return try context.manager.diffstat(worktree: path, against: context.base)
+            case .sharedBranch(let branch):
+                return try context.manager.diffstat(taskId: taskId, on: branch, since: context.base)
+            }
         }
     }
 
     func worktreeDiffSummary(taskId: String) async -> DiffSummary? {
         guard let context = diffContext(taskId: taskId) else { return nil }
         return try? await offMain {
-            try context.manager.diffSummary(worktree: context.worktree, against: context.base)
+            switch context.site {
+            case .worktree(let path):
+                return try context.manager.diffSummary(worktree: path, against: context.base)
+            case .sharedBranch(let branch):
+                return try context.manager.diffSummary(taskId: taskId, on: branch, since: context.base)
+            }
         }
     }
 
-    private func diffContext(taskId: String) -> (manager: WorktreeManager, worktree: URL, base: String)? {
+    private enum DiffSite {
+        case worktree(URL)
+        /// The task's commits are interleaved with its siblings' on one branch, so the diff is
+        /// selected by the attribution trailer rather than by the branch's whole range.
+        case sharedBranch(String)
+    }
+
+    private struct DiffContext {
+        var manager: WorktreeManager
+        var site: DiffSite
+        var base: String
+    }
+
+    private func diffContext(taskId: String) -> DiffContext? {
         guard let task = try? tasks.get(taskId),
               let project = try? projects.get(task.projectId),
-              let worktreePath = try? sessions.forTask(taskId)
-                  .compactMap(\.worktreePath)
-                  .first(where: { FileManager.default.fileExists(atPath: $0) })
+              let taskSessions = try? sessions.forTask(taskId)
         else { return nil }
         let manager = WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
         )
-        return (manager, URL(fileURLWithPath: worktreePath), project.baseBranch)
+        // A session with no worktree of its own ran in the shared checkout; its branch carries other
+        // tasks' commits too. Preferred over any worktree row, because a task that was retried into
+        // a worktree keeps that row and the shared path still answers for the shared attempt.
+        if let shared = taskSessions.last(where: { $0.worktreePath == nil && $0.branch != nil }),
+           let branch = shared.branch {
+            return DiffContext(manager: manager, site: .sharedBranch(branch), base: project.baseBranch)
+        }
+        guard let worktreePath = taskSessions
+            .map({ $0.worktreePath ?? $0.cwd })
+            .first(where: { FileManager.default.fileExists(atPath: $0) })
+        else { return nil }
+        return DiffContext(
+            manager: manager, site: .worktree(URL(fileURLWithPath: worktreePath)), base: project.baseBranch
+        )
+    }
+
+    /// A task branch that git no longer has is read from the ledger, never from its own absence:
+    /// Agent Board deletes a task branch precisely because its work was merged.
+    nonisolated static func branchFacts(
+        _ manager: WorktreeManager,
+        taskIds: [String],
+        epicBranch: String,
+        merged: [String: Bool],
+        dispatched: Set<String>
+    ) throws -> [String: TaskBranchFacts] {
+        let epicRef = "refs/heads/\(epicBranch)"
+        var facts: [String: TaskBranchFacts] = [:]
+        for taskId in taskIds {
+            let branch = IntegrationPlan.branchName(taskId: taskId)
+            var fact = TaskBranchFacts(
+                branchExists: try manager.branchExists(branch),
+                mergedIntoEpic: merged[branch] == true,
+                everDispatched: dispatched.contains(taskId)
+            )
+            if !fact.branchExists {
+                fact.recordedBase = try manager.refCommit(TaskBranchLedger.baseRef(taskId: taskId))
+                fact.recordedTip = try manager.refCommit(TaskBranchLedger.tipRef(taskId: taskId))
+                if let tip = fact.recordedTip {
+                    fact.tipOnEpicBranch = try manager.isMerged(commit: tip, into: epicRef)
+                    if let base = fact.recordedBase {
+                        fact.ownCommits = try manager.commitCount(from: base, to: tip)
+                    }
+                }
+            }
+            facts[taskId] = fact
+        }
+        return facts
+    }
+
+    /// A session death that never reached `terminate` — the row already inactive when the cap or
+    /// `reconcile` got there, or no row at all — leaves its task in `running`, where `spawn_worker`
+    /// refuses it and no report is ever coming. Nothing else clears that, so both the metering tick
+    /// and `reconcile` sweep it: `reconcile` only runs while the Status screen is on screen, and a
+    /// task must not stay unreachable for as long as nobody happens to look at it.
+    func recoverStrandedTasks(projectId: String) async {
+        guard let stranded = try? board.strandedRunningTasks(projectId: projectId), !stranded.isEmpty else { return }
+        var queued = false
+        for task in stranded {
+            let salvage = await branchSalvage(taskId: task.id)
+            let report = (try? board.recoverStranded(taskId: task.id, salvage: salvage)) ?? nil
+            queued = queued || report != nil
+        }
+        if queued { announceReports(projectId: projectId) }
+    }
+
+    /// What git can say about a task's branch, for a failure report to carry rather than throw the
+    /// work back to `ready` as if the branch were empty. Best effort: nil claims nothing.
+    private func branchSalvage(taskId: String?) async -> BranchSalvage? {
+        guard let taskId, let task = try? tasks.get(taskId),
+              let project = try? projects.get(task.projectId)
+        else { return nil }
+        let manager = Self.worktreeManager(for: project)
+        let branch = Self.taskBranchPrefix + taskId
+        let fallbackBase = mergeTargets(for: task, project: project).last ?? project.baseBranch
+        let worktree = (try? sessions.forTask(taskId).compactMap(\.worktreePath))?
+            .first { FileManager.default.fileExists(atPath: $0) }
+            .map { URL(fileURLWithPath: $0) }
+        return try? await offMain {
+            try Self.readSalvage(manager: manager, branch: branch, fallbackBase: fallbackBase, worktree: worktree)
+        }
+    }
+
+    /// The branch was cut from the ledger's recorded base; `fallbackBase` only covers a branch that
+    /// predates the ledger. A base that no longer resolves makes the count a lie, so nothing is claimed.
+    private nonisolated static func readSalvage(
+        manager: WorktreeManager, branch: String, fallbackBase: String, worktree: URL?
+    ) throws -> BranchSalvage? {
+        guard try manager.branchExists(branch) else { return nil }
+        let recorded = TaskBranchLedger.taskId(ofBranch: branch)
+            .flatMap { try? manager.refCommit(TaskBranchLedger.baseRef(taskId: $0)) }
+        let base = recorded ?? fallbackBase
+        guard try manager.commitExists(base) else { return nil }
+        let dirty = worktree.map { (try? manager.hasUncommittedChanges(worktree: $0)) ?? false } ?? false
+        return BranchSalvage(
+            branch: branch,
+            commitsAheadOfBase: try manager.commitCount(from: base, to: "refs/heads/\(branch)"),
+            uncommittedChanges: dirty
+        )
     }
 
     // MARK: - Worktree and branch cleanup
@@ -650,7 +1145,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private nonisolated static func sweepMergedBranches(_ manager: WorktreeManager, bases: [String]) -> [String] {
         guard let branches = try? manager.localBranches(withPrefix: taskBranchPrefix) else { return [] }
         return branches
-            .filter { !$0.hasPrefix(EpicStore.branchPrefix) }
+            .filter { !$0.hasPrefix(EpicStore.branchPrefix) && !$0.hasPrefix(SharedCheckoutGroup.branchPrefix) }
             .flatMap { branch -> [String] in
                 do {
                     _ = try manager.deleteBranchIfMerged(branch, into: bases)
@@ -698,6 +1193,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         await _Concurrency.Task.detached(priority: .userInitiated) { body() }.value
     }
 
+    /// Runs before the first git command of a spawn: `git worktree add` fires the repository's
+    /// `post-checkout` hook, so by the time the path is on disk its setup has already run in it.
+    @discardableResult
+    private func preflightWorktreePath(_ path: URL) -> [String] {
+        let warning = WorktreePathDiagnosis.preflight(worktreePath: path.path)?.message
+        lastWorktreePathWarning = warning
+        guard let warning else { return [] }
+        FileHandle.standardError.write(Data("worktree path warning: \(warning)\n".utf8))
+        report([warning])
+        return [warning]
+    }
+
     /// Cleanup notices share the status bar's error slot; nothing else surfaces them to the human.
     private func report(_ notices: [String]) {
         guard !notices.isEmpty else { return }
@@ -719,9 +1226,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return console
     }
 
+    func shellConsole(projectId: String) throws -> ShellConsole {
+        if let existing = shellConsoles[projectId] { return existing }
+        guard try projects.get(projectId) != nil else { throw SupervisorError.projectNotFound(projectId) }
+        let console = ShellConsole(projectId: projectId, db: db)
+        shellConsoles[projectId] = console
+        return console
+    }
+
     func approve(approvalId: String) async throws {
         try await recording {
             guard let approval = try approvals.get(approvalId) else { throw SupervisorError.approvalNotFound(approvalId) }
+            // Before the resolve, so a refused approval is still pending once the order is cancelled.
+            try requireNoShutdown(projectId: approval.projectId)
             try board.resolveApproval(approvalId, approved: true, by: "human")
             announceReports(projectId: approval.projectId)
             switch approval.kind {
@@ -729,8 +1246,54 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 if let taskId = approval.taskId { try await spawn(taskId: taskId) }
             case .integration:
                 if let epicId = approval.epicId { try await spawnIntegrator(epicId: epicId) }
+            case .push, .pullRequest:
+                try await publish(approval)
             }
         }
+    }
+
+    /// The human's half of D8's orchestrator path: the orchestrator asked, this grant is what lets
+    /// anything reach the remote. Whatever happens is written back to the board — the pull request
+    /// URL on the card, and a `decision` report the orchestrator pulls — including the failure,
+    /// which names its own cause (no remote, no `gh`, not logged in).
+    private func publish(_ approval: Approval) async throws {
+        guard let project = try projects.get(approval.projectId) else {
+            throw SupervisorError.projectNotFound(approval.projectId)
+        }
+        let request = try approval.publishRequest()
+        let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
+        let base = request.base ?? project.baseBranch
+        do {
+            switch approval.kind {
+            case .push:
+                let result = try await offMain { try publisher.push(branch: request.branch, remote: request.remote) }
+                try board.recordPublished(approval: approval, summary: "Push approved: \(result.summary).")
+            case .pullRequest:
+                let result = try await offMain {
+                    try publisher.openPullRequest(
+                        branch: request.branch, base: base, title: request.title ?? request.branch,
+                        body: request.body ?? "", remote: request.remote
+                    )
+                }
+                let verb = result.alreadyOpen ? "Pull request already open" : "Pull request opened"
+                try board.recordPublished(
+                    approval: approval,
+                    summary: "\(verb) from \(request.branch) into \(base).",
+                    url: result.url
+                )
+            case .spawn, .integration:
+                return
+            }
+        } catch {
+            try? board.recordPublished(
+                approval: approval,
+                summary: "\(approval.kind.rawValue) failed for \(request.branch): \(describe(error))",
+                failed: true
+            )
+            announceReports(projectId: approval.projectId)
+            throw error
+        }
+        announceReports(projectId: approval.projectId)
     }
 
     func deny(approvalId: String, reason: String?) async throws {
@@ -750,6 +1313,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording {
             guard try epics.get(epicId) != nil else { throw SupervisorError.epicNotFound(epicId) }
             try board.requestIntegration(epicId: epicId, requestedBy: "human")
+        }
+    }
+
+    /// SPEC §10: the preflight behind the close/abandon confirmation.
+    func epicClosurePlan(epicId: String, as closure: EpicClosure) throws -> EpicClosurePlan {
+        try board.epicClosurePlan(epicId: epicId, as: closure)
+    }
+
+    /// SPEC §10: a human ends the epic without integrating it. Board state and a `decision` report,
+    /// nothing else — no merge, no push, no worktree teardown, no task touched.
+    func closeEpic(epicId: String, as closure: EpicClosure) async throws {
+        try await recording {
+            let plan = try board.epicClosurePlan(epicId: epicId, as: closure)
+            if plan.isRefused { throw SupervisorError.epicCloseRefused(plan.message) }
+            let report = try board.closeEpic(epicId: epicId, as: closure, by: "human")
+            announceReports(projectId: report.projectId)
         }
     }
 
@@ -780,10 +1359,143 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    // MARK: - Shutdown
+
+    /// Raises the order and tells the orchestrator. Stops and signals nothing: workers already
+    /// running keep going, and `pauseAll` remains the blunt path that kills them.
+    @discardableResult
+    func requestShutdown(projectId: String, requestedBy: String = "human", reason: String? = nil) async throws -> ShutdownOrder {
+        try await recording {
+            let order = try board.requestShutdown(projectId: projectId, requestedBy: requestedBy, reason: reason)
+            announceReports(projectId: projectId)
+            return order
+        }
+    }
+
+    @discardableResult
+    func cancelShutdown(projectId: String, by: String = "human") async throws -> ShutdownOrder? {
+        try await recording {
+            let order = try board.cancelShutdown(projectId: projectId, by: by)
+            if order != nil {
+                shutdownProgress[projectId] = nil
+                announceReports(projectId: projectId)
+            }
+            return order
+        }
+    }
+
+    /// Hands the outstanding order to every worker still running. A busy session is left to the
+    /// `PreToolUse` deny, which is the only way in mid-turn; an idle one may never make that call,
+    /// so it gets the same text as a resume prompt. Nothing is stopped here: a worker stops itself
+    /// by calling `acknowledge_shutdown`, and one that never answers is counted, not killed.
+    @discardableResult
+    func deliverShutdownOrder(projectId: String) async throws -> ShutdownProgress {
+        try await recording {
+            guard let order = try shutdowns.outstanding(projectId: projectId) else {
+                throw SupervisorError.noShutdownOrder
+            }
+            let workers = try sessions.active(projectId: projectId)
+                .filter { $0.role == .worker && $0.state != .setup }
+            for worker in workers {
+                try deliveries.enroll(orderId: order.id, sessionId: worker.sessionId, taskId: worker.taskId)
+            }
+            for worker in workers where worker.state == .idle {
+                await deliverByResume(order: order, to: worker)
+            }
+            return refreshShutdownProgress(projectId: projectId, order: order)
+        }
+    }
+
+    /// Claimed before the resume runs, so a hook firing at the same moment cannot deliver the order
+    /// twice. A resume that fails releases the claim for the next hook to carry.
+    private func deliverByResume(order: ShutdownOrder, to session: AgentSession) async {
+        let claimed = (try? deliveries.claimDelivery(
+            orderId: order.id, sessionId: session.sessionId, taskId: session.taskId, via: .resume
+        )) ?? false
+        guard claimed else { return }
+        do {
+            try await resume(session, prompt: ShutdownOrder.windDownOrder(reason: order.reason, via: .resume))
+        } catch {
+            try? deliveries.releaseDelivery(orderId: order.id, sessionId: session.sessionId)
+        }
+    }
+
+    @discardableResult
+    private func refreshShutdownProgress(projectId: String, order: ShutdownOrder) -> ShutdownProgress {
+        let grace = (try? projects.get(projectId))??.settings.caps.shutdownGraceSeconds
+            ?? ShutdownDeliveryStore.defaultGraceSeconds
+        let progress = (try? deliveries.progress(orderId: order.id, graceSeconds: grace, awake: sleepLedger.reading()))
+            ?? ShutdownProgress(orderId: order.id, total: 0, acknowledged: 0)
+        shutdownProgress[projectId] = progress
+        return progress
+    }
+
+    /// Raises an order on every project, then delivers them all. The two passes are deliberate:
+    /// delivering project by project would leave the projects further down the list unordered
+    /// while the first ones' resumes are in flight, and an orchestrator could spawn into that gap.
+    /// A project with no active worker still gets its order for the same reason.
+    @discardableResult
+    func requestGlobalShutdown(requestedBy: String = "human", reason: String? = nil) async throws -> [ShutdownOrder] {
+        let all = try projects.list()
+        var raised: [ShutdownOrder] = []
+        var failures: [String] = []
+        for project in all {
+            do {
+                raised.append(try await requestShutdown(projectId: project.id, requestedBy: requestedBy, reason: reason))
+            } catch {
+                failures.append("\(project.name): \(describe(error))")
+            }
+        }
+        for project in all where raised.contains(where: { $0.projectId == project.id }) {
+            do {
+                _ = try await deliverShutdownOrder(projectId: project.id)
+            } catch {
+                failures.append("\(project.name): \(describe(error))")
+            }
+        }
+        if !failures.isEmpty { throw SupervisorError.globalShutdownIncomplete(failures) }
+        return raised
+    }
+
+    /// Every project is attempted before anything is thrown. A partial cancel is the one outcome
+    /// this must not produce: a project left refusing spawns with no sheet on screen saying why.
+    @discardableResult
+    func cancelGlobalShutdown(by: String = "human") async throws -> [ShutdownOrder] {
+        let all = try projects.list()
+        var lifted: [ShutdownOrder] = []
+        var failures: [String] = []
+        for project in all {
+            do {
+                if let order = try await cancelShutdown(projectId: project.id, by: by) { lifted.append(order) }
+            } catch {
+                failures.append("\(project.name): \(describe(error))")
+            }
+        }
+        if !failures.isEmpty { throw SupervisorError.globalShutdownIncomplete(failures) }
+        return lifted
+    }
+
+    /// The consoles are PTYs this process owns, so they die with it either way. Stopping them
+    /// first makes the exit deliberate: each session is marked `stopped` rather than left looking
+    /// active in a database the next launch reads.
+    func stopOrchestratorConsoles() {
+        for console in consoles.values { console.stop() }
+    }
+
+    func isShuttingDown(projectId: String) -> Bool {
+        (try? shutdowns.isShuttingDown(projectId: projectId)) ?? false
+    }
+
+    private func requireNoShutdown(projectId: String) throws {
+        if try shutdowns.outstanding(projectId: projectId) != nil {
+            throw SupervisorError.shutdownOrdered
+        }
+    }
+
     // MARK: - WorkerControl
 
-    func spawnWorker(taskId: String) async throws -> String {
-        try await recording { try await spawn(taskId: taskId).sessionId }
+    func spawnWorker(taskId: String) async throws -> WorkerSpawn {
+        try await recording { try await spawn(taskId: taskId) }
     }
 
     func stopWorker(sessionId: String) async throws {
@@ -792,8 +1504,65 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     // MARK: - BoardEventSink
 
-    func notify(title: String, body: String) async {
-        MacNotifier.post(title: title, body: body)
+    func notify(projectId: String, title: String, body: String) async {
+        await notify(projectId: projectId, sessionId: nil, title: title, body: body)
+    }
+
+    /// The only producer of this event is the hook sink's "Agent needs input" path, which fires
+    /// when a worker asked for input and nothing marked a task blocked — the blocked-worker
+    /// category by any other name.
+    func notify(projectId: String, sessionId: String?, title: String, body: String) async {
+        post(
+            title, body: body, projectId: projectId, category: .blockedWorkers,
+            subject: sessionId.map(NotificationRoute.Subject.session) ?? .project
+        )
+    }
+
+    /// Every banner Agent Board raises goes through here, so none of them can reach the human
+    /// without saying which project it is about, without carrying the route a click follows back
+    /// to it, or against that project's notification preferences.
+    private func post(
+        _ title: String, body: String, projectId: String?, category: NotificationCategory,
+        subject: NotificationRoute.Subject = .project
+    ) {
+        guard shouldNotify(projectId: projectId, category: category) else { return }
+        postBanner(
+            notificationTitle(title, projectId: projectId),
+            body,
+            projectId.map { NotificationRoute(projectId: $0, subject: subject) }
+        )
+    }
+
+    /// `MacNotifier.post` is inert under `xctest`, because the runner is not an app bundle. Every
+    /// banner leaves through here so a test can see which ones the categories let past and what
+    /// route each one carries.
+    @ObservationIgnored var postBanner: @MainActor (String, String, NotificationRoute?) -> Void = {
+        MacNotifier.shared.post(title: $0, body: $1, route: $2)
+    }
+
+    /// The gating decision for every banner that is not driven by the attention signal.
+    /// `MacNotifier.post` is inert under `xctest`, so this is what the tests assert on.
+    /// A project that has gone missing keeps the default, which is to notify.
+    func shouldNotify(
+        projectId: String?, category: NotificationCategory, now: Int64 = .nowMillis
+    ) -> Bool {
+        notificationPreferences(projectId).allows(category, now: now)
+    }
+
+    private func notificationPreferences(_ projectId: String?) -> NotificationPreferences {
+        guard let projectId, let project = (try? projects.get(projectId)) ?? nil else {
+            return NotificationPreferences()
+        }
+        return project.settings.notifications
+    }
+
+    /// `MacNotifier.post` is inert under `xctest`, so the naming is asserted here instead.
+    func notificationTitle(_ headline: String, projectId: String?) -> String {
+        NotificationText.title(headline, project: projectId.flatMap(projectName))
+    }
+
+    private func projectName(_ id: String) -> String? {
+        (try? projects.get(id))??.name
     }
 
     func orchestratorTurnEnded(projectId: String, sessionId: String) async {
@@ -802,6 +1571,89 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     func reportQueued(projectId: String) async {
         announceReports(projectId: projectId)
+    }
+
+    func orchestratorCompacted(projectId: String, sessionId: String, manual: Bool) async {
+        consoles[projectId]?.compactionCompleted(manual: manual)
+    }
+
+    /// The worker has committed and recorded its note; this is the orderly end of its session. The
+    /// cause is neither a human kill nor a cap kill, and `terminate` puts the unfinished task back
+    /// in `ready` with the note attached to the report.
+    func workerAcknowledgedShutdown(projectId: String, sessionId: String) async {
+        guard let session = try? sessions.get(sessionId) else { return }
+        let note = try? shutdowns.outstanding(projectId: projectId)
+            .flatMap { try deliveries.get(orderId: $0.id, sessionId: sessionId)?.note }
+        if let shortId = session.shortId {
+            try? await runtime.stop(shortId: shortId)
+        }
+        _ = try? board.terminate(sessionId: sessionId, cause: .shutdownAcknowledged(note: note ?? nil))
+        try? grants.revokeAll(sessionId: sessionId)
+        announceReports(projectId: projectId)
+        if let order = try? shutdowns.outstanding(projectId: projectId) {
+            refreshShutdownProgress(projectId: projectId, order: order)
+        }
+    }
+
+    /// The orderly end of a worker's life, and until now the only one that left its process running:
+    /// the agent is told to take no further turns, so the session sits `idle` holding its whole
+    /// context forever. Stopping it frees ~300 MB and costs nothing — `claude --bg --resume` reads
+    /// the transcript, which a stop leaves intact, so the task in `review` can still be reopened
+    /// and attached to.
+    func workerCompleted(projectId: String, sessionId: String) async {
+        guard let session = try? sessions.get(sessionId), let shortId = session.shortId else { return }
+        try? await runtime.stop(shortId: shortId)
+    }
+
+    /// Stops the agent of every session this board's own rows say is finished — the backlog left by
+    /// every worker that completed before `report_complete` learned to stop its own session.
+    ///
+    /// Every target comes from `agent_session`, and the runtime list read afterwards can only
+    /// subtract. A `claude` session with no row here is never a candidate, whatever its process
+    /// looks like: argv and environment cannot tell a parked spare from a session doing real work.
+    @discardableResult
+    func sweepLeakedAgents(dryRun: Bool = false) async -> AgentSweepReport {
+        var report = AgentSweepReport(dryRun: dryRun)
+        let rows = ((try? projects.list()) ?? []).flatMap { (try? sessions.all(projectId: $0.id)) ?? [] }
+        let listed = try? await runtime.listSessions()
+        // A registry entry without a pid has no process to free. Measured on this machine: of 124
+        // inactive rows `claude stop` accepted, the 8 carrying a pid were the whole 1,311 MB, and
+        // the other 116 cost 60s of the 71s the sweep took and moved nothing.
+        let resident = listed.map { Set($0.filter { $0.pid != nil }.compactMap(\.id)) }
+        report.runtimeListed = listed != nil
+        for decision in LeakedAgentSweep.plan(rows) {
+            guard decision.outcome == .stop, let shortId = decision.shortId else {
+                report.kept.append(decision)
+                continue
+            }
+            if let resident, !resident.contains(shortId) {
+                report.kept.append(LeakedAgentSweep.Decision(
+                    sessionId: decision.sessionId, shortId: shortId, outcome: .keep,
+                    reason: "the runtime reports no process for this short id"
+                ))
+                continue
+            }
+            if dryRun {
+                report.wouldStop.append(decision)
+                continue
+            }
+            do {
+                try await runtime.stop(shortId: shortId)
+                report.stopped.append(decision)
+            } catch {
+                report.failed.append(LeakedAgentSweep.Decision(
+                    sessionId: decision.sessionId, shortId: shortId, outcome: .stop,
+                    reason: describe(error)
+                ))
+            }
+        }
+        if let listed {
+            let known = Set(rows.compactMap(\.shortId))
+            report.untracked = listed
+                .filter { $0.pid != nil && $0.id.map { !known.contains($0) } ?? true }
+                .count
+        }
+        return report
     }
 
     /// The orchestrator only learns of a queued report through the console notice.
@@ -822,17 +1674,85 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
-    private func meterTick() async {
+    /// Internal so a test can drive one tick without waiting out the timer.
+    func meterTick() async {
         guard let all = try? projects.list() else { return }
-        let now = Int64.nowMillis
+        let awake = sleepLedger.reading()
+        let now = awake.nowMillis
+        raiseAttentionBanners(now: now)
+        if now - lastArchiveSweep >= Self.archiveSweepIntervalMillis {
+            lastArchiveSweep = now
+            sweepArchives(all, now: now)
+        }
         for project in all {
+            refreshShutdownProgressIfOrdered(projectId: project.id)
+            await recoverStrandedTasks(projectId: project.id)
             let limits = Self.capLimits(project.settings.caps)
             guard let projectSessions = try? sessions.all(projectId: project.id) else { continue }
             let stallSeconds = project.settings.caps.stallSeconds
             for session in projectSessions where Self.shouldMeter(session, now: now) {
-                await meter(session, limits: limits, stallSeconds: stallSeconds)
+                await meter(session, limits: limits, stallSeconds: stallSeconds, awake: awake)
             }
         }
+    }
+
+    /// A pending approval and a blocked worker each stop work outright and nothing else announces
+    /// them, so the same signal the sidebar badge reads raises the banner. `AttentionNotifier` owns
+    /// the once-per-transition rule, so a queue nobody has answered does not banner every 5s.
+    /// Each project's own notification preferences decide which of its banners survive. They gate
+    /// the banner alone: `attention.all` is read unchanged, so a muted project's sidebar badge and
+    /// At a Glance row say exactly what they said before.
+    @discardableResult
+    func raiseAttentionBanners(now: Int64 = .nowMillis) -> [AttentionNotice] {
+        guard let projects = try? attention.all(now: now) else { return [] }
+        let preferences = notificationPreferencesByProject()
+        let raised = attentionNotifier.notices(
+            for: projects,
+            focused: onScreenProject,
+            now: now,
+            preferences: { preferences[$0] ?? NotificationPreferences() }
+        )
+        for notice in raised {
+            postBanner(notice.title, notice.body, NotificationRoute(notice))
+        }
+        return raised
+    }
+
+    private func notificationPreferencesByProject() -> [String: NotificationPreferences] {
+        guard let all = try? projects.list() else { return [:] }
+        return Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.settings.notifications) })
+    }
+
+    /// A banner for the project already filling the screen is noise. Only the frontmost app counts:
+    /// a selection left behind a browser window is not something the human is looking at.
+    /// An `xctest` process runs at activation policy `.prohibited`, so `NSApplication.shared
+    /// .isActive` is false there and can never be true; a test that needs the suppressed case
+    /// replaces `isFrontmost`.
+    private var onScreenProject: String? {
+        isFrontmost() ? focusedProject : nil
+    }
+
+    @ObservationIgnored var isFrontmost: @MainActor () -> Bool = { NSApplication.shared.isActive }
+
+    func focusChanged(projectId: String?) {
+        focusedProject = projectId
+    }
+
+    /// The tick is what moves a silent worker into `overdue` once its grace period expires. It only
+    /// counts: nothing on this path stops a session.
+    private func refreshShutdownProgressIfOrdered(projectId: String) {
+        guard let order = try? shutdowns.outstanding(projectId: projectId) else {
+            shutdownProgress[projectId] = nil
+            return
+        }
+        refreshShutdownProgress(projectId: projectId, order: order)
+    }
+
+    /// `manual` and `afterEpicMerge` find nothing here by construction — only `afterDays` has a
+    /// deadline that passing time can cross.
+    @discardableResult
+    func sweepArchives(_ all: [Project], now: Int64 = .nowMillis) -> [String] {
+        all.flatMap { (try? archives.run(projectId: $0.id, now: now)) ?? [] }
     }
 
     private static func shouldMeter(_ session: AgentSession, now: Int64) -> Bool {
@@ -841,7 +1761,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return now - endedAt < finalSpendWindowMillis
     }
 
-    private func meter(_ session: AgentSession, limits: CapLimits, stallSeconds: Int) async {
+    /// Internal rather than private so a test can drive a single session's stall/cap evaluation
+    /// directly, the way `sweepArchives` is exposed for the archive tick.
+    func meter(_ session: AgentSession, limits: CapLimits, stallSeconds: Int, awake: AwakeElapsed) async {
         var totals = UsageTotals(
             inputTokens: session.tokensIn,
             outputTokens: session.tokensOut,
@@ -850,11 +1772,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
         var model = session.model
         var lastActivity = session.lastActivityDate
+        // Nil until a transcript has been read: the session row sums what it cost, which says
+        // nothing about how full its context is, so there is no fallback to compute this from.
+        var context: ContextPressure?
 
         if let path = session.transcriptPath {
             let url = URL(fileURLWithPath: path)
             if let summary = try? await offMain({ try TranscriptMeter.summarize(transcriptAt: url) }) {
                 totals = summary.totals
+                context = ContextPressure(
+                    usedTokens: summary.contextTokens,
+                    limitTokens: ModelCatalog.effectiveContextWindow(for: summary.model ?? model)
+                )
                 model = summary.model ?? model
                 if let seen = summary.lastActivity {
                     lastActivity = lastActivity.map { max($0, seen) } ?? seen
@@ -871,29 +1800,36 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
         }
 
-        guard let current = try? sessions.get(session.sessionId), current.state.isActive, current.role == .worker else {
+        guard let current = try? sessions.get(session.sessionId), current.state.isActive else {
             stallNotified.remove(session.sessionId)
             return
         }
-        noteStall(current, lastActivity: lastActivity, stallSeconds: stallSeconds)
+        if current.role == .orchestrator, let context {
+            consoles[current.projectId]?.contextPressureObserved(context)
+        }
+        guard current.role == .worker else {
+            stallNotified.remove(session.sessionId)
+            return
+        }
+        noteStall(current, lastActivity: lastActivity, stallSeconds: stallSeconds, awake: awake)
         guard let breach = CapEvaluator.evaluate(
             totals: totals,
             startedAt: current.startedDate,
             lastActivity: lastActivity,
-            now: Date(),
-            limits: limits
+            awake: awake,
+            limits: limits,
+            state: current.state
         ) else { return }
-        if case .idle = breach, current.state == .blocked { return }
-        await enforce(breach, on: current)
+        await enforce(breach, on: current, awake: awake)
     }
 
     /// SPEC §12 case 2: a grandchild process waiting on stdin fires no hook, so a `running` worker whose
     /// activity clock has frozen is only surfaced — never killed. The idle cap still decides that.
-    private func noteStall(_ session: AgentSession, lastActivity: Date?, stallSeconds: Int) {
+    private func noteStall(_ session: AgentSession, lastActivity: Date?, stallSeconds: Int, awake: AwakeElapsed) {
         let stalled = session.state == .running && AttentionSelection.isStalled(
             lastActivity: lastActivity,
             startedAt: session.startedDate,
-            now: Date(),
+            awake: awake,
             threshold: TimeInterval(stallSeconds)
         )
         guard stalled else {
@@ -903,20 +1839,27 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard stallNotified.insert(session.sessionId).inserted else { return }
         var title: String?
         if let taskId = session.taskId { title = try? tasks.get(taskId)?.title }
-        MacNotifier.post(
-            title: "Worker may be stuck",
-            body: "\(session.displayShortId) has made no tool call in \(stallSeconds)s — \(title ?? "no task"). Attach to check."
+        post(
+            "Worker may be stuck",
+            body: "\(session.displayShortId) has made no tool call in \(stallSeconds)s — \(title ?? "no task"). Attach to check.",
+            projectId: session.projectId,
+            category: .capsAndStalls,
+            subject: .session(session.sessionId)
         )
     }
 
-    private func enforce(_ breach: CapBreach, on session: AgentSession) async {
-        let description = Self.describe(breach)
+    private func enforce(_ breach: CapBreach, on session: AgentSession, awake: AwakeElapsed) async {
+        let description = Self.describe(breach, awake: awake)
         if let shortId = session.shortId {
             try? await runtime.stop(shortId: shortId)
         }
-        _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description))
+        let salvage = await branchSalvage(taskId: session.taskId)
+        _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description), salvage: salvage)
         announceReports(projectId: session.projectId)
-        MacNotifier.post(title: "Worker stopped at cap", body: description)
+        post(
+            "Worker stopped at cap", body: description, projectId: session.projectId,
+            category: .capsAndStalls, subject: .session(session.sessionId)
+        )
     }
 
     private static func capLimits(_ caps: Caps) -> CapLimits {
@@ -927,14 +1870,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
     }
 
-    private static func describe(_ breach: CapBreach) -> String {
+    private static func describe(_ breach: CapBreach, awake: AwakeElapsed) -> String {
         switch breach {
         case .tokens(let used, let limit):
             return "token cap reached: \(used) of \(limit) tokens"
         case .wallClock(let elapsed, let limit):
-            return "wall clock cap reached: \(Int(elapsed / 60)) of \(Int(limit / 60)) minutes"
+            return "elapsed cap reached: \(Int(elapsed / 60)) of \(Int(limit / 60)) awake minutes"
         case .idle(let since, let limit):
-            let idleFor = Int(Date().timeIntervalSince(since) / 60)
+            let idleFor = Int(awake.secondsAwake(since: since) / 60)
             return "idle cap reached: no activity for \(idleFor) minutes (limit \(Int(limit / 60)))"
         }
     }
@@ -975,12 +1918,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return listed == nil ? nil : expected
     }
 
-    static func resumePrompt(previousStop: String?) -> String {
+    /// The commit step differs by placement: `git commit` is refused in a shared checkout, so a
+    /// resumed co-resident worker told to "commit on this branch" is sent at a command that fails.
+    static func resumePrompt(previousStop: String?, placement: WorkerPlacement = .worktree) -> String {
         var lines = ["Agent Board resumed this session. Continue your task from where you left off; check `git status` and `git log` first."]
         if let previousStop, !previousStop.isEmpty {
             lines.append("The previous run was stopped by Agent Board: \(previousStop).")
         }
-        lines.append("When finished, follow the completion protocol from your original instructions (commit, do not push, call report_complete).")
+        let commit = placement.sharedBranch == nil
+            ? "commit on this branch"
+            : "commit by calling `\(OpeningPrompt.commitToolName)`"
+        lines.append(
+            "When finished: \(commit), do not push, call `report_complete`. "
+            + "If a resume or a compaction has left you without the instructions you were spawned with, "
+            + "read the MCP resource `\(BriefingResourceURI.worker)` — it returns them in full."
+        )
         return lines.joined(separator: " ")
     }
 
@@ -1005,9 +1957,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     static func openingPrompt(
-        task: BoardTask, branch: String, attempt: Int, epicGoal: String? = nil, notes: [InjectedNote] = []
+        task: BoardTask,
+        branch: String,
+        attempt: Int,
+        epicGoal: String? = nil,
+        notes: SpawnNotes = SpawnNotes(),
+        verification: VerificationCommands = VerificationCommands(),
+        placement: WorkerPlacement = .worktree,
+        workingDirectory: String? = nil
     ) -> String {
-        OpeningPrompt.compose(task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes)
+        OpeningPrompt.compose(
+            task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes,
+            verification: verification, placement: placement, workingDirectory: workingDirectory
+        )
     }
 
     private nonisolated static func defaultBranch(repo: URL) -> String? {
