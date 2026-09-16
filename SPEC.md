@@ -383,7 +383,9 @@ CREATE TABLE agent_session (
   attempt        INTEGER NOT NULL DEFAULT 1,
   model          TEXT,
   last_tool      TEXT,
-  stop_reason    TEXT
+  stop_reason    TEXT,
+  tool_started_at INTEGER,           -- oldest tool call not yet seen to return
+  tools_in_flight INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE token_grant (
@@ -895,7 +897,11 @@ Claude Code nor Agent Board, so nothing is posted and `last_activity` simply
 stops advancing. The metering tick (already running every 5s, already reading
 `last_activity`) flags a `running` worker whose activity clock has not moved
 for `caps.stallSeconds` — default 120s, deliberately below the 300s idle cap so
-it surfaces before the cap kills it. A stall is a suspicion, not a reported
+it surfaces before the cap kills it. A worker inside a tool call that has
+started and not returned is excused for 6 × `caps.stallSeconds` (720s at the
+default), because `PostToolUse` fires only on return and one command can
+legitimately run for minutes (§8); past that the command itself is what looks
+wedged and the stall is raised. A stall is a suspicion, not a reported
 state: nothing is written to the task, nothing is killed, one macOS
 notification ("Worker may be stuck") is raised on the transition, and the
 sidebar shows the row until activity resumes or the human acts.
@@ -911,7 +917,7 @@ Per project, overridable:
 | Concurrent workers | 3 (lower for large repos — Derivita) | Spawn refused; orchestrator told why |
 | Tokens per agent (uncached input + output) | off until set | Agent stopped, task flagged, Resume offered |
 | Elapsed per agent, sleep excluded | 30 min | Agent stopped, task flagged, Resume offered |
-| Idle (no tool use, no output), sleep excluded | 5 min | Agent stopped, task flagged |
+| Idle (no tool use, no output), sleep excluded | 5 min (6× while a tool call is running) | Agent stopped, task flagged |
 | Project session ceiling | configurable | Spawn refused |
 
 - A stopped agent's task returns to `ready` with its `failure_reason` set, and a
@@ -936,6 +942,23 @@ Per project, overridable:
   counted every sleeping minute against it. Archive retention
   (`ArchivePolicy.afterDays`) stays on the wall clock: it bounds calendar time,
   not work. So does the token cap, which is a count, not a duration.
+- **A tool call that has started and not returned is not silence.** `PreToolUse`
+  fires before a tool runs and `PostToolUse` only when it returns, so a single
+  long command writes no hook for its whole duration. A cold `swift build` on
+  Agent Board itself measures 544s, and a worker with 376 counted tokens and
+  `Bash` as its last tool was executed mid-command for "no activity for 15
+  minutes". `PreToolUse` records the start on the session row
+  (`tool_started_at`, `tools_in_flight`) and `PostToolUse` clears it; an
+  outstanding call then extends both the idle cap and the stall threshold by
+  `ToolCallGrace.multiplier` — 6×, so 1800s and 720s at the defaults, the
+  former exactly the default elapsed cap. The grace is finite by construction
+  and is only ever consulted after a deadline has already been breached, so a
+  command that never returns is still reaped, and a `tool_started_at` left
+  behind by a lost `PostToolUse` costs a worker its grace rather than its life.
+  `Stop` and `SessionEnd` clear the marker, bounding any lost `PostToolUse` to
+  the turn it went missing in. `tools_in_flight` counts rather than flags
+  because Claude runs parallel tool calls: the row keeps the oldest outstanding
+  start, so a short call returning cannot end a long one's grace.
 - **Autonomy is off on first run.** Every `spawn_worker` creates a pending
   approval until you turn it on. This is a setting, not a rebuild.
 - **Stopping is not destructive.** Every session has a pinned `--session-id`, so

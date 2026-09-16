@@ -1791,6 +1791,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             totals: totals,
             startedAt: current.startedDate,
             lastActivity: lastActivity,
+            toolStartedAt: current.toolStartedDate,
             awake: awake,
             limits: limits,
             state: current.state
@@ -1804,6 +1805,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let stalled = session.state == .running && AttentionSelection.isStalled(
             lastActivity: lastActivity,
             startedAt: session.startedDate,
+            toolStartedAt: session.toolStartedDate,
             awake: awake,
             threshold: TimeInterval(stallSeconds)
         )

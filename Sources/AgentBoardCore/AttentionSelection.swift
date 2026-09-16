@@ -31,14 +31,22 @@ public enum AttentionSelection {
     /// A running worker whose activity clock has not moved for `threshold` of *awake* time. A
     /// session that has never recorded activity is measured from its start, matching `CapEvaluator`
     /// — including its clock: a suspended worker is not stalled, it is asleep.
+    ///
+    /// A tool call that has started and not returned buys `ToolCallGrace` on top, because a worker
+    /// inside a 544s build has made no tool call for exactly the reason that it is working. The
+    /// grace only ever extends the threshold, never triggers it.
     public static func isStalled(
         lastActivity: Date?,
         startedAt: Date,
+        toolStartedAt: Date? = nil,
         awake: AwakeElapsed,
         threshold: TimeInterval
     ) -> Bool {
         guard threshold > 0 else { return false }
-        return awake.secondsAwake(since: lastActivity ?? startedAt) >= threshold
+        guard awake.secondsAwake(since: lastActivity ?? startedAt) >= threshold else { return false }
+        return !ToolCallGrace.excusesSilence(
+            toolStartedAt: toolStartedAt, awake: awake, threshold: threshold
+        )
     }
 
     /// Blocked tasks first, then suspected stalls, each longest-waiting first.
@@ -71,6 +79,7 @@ public enum AttentionSelection {
             guard isStalled(
                 lastActivity: session.lastActivityDate,
                 startedAt: session.startedDate,
+                toolStartedAt: session.toolStartedDate,
                 awake: awake,
                 threshold: stallThreshold
             ) else { continue }
