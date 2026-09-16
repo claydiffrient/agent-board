@@ -426,6 +426,7 @@ CREATE TABLE message (
   delivered_at    INTEGER,           -- set when the `message` report is written
   report_id       INTEGER REFERENCES report(id)
 );
+CREATE INDEX message_to_project_delivered ON message(to_project_id, delivered_at);
 
 CREATE TABLE approval (
   id           TEXT PRIMARY KEY,
@@ -1010,6 +1011,30 @@ silent past the grace period counts as overdue. An overdue worker is
 **reported, not killed** — stopping it, like any worker, is the human's call
 from the progress sheet (§10).
 
+### 8.2 Cross-project authority boundary
+
+D4 binds every token grant to one project and one scope. On the orchestrator
+surface that means every tool either never takes another project's id
+(`list_tasks`, `create_task`, `list_agents`, and the rest of what reads or
+writes only `identity.projectId`) or refuses one it is handed — `get_task`,
+`spawn_worker`, `set_epic`, `request_integration`, the note tools, and every
+other by-id tool answer a foreign id with a refusal naming it, never with the
+foreign project's data or an empty result standing in for "not yours."
+`CrossProjectBoundaryTests` classifies the whole orchestrator tool surface into
+exactly these two sets and fails the moment a new tool ships unclassified or a
+classified one moves sides, so the boundary is a property the test suite holds,
+not a convention someone has to remember to preserve.
+
+`list_projects` and `send_message` (§6, §9.2) are the one hole this epic opens,
+and it is send-only. What a grant may do across the boundary: learn that
+another project exists, by id and name only, and queue text into its report
+queue. What stays denied, with no tool anywhere reaching it: reading another
+project's tasks, epics, notes, approvals, sessions, or reports; spawning,
+stopping, or otherwise acting on anything running there; mutating its board in
+any way. `send_message`'s own refusals — no addressing yourself, unknown
+project, blank or oversized body — narrow when the hole may be used without
+widening what using it is allowed to do.
+
 ---
 
 ## 9. Orchestrator
@@ -1171,11 +1196,17 @@ one that says so.
 
 ### 9.3 Cross-project messages
 
-An orchestrator may send text to another project's orchestrator. D9 forbids
-agent-authored text in the receiving orchestrator's user-authority turn, and
-§9.1 keeps `OrchestratorConsole` the only writer into that PTY, so a message is
-never injected. It is **delivered into the recipient's `report` queue** as a
-`message` report and pulled through `list_reports` exactly like a worker report.
+An orchestrator may send text to another project's orchestrator. The sender is
+itself an orchestrator, with real authority over its own project — but that
+authority does not travel with the text. To the recipient, what arrived is
+agent-authored text from outside its board, no different in standing from a
+worker's report, and D9 forbids exactly that from entering an orchestrator's
+user-authority turn. §9.1 keeps `OrchestratorConsole` the only writer into that
+PTY, so nothing this epic built could put the message there without reopening
+the hole D9 exists to close. Instead it is **delivered into the recipient's
+`report` queue** as a `message` report and pulled through `list_reports`
+exactly like a worker report, on the recipient's own schedule rather than
+whenever the sender happened to call `send_message`.
 
 The stored `message` row keeps the sender's text verbatim. The delivered report
 body wraps it: the sending project's name and id, a statement that the text
