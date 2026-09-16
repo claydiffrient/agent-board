@@ -33,6 +33,7 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D16 | Workers are `claude --bg` background sessions | Deletes process supervision, crash recovery, and scrollback from scope | App owns the PTYs |
 | D17 | Swift + SwiftUI | Literal reading of "native Mac app" | Tauri |
 | D18 | Runtime spike → board → orchestrator → epics → notes | The riskiest assumption is provable in 200 lines | Build everything |
+| D19 | The Terminal screen and worktree shells (§10) run with the human's own authority: `IntegrationGuard` and `--disallowedTools` deliberately do not gate them, and no Agent Board grant token may reach the shell's environment | A human typing `git push` is entitled to push — those mechanisms bound what an unattended agent may do under `--permission-mode auto`, and there is no agent here; a shell holding a grant token would let anything running in it act with that session's authority over the board | Route the shell through a worker-scoped grant |
 
 **D8 amended.** As first written, D8 said the pull request was opened by the
 human and by nobody else, and §5.2 step 5 said the same. The orchestrator half
@@ -206,8 +207,9 @@ proven by the runtime spike in `spike/` on 2026-09-11.
 ```
 ┌─ Agent Board.app (Swift / SwiftUI) ───────────────────────────┐
 │                                                                │
-│  UI: Orchestrator · Task Board · Status · Notes                │
-│  Terminal: SwiftTerm                                           │
+│  UI: Orchestrator · Terminal · Task Board · Status · Notes     │
+│  Terminals: SwiftTerm (orchestrator, project shell, attach,    │
+│    worktree shell)                                             │
 │  Store: SQLite via GRDB                                        │
 │                                                                │
 │  Localhost HTTP server (Hummingbird), 127.0.0.1 only           │
@@ -1334,6 +1336,31 @@ Agent Board** button appears, stopping the orchestrator console and
 terminating the app. **Cancel Shutdown** lifts the standing refusal so
 spawning resumes; it restarts nothing — workers that already acknowledged
 stay stopped, their tasks sitting in `ready` with their resume notes.
+
+**Terminal** — one plain login shell per project, rooted at the project's repo
+(`ShellConsole`, memoized on the supervisor beside the orchestrator consoles),
+alive for as long as the app whether or not the screen is showing. Switching to
+another screen or another project and back does not restart it: the segmented
+control mounts and unmounts `TerminalScreenView`, but the console and its
+retained `LocalProcessTerminalView` belong to the supervisor, not the view, so
+nothing tears down. An exit is final and shown in the header's state dot rather
+than silently respawned; **Start Again** (idle) or **Restart** (hang up and
+relaunch — SIGHUP to the shell's process group, escalating to SIGKILL) is the
+way back. It carries no board authority — D19 (§1).
+
+A worker's worktree gets its own shell instead of using this screen: the
+terminal button beside **Attach** on a session row (Status's Actions column,
+the task inspector's session rows) opens a `worktree-shell` window keyed by
+session id, its working directory the session's recorded `worktree_path` —
+never composed from a worktree base, since the default root has moved and
+older sessions still hold the old one. It is a separate window, not a tab on
+this screen, because this screen's console is memoized for the app's lifetime,
+which is wrong for a directory `accept_task` reaps out from under it; the
+worktree-shell window instead disappears with the worktree, or, if the
+directory vanishes while the window is still open, shows a banner over a shell
+that keeps running so the human can `cd` out. A session recorded with no
+worktree — it ran in the project's own checkout — points at this screen
+instead.
 
 **Task Board** — columns from §5, swimlanes by epic. A card shows title, epic,
 assigned agent, elapsed, spend, and its `blocked`/`failed` flag. Drag between
