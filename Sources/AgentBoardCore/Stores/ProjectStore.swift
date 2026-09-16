@@ -65,6 +65,7 @@ public struct ProjectStore: Sendable {
 
     public func delete(_ id: String) throws {
         try db.writer.write { db in
+            try db.execute(sql: "DELETE FROM project_roster_agent WHERE project_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM token_grant WHERE project_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM report WHERE project_id = ?", arguments: [id])
             try db.execute(

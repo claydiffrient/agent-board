@@ -30,6 +30,17 @@ final class SchemaTests: XCTestCase {
 
             let taskColumns = try db.columns(in: "task").map(\.name)
             XCTAssertTrue(taskColumns.contains("column_name"))
+
+            let rosterColumns = try db.columns(in: "roster_agent").map(\.name)
+            XCTAssertFalse(rosterColumns.contains("project_id"), "the roster is cross-project")
+            XCTAssertEqual(
+                rosterColumns,
+                ["id", "name", "role", "system_prompt", "model", "tool_scope", "enabled", "created_at", "updated_at"]
+            )
+            XCTAssertEqual(
+                try db.columns(in: "project_roster_agent").map(\.name),
+                ["project_id", "roster_agent_id", "ordering"]
+            )
         }
     }
 
