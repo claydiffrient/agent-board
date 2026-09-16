@@ -10,8 +10,8 @@ enum AppComposition {
         do {
             let db = try AppDatabase.open(at: url)
             let supervisor = Wiring.makeSupervisor(db: db)
-            _Concurrency.Task { await supervisor.start() }
-            let environment = AppEnvironment(db: db, supervisor: supervisor)
+            let startup = _Concurrency.Task { await supervisor.start() }
+            let environment = AppEnvironment(db: db, supervisor: supervisor, startup: startup)
             MacNotifier.shared.start(router: environment.router)
             return environment
         } catch {

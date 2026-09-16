@@ -1434,8 +1434,9 @@ sections the viewer has collapsed is a per-viewer convenience and lives in
 `UserDefaults`, not the database.
 
 **What's New in Agent Board** — the release notes, opened from the Help menu and
-from nowhere else. A `Window` scene rather than a `WindowGroup`, so choosing the
-menu item again brings the open window forward instead of stacking a second one;
+once on their own after an update installs. A `Window` scene rather than a
+`WindowGroup`, so choosing the menu item again — or a second launch that decides
+to show them — brings the open window forward instead of stacking a second one;
 resizable, scrollable, closed with ⌘W, and never a sheet, because notes are read
 beside the board rather than in front of it. Every release in the bundled
 `RELEASES.md` is in one scroll, newest first, with the running version marked —
@@ -1454,6 +1455,43 @@ no readable notes — the bare `AgentBoard` binary, or an `.app` whose
 `RELEASES.md` will not parse — gets a window saying which of those it is. Hiding
 the item would read as "this app has no release notes", and a disabled item gives
 no reason at all.
+
+**Shown once, after an update.** `UserDefaults` holds the last version whose
+notes were shown — per-user app state, so not the database, and not worth a
+schema migration for one string. On launch the window opens by itself when the
+running version is above that record *and* `RELEASES.md` has an entry for it;
+the record then moves to the running version. Shown counts as shown whether or
+not the human read it: whether the window was looked at is not something to
+detect, and trying would mean showing it again to someone who closed it on
+purpose.
+
+The two cases this hinges on are **no record** and **a record from an older
+version**. No record is a first ever install: it records the running version and
+stays silent, because someone opening the app for the first time wants the app,
+not a changelog of a product they have never used. Reading it as an upgrade
+instead would greet every new user with a release-notes window.
+
+A **downgrade** — running a build older than the record — shows nothing and
+leaves the record alone; the record names the newest notes a human has been
+given, and running an older build does not un-give them. An **upgrade the author
+wrote no entry for** shows nothing but still records, so the decision is not
+re-made on every launch until a version with notes arrives. The `.unavailable`
+and unparsable-`RELEASES.md` states do nothing at all, record included: burning
+the record on a build whose notes will not parse would swallow those notes for
+good once the file is fixed.
+
+It opens **last in the launch sequence**, after `supervisor.start()` has returned
+— the server bind, the stale-lock sweep and the worktree-root migration — and
+with the board already on screen. Each of those writes to the board the human is
+about to be shown, and a window over the middle of that hides work still
+settling.
+
+It does **not** stand aside for a board that already needs a human. Deferring has
+no later that is better: holding the record back starves the notes on every
+launch that has an approval waiting, and releasing it mid-session puts the window
+over whatever the human is then doing rather than over a board they have not
+touched yet. The notes are a separate, non-modal, ⌘W-closable window, and every
+attention signal is still standing behind it when it is closed or ignored.
 
 The Help menu is added to with `CommandGroup(after: .help)`, never
 `replacing:`. The `.help` group holds two items in this app — **AgentBoard Help**
