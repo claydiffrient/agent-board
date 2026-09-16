@@ -67,6 +67,17 @@ struct ProjectSettingsSheet: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Review") {
+                    Picker("Review level", selection: $settings.reviewLevel) {
+                        ForEach(ReviewLevel.allCases, id: \.self) { level in
+                            Text(level.label).tag(level)
+                        }
+                    }
+                    Text(Self.reviewLevelBlurb(settings.reviewLevel))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Autonomy") {
                     Toggle("Autonomy (spawn without approval)", isOn: $settings.autonomyEnabled)
                     Text("Off by default. While off, every orchestrator spawn waits for your approval.")
@@ -151,6 +162,22 @@ struct ProjectSettingsSheet: View {
             dismiss()
         } catch {
             errorMessage = errorText(error)
+        }
+    }
+
+    static func reviewLevelBlurb(_ level: ReviewLevel) -> String {
+        switch level {
+        case .none:
+            return "A finished task goes straight to Done. Nobody reviews it."
+        case .agent:
+            return "A rostered agent whose role reads as reviewer picks the task up from Review and "
+                + "either accepts it or sends it back with findings. With no such agent on the roster, "
+                + "the task waits for you instead."
+        case .task:
+            return "You accept every task. The default; leaving it here changes nothing."
+        case .epic:
+            return "A task inside an epic goes straight to Done; you review at the epic's integration "
+                + "gate. A task outside an epic still waits for you."
         }
     }
 }

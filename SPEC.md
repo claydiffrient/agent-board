@@ -180,7 +180,7 @@ CREATE TABLE project (
   worktree_root   TEXT NOT NULL,
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
-  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance
+  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance, reviewLevel
   created_at      INTEGER NOT NULL
 );
 
@@ -191,7 +191,8 @@ CREATE TABLE epic (
   goal           TEXT,
   branch         TEXT NOT NULL,    -- agentboard/epic-<id>
   state          TEXT NOT NULL,    -- planning | active | integrating | done | abandoned
-  created_at     INTEGER NOT NULL
+  created_at     INTEGER NOT NULL,
+  review_level   TEXT              -- none|agent|task|epic for this epic's tasks; NULL inherits the project's
 );
 
 CREATE TABLE task (
@@ -211,7 +212,8 @@ CREATE TABLE task (
   origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
-  model          TEXT              -- overrides project settings.defaultModel for this task's worker
+  model          TEXT,             -- overrides project settings.defaultModel for this task's worker
+  reviewer_agent_id TEXT REFERENCES roster_agent(id)  -- the rostered reviewer holding it in `review`
 );
 
 CREATE TABLE task_dep (
@@ -361,6 +363,11 @@ anyone's selection. Deleting a rostered agent clears its `project_roster_agent`
 rows and nothing else: the tasks it worked, its sessions, and the `progress`
 rows naming it all survive it.
 
+`settings_json.reviewLevel` is one of `none`, `agent`, `task` or `epic` and
+defaults to **`task`**, so a project that predates the setting behaves exactly as
+it did. `epic.review_level` overrides it for that epic's tasks; NULL inherits.
+Nothing else reads either value — the level is resolved once, on completion (§5).
+
 ---
 
 ## 5. Task lifecycle
@@ -371,9 +378,29 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
                           ┌──────────────────────────────────────┤
                           ▼                                      ▼
                        review ──accept──> done              failed (flag)
-                          │                                      │
+                          │                  ▲                   │
+                          │                  │                   │
+                          │      no review / epic review:        │
+                          │      complete goes straight here     │
                           └──────────── reopen ──────────────────┘
 ```
+
+Which of those two edges a completed task takes is the **review level** (§4), a
+project setting an epic may override for its own tasks:
+
+| Level | A completed task | Who decides |
+|---|---|---|
+| `none` | goes straight to `done` | nobody looks |
+| `agent` | waits in `review`, assigned to a rostered reviewer | that agent |
+| `task` | waits in `review` | you (**the default**) |
+| `epic` | inside an epic, goes straight to `done`; standalone, waits in `review` | you, at the epic's integration gate |
+
+The level is resolved on completion: the task's epic's `review_level` if it has
+one, otherwise the project's. Two rules override it unconditionally. An epic's
+integration task (`origin = integration`) always waits for a person, at every
+level — §5.2's gate is not weakened by this setting. And `agent` with no usable
+rostered reviewer falls back to `task` and says so in a `progress` row, rather
+than accepting work nobody reviewed.
 
 - `proposed` — created by a worker via `propose_task`. Neither the orchestrator
   nor a worker may promote a worker proposal without human approval when
@@ -385,8 +412,11 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
 - `blocked` — a flag, not a column. Set by the `Notification` hook, cleared on
   the next `PostToolUse`. The card keeps its position and shows why.
 - `review` — worker has committed on `agentboard/<task-id>` and called
-  `report_complete`. The worktree is retained.
-- `done` — you accept it. Every attempt's worktree is removed (firing the
+  `report_complete`, and the review level says someone must look. The worktree is
+  retained. Under `agent` the task carries `reviewer_agent_id`, the rostered
+  reviewer holding it; under `task` it waits on you.
+- `done` — you accept it, or, under `none`/`epic`/`agent`, the review level or a
+  rostered reviewer does. Every attempt's worktree is removed (firing the
   existing `WorktreeRemove` hook, which reclaims Bazel `output_base` on
   Derivita), and `agentboard/<task-id>` is deleted once it is merged into the
   base or epic branch. An unmerged branch, or a worktree with uncommitted
@@ -407,6 +437,21 @@ A worker's closing instructions, injected at spawn:
    (`--disallowedTools` and the `PreToolUse` hook, §8); the instruction exists
    so the agent does not waste a turn discovering that.
 3. Call `report_complete(summary, files_changed, tests_run, caveats)`.
+
+`report_complete` records the report and then resolves the review level. Where
+the level accepts the task, it runs **the same acceptance a human Accept runs** —
+the newly-ready announcement, the grant revocation and the worktree removal are
+one code path (`WorkerControl.accept`), not a second one that has to be kept in
+step. The worker's return text tells it which happened.
+
+A rostered reviewer under `agent` review gets its own token scope (§6), narrower
+than a worker's: `get_my_task`, `log_progress`, `accept_task(verdict)` and
+`reopen_task(findings)` over the one task its token names, and nothing else — no
+spawn, no reassign, no other task. `accept_task` writes the verdict to `progress`
+and then takes that same acceptance path; `reopen_task` puts the findings on the
+task and returns it to `ready` without flagging a failure. The verdict on the
+task is the point: a person reading a task that reached `done` without them can
+see who approved it and why.
 
 ### 5.2 Epic integration
 
@@ -444,7 +489,7 @@ error, because the tool list is rendered per scope.
 | `replace_section(note_id, heading, body, if_version)` | Section-scoped write |
 | `create_note(title, sections)` | New note, unpinned |
 | `propose_task(title, body, rationale)` | Inserts into `proposed` |
-| `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review` |
+| `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review`, or to `done` where the review level (§5) says so |
 | `hand_off(summary, next_role, files_changed)` | Inserts a `handoff` `report` and a `progress` row; moves task to `ready`, keeps the worktree |
 | `report_blocked(reason)` | Inserts a `report`; sets `blocked` |
 
@@ -459,6 +504,23 @@ what D6 buys. `next_role` is advisory — the orchestrator decides who gets it.
 Two live sessions must never hold one worktree, so `Board.assign` refuses, in
 its write transaction, any session for a task an active worker still holds or
 for a worktree path an active session is already in.
+
+### Reviewer scope
+
+Held by a rostered reviewer under `agent` review (§5). Deliberately not a subset
+of orchestrator scope: it is the authority to move one named task out of
+`review`, and nothing besides.
+
+| Tool | Effect |
+|---|---|
+| `get_my_task()` | The task under review and its `progress` rows |
+| `log_progress(text)` | Appends to `progress` |
+| `accept_task(verdict)` | Writes the verdict to `progress`, then runs the ordinary acceptance (§5.1) |
+| `reopen_task(findings)` | Writes the findings to `progress`; moves the task to `ready` without flagging failure |
+
+Every call reads the task id off the token, never off the arguments, so a
+reviewer cannot reach a task it was not given. It cannot spawn, reassign, stop a
+session, query the board, propose, or report on its own behalf.
 
 ### Orchestrator scope
 

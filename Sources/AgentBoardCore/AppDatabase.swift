@@ -45,6 +45,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("roster") { db in
             try db.execute(sql: Schema.roster)
         }
+        migrator.registerMigration("review_level") { db in
+            try db.execute(sql: Schema.reviewLevel)
+        }
         return migrator
     }
 }

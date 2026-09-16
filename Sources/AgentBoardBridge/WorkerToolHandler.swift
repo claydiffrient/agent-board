@@ -8,14 +8,16 @@ public final class WorkerToolHandler: ToolHandler {
     private let progress: ProgressStore
     private let board: Board
     private let notes: NoteTools
+    private let control: any WorkerControl
     private let events: any BoardEventSink
 
-    public init(db: AppDatabase, events: any BoardEventSink) {
+    public init(db: AppDatabase, control: any WorkerControl, events: any BoardEventSink) {
         tasks = TaskStore(db)
         sessions = SessionStore(db)
         progress = ProgressStore(db)
         board = Board(db)
         notes = NoteTools(db: db)
+        self.control = control
         self.events = events
     }
 
@@ -134,7 +136,7 @@ public final class WorkerToolHandler: ToolHandler {
             await events.reportQueued(projectId: identity.projectId)
             return .json(.object(["id": .string(proposed.id), "column": .string(proposed.column.rawValue)]))
         case "report_complete":
-            let result = try reportComplete(task, arguments: arguments, identity: identity)
+            let result = try await reportComplete(task, arguments: arguments, identity: identity)
             await events.reportQueued(projectId: identity.projectId)
             return result
         case "hand_off":
@@ -243,7 +245,9 @@ public final class WorkerToolHandler: ToolHandler {
         )
     }
 
-    private func reportComplete(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+    private func reportComplete(
+        _ task: BoardTask, arguments: JSONValue, identity: TokenIdentity
+    ) async throws -> ToolResult {
         let summary = try ToolArguments.requiredString("summary", in: arguments)
         let files = arguments["files_changed"]?.arrayValue ?? []
         let body: JSONValue = .object([
@@ -255,7 +259,25 @@ public final class WorkerToolHandler: ToolHandler {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(body)
-        try board.complete(taskId: task.id, sessionId: try requiredSession(identity), summary: String(decoding: data, as: UTF8.self))
-        return ToolResult(text: "Report recorded. The task is now in Review. Stop here; do not start further work.")
+        let outcome = try board.complete(
+            taskId: task.id, sessionId: try requiredSession(identity), summary: String(decoding: data, as: UTF8.self)
+        )
+        guard outcome.autoAccept else {
+            return ToolResult(text: "Report recorded. The task is now in Review. Stop here; do not start further work.")
+        }
+        // Not a second accept path: this is the call the Accept button makes, so the newly-ready
+        // announcement, the grant revocation and the worktree removal all run exactly once, here.
+        do {
+            try await control.accept(taskId: task.id, acceptedBy: .policy(outcome.level))
+        } catch {
+            return ToolResult(
+                text: "Report recorded. This project needs no review, but the task could not be accepted "
+                    + "automatically and is waiting in Review: \(error). Stop here; do not start further work."
+            )
+        }
+        return ToolResult(
+            text: "Report recorded. This project needs no review, so the task went straight to Done and its "
+                + "worktree has been removed. Stop here; do not start further work."
+        )
     }
 }

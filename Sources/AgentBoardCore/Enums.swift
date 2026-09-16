@@ -97,4 +97,28 @@ public enum ProgressKind: String, Codable, Sendable, CaseIterable, Equatable, Da
 public enum TokenScope: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
     case orchestrator
     case worker
+    /// A rostered reviewer under agent review: it may move its one task out of `review` and nothing else.
+    case reviewer
+}
+
+/// How much human acceptance a finished task needs before it reaches `done`.
+public enum ReviewLevel: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    /// Completion goes straight to `done`, running the same side effects a human accept runs.
+    case none
+    /// A rostered agent whose role marks it a reviewer holds the review column.
+    case agent
+    /// A human accepts every task. The default, and the behaviour before this setting existed.
+    case task
+    /// A task inside an epic is accepted on completion; the human's gate is the epic's integration
+    /// approval instead. A task with no epic has no such gate, so it falls back to `task`.
+    case epic
+
+    public var label: String {
+        switch self {
+        case .none: return "No review"
+        case .agent: return "Agent review"
+        case .task: return "Task review"
+        case .epic: return "Epic review"
+        }
+    }
 }

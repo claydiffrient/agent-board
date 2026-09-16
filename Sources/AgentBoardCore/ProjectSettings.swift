@@ -47,6 +47,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var defaultModel: String? = nil
     /// Free text the orchestrator reads when choosing a model per task.
     public var modelGuidance: String? = nil
+    /// How much human acceptance a finished task needs. An epic may override it for its own tasks.
+    public var reviewLevel: ReviewLevel = .task
 
     public init(
         caps: Caps = Caps(),
@@ -54,7 +56,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         autoModeJSON: String? = nil,
         extraMcpServers: [String] = [],
         defaultModel: String? = nil,
-        modelGuidance: String? = nil
+        modelGuidance: String? = nil,
+        reviewLevel: ReviewLevel = .task
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -62,6 +65,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.extraMcpServers = extraMcpServers
         self.defaultModel = defaultModel
         self.modelGuidance = modelGuidance
+        self.reviewLevel = reviewLevel
     }
 
     public init(from decoder: Decoder) throws {
@@ -72,6 +76,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         extraMcpServers = try c.decodeIfPresent([String].self, forKey: .extraMcpServers) ?? []
         defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
         modelGuidance = try c.decodeIfPresent(String.self, forKey: .modelGuidance)
+        reviewLevel = try c.decodeIfPresent(ReviewLevel.self, forKey: .reviewLevel) ?? .task
     }
 
     public static func decode(_ json: String) -> ProjectSettings {

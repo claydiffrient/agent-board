@@ -182,6 +182,13 @@ enum Schema {
     CREATE INDEX project_roster_agent_order ON project_roster_agent(project_id, ordering);
     """
 
+    /// `epic.review_level` is nullable on purpose: NULL means "inherit the project's level", which is
+    /// what every epic that predates the setting has.
+    static let reviewLevel = """
+    ALTER TABLE epic ADD COLUMN review_level TEXT;
+    ALTER TABLE task ADD COLUMN reviewer_agent_id TEXT REFERENCES roster_agent(id);
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",

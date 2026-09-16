@@ -1,3 +1,4 @@
+import AgentBoardCore
 import Foundation
 
 public protocol BoardEventSink: Sendable {
@@ -10,6 +11,10 @@ public protocol WorkerControl: Sendable {
     /// The caller has already passed `Board.requestSpawn`; returns the new session id.
     func spawnWorker(taskId: String) async throws -> String
     func stopWorker(sessionId: String) async throws
+    /// The single acceptance path, whoever triggered it: the board accept, the newly-ready
+    /// announcement, the grant revocation and the worktree removal. A no-review completion and a
+    /// rostered reviewer's approval both come through here rather than repeating any of it.
+    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws
 }
 
 public struct ClosureBoardEventSink: BoardEventSink {

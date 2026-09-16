@@ -29,6 +29,14 @@ actor RecordingEventSink: BoardEventSink {
 actor FakeWorkerControl: WorkerControl {
     private(set) var spawned: [String] = []
     private(set) var stopped: [String] = []
+    private(set) var accepted: [(taskId: String, acceptedBy: TaskAcceptance)] = []
+    /// Stands in for the supervisor: the bridge tests assert the board effects, and the supervisor's
+    /// own side effects (grants, worktrees) are asserted in AgentBoardAppTests.
+    private nonisolated let board: Board?
+
+    init(board: Board? = nil) {
+        self.board = board
+    }
 
     func spawnWorker(taskId: String) async throws -> String {
         spawned.append(taskId)
@@ -37,6 +45,11 @@ actor FakeWorkerControl: WorkerControl {
 
     func stopWorker(sessionId: String) async throws {
         stopped.append(sessionId)
+    }
+
+    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws {
+        accepted.append((taskId, acceptedBy))
+        try board?.accept(taskId: taskId, acceptedBy: acceptedBy)
     }
 }
 
@@ -47,6 +60,7 @@ struct BridgeFixture {
     let control: FakeWorkerControl
     let orchestrator: OrchestratorToolHandler
     let worker: WorkerToolHandler
+    let reviewer: ReviewerToolHandler
     let scoped: ScopedToolHandler
     let hooks: StoreHookSink
 
@@ -73,9 +87,10 @@ struct BridgeFixture {
             memoryDir: nil
         )
         let events = RecordingEventSink()
-        let control = FakeWorkerControl()
+        let control = FakeWorkerControl(board: Board(db))
         let orchestrator = OrchestratorToolHandler(db: db, control: control, events: events)
-        let worker = WorkerToolHandler(db: db, events: events)
+        let worker = WorkerToolHandler(db: db, control: control, events: events)
+        let reviewer = ReviewerToolHandler(db: db, control: control, events: events)
         return BridgeFixture(
             db: db,
             project: project,
@@ -83,7 +98,8 @@ struct BridgeFixture {
             control: control,
             orchestrator: orchestrator,
             worker: worker,
-            scoped: ScopedToolHandler(worker: worker, orchestrator: orchestrator),
+            reviewer: reviewer,
+            scoped: ScopedToolHandler(worker: worker, orchestrator: orchestrator, reviewer: reviewer),
             hooks: StoreHookSink(db: db, events: events)
         )
     }
@@ -132,6 +148,27 @@ struct BridgeFixture {
         )
         try db.writer.write { db in try epic.insert(db) }
         return epic
+    }
+
+    func reviewerIdentity(sessionId: String, taskId: String?) -> TokenIdentity {
+        TokenIdentity(
+            token: "reviewer-\(sessionId)", scope: .reviewer, projectId: project.id,
+            sessionId: sessionId, taskId: taskId
+        )
+    }
+
+    func setReviewLevel(_ level: ReviewLevel) throws {
+        var settings = project.settings
+        settings.reviewLevel = level
+        try projects.updateSettings(project.id, settings)
+    }
+
+    @discardableResult
+    func rosterReviewer(_ name: String, role: String = "reviewer") throws -> RosterAgent {
+        let roster = RosterStore(db)
+        let agent = try roster.create(name: name, role: role, systemPrompt: "You review.")
+        try roster.enable(agentId: agent.id, forProject: project.id)
+        return agent
     }
 
     func workerIdentity(sessionId: String, taskId: String) -> TokenIdentity {

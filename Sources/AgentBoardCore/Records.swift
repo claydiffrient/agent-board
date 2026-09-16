@@ -61,6 +61,8 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var branch: String
     public var state: EpicState
     public var createdAt: Int64
+    /// Overrides the project's level for this epic's tasks. nil inherits.
+    public var reviewLevel: ReviewLevel?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -70,9 +72,13 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case branch
         case state
         case createdAt = "created_at"
+        case reviewLevel = "review_level"
     }
 
-    public init(id: String, projectId: String, title: String, goal: String?, branch: String, state: EpicState, createdAt: Int64) {
+    public init(
+        id: String, projectId: String, title: String, goal: String?, branch: String,
+        state: EpicState, createdAt: Int64, reviewLevel: ReviewLevel? = nil
+    ) {
         self.id = id
         self.projectId = projectId
         self.title = title
@@ -80,6 +86,7 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         self.branch = branch
         self.state = state
         self.createdAt = createdAt
+        self.reviewLevel = reviewLevel
     }
 
     public static func newId() -> String { BoardId.new() }
@@ -108,6 +115,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var updatedAt: Int64
     /// Overrides the project's default model for the worker on this task.
     public var model: String?
+    /// Under agent review, the rostered reviewer this task was handed to when it entered `review`.
+    public var reviewerAgentId: String?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -127,15 +136,17 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case model
+        case reviewerAgentId = "reviewer_agent_id"
     }
 
     public init(
         id: String, projectId: String, epicId: String?, title: String, body: String?, acceptance: String?,
         priority: String?, column: TaskColumn, blocked: Bool = false, blockedReason: String? = nil,
         failed: Bool = false, failureReason: String? = nil, ordering: Double, origin: TaskOrigin,
-        createdAt: Int64, updatedAt: Int64, model: String? = nil
+        createdAt: Int64, updatedAt: Int64, model: String? = nil, reviewerAgentId: String? = nil
     ) {
         self.model = model
+        self.reviewerAgentId = reviewerAgentId
         self.id = id
         self.projectId = projectId
         self.epicId = epicId

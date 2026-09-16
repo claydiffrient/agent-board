@@ -79,8 +79,9 @@ struct SupervisorFixture {
             tokens: StoreTokenResolver(db: db),
             hooks: StoreHookSink(db: db, events: sink),
             tools: ScopedToolHandler(
-                worker: WorkerToolHandler(db: db, events: sink),
-                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink)
+                worker: WorkerToolHandler(db: db, control: sink, events: sink),
+                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink),
+                reviewer: ReviewerToolHandler(db: db, control: sink, events: sink)
             )
         )
         let runtime = FakeRuntime()

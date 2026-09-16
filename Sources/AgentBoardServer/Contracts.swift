@@ -3,6 +3,9 @@ import Foundation
 public enum TokenScope: String, Sendable, Codable {
     case worker
     case orchestrator
+    /// A rostered reviewer under agent review. Narrower than `worker`: it may only move the one task
+    /// it was given out of `review`, and cannot spawn, reassign, or reach any other task.
+    case reviewer
 }
 
 public struct TokenIdentity: Sendable, Equatable {

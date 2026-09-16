@@ -4,10 +4,12 @@ import Foundation
 public struct ScopedToolHandler: ToolHandler {
     private let worker: any ToolHandler
     private let orchestrator: any ToolHandler
+    private let reviewer: any ToolHandler
 
-    public init(worker: any ToolHandler, orchestrator: any ToolHandler) {
+    public init(worker: any ToolHandler, orchestrator: any ToolHandler, reviewer: any ToolHandler) {
         self.worker = worker
         self.orchestrator = orchestrator
+        self.reviewer = reviewer
     }
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
@@ -22,6 +24,7 @@ public struct ScopedToolHandler: ToolHandler {
         switch identity.scope {
         case .worker: return worker
         case .orchestrator: return orchestrator
+        case .reviewer: return reviewer
         }
     }
 }

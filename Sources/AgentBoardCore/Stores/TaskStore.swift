@@ -190,6 +190,18 @@ public struct TaskStore: Sendable {
         )
     }
 
+    /// Under agent review, the rostered reviewer holding the task. Cleared when it leaves `review`.
+    public func setReviewer(_ id: String, _ rosterAgentId: String?) throws {
+        try db.writer.write { db in try Self.setReviewer(db, id, rosterAgentId) }
+    }
+
+    static func setReviewer(_ db: Database, _ id: String, _ rosterAgentId: String?) throws {
+        try db.execute(
+            sql: "UPDATE task SET reviewer_agent_id = ?, updated_at = ? WHERE id = ?",
+            arguments: [rosterAgentId, Int64.nowMillis, id]
+        )
+    }
+
     public func setFailed(_ id: String, _ failed: Bool, reason: String?) throws {
         try db.writer.write { db in
             try Self.setFailed(db, id, failed, reason: reason)

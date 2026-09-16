@@ -185,7 +185,7 @@ final class EpicIntegrationTests: XCTestCase {
         let token = try XCTUnwrap(fixture.grants.forSession(session.sessionId).first).token
         let resolved = await fixture.resolver.resolve(token: token)
         let identity = try XCTUnwrap(resolved)
-        let handler = WorkerToolHandler(db: fixture.db, events: LateBoundSink())
+        let handler = WorkerToolHandler(db: fixture.db, control: LateBoundSink(), events: LateBoundSink())
         _ = try await handler.call(
             "report_complete",
             arguments: .object([

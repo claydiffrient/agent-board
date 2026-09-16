@@ -419,12 +419,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func accept(taskId: String) async throws {
+        try await accept(taskId: taskId, acceptedBy: .human)
+    }
+
+    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws {
         try await recording {
             guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
             guard let project = try projects.get(task.projectId) else {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
-            try board.accept(taskId: taskId)
+            try board.accept(taskId: taskId, acceptedBy: acceptedBy)
             let taskSessions = try sessions.forTask(taskId)
             for session in taskSessions {
                 try grants.revokeAll(sessionId: session.sessionId)

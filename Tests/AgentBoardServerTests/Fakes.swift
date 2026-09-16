@@ -59,7 +59,7 @@ actor FakeToolHandler: ToolHandler {
 
     func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
         switch identity.scope {
-        case .worker: return Self.workerTools
+        case .worker, .reviewer: return Self.workerTools
         case .orchestrator: return Self.orchestratorTools
         }
     }

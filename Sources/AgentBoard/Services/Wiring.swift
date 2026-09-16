@@ -20,8 +20,9 @@ enum Wiring {
             tokens: StoreTokenResolver(db: db),
             hooks: StoreHookSink(db: db, events: sink),
             tools: ScopedToolHandler(
-                worker: WorkerToolHandler(db: db, events: sink),
-                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink)
+                worker: WorkerToolHandler(db: db, control: sink, events: sink),
+                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink),
+                reviewer: ReviewerToolHandler(db: db, control: sink, events: sink)
             )
         )
         let supervisor = WorkerSupervisor(
@@ -65,5 +66,10 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
     func stopWorker(sessionId: String) async throws {
         guard let target else { throw SupervisorError.serverNotRunning }
         try await target.stopWorker(sessionId: sessionId)
+    }
+
+    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws {
+        guard let target else { throw SupervisorError.serverNotRunning }
+        try await target.accept(taskId: taskId, acceptedBy: acceptedBy)
     }
 }
