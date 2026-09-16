@@ -76,6 +76,24 @@ public final class WorkerToolHandler: ToolHandler {
             )
         ),
         ToolDescriptor(
+            name: "hand_off",
+            description: "Return the task to the queue after doing only the portion that matches your specialty. Commit "
+                + "on your branch first, exactly as report_complete requires: uncommitted work is still in the worktree "
+                + "for the next agent to see, but it is not attributable to you. The task goes back to ready with your "
+                + "summary attached; the worktree is kept, so whoever picks it up next works this same checkout and sees "
+                + "what you built. This is not a failure. Ends your part of the work; do not continue after calling it.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "summary": ToolSchema.string("What you did, and what the next agent needs to do."),
+                    "next_role": ToolSchema.string(
+                        "The specialty you think should pick this up next. Advisory only: the orchestrator decides."
+                    ),
+                    "files_changed": ToolSchema.stringArray(),
+                ],
+                required: ["summary", "next_role", "files_changed"]
+            )
+        ),
+        ToolDescriptor(
             name: "report_blocked",
             description: "Declare that you cannot make progress without a human decision or information you do not have. "
                 + "State exactly what you need. The task is flagged blocked and a person is notified.",
@@ -117,6 +135,10 @@ public final class WorkerToolHandler: ToolHandler {
             return .json(.object(["id": .string(proposed.id), "column": .string(proposed.column.rawValue)]))
         case "report_complete":
             let result = try reportComplete(task, arguments: arguments, identity: identity)
+            await events.reportQueued(projectId: identity.projectId)
+            return result
+        case "hand_off":
+            let result = try handOff(task, arguments: arguments, identity: identity)
             await events.reportQueued(projectId: identity.projectId)
             return result
         case "report_blocked":
@@ -198,6 +220,27 @@ public final class WorkerToolHandler: ToolHandler {
         let text = detail.isEmpty ? state : "\(state): \(detail)"
         try progress.append(taskId: task.id, sessionId: sessionId, kind: .status, text: text)
         return ToolResult(text: "Status recorded: \(text)")
+    }
+
+    private func handOff(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let summary = try ToolArguments.requiredString("summary", in: arguments)
+        let files = (arguments["files_changed"]?.arrayValue ?? []).compactMap(\.stringValue)
+        let sessionId = try requiredSession(identity)
+        do {
+            try board.handOff(
+                taskId: task.id,
+                sessionId: sessionId,
+                summary: summary,
+                nextRole: arguments["next_role"]?.stringValue,
+                filesChanged: files
+            )
+        } catch BoardError.sessionNotOnTask {
+            throw ToolError("Session \(sessionId) is not the agent currently working task \(task.id).")
+        }
+        return ToolResult(
+            text: "Handed off. The task is back in ready with your summary and the worktree is kept for the next "
+                + "agent. Stop here; do not start further work."
+        )
     }
 
     private func reportComplete(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {

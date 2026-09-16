@@ -70,6 +70,8 @@ public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, Data
 public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
     case complete
     case failed
+    /// A rostered agent did its portion and returned the task to the queue for the next one.
+    case handoff
     case blocked
     case proposal
     case decision

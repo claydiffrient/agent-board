@@ -107,8 +107,14 @@ struct BridgeFixture {
     }
 
     @discardableResult
-    func session(_ id: String, role: SessionRole = .worker, state: SessionState = .running, taskId: String? = nil) throws -> AgentSession {
-        let session = AgentSession(sessionId: id, projectId: project.id, taskId: taskId, role: role, cwd: "/tmp", state: state)
+    func session(
+        _ id: String, role: SessionRole = .worker, state: SessionState = .running, taskId: String? = nil,
+        worktreePath: String? = nil, shortId: String? = nil
+    ) throws -> AgentSession {
+        let session = AgentSession(
+            sessionId: id, shortId: shortId, projectId: project.id, taskId: taskId, role: role,
+            worktreePath: worktreePath, cwd: "/tmp", state: state
+        )
         try sessions.insert(session)
         return session
     }

@@ -22,7 +22,12 @@ actor FakeRuntime: AgentRuntime {
 
     func stop(shortId: String) async throws { stopped.append(shortId) }
     func remove(shortId: String) async throws {}
-    func listSessions() async throws -> [AgentInfo] { [] }
+
+    private var listed: [AgentInfo] = []
+
+    func setListed(_ infos: [AgentInfo]) { listed = infos }
+
+    func listSessions() async throws -> [AgentInfo] { listed }
     nonisolated func attachCommand(shortId: String) -> (executable: String, arguments: [String]) {
         ("claude", ["attach", shortId])
     }

@@ -15,6 +15,8 @@ enum SupervisorError: LocalizedError {
     case sessionHasNoShortId(String)
     case taskNotAssignable(title: String, column: TaskColumn)
     case capRefused(String)
+    case taskAlreadyHeld(title: String, sessionId: String)
+    case worktreeAlreadyHeld(path: String, sessionId: String)
     case serverNotRunning
     case spawnFailed(worktree: String, underlying: String)
     case approvalNotFound(String)
@@ -30,6 +32,10 @@ enum SupervisorError: LocalizedError {
         case .sessionHasNoShortId(let id): return "session \(id) has no claude short id yet; reconcile first"
         case .taskNotAssignable(let title, let column): return "\"\(title)\" is in \(column.rawValue) and cannot be assigned"
         case .capRefused(let reason): return "spawn refused: \(reason)"
+        case .taskAlreadyHeld(let title, let sessionId):
+            return "\"\(title)\" is still held by session \(sessionId); a second agent would share its worktree"
+        case .worktreeAlreadyHeld(let path, let sessionId):
+            return "session \(sessionId) is still working in \(path); a second agent must not share it"
         case .serverNotRunning: return "the Agent Board server is not running"
         case .spawnFailed(let worktree, let underlying):
             return "spawn failed; worktree kept at \(worktree) for retry.\n\(underlying)"
@@ -161,6 +167,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
         }
+        // A handed-off task is back in `ready` while its worktree stays on disk, so the column alone no
+        // longer proves nobody is in it. `Board.assign` re-checks this in its transaction; refusing here
+        // as well keeps a doomed spawn from launching a process it would then have to orphan.
+        if let holder = try sessions.activeHolder(taskId: taskId) {
+            throw SupervisorError.taskAlreadyHeld(title: task.title, sessionId: holder.sessionId)
+        }
 
         let attempt = try sessions.forTask(taskId).count + 1
         let branch = Self.taskBranchPrefix + taskId
@@ -180,6 +192,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         let worktree = try await offMain {
             try Self.existingWorktree(manager, name: taskId) ?? manager.create(name: taskId, branch: branch, base: base)
+        }
+        if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
+            throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
         }
 
         do {
@@ -289,6 +304,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let worktree = try await offMain {
             try Self.existingWorktree(manager, name: worktreeName)
                 ?? manager.createForBranch(name: worktreeName, branch: epicBranch)
+        }
+        if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
+            throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
         }
 
         let members = try tasks.list(projectId: project.id, epicId: epicId)
@@ -940,13 +958,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return object[key] as? String
     }
 
+    /// Returns `expected` rather than the path `git worktree list` prints, which on macOS resolves
+    /// `/var` to `/private/var`. Reusing a worktree would otherwise record a second spelling of one
+    /// directory on the new session row, and `worktree_path` is compared as a string to decide
+    /// whether anyone is already in it.
     private nonisolated static func existingWorktree(_ manager: WorktreeManager, name: String) throws -> URL? {
         let expected = manager.worktreeRoot.appendingPathComponent(name)
         guard FileManager.default.fileExists(atPath: expected.path) else { return nil }
         let expectedPath = expected.standardizedFileURL.resolvingSymlinksInPath().path
-        return try manager.list()
-            .first { $0.path.standardizedFileURL.resolvingSymlinksInPath().path == expectedPath }?
-            .path
+        let listed = try manager.list()
+            .first { $0.path.standardizedFileURL.resolvingSymlinksInPath().path == expectedPath }
+        return listed == nil ? nil : expected
     }
 
     static func resumePrompt(previousStop: String?) -> String {

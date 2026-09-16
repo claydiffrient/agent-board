@@ -416,10 +416,20 @@ error, because the tool list is rendered per scope.
 | `create_note(title, sections)` | New note, unpinned |
 | `propose_task(title, body, rationale)` | Inserts into `proposed` |
 | `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review` |
+| `hand_off(summary, next_role, files_changed)` | Inserts a `handoff` `report` and a `progress` row; moves task to `ready`, keeps the worktree |
 | `report_blocked(reason)` | Inserts a `report`; sets `blocked` |
 
 A worker may not read other tasks, reassign, create a non-proposal task, or
 spawn anything.
+
+`hand_off` is for a rostered agent that does only the portion matching its
+specialty. It never sets the `failed` flag, and it releases the session's hold
+on the task so nothing believes that agent is still working it. The worktree is
+retained: the next agent assigned to the task works the same checkout, which is
+what D6 buys. `next_role` is advisory — the orchestrator decides who gets it.
+Two live sessions must never hold one worktree, so `Board.assign` refuses, in
+its write transaction, any session for a task an active worker still holds or
+for a worktree path an active session is already in.
 
 ### Orchestrator scope
 

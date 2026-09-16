@@ -152,11 +152,20 @@ public struct Board: Sendable {
         }
     }
 
+    /// The only path that creates a worker session row. The two guards run inside the write
+    /// transaction, so a handed-off task cannot be assigned twice concurrently: one caller wins and
+    /// the other throws rather than launching a second agent into the same checkout.
     @discardableResult
     public func assign(taskId: String, session: AgentSession) throws -> AgentSession {
         try db.writer.write { db in
             guard let task = try Task.fetchOne(db, key: taskId) else {
                 throw BoardError.taskNotFound(taskId)
+            }
+            if let holder = try SessionStore.activeHolder(db, taskId: taskId) {
+                throw BoardError.taskAlreadyHeld(taskId: taskId, sessionId: holder.sessionId)
+            }
+            if let path = session.worktreePath, let holder = try SessionStore.activeHolder(db, worktreePath: path) {
+                throw BoardError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
             }
             let previousAttempts = try Int.fetchOne(
                 db,
@@ -191,6 +200,49 @@ public struct Board: Sendable {
                try Epic.fetchOne(db, key: epicId)?.state == .integrating {
                 try EpicStore.setState(db, epicId, .done)
             }
+            return report
+        }
+    }
+
+    /// A rostered agent finishing its portion: the task goes back to `ready` with a progress row and a
+    /// report, the session's hold is released so nothing believes it is still working, and the worktree
+    /// is left in place for whoever picks the task up next. This is not a failure and never flags one.
+    @discardableResult
+    public func handOff(
+        taskId: String, sessionId: String, summary: String, nextRole: String?, filesChanged: [String]
+    ) throws -> Report {
+        try db.writer.write { db in
+            let task = try Self.requireTask(db, taskId)
+            guard let session = try AgentSession.fetchOne(db, key: sessionId),
+                  session.taskId == taskId, session.state.isActive
+            else {
+                throw BoardError.sessionNotOnTask(sessionId: sessionId, taskId: taskId)
+            }
+            let agent = session.shortId ?? sessionId
+            let suggested = nextRole.flatMap { $0.isEmpty ? nil : $0 }
+
+            var lines = [
+                "Handed off by \(agent) (attempt \(session.attempt)) after doing its portion.",
+                summary,
+            ]
+            if !filesChanged.isEmpty {
+                lines.append("Files changed: " + filesChanged.joined(separator: ", "))
+            }
+            lines.append(suggested.map { "Suggested next role: \($0) (advisory; you decide who gets it)." }
+                ?? "No next role suggested.")
+            lines.append("Task \(taskId) (\(task.title)) is back in ready. Its worktree is retained, so the "
+                + "next agent works the same checkout; nothing else may be dispatched into it meanwhile.")
+            let body = lines.joined(separator: "\n\n")
+
+            let report = try ReportStore.insert(
+                db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .handoff, body: body
+            )
+            _ = try ProgressStore.append(db, taskId: taskId, sessionId: sessionId, kind: .note, text: body)
+            try TaskStore.setBlocked(db, taskId, false, reason: nil)
+            try TaskStore.setFailed(db, taskId, false, reason: nil)
+            try TaskStore.move(db, taskId, to: .ready, before: nil)
+            try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
+            try SessionStore.setStopReason(db, sessionId, suggested.map { "handed off to \($0)" } ?? "handed off")
             return report
         }
     }

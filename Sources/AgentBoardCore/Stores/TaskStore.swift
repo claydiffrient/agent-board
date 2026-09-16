@@ -237,4 +237,10 @@ public enum BoardError: Error, Equatable, Sendable {
     case epicNotFound(String)
     /// `createEpic` was handed a `dependsOn` index that is out of range or points at the task itself.
     case invalidEpicDependency(taskIndex: Int, dependsOn: Int)
+    /// An active worker session already holds the task; a second one would share its worktree.
+    case taskAlreadyHeld(taskId: String, sessionId: String)
+    /// An active session already holds the worktree the new session was about to be launched into.
+    case worktreeAlreadyHeld(path: String, sessionId: String)
+    /// The session is not the one currently working the task it is acting on.
+    case sessionNotOnTask(sessionId: String, taskId: String)
 }

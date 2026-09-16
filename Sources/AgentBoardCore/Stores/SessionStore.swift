@@ -26,6 +26,42 @@ public struct SessionStore: Sendable {
         }
     }
 
+    /// The active worker session working `taskId`, if any. Two of these must never exist at once:
+    /// both would be editing one worktree.
+    public func activeHolder(taskId: String) throws -> AgentSession? {
+        try db.reader.read { db in try Self.activeHolder(db, taskId: taskId) }
+    }
+
+    static func activeHolder(_ db: Database, taskId: String) throws -> AgentSession? {
+        try AgentSession.fetchOne(
+            db,
+            sql: """
+            SELECT * FROM agent_session
+            WHERE task_id = ? AND role = 'worker' AND state IN (\(activeStatesSQL))
+            ORDER BY started_at DESC LIMIT 1
+            """,
+            arguments: [taskId]
+        )
+    }
+
+    /// The active session whose checkout is `path`, if any. A handed-off task keeps its worktree, so
+    /// this is the check that stops a second agent being launched into a checkout someone still holds.
+    public func activeHolder(worktreePath: String) throws -> AgentSession? {
+        try db.reader.read { db in try Self.activeHolder(db, worktreePath: worktreePath) }
+    }
+
+    static func activeHolder(_ db: Database, worktreePath: String) throws -> AgentSession? {
+        try AgentSession.fetchOne(
+            db,
+            sql: """
+            SELECT * FROM agent_session
+            WHERE worktree_path = ? AND state IN (\(activeStatesSQL))
+            ORDER BY started_at DESC LIMIT 1
+            """,
+            arguments: [worktreePath]
+        )
+    }
+
     public func orchestrator(projectId: String) throws -> AgentSession? {
         try db.reader.read { db in
             try AgentSession.fetchOne(
