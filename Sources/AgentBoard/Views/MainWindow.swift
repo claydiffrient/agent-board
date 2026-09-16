@@ -4,6 +4,7 @@ import SwiftUI
 
 struct MainWindow: View {
     @Environment(AppEnvironment.self) private var env
+    @Environment(\.openWindow) private var openWindow
     @State private var projects = Observed<[Project]>([])
     @State private var workspaces = Observed<[Workspace]>([])
     @State private var attention = Observed<[ProjectAttention]>([])
@@ -37,6 +38,7 @@ struct MainWindow: View {
         .task {
             await attention.run(ProjectAttentionStore(env.db).observeAll(), in: env.db.reader)
         }
+        .task { await announceReleaseNotes() }
         .sheet(item: $settingsProject) { project in
             ProjectSettingsSheet(project: project, workspaces: workspaces.value) {
                 if selection == .project(project.id) { select(.atAGlance) }
@@ -58,6 +60,16 @@ struct MainWindow: View {
         }
         .errorAlert($errorMessage)
         .onChange(of: env.router.sequence) { openRoutedProject() }
+    }
+
+    /// Last in the launch sequence, after `supervisor.start()` returns — the server bind, the
+    /// stale-lock sweep and the worktree-root migration all write to the board a human is about to
+    /// be shown, and a window over the middle of that hides work still settling. It does not stand
+    /// aside for a board that already needs attention; SPEC §10 has the argument.
+    private func announceReleaseNotes() async {
+        await env.startup?.value
+        guard env.releaseNotes.announceOnLaunch() else { return }
+        openWindow(id: ReleaseNotesScene.id)
     }
 
     /// A banner click selects its project through `select`, the same funnel the sidebar uses, so

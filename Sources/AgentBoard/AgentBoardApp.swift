@@ -3,7 +3,6 @@ import SwiftUI
 @main
 struct AgentBoardApp: App {
     @State private var appEnvironment = AppComposition.make()
-    @State private var releaseNotes = ReleaseNotesLoader.load()
 
     init() {
         MenuProbe.runIfRequested()
@@ -29,7 +28,7 @@ struct AgentBoardApp: App {
         }
 
         Window(ReleaseNotesScene.title, id: ReleaseNotesScene.id) {
-            ReleaseNotesWindow(state: releaseNotes)
+            ReleaseNotesWindow(state: appEnvironment.releaseNotes.state)
         }
         .defaultSize(width: 620, height: 680)
 
