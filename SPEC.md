@@ -1349,11 +1349,10 @@ relaunch — SIGHUP to the shell's process group, escalating to SIGKILL) is the
 way back. It carries no board authority — D19 (§1).
 
 A worker's worktree gets its own shell instead of using this screen: the
-terminal button beside **Attach** on a session row (Status's Actions column,
-the task inspector's session rows) opens a `worktree-shell` window keyed by
-session id, its working directory the session's recorded `worktree_path` —
-never composed from a worktree base, since the default root has moved and
-older sessions still hold the old one. It is a separate window, not a tab on
+`apple.terminal` button beside the attach button on a session row opens a
+`worktree-shell` window keyed by session id, its working directory the
+session's recorded `worktree_path` — never composed from a worktree base,
+since the default root has moved and older sessions still hold the old one. It is a separate window, not a tab on
 this screen, because this screen's console is memoized for the app's lifetime,
 which is wrong for a directory `accept_task` reaps out from under it; the
 worktree-shell window instead disappears with the worktree, or, if the
@@ -1361,6 +1360,19 @@ directory vanishes while the window is still open, shows a banner over a shell
 that keeps running so the human can `cd` out. A session recorded with no
 worktree — it ran in the project's own checkout — points at this screen
 instead.
+
+The pair is `bubble.left.fill` for attach and `apple.terminal` for the worktree
+shell, monochrome and unstyled — the same glyph the shell window itself shows
+for a ready worktree, so the button and the window agree. They were one terminal
+glyph twice until the symbols were split; `terminal` and `apple.terminal` are in
+fact the same image on macOS 26, so the old pair was indistinguishable rather
+than merely similar. The two sites differ deliberately: Status's Actions column
+is width-constrained and shows icons only (a title truncates to `Ag…` there),
+while the task inspector's session rows show **Agent** and **Shell**. Because
+the Status column carries no visible label, the buttons' accessibility labels —
+"Attach to agent session" and "Open shell in worktree", divergent from the first
+word, since VoiceOver reads them consecutively along the row — are the only
+thing naming them there.
 
 **Task Board** — columns from §5, swimlanes by epic. A card shows title, epic,
 assigned agent, elapsed, spend, and its `blocked`/`failed` flag. Drag between
