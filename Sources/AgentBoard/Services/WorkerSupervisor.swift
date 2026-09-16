@@ -415,6 +415,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let queued = (try? board.terminate(sessionId: sessionId, cause: .setupFailed(detail))) ?? nil
         guard queued != nil else { return }
         announceReports(projectId: projectId)
+        // `sessionId` always names a real row (`assign` writes it before setup runs), so this could
+        // route to `.session(sessionId)` the way the stall and cap banners do. It stays on `.project`
+        // because the Status row it would land on carries no diagnosis — no transcript, no spend, a
+        // bare `failed` state — while `detail` is the actual worktree-prep failure, which only the
+        // queued report on the Orchestrator screen shows.
         post("Worker never started", body: detail, projectId: projectId, category: .workerFailures)
     }
 
@@ -1731,7 +1736,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return now - endedAt < finalSpendWindowMillis
     }
 
-    private func meter(_ session: AgentSession, limits: CapLimits, stallSeconds: Int, awake: AwakeElapsed) async {
+    /// Internal rather than private so a test can drive a single session's stall/cap evaluation
+    /// directly, the way `sweepArchives` is exposed for the archive tick.
+    func meter(_ session: AgentSession, limits: CapLimits, stallSeconds: Int, awake: AwakeElapsed) async {
         var totals = UsageTotals(
             inputTokens: session.tokensIn,
             outputTokens: session.tokensOut,
@@ -1811,7 +1818,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             "Worker may be stuck",
             body: "\(session.displayShortId) has made no tool call in \(stallSeconds)s — \(title ?? "no task"). Attach to check.",
             projectId: session.projectId,
-            category: .capsAndStalls
+            category: .capsAndStalls,
+            subject: .session(session.sessionId)
         )
     }
 
@@ -1823,7 +1831,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let salvage = await branchSalvage(taskId: session.taskId)
         _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description), salvage: salvage)
         announceReports(projectId: session.projectId)
-        post("Worker stopped at cap", body: description, projectId: session.projectId, category: .capsAndStalls)
+        post(
+            "Worker stopped at cap", body: description, projectId: session.projectId,
+            category: .capsAndStalls, subject: .session(session.sessionId)
+        )
     }
 
     private static func capLimits(_ caps: Caps) -> CapLimits {
