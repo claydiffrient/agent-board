@@ -45,3 +45,5 @@ First release.
   projects into.
 - **Cross-project messages.** One project's orchestrator can drop a note in
   another project's queue.
+- **What's New.** This window, from the Help menu — and from now on, it opens
+  itself once after an update that has notes for you.
