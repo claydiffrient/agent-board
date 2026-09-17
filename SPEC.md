@@ -624,6 +624,11 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
   leaves the epic branch where it was, and queues a `decision` report naming the
   task, the epic branch and the conflicting files, so the orchestrator can
   dispatch a fix rather than discover the divergence at integration time.
+  The merge commit's subject is `Merge <task title> into <epic title>` — titles,
+  never branch names, because this commit is on the branch the epic's pull
+  request is opened from and `agentboard/<id>` names would publish the task and
+  epic identifiers into that repository's history permanently (§6.1 renames the
+  branch, not commits already made).
   Nothing here pushes: it is a local branch-to-branch merge.
 - `archived` — also a flag, not a column, with `blocked` and `failed` as the
   precedent: D7's six columns (`proposed`/`backlog`/`ready`/`running`/`review`/

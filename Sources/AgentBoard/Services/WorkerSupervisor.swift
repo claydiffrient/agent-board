@@ -732,6 +732,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let manager = Self.worktreeManager(for: project)
         let taskBranch = Self.taskBranchPrefix + task.id
         let epicBranch = epic.branch
+        let taskTitle = task.title
+        let epicTitle = epic.title
         let projectBase = project.baseBranch
         let worktreeName = "merge-\(task.id)"
         let outcome: EpicMerge
@@ -739,7 +741,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             outcome = try await offMain {
                 try manager.ensureBranch(epicBranch, from: projectBase)
                 return try manager.mergeIntoEpic(
-                    taskBranch: taskBranch, epicBranch: epicBranch, worktreeName: worktreeName
+                    taskBranch: taskBranch, epicBranch: epicBranch,
+                    taskTitle: taskTitle, epicTitle: epicTitle,
+                    worktreeName: worktreeName
                 )
             }
         } catch {

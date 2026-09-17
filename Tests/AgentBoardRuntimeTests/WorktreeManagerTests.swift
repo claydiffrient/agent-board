@@ -221,7 +221,8 @@ final class WorktreeManagerTests: XCTestCase {
         try manager.remove(path: work)
 
         let outcome = try manager.mergeIntoEpic(
-            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1",
+            taskTitle: "Add the widget", epicTitle: "Widgets", worktreeName: "merge"
         )
 
         XCTAssertEqual(outcome, .fastForwarded(head: taskHead))
@@ -241,7 +242,8 @@ final class WorktreeManagerTests: XCTestCase {
         let epicBefore = try revParse("agentboard/epic-1")
 
         let outcome = try manager.mergeIntoEpic(
-            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1",
+            taskTitle: "Add the widget", epicTitle: "Widgets", worktreeName: "merge"
         )
 
         guard case .merged(let head) = outcome else { return XCTFail("expected a merge, got \(outcome)") }
@@ -264,7 +266,8 @@ final class WorktreeManagerTests: XCTestCase {
         let epicBefore = try revParse("agentboard/epic-1")
 
         let outcome = try manager.mergeIntoEpic(
-            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1",
+            taskTitle: "Add the widget", epicTitle: "Widgets", worktreeName: "merge"
         )
 
         XCTAssertEqual(outcome, .conflicted(files: ["schema.sql"]))
@@ -283,7 +286,8 @@ final class WorktreeManagerTests: XCTestCase {
 
         XCTAssertEqual(
             try manager.mergeIntoEpic(
-                taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+                taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1",
+            taskTitle: "Add the widget", epicTitle: "Widgets", worktreeName: "merge"
             ),
             .alreadyMerged
         )
@@ -294,7 +298,8 @@ final class WorktreeManagerTests: XCTestCase {
         try manager.ensureBranch("agentboard/epic-1", from: "main")
         XCTAssertEqual(
             try manager.mergeIntoEpic(
-                taskBranch: "agentboard/never-ran", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+                taskBranch: "agentboard/never-ran", epicBranch: "agentboard/epic-1",
+                taskTitle: "Add the widget", epicTitle: "Widgets", worktreeName: "merge"
             ),
             .nothingToMerge
         )
@@ -305,7 +310,8 @@ final class WorktreeManagerTests: XCTestCase {
         let integration = try manager.createForBranch(name: "epic-1", branch: "agentboard/epic-1")
 
         let outcome = try manager.mergeIntoEpic(
-            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1", worktreeName: "merge"
+            taskBranch: "agentboard/task", epicBranch: "agentboard/epic-1",
+            taskTitle: "Add the widget", epicTitle: "Widgets", worktreeName: "merge"
         )
         guard case .skippedCheckedOut(let path) = outcome else {
             return XCTFail("expected the merge to defer to the checkout, got \(outcome)")
@@ -320,8 +326,48 @@ final class WorktreeManagerTests: XCTestCase {
 
         XCTAssertThrowsError(
             try manager.mergeIntoEpic(
-                taskBranch: "agentboard/task", epicBranch: "agentboard/epic-missing", worktreeName: "merge"
+                taskBranch: "agentboard/task", epicBranch: "agentboard/epic-missing",
+                taskTitle: "Add the widget", epicTitle: "Widgets", worktreeName: "merge"
             )
+        )
+    }
+
+    func testMergeIntoEpicSubjectNamesTitlesAndCarriesNoIdentifiers() throws {
+        let taskId = UUID().uuidString.lowercased()
+        let epicId = UUID().uuidString.lowercased()
+        let taskBranch = "agentboard/\(taskId)"
+        let epicBranch = "agentboard/epic-\(epicId)"
+        try manager.ensureBranch(epicBranch, from: "main")
+        let work = try manager.create(name: "task", branch: taskBranch, base: epicBranch)
+        try addCommit("feature.txt", in: work)
+        try manager.remove(path: work)
+        let sibling = try manager.create(name: "sibling", branch: "agentboard/side", base: epicBranch)
+        try addCommit("sibling.txt", in: sibling)
+        try git(["branch", "-f", epicBranch, "agentboard/side"], cwd: repo)
+        try manager.remove(path: sibling)
+
+        let outcome = try manager.mergeIntoEpic(
+            taskBranch: taskBranch, epicBranch: epicBranch,
+            taskTitle: "Add the widget", epicTitle: "Widgets", worktreeName: "merge"
+        )
+
+        guard case .merged = outcome else { return XCTFail("expected a merge, got \(outcome)") }
+        let subject = try git(["log", "-1", "--format=%s", epicBranch], cwd: repo)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(subject, "Merge Add the widget into Widgets")
+        XCTAssertFalse(subject.contains(taskId), subject)
+        XCTAssertFalse(subject.contains(epicId), subject)
+        XCTAssertFalse(subject.contains("agentboard/"), subject)
+    }
+
+    func testMergeSubjectCollapsesWhitespaceAndNamesUntitledWork() {
+        XCTAssertEqual(
+            WorktreeManager.mergeSubject(taskTitle: "  Add\n the   widget \t", epicTitle: "Widgets"),
+            "Merge Add the widget into Widgets"
+        )
+        XCTAssertEqual(
+            WorktreeManager.mergeSubject(taskTitle: "   ", epicTitle: ""),
+            "Merge an untitled task into an untitled epic"
         )
     }
 
