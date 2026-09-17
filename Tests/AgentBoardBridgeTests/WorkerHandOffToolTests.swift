@@ -84,6 +84,58 @@ final class WorkerHandOffToolTests: XCTestCase {
         XCTAssertTrue(queued.contains(.reportQueued(projectId: f.project.id)))
     }
 
+    /// The signal the supervisor stops the agent on. Without it the handed-off `claude` process
+    /// stayed resident until the next periodic sweep, holding its context while the task it handed
+    /// back sat in `ready` — dispatchable into that very worktree.
+    func testHandOffRaisesWorkerCompletedSoNothingWaitsForTheSweep() async throws {
+        try await handOff()
+
+        let raised = await f.events.events
+        XCTAssertTrue(
+            raised.contains(.workerCompleted(projectId: f.project.id, sessionId: "s1")),
+            "hand_off raised no workerCompleted, so only the sweep would stop the agent: \(raised)"
+        )
+    }
+
+    /// `workerCompleted` says a session is over and nothing more. Emitting it from both paths must
+    /// not blur them: the report kind, the task's column and the stop reason each still separate a
+    /// hand-off from a completion, and every surface that tells them apart reads one of those.
+    func testAHandOffAndACompletionRaiseTheSameSignalAndStayTellableApart() async throws {
+        let finished = try f.task("ship the UI", column: .ready)
+        try f.board.assign(
+            taskId: finished.id,
+            session: AgentSession(
+                sessionId: "s2", shortId: "beta", projectId: f.project.id, taskId: finished.id, role: .worker,
+                worktreePath: "/wt/\(finished.id)", branch: "agentboard/\(finished.id)",
+                cwd: "/wt/\(finished.id)", state: .running
+            )
+        )
+
+        try await handOff()
+        _ = try await f.call(
+            "report_complete",
+            [
+                "summary": .string("Shipped it."),
+                "files_changed": .array([.string("Sources/UI.swift")]),
+                "tests_run": .string("swift test"),
+                "caveats": .string("none"),
+            ],
+            as: f.workerIdentity(sessionId: "s2", taskId: finished.id)
+        )
+
+        let raised = await f.events.events
+        XCTAssertTrue(raised.contains(.workerCompleted(projectId: f.project.id, sessionId: "s1")))
+        XCTAssertTrue(raised.contains(.workerCompleted(projectId: f.project.id, sessionId: "s2")))
+
+        XCTAssertEqual(try f.reports.latest(taskId: task.id)?.kind, .handoff)
+        XCTAssertEqual(try f.reports.latest(taskId: finished.id)?.kind, .complete)
+        XCTAssertEqual(try f.tasks.get(task.id)?.column, .ready)
+        XCTAssertEqual(try f.tasks.get(finished.id)?.column, .review)
+        XCTAssertEqual(try f.sessions.get("s1")?.stopReason, "handed off to reviewer")
+        XCTAssertNotEqual(try f.sessions.get("s2")?.stopReason, "handed off to reviewer")
+        XCTAssertEqual(try f.sessions.get("s1")?.state, try f.sessions.get("s2")?.state)
+    }
+
     func testTheWorktreeRowSurvivesAndTheSessionNoLongerHoldsTheTask() async throws {
         try await handOff()
 

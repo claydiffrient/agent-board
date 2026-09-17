@@ -836,7 +836,7 @@ is reached by neither.
 | `create_note(title, sections)` | New note, unpinned |
 | `propose_task(title, body, rationale)` | Inserts into `proposed` |
 | `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review`, or to `done` where the review level (§5) says so |
-| `hand_off(summary, next_role, files_changed)` | Inserts a `handoff` `report` and a `progress` row; moves task to `ready`, keeps the worktree |
+| `hand_off(summary, next_role, files_changed)` | Inserts a `handoff` `report` and a `progress` row; moves task to `ready`, keeps the worktree, stops the session |
 | `report_blocked(reason)` | Inserts a `report`; sets `blocked` |
 | `acknowledge_shutdown(note)` | Answers a wind-down order (§8). Records `note` against the delivery and the task, then Agent Board stops the session. The task goes back to `ready`, never `review` (§5) — this is not `report_complete` |
 
@@ -851,6 +851,16 @@ what D6 buys. `next_role` is advisory — the orchestrator decides who gets it.
 Two live sessions must never hold one worktree, so `Board.assign` refuses, in
 its write transaction, any session for a task an active worker still holds or
 for a worktree path an active session is already in.
+
+The hand-off ends the session then and there: it raises `workerCompleted`, the
+same signal `report_complete` raises, on which the supervisor stops the agent.
+The task is back in `ready` and may be dispatched into that same worktree
+immediately, so leaving the previous agent resident would put two `claude`
+processes in one checkout, and waiting for the periodic sweep to reap it would
+hold its memory meanwhile. `workerCompleted` says only that a session is
+finished; a hand-off stays distinguishable from a completion by its `handoff`
+report kind, by the task sitting in `ready` rather than `review`, and by the
+session's `handed off` stop reason.
 
 ### Reviewer scope
 

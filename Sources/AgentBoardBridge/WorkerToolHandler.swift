@@ -189,6 +189,9 @@ public final class WorkerToolHandler: ToolHandler {
             return result
         case "hand_off":
             let result = try handOff(task, arguments: arguments, identity: identity)
+            if let sessionId = identity.sessionId {
+                await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
+            }
             await events.reportQueued(projectId: identity.projectId)
             return result
         case "acknowledge_shutdown":

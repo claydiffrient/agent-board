@@ -17,8 +17,10 @@ public protocol BoardEventSink: Sendable {
     /// The worker has recorded its resume note and is waiting to be stopped. Agent Board owns the
     /// rest: stop the session, terminate the row as an orderly shutdown, put the task back in ready.
     func workerAcknowledgedShutdown(projectId: String, sessionId: String) async
-    /// The worker has filed its report and the task is in review. `Board.complete` cannot reach a
-    /// runtime, so stopping the agent that is now doing nothing is the supervisor's to do.
+    /// The worker's session is over by its own account — `report_complete` or `hand_off`. Neither
+    /// `Board.complete` nor `Board.handOff` can reach a runtime, so stopping the agent that is now
+    /// doing nothing is the supervisor's to do. Which of the two it was is carried by the report
+    /// kind, the task's column and the session's stop reason, never by this signal.
     func workerCompleted(projectId: String, sessionId: String) async
 }
 

@@ -137,7 +137,13 @@ final class HookAndWorkerEventTests: XCTestCase {
 
         XCTAssertFalse(result.isError)
         let events = await f.events.events
-        XCTAssertEqual(events, [.reportQueued(projectId: f.project.id)])
+        XCTAssertEqual(
+            events,
+            [
+                .workerCompleted(projectId: f.project.id, sessionId: "w1"),
+                .reportQueued(projectId: f.project.id),
+            ]
+        )
         XCTAssertEqual(try f.tasks.get(task.id)?.column, .review)
         XCTAssertEqual(try f.reports.unconsumedCount(projectId: f.project.id), 1)
     }
