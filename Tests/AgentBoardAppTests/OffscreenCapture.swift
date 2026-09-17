@@ -14,11 +14,18 @@ import XCTest
 struct Capture {
     let width: Int
     let height: Int
+    /// The window this was taken of, in points. Without it a caller can only name a region of this
+    /// image in pixels, and the scale that converts the two is not a constant — see `columns`.
+    let windowWidth: CGFloat
     private let rowBytes: Int
     private let samplesPerPixel: Int
     private let bytes: [UInt8]
 
-    init(_ rep: NSBitmapImageRep, file: StaticString = #filePath, line: UInt = #line) throws {
+    init(
+        _ rep: NSBitmapImageRep, windowWidth: CGFloat,
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        self.windowWidth = windowWidth
         let data = try XCTUnwrap(rep.bitmapData, "the capture has no readable bitmap data", file: file, line: line)
         width = rep.pixelsWide
         height = rep.pixelsHigh
@@ -61,6 +68,31 @@ struct Capture {
         return box
     }
 
+    /// `points` from the leading edge as pixel columns of this image, at its own scale.
+    ///
+    /// The scale is not 2. A Mac with no display attached does not always capture at the scale one
+    /// with a display does, and it does not always pick the same one: measured 2026-09-16, the same
+    /// 1100x700 window came back 1982x1262 at 21:33 and 2200x1400 half an hour later. The sidebar
+    /// strip was the constant `0..<460` — 230 points doubled — and 460 pixels at 1.80 is 255 points,
+    /// past the sidebar divider and into the At a Glance headline, which changes whenever the board
+    /// does. Measured on one such pair: over the sidebar's real 396 columns they differ by the badge
+    /// alone, 147 pixels in a 13x14 box; over 460, by 138x193.
+    func columns(_ points: Range<Int>) -> Range<Int> {
+        Self.columns(points, capturedWidth: width, windowWidth: windowWidth)
+    }
+
+    /// Split out so both scales can be pinned without a window: see `OffscreenCaptureContractTests`.
+    static func columns(_ points: Range<Int>, capturedWidth: Int, windowWidth: CGFloat) -> Range<Int> {
+        guard windowWidth > 0, capturedWidth > 0 else { return 0..<0 }
+        let scale = Double(capturedWidth) / Double(windowWidth)
+        func pixels(_ point: Int) -> Int {
+            point >= Int(windowWidth.rounded(.up)) ? capturedWidth : Int((Double(point) * scale).rounded())
+        }
+        let lower = max(0, min(pixels(points.lowerBound), capturedWidth))
+        let upper = max(lower, min(pixels(points.upperBound), capturedWidth))
+        return lower..<upper
+    }
+
     /// True when every pixel is the same colour.
     ///
     /// The window server hands back a flat surface for a window it has not composited yet, and a
@@ -86,6 +118,17 @@ struct Capture {
         }
         return flat
     }
+}
+
+/// What the sidebar `List` has drawn: row cells and section headers.
+///
+/// `MainWindow`'s three `ValueObservation`s deliver after the window is already on screen, and until
+/// they do the sidebar is the pinned At a Glance row under a "No projects yet" overlay. That picture
+/// is perfectly stable, so `OffscreenMount.capture`'s agreeing-captures poll would accept it as a
+/// baseline. A baseline has to mean "the board loaded", not "the pixels stopped moving".
+struct SidebarContent: Equatable {
+    var rows: Int
+    var headers: Int
 }
 
 struct PixelDiff {
@@ -122,8 +165,8 @@ final class OffscreenMount {
 
     func close() { window.orderOut(nil) }
 
-    /// Pumps the main run loop until the picture stops moving — and, when `until` is given, until
-    /// it also satisfies that condition.
+    /// Pumps the main run loop until the picture stops moving — and, when `showing` or `until` is
+    /// given, until it also shows that content and satisfies that condition.
     ///
     /// A fixed pump is a guess at three asynchronous hops at once: a GRDB `ValueObservation`
     /// delivering on the main actor, SwiftUI applying it to the view tree, and the window server
@@ -131,33 +174,64 @@ final class OffscreenMount {
     /// is forced here by `demandAFreshSurface()`. Polling for `agreeing` byte-identical captures in
     /// a row then waits out whichever of the first two is slowest on the day.
     ///
-    /// `columns` narrows the region stability is judged over to the strip the caller compares;
-    /// waiting for a pane it never looks at only costs time. On timeout this returns the last
-    /// capture rather than failing, so the caller's own assertion reports the failure with its own
-    /// message and its own numbers.
+    /// `points` narrows the region stability is judged over to the strip the caller compares, in
+    /// window points rather than capture pixels; waiting for a pane it never looks at only costs time.
+    ///
+    /// `ceiling` is on `SuspendingClock` because it bounds work, the rule this repo already applies
+    /// to every deadline in `AgentBoardCore`. On the wall clock a system sleep counts against it, and
+    /// this machine sleeps between test cases — `pmset -g log` on 2026-09-16 shows Deep Idle sleeps
+    /// of 909s, 940s, 975s, 986s and 1034s in one evening. A suspend mid-poll would blow a `Date`
+    /// deadline the instant the machine woke, and hand back whatever half-drawn window it had.
+    ///
+    /// A blown ceiling fails here, by name. It used to return the last capture quietly so the
+    /// caller's own assertion would report it; what the caller then reported was the geometry of a
+    /// half-drawn window — `("430") is not less than ("40")` for a badge that had not moved — and
+    /// two attempts at this bug were spent reading that as state pollution. The caller's assertions
+    /// still run and still print their own numbers; this only puts the cause above them.
     func capture(
-        columns: Range<Int>? = nil, agreeing: Int = 6, ceiling: TimeInterval = 10,
+        points: Range<Int>? = nil, showing content: SidebarContent? = nil,
+        agreeing: Int = 6, ceiling: Duration = .seconds(10),
+        file: StaticString = #filePath, line: UInt = #line,
         until satisfied: (Capture) -> Bool = { _ in true }
     ) throws -> Capture {
-        let deadline = Date().addingTimeInterval(ceiling)
+        let clock = SuspendingClock()
+        let deadline = clock.now.advanced(by: ceiling)
         var previous: Capture?
         var agreed = 0
         demandAFreshSurface()
-        while Date() < deadline {
+        while clock.now < deadline {
             pump()
             // A freshly ordered window has no surface at the window server until the run loop has
             // turned, and the first surfaces it does hand back can be flat.
             guard let latest = try shoot(), !latest.isBlank else { continue }
             if let previous,
-               previous.diff(latest, columns: columns ?? 0..<latest.width).count == 0 {
+               previous.diff(latest, columns: points.map(latest.columns) ?? 0..<latest.width).count == 0 {
                 agreed += 1
             } else {
                 agreed = 0
             }
             previous = latest
-            if agreed >= agreeing && satisfied(latest) { return latest }
+            guard agreed >= agreeing else { continue }
+            guard content == nil || sidebarContent == content else { continue }
+            if satisfied(latest) { return latest }
         }
+        let stuckOn = if let content, sidebarContent != content {
+            "the sidebar showed \(sidebarContent), not \(content)"
+        } else if agreed < agreeing {
+            "\(agreed) of \(agreeing) agreeing captures"
+        } else {
+            "the picture held still but never satisfied the caller's condition"
+        }
+        XCTFail("the window never settled inside \(ceiling): \(stuckOn)", file: file, line: line)
         return try XCTUnwrap(previous, "the window server never produced an image for the offscreen window")
+    }
+
+    /// What the sidebar `List` has drawn, by the AppKit classes `List` builds rows and headers from.
+    var sidebarContent: SidebarContent {
+        SidebarContent(
+            rows: viewCount(ofClassNamed: "ListTableCellView"),
+            headers: viewCount(ofClassNamed: "ListTableHeaderView")
+        )
     }
 
     /// Views `List` actually drew, by AppKit class name.
@@ -200,7 +274,7 @@ final class OffscreenMount {
             .null, .optionIncludingWindow, CGWindowID(window.windowNumber),
             [.boundsIgnoreFraming, .bestResolution]
         ) else { return nil }
-        return try Capture(NSBitmapImageRep(cgImage: image))
+        return try Capture(NSBitmapImageRep(cgImage: image), windowWidth: window.frame.width)
     }
 }
 
@@ -224,4 +298,33 @@ func renderEnvironment(
             refresher: AccountUsageRefresher { _ in false }
         )
     )
+}
+
+/// A sidebar collapse preference under a key of this test's own, and the cleanup that removes it.
+///
+/// `UserDefaults.standard` under `xctest` resolves to `com.apple.dt.xctest.tool`, and every
+/// `swift test` process on the machine shares it. Several agent-board workers run the suite at
+/// once here, so a mount that reads the real key can draw a section a different process just
+/// expanded — measured, four concurrent runs lost 225-303 of 400 write-then-read round trips to
+/// each other, and three of four concurrent runs of `SidebarAttentionLiveTests` then failed on
+/// `viewCount 2 != 1` with a whole-sidebar pixel diff behind it.
+///
+/// A key rather than a `UserDefaults(suiteName:)`: a suite is a persistent domain, and
+/// `removePersistentDomain` empties it but leaves the plist, so a suite per test would add one
+/// file per test per run to `~/Library/Preferences` (measured: 87 after two runs).
+///
+/// Every mount of `MainWindow` in this target must pass one of these, including the mounts that
+/// never collapse anything: reading the shared key is enough to draw the wrong sidebar.
+struct IsolatedCollapseState {
+    let key = "\(SidebarCollapseState.key).test-\(UUID().uuidString)"
+    let state: SidebarCollapseState
+
+    init() {
+        state = SidebarCollapseState(key: key)
+    }
+
+    /// Call from `tearDown`.
+    func remove() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
 }
