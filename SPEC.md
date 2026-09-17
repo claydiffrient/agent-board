@@ -1710,8 +1710,8 @@ from knowing how the agents actually behave first.
   stub runtime. The progress sheet (§10) fares no better: it was mounted
   offscreen via `NSHostingView` and proven to re-render off the database, but
   its rendered text could not be read back on this machine at all —
-  `AXIsProcessTrusted()` is false here, so the accessibility tree comes back
-  empty — and the human click-through steps its own report wrote out (open
+  the accessibility elements SwiftUI publishes offscreen carry no label, title
+  or value, so the tree comes back empty — and the human click-through steps its own report wrote out (open
   the console, click Stop All, watch rows move `ordered` → `closing` →
   `acknowledged`, let one go overdue, attach to a blocked one, quit) were
   explicitly never run. Unlike the M3 push-block verification above, which

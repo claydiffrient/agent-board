@@ -13,8 +13,9 @@ import XCTest
 /// polling.
 ///
 /// What it cannot prove: that a row reads "From Beta", that the unread bar is orange, or anything
-/// else about the pixels. SwiftUI draws `Text` into backing layers and `AXIsProcessTrusted()` is
-/// false in an xctest process, so no string on this screen is readable on this machine.
+/// else about the pixels. SwiftUI draws `Text` into backing layers, and the accessibility elements
+/// it publishes offscreen carry no label, title or value, so no string on this screen is readable on
+/// this machine.
 @MainActor
 final class MessageSidebarRenderTests: XCTestCase {
     private struct Mounted {

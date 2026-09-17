@@ -13,8 +13,8 @@ import XCTest
 /// row therefore cannot be inside a collapsible section.
 ///
 /// What it cannot prove: that the row reads "At a Glance", or anything else about the pixels.
-/// SwiftUI draws text into backing layers and `AXIsProcessTrusted()` is false here, so no string is
-/// readable on this machine.
+/// SwiftUI draws text into backing layers, and the accessibility elements it publishes offscreen
+/// carry no label, title or value, so no string is readable on this machine.
 @MainActor
 final class AtAGlanceRowRenderTests: XCTestCase {
     private var collapse = IsolatedCollapseState()

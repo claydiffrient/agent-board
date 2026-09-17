@@ -13,9 +13,9 @@ import XCTest
 /// count advances off the database, not off a polling loop.
 ///
 /// What it cannot prove: anything about the pixels or the rendered strings. SwiftUI draws its text
-/// into backing layers rather than `NSTextField`s, and its accessibility tree stays empty here
-/// because `AXIsProcessTrusted()` is false on this machine. The wording and the state mapping are
-/// covered instead by `ShutdownSheetTests` in AgentBoardCoreTests.
+/// into backing layers rather than `NSTextField`s, and the accessibility elements it does publish
+/// carry no label, title or value here. The wording and the state mapping are covered instead by
+/// `ShutdownSheetTests` in AgentBoardCoreTests.
 @MainActor
 final class ShutdownSheetRenderTests: XCTestCase {
     private struct Mounted {
@@ -129,8 +129,16 @@ final class ShutdownSheetRenderTests: XCTestCase {
     }
 
     /// Evidence that the rendered strings are unreadable here rather than merely absent, so a later
-    /// reader does not mistake this suite for a claim about what the sheet displays. If a future
-    /// macOS starts exposing them, this fails and the assertions above can be strengthened.
+    /// reader does not mistake this suite for a claim about what the sheet displays.
+    ///
+    /// This asserted `AXIsProcessTrusted() == false` until 2026-09-17, when the flag flipped to
+    /// true. Trust is attributed to whichever process is responsible for launching the test host,
+    /// not to the host itself, so it is never the suite's to hold or revoke; the flag was only ever
+    /// a proxy. The capability is asserted directly instead, and both halves still hold: the AX
+    /// server refuses this process's queries against its own application element
+    /// (`kAXErrorCannotComplete`, -25208), and the walk below interrogates every accessibility
+    /// element the mounted hierarchy publishes, follows their child links, and recovers no string.
+    /// If either opens up, this fails and the assertions above can be strengthened.
     func testRenderedTextIsNotReadableOnThisMachine() throws {
         let mounted = try mount(
             workers: [
@@ -140,16 +148,32 @@ final class ShutdownSheetRenderTests: XCTestCase {
             reported: ShutdownProgress(orderId: "x", total: 2, acknowledged: 1)
         )
         mounted.settle()
-        XCTAssertFalse(AXIsProcessTrusted(), "accessibility is trusted now; the AX tree may be readable")
+
+        var windows: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(
+            AXUIElementCreateApplication(getpid()), kAXWindowsAttribute as CFString, &windows
+        )
+        XCTAssertNotEqual(
+            status, .success,
+            "this process can read its own AX window list now; the AX tree may be readable"
+        )
+
+        let walk = Self.walk(mounted.host)
+        XCTAssertGreaterThan(walk.elements, 1, "the walk never interrogated the mounted hierarchy")
+        XCTAssertGreaterThan(walk.childLinks, 0, "the walk never followed an accessibility child link")
         XCTAssertTrue(
-            Self.strings(in: mounted.host).isEmpty,
+            walk.strings.isEmpty,
             "the rendered text is readable now; assert on the sheet's wording directly"
         )
     }
 
-    /// Walks both the view tree and the accessibility tree for anything that carries a string.
-    private static func strings(in root: NSView) -> [String] {
+    /// Walks both the view tree and the accessibility tree for anything that carries a string,
+    /// counting what it interrogated so an empty result cannot pass for a walk that found nothing
+    /// to ask.
+    private static func walk(_ root: NSView) -> (strings: [String], elements: Int, childLinks: Int) {
         var found: [String] = []
+        var elements = 0
+        var childLinks = 0
         var queue: [Any] = [root]
         var visited = 0
         while let node = queue.popLast(), visited < 6000 {
@@ -157,14 +181,17 @@ final class ShutdownSheetRenderTests: XCTestCase {
             if let text = node as? NSTextField { found.append(text.stringValue) }
             if let button = node as? NSButton { found.append(button.title) }
             if let element = node as? NSAccessibilityProtocol {
+                elements += 1
                 found.append(element.accessibilityLabel() ?? "")
                 found.append(element.accessibilityTitle() ?? "")
                 found.append(element.accessibilityValue() as? String ?? "")
-                queue.append(contentsOf: element.accessibilityChildren() ?? [])
+                let children = element.accessibilityChildren() ?? []
+                childLinks += children.count
+                queue.append(contentsOf: children)
             }
             if let view = node as? NSView { queue.append(contentsOf: view.subviews) }
         }
-        return found.filter { !$0.isEmpty }
+        return (found.filter { !$0.isEmpty }, elements, childLinks)
     }
 }
 
