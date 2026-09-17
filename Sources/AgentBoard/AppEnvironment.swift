@@ -14,15 +14,20 @@ final class AppEnvironment {
     /// The same instance the supervisor drives, so the Status footer reads the assertion that is
     /// actually held rather than a second copy of the decision. SPEC §8.3.
     let sleepGuard: SleepGuard
+    /// Quitting is not `NSApplication.terminate` on its own — see `AppQuitting` — and a test needs
+    /// a seam that does not end the test process.
+    let quitter: any AppQuitting
 
     init(
         db: AppDatabase, supervisor: any WorkerSupervising, router: NotificationRouter? = nil,
-        accountUsage: AccountUsageModel? = nil, sleepGuard: SleepGuard? = nil
+        accountUsage: AccountUsageModel? = nil, sleepGuard: SleepGuard? = nil,
+        quitter: (any AppQuitting)? = nil
     ) {
         self.db = db
         self.supervisor = supervisor
         self.router = router ?? NotificationRouter()
         self.accountUsage = accountUsage ?? AccountUsageModel()
         self.sleepGuard = sleepGuard ?? SleepGuard()
+        self.quitter = quitter ?? AppQuit()
     }
 }

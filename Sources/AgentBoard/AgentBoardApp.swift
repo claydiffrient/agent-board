@@ -5,6 +5,7 @@ struct AgentBoardApp: App {
     @State private var appEnvironment = AppComposition.make()
 
     init() {
+        QuitProbe.runIfRequested()
         if let repo = ProcessInfo.processInfo.environment["AGENTBOARD_E2E_REPO"] {
             let environment = appEnvironment
             _Concurrency.Task { await E2E.run(environment, repo: URL(fileURLWithPath: repo)) }
