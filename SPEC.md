@@ -1495,7 +1495,9 @@ how permission prompts get answered (D15).
 
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
-section.
+section. Each section header carries a copy button that puts that section on the
+clipboard as `## heading` followed by the text on screen — unsaved edits
+included, since that is what the human is looking at.
 
 **Project sidebar** — projects grouped into workspaces. Each workspace is a
 collapsible section in `workspace.ordering` order holding the projects whose
