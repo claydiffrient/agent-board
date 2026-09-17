@@ -31,7 +31,7 @@ final class SidebarCollapseIsolationTests: XCTestCase {
         super.tearDown()
     }
 
-    private static let sidebar = 0..<460
+    private static let sidebar = 0..<230
 
     /// One workspace holding one project, so the sidebar draws two rows expanded and one collapsed.
     private func board() throws -> (AppDatabase, String) {
@@ -49,7 +49,7 @@ final class SidebarCollapseIsolationTests: XCTestCase {
         let mounted = OffscreenMount(
             MainWindow(collapseState: collapse.state).environment(renderEnvironment(db: db))
         )
-        _ = try mounted.capture(columns: Self.sidebar)
+        _ = try mounted.capture(points: Self.sidebar)
         return mounted
     }
 
