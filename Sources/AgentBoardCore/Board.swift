@@ -71,6 +71,16 @@ public enum SessionTermination: Sendable, Equatable {
         }
     }
 
+    /// Whether committed work on the task branch should divert a stranded task to `review` rather
+    /// than `ready`. A wind-down acknowledgment has its own resume-note contract, and a setup
+    /// failure never ran a worker, so neither gets to reinterpret what is on the branch.
+    var salvagesBranchWork: Bool {
+        switch self {
+        case .capBreach, .vanished, .stoppedByHuman: return true
+        case .setupFailed, .shutdownAcknowledged: return false
+        }
+    }
+
     var flagsTaskFailed: Bool {
         switch self {
         case .capBreach, .vanished, .setupFailed: return true
@@ -434,40 +444,51 @@ public struct Board: Sendable {
     }
 
     /// Ends a worker session that will not report for itself and queues a `failed` report, so the
-    /// orchestrator stops believing the worker is running. A task stranded in `running` returns to `ready`.
+    /// orchestrator stops believing the worker is running. A task stranded in `running` leaves it:
+    /// for `review` when `salvage` shows commits on its branch, otherwise back to `ready`.
+    ///
+    /// An already-inactive session row is not a reason to stop. The worker's `SessionEnd` hook races
+    /// this call and writes `stopped` first often enough that bailing there strands the task in
+    /// `running` with no report and nothing able to pick it up.
     @discardableResult
-    public func terminate(sessionId: String, cause: SessionTermination) throws -> Report? {
+    public func terminate(
+        sessionId: String, cause: SessionTermination, salvage: BranchSalvage? = nil
+    ) throws -> Report? {
         try db.writer.write { db in
-            guard let session = try AgentSession.fetchOne(db, key: sessionId), session.state.isActive else {
-                return nil
-            }
+            guard let session = try AgentSession.fetchOne(db, key: sessionId) else { return nil }
+            let task = session.role == .worker
+                ? try session.taskId.flatMap { try Task.fetchOne(db, key: $0) }
+                : nil
+            let stranded = task?.column == .running
+            guard session.state.isActive || stranded else { return nil }
+
             let reason = cause.reason
-            try SessionStore.setState(db, sessionId, cause.sessionState, endedAt: .nowMillis)
+            if session.state.isActive {
+                try SessionStore.setState(db, sessionId, cause.sessionState, endedAt: .nowMillis)
+            }
             try SessionStore.setStopReason(db, sessionId, reason)
             // Every route out of a session lands here or in `complete`: a cap kill, a human stop,
             // a vanished process, a failed setup, an acknowledged wind-down. A lock that outlived
             // one of them would block the checkout with nobody behind it.
             try FileLockStore.releaseAll(db, sessionId: sessionId)
-            guard session.role == .worker, let taskId = session.taskId,
-                  let task = try Task.fetchOne(db, key: taskId)
-            else { return nil }
+            guard let task else { return nil }
+            let taskId = task.id
 
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             if cause.flagsTaskFailed {
                 try TaskStore.setFailed(db, taskId, true, reason: reason)
             }
-            let stranded = task.column == .running
-            if stranded {
-                try TaskStore.move(db, taskId, to: .ready, before: nil)
+            let destination = Self.landingColumn(stranded: stranded, cause: cause, salvage: salvage)
+            if let destination {
+                try TaskStore.move(db, taskId, to: destination, before: nil)
             }
             var lines = [
                 cause.headline,
                 "Task: \(taskId) (\(task.title))",
                 "Session: \(sessionId) (attempt \(session.attempt))",
-                stranded
-                    ? "The task is back in ready; dispatch it again if you want it retried."
-                    : "The task stayed in \(task.column.rawValue).",
             ]
+            if let salvage { lines.append(salvage.sentence) }
+            lines.append(Self.landingLine(destination: destination, stayedIn: task.column))
             if let detail = cause.detail {
                 lines.append("Where the worker stopped and what remains:\n\(detail)")
             }
@@ -478,14 +499,99 @@ public struct Board: Sendable {
         }
     }
 
+    /// Nil when the task was not in `running` and so is not moved at all.
+    static func landingColumn(
+        stranded: Bool, cause: SessionTermination, salvage: BranchSalvage?
+    ) -> TaskColumn? {
+        guard stranded else { return nil }
+        guard cause.salvagesBranchWork, salvage?.hasCommittedWork == true else { return .ready }
+        return .review
+    }
+
+    static func landingLine(destination: TaskColumn?, stayedIn column: TaskColumn) -> String {
+        switch destination {
+        case .review:
+            return "The task is in review, not ready, so a retry cannot silently redo that work. "
+                + "Read the branch, then accept it or reopen the task to hand it back to a worker."
+        case .ready:
+            return "The task is back in ready; dispatch it again if you want it retried."
+        default:
+            return "The task stayed in \(column.rawValue)."
+        }
+    }
+
+    /// Tasks in `running` that no active session owns. Nothing can act on one: `spawn_worker` takes
+    /// only a `ready` task and no report is coming, so it is invisible until a human moves it by hand.
+    /// Returned rather than fixed here, so the caller can read each branch before deciding where it lands.
+    public func strandedRunningTasks(projectId: String) throws -> [BoardTask] {
+        try db.reader.read { db in
+            try Task.fetchAll(
+                db,
+                sql: """
+                SELECT t.* FROM task t
+                WHERE t.project_id = ? AND t.column_name = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM agent_session s
+                    WHERE s.task_id = t.id AND s.state IN (\(SessionStore.activeStatesSQL))
+                  )
+                ORDER BY t.ordering, t.created_at, t.id
+                """,
+                arguments: [projectId, TaskColumn.running.rawValue]
+            )
+        }
+    }
+
+    /// Moves a stranded task out of `running` and queues a `failed` report, whatever path its
+    /// session death took — including one that left no session row at all, which `terminate` has
+    /// no handle on. Re-checks the strand inside the write, so a task that has since moved or
+    /// gained an active session is left exactly where it is.
     @discardableResult
-    public func propose(projectId: String, title: String, body: String?, rationale: String?, sessionId: String?) throws -> Task {
+    public func recoverStranded(taskId: String, salvage: BranchSalvage? = nil) throws -> Report? {
         try db.writer.write { db in
+            guard let task = try Task.fetchOne(db, key: taskId), task.column == .running else { return nil }
+            let sessions = try AgentSession.fetchAll(
+                db,
+                sql: "SELECT * FROM agent_session WHERE task_id = ? ORDER BY attempt DESC, started_at DESC",
+                arguments: [taskId]
+            )
+            guard !sessions.contains(where: { $0.state.isActive }) else { return nil }
+
+            let reason = "the task was left in running with no active session and no report"
+            try TaskStore.setBlocked(db, taskId, false, reason: nil)
+            try TaskStore.setFailed(db, taskId, true, reason: reason)
+            let destination: TaskColumn = salvage?.hasCommittedWork == true ? .review : .ready
+            try TaskStore.move(db, taskId, to: destination, before: nil)
+
+            var lines = [
+                "Task stranded in running: \(reason).",
+                "Task: \(taskId) (\(task.title))",
+                sessions.first.map { "Last session: \($0.sessionId) (attempt \($0.attempt)), \($0.state.rawValue)" }
+                    ?? "No session was ever recorded for this task.",
+            ]
+            if let salvage { lines.append(salvage.sentence) }
+            lines.append(Self.landingLine(destination: destination, stayedIn: task.column))
+            return try ReportStore.insert(
+                db, projectId: task.projectId, taskId: taskId, sessionId: sessions.first?.sessionId,
+                kind: .failed, body: lines.joined(separator: "\n")
+            )
+        }
+    }
+
+    @discardableResult
+    public func propose(
+        projectId: String, title: String, body: String?, rationale: String?, sessionId: String?,
+        epicId: String?
+    ) throws -> Task {
+        try db.writer.write { db in
+            if let epicId {
+                _ = try Self.proposalEpic(db, epicId: epicId, projectId: projectId)
+            }
             let task = try TaskStore.insert(
                 db, projectId: projectId, title: title, body: body, acceptance: nil, priority: nil,
-                column: .proposed, origin: .workerProposal, epicId: nil
+                column: .proposed, origin: .workerProposal, epicId: epicId
             )
             var lines = ["Proposed task: \(title)", "Task id: \(task.id)"]
+            if let epicId { lines.append("Proposed into epic: \(epicId)") }
             if let body, !body.isEmpty { lines.append(body) }
             if let rationale, !rationale.isEmpty { lines.append("Rationale: \(rationale)") }
             _ = try ReportStore.insert(
@@ -496,23 +602,52 @@ public struct Board: Sendable {
         }
     }
 
+    /// The epic a proposal names must still be a destination when the proposal is promoted, which
+    /// can be much later — so this re-checks and, when the epic has stopped being one, promotes the
+    /// task into no epic and says so on the decision report rather than refusing the promotion or
+    /// dropping an unfinished task into a finished epic. SPEC §5.
     @discardableResult
-    public func promote(taskId: String) throws -> [String] {
+    public func promote(taskId: String) throws -> Promotion {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
             guard task.column == .proposed else {
                 throw BoardError.invalidTransition(taskId: taskId, from: task.column, to: .backlog)
             }
+            var dropped: ProposalEpicRefusal?
+            if let epicId = task.epicId {
+                do {
+                    _ = try Self.proposalEpic(db, epicId: epicId, projectId: task.projectId)
+                } catch let refusal as ProposalEpicRefusal {
+                    dropped = refusal
+                    try TaskStore.setEpic(db, taskId, epicId: nil)
+                }
+            }
             try TaskStore.move(db, taskId, to: .backlog, before: nil)
             let ready = try Self.newlyReady(db, projectId: task.projectId)
             let landed = try Task.fetchOne(db, key: taskId)?.column ?? .backlog
             var body = "Proposal \(taskId) (\(task.title)) was promoted to \(landed.rawValue)."
+            if let dropped, let named = task.epicId {
+                body += "\n\nIt was proposed into epic \(named) but promoted into no epic: \(dropped.reason)"
+            }
             body += "\n\n" + (try Self.describeNewlyReady(db, ready))
             _ = try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision, body: body
             )
-            return ready
+            return Promotion(newlyReady: ready, landedIn: landed, droppedEpic: dropped)
         }
+    }
+
+    static func proposalEpic(_ db: Database, epicId: String, projectId: String) throws -> Epic {
+        guard let epic = try Epic.fetchOne(db, key: epicId) else {
+            throw ProposalEpicRefusal.notFound(epicId)
+        }
+        guard epic.projectId == projectId else {
+            throw ProposalEpicRefusal.otherProject(epicId: epicId)
+        }
+        guard !epic.state.isTerminal else {
+            throw ProposalEpicRefusal.closed(epicId: epicId, state: epic.state)
+        }
+        return epic
     }
 
     /// Creates the epic and every task in `tasks` in one transaction, wiring `task_dep` rows from

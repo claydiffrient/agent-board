@@ -16,7 +16,7 @@ enum Wiring {
 
     static var worktreeBase: URL { SupportPaths.worktreeBase() }
 
-    static func makeSupervisor(db: AppDatabase) -> WorkerSupervisor {
+    static func makeSupervisor(db: AppDatabase, sleepGuard: SleepGuard? = nil) -> WorkerSupervisor {
         let sink = LateBoundSink()
         let server = BoardServer(
             tokens: StoreTokenResolver(db: db),
@@ -24,14 +24,20 @@ enum Wiring {
             tools: ScopedToolHandler(
                 worker: WorkerToolHandler(db: db, events: sink, scopedCommits: ScopedCommitRunner()),
                 orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink)
-            )
+            ),
+            resources: CompositeResourceHandler([
+                (NoteResourceURI.scheme, NoteResourceHandler(db: db)),
+                (BriefingResourceURI.scheme, BriefingResourceHandler(db: db)),
+            ]),
+            prompts: BriefingPromptHandler()
         )
         let supervisor = WorkerSupervisor(
             db: db,
             runtime: BackgroundSessionRuntime(),
             server: server,
             appSupportDir: appSupportDir,
-            worktreeBase: worktreeBase
+            worktreeBase: worktreeBase,
+            sleepGuard: sleepGuard
         )
         sink.target = supervisor
         return supervisor
@@ -48,8 +54,12 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         set { lock.withLock { storedTarget = newValue } }
     }
 
-    func notify(title: String, body: String) async {
-        await target?.notify(title: title, body: body)
+    func notify(projectId: String, title: String, body: String) async {
+        await target?.notify(projectId: projectId, title: title, body: body)
+    }
+
+    func notify(projectId: String, sessionId: String?, title: String, body: String) async {
+        await target?.notify(projectId: projectId, sessionId: sessionId, title: title, body: body)
     }
 
     func orchestratorTurnEnded(projectId: String, sessionId: String) async {
@@ -60,8 +70,16 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         await target?.reportQueued(projectId: projectId)
     }
 
+    func orchestratorCompacted(projectId: String, sessionId: String, manual: Bool) async {
+        await target?.orchestratorCompacted(projectId: projectId, sessionId: sessionId, manual: manual)
+    }
+
     func workerAcknowledgedShutdown(projectId: String, sessionId: String) async {
         await target?.workerAcknowledgedShutdown(projectId: projectId, sessionId: sessionId)
+    }
+
+    func workerCompleted(projectId: String, sessionId: String) async {
+        await target?.workerCompleted(projectId: projectId, sessionId: sessionId)
     }
 
     func spawnWorker(taskId: String) async throws -> WorkerSpawn {

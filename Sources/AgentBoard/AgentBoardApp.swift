@@ -5,6 +5,7 @@ struct AgentBoardApp: App {
     @State private var appEnvironment = AppComposition.make()
 
     init() {
+        QuitProbe.runIfRequested()
         if let repo = ProcessInfo.processInfo.environment["AGENTBOARD_E2E_REPO"] {
             let environment = appEnvironment
             _Concurrency.Task { await E2E.run(environment, repo: URL(fileURLWithPath: repo)) }
@@ -26,5 +27,15 @@ struct AgentBoardApp: App {
             }
         }
         .defaultSize(width: 1100, height: 750)
+
+        WindowGroup("Worktree Shell", id: "worktree-shell", for: String.self) { $sessionId in
+            if let sessionId {
+                WorktreeShellWindow(sessionId: sessionId)
+                    .environment(appEnvironment)
+            } else {
+                ContentUnavailableView("No session", systemImage: "apple.terminal")
+            }
+        }
+        .defaultSize(width: 1000, height: 700)
     }
 }

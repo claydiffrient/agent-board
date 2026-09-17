@@ -130,7 +130,7 @@ final class ShutdownDeliveryTests: XCTestCase {
             )
         }
 
-        var progress = try deliveries.progress(orderId: order.id, graceSeconds: 120, now: orderedAt)
+        var progress = try deliveries.progress(orderId: order.id, graceSeconds: 120, awake: .init(nowMillis: orderedAt))
         XCTAssertEqual(progress.total, 2)
         XCTAssertEqual(progress.acknowledged, 0)
         XCTAssertEqual(progress.unacknowledged, 2)
@@ -139,7 +139,7 @@ final class ShutdownDeliveryTests: XCTestCase {
 
         try f.board.acknowledgeShutdown(sessionId: quick.session.sessionId, note: "committed")
 
-        progress = try deliveries.progress(orderId: order.id, graceSeconds: 120, now: orderedAt + 121_000)
+        progress = try deliveries.progress(orderId: order.id, graceSeconds: 120, awake: .init(nowMillis: orderedAt + 121_000))
         XCTAssertEqual(progress.total, 2)
         XCTAssertEqual(progress.acknowledged, 1)
         XCTAssertEqual(progress.unacknowledged, 1)
@@ -148,10 +148,51 @@ final class ShutdownDeliveryTests: XCTestCase {
 
         try f.board.acknowledgeShutdown(sessionId: slow.session.sessionId, note: "late but here")
 
-        progress = try deliveries.progress(orderId: order.id, graceSeconds: 120, now: orderedAt + 300_000)
+        progress = try deliveries.progress(orderId: order.id, graceSeconds: 120, awake: .init(nowMillis: orderedAt + 300_000))
         XCTAssertEqual(progress.acknowledged, 2)
         XCTAssertEqual(progress.overdue, [])
         XCTAssertTrue(progress.isComplete)
+    }
+
+    /// The grace period has the same shape as the idle cap and the same fix: a worker on a sleeping
+    /// machine never got the order, so it is not refusing to answer it.
+    func testASleepingWorkerIsNotOverdueOnItsGracePeriod() throws {
+        let worker = try runningWorker("Asleep")
+        let order = try order()
+        let orderedAt = Int64.nowMillis
+        try deliveries.enroll(
+            orderId: order.id, sessionId: worker.session.sessionId, taskId: worker.task.id, at: orderedAt
+        )
+        let now = orderedAt + 1_200_000
+        let slept = ObservedSleep(endedAtMillis: now - 5_000, millis: 1_195_000)
+
+        XCTAssertEqual(
+            try deliveries.progress(orderId: order.id, graceSeconds: 120, awake: .init(nowMillis: now)).overdue,
+            [worker.session.sessionId],
+            "on the wall clock alone the same 20 minutes reads as a refusal"
+        )
+        XCTAssertEqual(
+            try deliveries.progress(
+                orderId: order.id, graceSeconds: 120, awake: .init(nowMillis: now, sleeps: [slept])
+            ).overdue,
+            []
+        )
+    }
+
+    /// And the grace period still expires: 20 awake minutes of silence is overdue.
+    func testAWorkerSilentWhileTheMachineIsAwakeStillGoesOverdue() throws {
+        let worker = try runningWorker("Silent")
+        let order = try order()
+        let orderedAt = Int64.nowMillis
+        try deliveries.enroll(
+            orderId: order.id, sessionId: worker.session.sessionId, taskId: worker.task.id, at: orderedAt
+        )
+        XCTAssertEqual(
+            try deliveries.progress(
+                orderId: order.id, graceSeconds: 120, awake: .init(nowMillis: orderedAt + 1_200_000, sleeps: [])
+            ).overdue,
+            [worker.session.sessionId]
+        )
     }
 
     func testTheWindDownTextIsTheSameOrderOnBothPaths() {

@@ -67,6 +67,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let appSupportDir: URL
     @ObservationIgnored private let worktreeBase: URL
     @ObservationIgnored private let projectsRoot: URL
+    /// Sampled once per metering tick. Every cap and grace deadline is measured against it so a
+    /// suspended machine does not count against a worker.
+    @ObservationIgnored private let sleepLedger: SleepLedger
+    /// Nil in tests that do not care; the app always supplies one. SPEC §8.3.
+    @ObservationIgnored private let sleepGuard: SleepGuard?
     @ObservationIgnored private let projects: ProjectStore
     @ObservationIgnored private let tasks: TaskStore
     @ObservationIgnored private let sessions: SessionStore
@@ -80,13 +85,25 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let board: Board
     @ObservationIgnored private let archives: ArchiveSweep
     @ObservationIgnored private let fileLocks: FileLockStore
+    @ObservationIgnored private let attention: ProjectAttentionStore
+    /// Which project needs a human and which of those has already been announced. Polled on the
+    /// metering tick rather than observed, because `overdueShutdown` and any future deadline cause
+    /// only become true as the clock moves, and a `ValueObservation` re-fires on writes alone.
+    @ObservationIgnored private var attentionNotifier = AttentionNotifier()
+    /// The project whose screen is open, pushed by `MainWindow`. Nil when the window is on At a
+    /// Glance; combined with `NSApp.isActive` it decides which banners are redundant.
+    @ObservationIgnored private var focusedProject: String?
     @ObservationIgnored private var meteringTask: _Concurrency.Task<Void, Never>?
     /// Millis of the last archive sweep; 0 means none yet, so the first tick after launch sweeps
     /// and picks up whatever came due while the app was closed.
     @ObservationIgnored private var lastArchiveSweep: Int64 = 0
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
     @ObservationIgnored private var stallNotified: Set<String> = []
+    /// `<project-id>\u{01}<branch>` for each shared branch whose pre-ledger `Agent-Board-Task`
+    /// trailers have already been read back this run.
+    @ObservationIgnored private var trailersBackfilled: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
+    @ObservationIgnored private var shellConsoles: [String: ShellConsole] = [:]
     /// Keyed by setup session id, so a test — or a human stopping a worker mid-setup — can wait on
     /// or cancel the half of a spawn that outlives the call.
     @ObservationIgnored private var setupTasks: [String: _Concurrency.Task<Void, Never>] = [:]
@@ -105,7 +122,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         server: BoardServer,
         appSupportDir: URL,
         worktreeBase: URL,
-        projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot
+        projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
+        sleepLedger: SleepLedger = .shared,
+        sleepGuard: SleepGuard? = nil
     ) {
         self.db = db
         self.runtime = runtime
@@ -113,6 +132,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         self.appSupportDir = appSupportDir
         self.worktreeBase = worktreeBase
         self.projectsRoot = projectsRoot
+        self.sleepLedger = sleepLedger
+        self.sleepGuard = sleepGuard
         projects = ProjectStore(db)
         tasks = TaskStore(db)
         sessions = SessionStore(db)
@@ -126,6 +147,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         board = Board(db)
         archives = ArchiveSweep(db)
         fileLocks = FileLockStore(db)
+        attention = ProjectAttentionStore(db)
     }
 
     private var sessionConfigDir: URL { appSupportDir.appendingPathComponent("sessions") }
@@ -143,7 +165,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         failInterruptedSetups()
         sweepStaleFileLocks()
+        await sweepLeakedAgents()
         await migrateWorktreeRoots()
+        refreshSleepAssertion()
         startMetering()
     }
 
@@ -226,10 +250,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
 
         let attempt = try sessions.forTask(taskId).count + 1
-        let manager = WorktreeManager(
-            repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
-        )
+        let manager = worktreeManager(for: project)
         let epic = try task.epicId.flatMap { try epics.get($0) }
         let placement = WorkerPlacementDecision.decide(
             strategy: project.settings.worktreeStrategy,
@@ -399,7 +420,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let queued = (try? board.terminate(sessionId: sessionId, cause: .setupFailed(detail))) ?? nil
         guard queued != nil else { return }
         announceReports(projectId: projectId)
-        MacNotifier.post(title: "Worker never started", body: detail)
+        // `sessionId` always names a real row (`assign` writes it before setup runs), so this could
+        // route to `.session(sessionId)` the way the stall and cap banners do. It stays on `.project`
+        // because the Status row it would land on carries no diagnosis — no transcript, no spend, a
+        // bare `failed` state — while `detail` is the actual worktree-prep failure, which only the
+        // queued report on the Orchestrator screen shows.
+        post("Worker never started", body: detail, projectId: projectId, category: .workerFailures)
     }
 
     /// A lock held by a session the last run of the app never saw end — a killed process, a crash —
@@ -509,7 +535,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.capRefused(reason)
         }
 
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let worktreeName = "epic-\(epicId)"
         _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(worktreeName))
         let epicBranch = epic.branch
@@ -598,16 +624,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             } else {
                 throw SupervisorError.sessionHasNoShortId(sessionId)
             }
-            try board.terminate(sessionId: sessionId, cause: .stoppedByHuman)
+            let salvage = await branchSalvage(taskId: session.taskId)
+            try board.terminate(sessionId: sessionId, cause: .stoppedByHuman, salvage: salvage)
             try grants.revokeAll(sessionId: sessionId)
             announceReports(projectId: session.projectId)
+            refreshSleepAssertion()
         }
     }
 
     func resume(sessionId: String) async throws {
         try await recording {
             let session = try requireSession(sessionId)
-            try await resume(session, prompt: Self.resumePrompt(previousStop: session.stopReason))
+            let placement = try projects.get(session.projectId).map {
+                WorkerStanding.recorded(session: session, project: $0, taskId: session.taskId ?? "").placement
+            } ?? .worktree
+            try await resume(
+                session,
+                prompt: Self.resumePrompt(previousStop: session.stopReason, placement: placement)
+            )
         }
     }
 
@@ -672,6 +706,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
             }
             announceReports(projectId: projectId)
+            refreshSleepAssertion()
             if let firstFailure { throw firstFailure }
         }
     }
@@ -705,9 +740,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             await mergeSharedBranch(task: task, epic: epic, project: project, branch: shared)
             return
         }
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let taskBranch = Self.taskBranchPrefix + task.id
         let epicBranch = epic.branch
+        let taskTitle = task.title
+        let epicTitle = epic.title
         let projectBase = project.baseBranch
         let worktreeName = "merge-\(task.id)"
         let outcome: EpicMerge
@@ -715,7 +752,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             outcome = try await offMain {
                 try manager.ensureBranch(epicBranch, from: projectBase)
                 return try manager.mergeIntoEpic(
-                    taskBranch: taskBranch, epicBranch: epicBranch, worktreeName: worktreeName
+                    taskBranch: taskBranch, epicBranch: epicBranch,
+                    taskTitle: taskTitle, epicTitle: epicTitle,
+                    worktreeName: worktreeName
                 )
             }
         } catch {
@@ -796,21 +835,27 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             return
         }
 
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let epicBranch = epic.branch
+        let epicTitle = epic.title
         let projectBase = project.baseBranch
         let memberIds = members.map(\.taskId)
+        let mergeTitle = sharedMergeTitle(memberIds)
         let worktreeName = "merge-shared-\(epic.id)"
         let outcome: EpicMerge
         do {
             outcome = try await offMain {
                 try manager.ensureBranch(epicBranch, from: projectBase)
                 let base = try manager.mergeBase(branch, epicBranch) ?? projectBase
+                // A branch that predates the ledger has its attribution only in its old trailers,
+                // and this is the last moment anything reads it: reaping deletes the ref.
+                _ = try? manager.backfillFromTrailers(on: branch, since: base)
                 // Written before the merge, because the branch is about to be deleted and the refs
                 // are all that is left to say which commit was whose.
                 try manager.recordSharedLedger(branch: branch, base: base, taskIds: memberIds)
                 return try manager.mergeIntoEpic(
-                    taskBranch: branch, epicBranch: epicBranch, worktreeName: worktreeName
+                    taskBranch: branch, epicBranch: epicBranch, taskTitle: mergeTitle,
+                    epicTitle: epicTitle, worktreeName: worktreeName
                 )
             }
         } catch {
@@ -845,10 +890,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    /// What the merge commit calls a branch that belongs to several tasks. Never an id: this subject
+    /// lands in whatever repository the epic's pull request is opened in (SPEC §5.2).
+    private func sharedMergeTitle(_ taskIds: [String]) -> String {
+        let titles = taskIds.compactMap { try? tasks.get($0)?.title }.compactMap { $0 }
+        guard titles.count != 1 else { return titles[0] }
+        return "\(taskIds.count) tasks sharing a checkout"
+    }
+
     /// The project's own checkout is standing on the shared branch, so it has to step off before
     /// git will delete the ref. A dirty checkout keeps the branch rather than losing anything.
     private func reapSharedBranch(_ branch: String, epic: Epic, project: Project) async {
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let epicBranch = epic.branch
         let bases = [project.baseBranch, epicBranch]
         let notices = await offMainNotices {
@@ -930,7 +983,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     if session.role == .orchestrator, consoles[session.projectId]?.isProcessRunning == true {
                         continue
                     }
-                    let report = (try? board.terminate(sessionId: session.sessionId, cause: .vanished)) ?? nil
+                    let salvage = await branchSalvage(taskId: session.taskId)
+                    let report = (try? board.terminate(
+                        sessionId: session.sessionId, cause: .vanished, salvage: salvage
+                    )) ?? nil
                     queuedReport = queuedReport || report != nil
                 }
                 continue
@@ -942,7 +998,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let status = info.status?.lowercased()
             if state == "stopped" || status == "stopped" {
                 if session.state.isActive {
-                    let report = (try? board.terminate(sessionId: session.sessionId, cause: .vanished)) ?? nil
+                    let salvage = await branchSalvage(taskId: session.taskId)
+                    let report = (try? board.terminate(
+                        sessionId: session.sessionId, cause: .vanished, salvage: salvage
+                    )) ?? nil
                     queuedReport = queuedReport || report != nil
                 }
             } else if status == "running" {
@@ -956,7 +1015,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
         }
         if queuedReport { announceReports(projectId: projectId) }
+        await recoverStrandedTasks(projectId: projectId)
         await reapOrphanedWorktrees(projectId: projectId, keeping: liveWorktrees)
+        refreshSleepAssertion()
     }
 
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? {
@@ -971,6 +1032,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             case .worktree(let path):
                 return try context.manager.diffstat(worktree: path, against: context.base)
             case .sharedBranch(let branch):
+                context.backfillTrailers(branch: branch)
                 return try context.manager.diffstat(taskId: taskId, on: branch, since: context.base)
             }
         }
@@ -983,6 +1045,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             case .worktree(let path):
                 return try context.manager.diffSummary(worktree: path, against: context.base)
             case .sharedBranch(let branch):
+                context.backfillTrailers(branch: branch)
                 return try context.manager.diffSummary(taskId: taskId, on: branch, since: context.base)
             }
         }
@@ -991,7 +1054,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private enum DiffSite {
         case worktree(URL)
         /// The task's commits are interleaved with its siblings' on one branch, so the diff is
-        /// selected by the attribution trailer rather than by the branch's whole range.
+        /// selected by the `task_commit` ledger rather than by the branch's whole range.
         case sharedBranch(String)
     }
 
@@ -999,6 +1062,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var manager: WorktreeManager
         var site: DiffSite
         var base: String
+        /// Set for the first shared-branch read of a branch this run, which is the one that turns
+        /// pre-ledger `Agent-Board-Task` trailers into rows. Off main, because it runs git.
+        var readTrailers: Bool = false
+
+        func backfillTrailers(branch: String) {
+            guard readTrailers else { return }
+            _ = try? manager.backfillFromTrailers(on: branch, since: base)
+        }
     }
 
     private func diffContext(taskId: String) -> DiffContext? {
@@ -1006,16 +1077,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
               let project = try? projects.get(task.projectId),
               let taskSessions = try? sessions.forTask(taskId)
         else { return nil }
-        let manager = WorktreeManager(
-            repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
-        )
+        let manager = worktreeManager(for: project)
         // A session with no worktree of its own ran in the shared checkout; its branch carries other
         // tasks' commits too. Preferred over any worktree row, because a task that was retried into
         // a worktree keeps that row and the shared path still answers for the shared attempt.
         if let shared = taskSessions.last(where: { $0.worktreePath == nil && $0.branch != nil }),
            let branch = shared.branch {
-            return DiffContext(manager: manager, site: .sharedBranch(branch), base: project.baseBranch)
+            return DiffContext(
+                manager: manager, site: .sharedBranch(branch), base: project.baseBranch,
+                readTrailers: trailersBackfilled.insert("\(project.id)\u{01}\(branch)").inserted
+            )
         }
         guard let worktreePath = taskSessions
             .map({ $0.worktreePath ?? $0.cwd })
@@ -1068,9 +1139,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return facts
     }
 
-    /// A shared branch belongs to no one task, so every count here is selected by the
-    /// `Agent-Board-Task` trailer rather than by the branch's range. Once the branch is reaped, the
-    /// same selection still works against the epic branch, where the commits now live.
+    /// A shared branch belongs to no one task, so every count here is selected by the commit ledger
+    /// rather than by the branch's range. Once the branch is reaped, the same selection still works
+    /// against the epic branch, where the commits now live.
     private nonisolated static func sharedBranchFacts(
         _ manager: WorktreeManager,
         taskId: String,
@@ -1096,6 +1167,57 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return fact
     }
 
+    /// A session death that never reached `terminate` — the row already inactive when the cap or
+    /// `reconcile` got there, or no row at all — leaves its task in `running`, where `spawn_worker`
+    /// refuses it and no report is ever coming. Nothing else clears that, so both the metering tick
+    /// and `reconcile` sweep it: `reconcile` only runs while the Status screen is on screen, and a
+    /// task must not stay unreachable for as long as nobody happens to look at it.
+    func recoverStrandedTasks(projectId: String) async {
+        guard let stranded = try? board.strandedRunningTasks(projectId: projectId), !stranded.isEmpty else { return }
+        var queued = false
+        for task in stranded {
+            let salvage = await branchSalvage(taskId: task.id)
+            let report = (try? board.recoverStranded(taskId: task.id, salvage: salvage)) ?? nil
+            queued = queued || report != nil
+        }
+        if queued { announceReports(projectId: projectId) }
+    }
+
+    /// What git can say about a task's branch, for a failure report to carry rather than throw the
+    /// work back to `ready` as if the branch were empty. Best effort: nil claims nothing.
+    private func branchSalvage(taskId: String?) async -> BranchSalvage? {
+        guard let taskId, let task = try? tasks.get(taskId),
+              let project = try? projects.get(task.projectId)
+        else { return nil }
+        let manager = worktreeManager(for: project)
+        let branch = Self.taskBranchPrefix + taskId
+        let fallbackBase = mergeTargets(for: task, project: project).last ?? project.baseBranch
+        let worktree = (try? sessions.forTask(taskId).compactMap(\.worktreePath))?
+            .first { FileManager.default.fileExists(atPath: $0) }
+            .map { URL(fileURLWithPath: $0) }
+        return try? await offMain {
+            try Self.readSalvage(manager: manager, branch: branch, fallbackBase: fallbackBase, worktree: worktree)
+        }
+    }
+
+    /// The branch was cut from the ledger's recorded base; `fallbackBase` only covers a branch that
+    /// predates the ledger. A base that no longer resolves makes the count a lie, so nothing is claimed.
+    private nonisolated static func readSalvage(
+        manager: WorktreeManager, branch: String, fallbackBase: String, worktree: URL?
+    ) throws -> BranchSalvage? {
+        guard try manager.branchExists(branch) else { return nil }
+        let recorded = TaskBranchLedger.taskId(ofBranch: branch)
+            .flatMap { try? manager.refCommit(TaskBranchLedger.baseRef(taskId: $0)) }
+        let base = recorded ?? fallbackBase
+        guard try manager.commitExists(base) else { return nil }
+        let dirty = worktree.map { (try? manager.hasUncommittedChanges(worktree: $0)) ?? false } ?? false
+        return BranchSalvage(
+            branch: branch,
+            commitsAheadOfBase: try manager.commitCount(from: base, to: "refs/heads/\(branch)"),
+            uncommittedChanges: dirty
+        )
+    }
+
     // MARK: - Worktree and branch cleanup
 
     /// A retried task has one worktree per attempt, so every session is torn down, not just the newest.
@@ -1103,7 +1225,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let paths = taskSessions.compactMap(\.worktreePath).reduce(into: [String]()) { unique, path in
             if !unique.contains(path) { unique.append(path) }
         }
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let branch = Self.taskBranchPrefix + task.id
         let bases = mergeTargets(for: task, project: project)
         let notices = await offMainNotices {
@@ -1116,7 +1238,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// worktree behind, as do sessions whose task record is already gone.
     private func reapOrphanedWorktrees(projectId: String, keeping live: Set<String>) async {
         guard let project = try? projects.get(projectId) else { return }
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let bases = [project.baseBranch] + ((try? epics.list(projectId: projectId)) ?? []).map(\.branch)
         let notices = await offMainNotices {
             Self.reap(manager: manager, keeping: live, bases: bases)
@@ -1129,10 +1251,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return [project.baseBranch, epic.branch]
     }
 
-    private static func worktreeManager(for project: Project) -> WorktreeManager {
+    /// The only way this type builds a `WorktreeManager`. It is always ledger-backed: a second
+    /// spelling here is what made attribution depend on which call site a caller happened to copy.
+    func worktreeManager(for project: Project) -> WorktreeManager {
         WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
+            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot),
+            attribution: .ledger(TaskCommitStore(db))
         )
     }
 
@@ -1275,6 +1400,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return console
     }
 
+    func shellConsole(projectId: String) throws -> ShellConsole {
+        if let existing = shellConsoles[projectId] { return existing }
+        guard try projects.get(projectId) != nil else { throw SupervisorError.projectNotFound(projectId) }
+        let console = ShellConsole(projectId: projectId, db: db)
+        shellConsoles[projectId] = console
+        return console
+    }
+
     func approve(approvalId: String) async throws {
         try await recording {
             guard let approval = try approvals.get(approvalId) else { throw SupervisorError.approvalNotFound(approvalId) }
@@ -1307,19 +1440,26 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         do {
             switch approval.kind {
             case .push:
-                let result = try await offMain { try publisher.push(branch: request.branch, remote: request.remote) }
+                let result = try await offMain {
+                    try publisher.push(
+                        branch: request.branch, publishedAs: request.publishedBranch, remote: request.remote
+                    )
+                }
                 try board.recordPublished(approval: approval, summary: "Push approved: \(result.summary).")
             case .pullRequest:
                 let result = try await offMain {
                     try publisher.openPullRequest(
-                        branch: request.branch, base: base, title: request.title ?? request.branch,
-                        body: request.body ?? "", remote: request.remote
+                        branch: request.branch, publishedAs: request.publishedBranch, base: base,
+                        title: request.title ?? request.branch, body: request.body ?? "", remote: request.remote
                     )
                 }
                 let verb = result.alreadyOpen ? "Pull request already open" : "Pull request opened"
+                let from = request.head == request.branch
+                    ? request.branch
+                    : "\(request.head) (local \(request.branch))"
                 try board.recordPublished(
                     approval: approval,
-                    summary: "\(verb) from \(request.branch) into \(base).",
+                    summary: "\(verb) from \(from) into \(base).",
                     url: result.url
                 )
             case .spawn, .integration:
@@ -1383,7 +1523,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
             let opener = PullRequestOpener(repoPath: URL(fileURLWithPath: project.repoPath))
             let base = project.baseBranch
-            let head = epic.branch
+            // The same name the approved path would publish, so the button does not aim the compare
+            // page at a ref the remote does not have under that name.
+            let head = try RemoteBranchResolver(db).publishedName(branch: epic.branch, project: project)
+                ?? epic.branch
             let outcome = try await offMain { try opener.open(baseBranch: base, headBranch: head) }
             if case .openInBrowser(let url, _) = outcome {
                 NSWorkspace.shared.open(url)
@@ -1465,7 +1608,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func refreshShutdownProgress(projectId: String, order: ShutdownOrder) -> ShutdownProgress {
         let grace = (try? projects.get(projectId))??.settings.caps.shutdownGraceSeconds
             ?? ShutdownDeliveryStore.defaultGraceSeconds
-        let progress = (try? deliveries.progress(orderId: order.id, graceSeconds: grace))
+        let progress = (try? deliveries.progress(orderId: order.id, graceSeconds: grace, awake: sleepLedger.reading()))
             ?? ShutdownProgress(orderId: order.id, total: 0, acknowledged: 0)
         shutdownProgress[projectId] = progress
         return progress
@@ -1545,8 +1688,65 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     // MARK: - BoardEventSink
 
-    func notify(title: String, body: String) async {
-        MacNotifier.post(title: title, body: body)
+    func notify(projectId: String, title: String, body: String) async {
+        await notify(projectId: projectId, sessionId: nil, title: title, body: body)
+    }
+
+    /// The only producer of this event is the hook sink's "Agent needs input" path, which fires
+    /// when a worker asked for input and nothing marked a task blocked — the blocked-worker
+    /// category by any other name.
+    func notify(projectId: String, sessionId: String?, title: String, body: String) async {
+        post(
+            title, body: body, projectId: projectId, category: .blockedWorkers,
+            subject: sessionId.map(NotificationRoute.Subject.session) ?? .project
+        )
+    }
+
+    /// Every banner Agent Board raises goes through here, so none of them can reach the human
+    /// without saying which project it is about, without carrying the route a click follows back
+    /// to it, or against that project's notification preferences.
+    private func post(
+        _ title: String, body: String, projectId: String?, category: NotificationCategory,
+        subject: NotificationRoute.Subject = .project
+    ) {
+        guard shouldNotify(projectId: projectId, category: category) else { return }
+        postBanner(
+            notificationTitle(title, projectId: projectId),
+            body,
+            projectId.map { NotificationRoute(projectId: $0, subject: subject) }
+        )
+    }
+
+    /// `MacNotifier.post` is inert under `xctest`, because the runner is not an app bundle. Every
+    /// banner leaves through here so a test can see which ones the categories let past and what
+    /// route each one carries.
+    @ObservationIgnored var postBanner: @MainActor (String, String, NotificationRoute?) -> Void = {
+        MacNotifier.shared.post(title: $0, body: $1, route: $2)
+    }
+
+    /// The gating decision for every banner that is not driven by the attention signal.
+    /// `MacNotifier.post` is inert under `xctest`, so this is what the tests assert on.
+    /// A project that has gone missing keeps the default, which is to notify.
+    func shouldNotify(
+        projectId: String?, category: NotificationCategory, now: Int64 = .nowMillis
+    ) -> Bool {
+        notificationPreferences(projectId).allows(category, now: now)
+    }
+
+    private func notificationPreferences(_ projectId: String?) -> NotificationPreferences {
+        guard let projectId, let project = (try? projects.get(projectId)) ?? nil else {
+            return NotificationPreferences()
+        }
+        return project.settings.notifications
+    }
+
+    /// `MacNotifier.post` is inert under `xctest`, so the naming is asserted here instead.
+    func notificationTitle(_ headline: String, projectId: String?) -> String {
+        NotificationText.title(headline, project: projectId.flatMap(projectName))
+    }
+
+    private func projectName(_ id: String) -> String? {
+        (try? projects.get(id))??.name
     }
 
     func orchestratorTurnEnded(projectId: String, sessionId: String) async {
@@ -1555,6 +1755,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     func reportQueued(projectId: String) async {
         announceReports(projectId: projectId)
+    }
+
+    func orchestratorCompacted(projectId: String, sessionId: String, manual: Bool) async {
+        consoles[projectId]?.compactionCompleted(manual: manual)
     }
 
     /// The worker has committed and recorded its note; this is the orderly end of its session. The
@@ -1575,6 +1779,67 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    /// The orderly end of a worker's life, and until now the only one that left its process running:
+    /// the agent is told to take no further turns, so the session sits `idle` holding its whole
+    /// context forever. Stopping it frees ~300 MB and costs nothing — `claude --bg --resume` reads
+    /// the transcript, which a stop leaves intact, so the task in `review` can still be reopened
+    /// and attached to.
+    func workerCompleted(projectId: String, sessionId: String) async {
+        guard let session = try? sessions.get(sessionId), let shortId = session.shortId else { return }
+        try? await runtime.stop(shortId: shortId)
+    }
+
+    /// Stops the agent of every session this board's own rows say is finished — the backlog left by
+    /// every worker that completed before `report_complete` learned to stop its own session.
+    ///
+    /// Every target comes from `agent_session`, and the runtime list read afterwards can only
+    /// subtract. A `claude` session with no row here is never a candidate, whatever its process
+    /// looks like: argv and environment cannot tell a parked spare from a session doing real work.
+    @discardableResult
+    func sweepLeakedAgents(dryRun: Bool = false) async -> AgentSweepReport {
+        var report = AgentSweepReport(dryRun: dryRun)
+        let rows = ((try? projects.list()) ?? []).flatMap { (try? sessions.all(projectId: $0.id)) ?? [] }
+        let listed = try? await runtime.listSessions()
+        // A registry entry without a pid has no process to free. Measured on this machine: of 124
+        // inactive rows `claude stop` accepted, the 8 carrying a pid were the whole 1,311 MB, and
+        // the other 116 cost 60s of the 71s the sweep took and moved nothing.
+        let resident = listed.map { Set($0.filter { $0.pid != nil }.compactMap(\.id)) }
+        report.runtimeListed = listed != nil
+        for decision in LeakedAgentSweep.plan(rows) {
+            guard decision.outcome == .stop, let shortId = decision.shortId else {
+                report.kept.append(decision)
+                continue
+            }
+            if let resident, !resident.contains(shortId) {
+                report.kept.append(LeakedAgentSweep.Decision(
+                    sessionId: decision.sessionId, shortId: shortId, outcome: .keep,
+                    reason: "the runtime reports no process for this short id"
+                ))
+                continue
+            }
+            if dryRun {
+                report.wouldStop.append(decision)
+                continue
+            }
+            do {
+                try await runtime.stop(shortId: shortId)
+                report.stopped.append(decision)
+            } catch {
+                report.failed.append(LeakedAgentSweep.Decision(
+                    sessionId: decision.sessionId, shortId: shortId, outcome: .stop,
+                    reason: describe(error)
+                ))
+            }
+        }
+        if let listed {
+            let known = Set(rows.compactMap(\.shortId))
+            report.untracked = listed
+                .filter { $0.pid != nil && $0.id.map { !known.contains($0) } ?? true }
+                .count
+        }
+        return report
+    }
+
     /// The orchestrator only learns of a queued report through the console notice.
     private func announceReports(projectId: String) {
         consoles[projectId]?.reportsChanged()
@@ -1593,22 +1858,78 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
-    private func meterTick() async {
+    /// Internal so a test can drive one tick without waiting out the timer.
+    func meterTick() async {
         guard let all = try? projects.list() else { return }
-        let now = Int64.nowMillis
+        let awake = sleepLedger.reading()
+        let now = awake.nowMillis
+        raiseAttentionBanners(now: now)
         if now - lastArchiveSweep >= Self.archiveSweepIntervalMillis {
             lastArchiveSweep = now
             sweepArchives(all, now: now)
         }
         for project in all {
             refreshShutdownProgressIfOrdered(projectId: project.id)
+            await recoverStrandedTasks(projectId: project.id)
             let limits = Self.capLimits(project.settings.caps)
             guard let projectSessions = try? sessions.all(projectId: project.id) else { continue }
             let stallSeconds = project.settings.caps.stallSeconds
             for session in projectSessions where Self.shouldMeter(session, now: now) {
-                await meter(session, limits: limits, stallSeconds: stallSeconds)
+                await meter(session, limits: limits, stallSeconds: stallSeconds, awake: awake)
             }
         }
+        refreshSleepAssertion(all)
+    }
+
+    /// Driven by the observed `agent_session` rows and nothing else, so a worker that died without
+    /// reporting stops holding the Mac awake the moment `reconcile` or the leaked-agent sweep flips
+    /// its row inactive — there is no spawn-side counter that could be left one too high. SPEC §8.3.
+    func refreshSleepAssertion(_ all: [Project]? = nil) {
+        guard let sleepGuard else { return }
+        let projectList = all ?? ((try? projects.list()) ?? [])
+        sleepGuard.apply(projectList.flatMap { ((try? sessions.all(projectId: $0.id)) ?? []).map(\.state) })
+    }
+
+    /// A pending approval and a blocked worker each stop work outright and nothing else announces
+    /// them, so the same signal the sidebar badge reads raises the banner. `AttentionNotifier` owns
+    /// the once-per-transition rule, so a queue nobody has answered does not banner every 5s.
+    /// Each project's own notification preferences decide which of its banners survive. They gate
+    /// the banner alone: `attention.all` is read unchanged, so a muted project's sidebar badge and
+    /// At a Glance row say exactly what they said before.
+    @discardableResult
+    func raiseAttentionBanners(now: Int64 = .nowMillis) -> [AttentionNotice] {
+        guard let projects = try? attention.all(now: now) else { return [] }
+        let preferences = notificationPreferencesByProject()
+        let raised = attentionNotifier.notices(
+            for: projects,
+            focused: onScreenProject,
+            now: now,
+            preferences: { preferences[$0] ?? NotificationPreferences() }
+        )
+        for notice in raised {
+            postBanner(notice.title, notice.body, NotificationRoute(notice))
+        }
+        return raised
+    }
+
+    private func notificationPreferencesByProject() -> [String: NotificationPreferences] {
+        guard let all = try? projects.list() else { return [:] }
+        return Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.settings.notifications) })
+    }
+
+    /// A banner for the project already filling the screen is noise. Only the frontmost app counts:
+    /// a selection left behind a browser window is not something the human is looking at.
+    /// An `xctest` process runs at activation policy `.prohibited`, so `NSApplication.shared
+    /// .isActive` is false there and can never be true; a test that needs the suppressed case
+    /// replaces `isFrontmost`.
+    private var onScreenProject: String? {
+        isFrontmost() ? focusedProject : nil
+    }
+
+    @ObservationIgnored var isFrontmost: @MainActor () -> Bool = { NSApplication.shared.isActive }
+
+    func focusChanged(projectId: String?) {
+        focusedProject = projectId
     }
 
     /// The tick is what moves a silent worker into `overdue` once its grace period expires. It only
@@ -1634,7 +1955,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return now - endedAt < finalSpendWindowMillis
     }
 
-    private func meter(_ session: AgentSession, limits: CapLimits, stallSeconds: Int) async {
+    /// Internal rather than private so a test can drive a single session's stall/cap evaluation
+    /// directly, the way `sweepArchives` is exposed for the archive tick.
+    func meter(_ session: AgentSession, limits: CapLimits, stallSeconds: Int, awake: AwakeElapsed) async {
         var totals = UsageTotals(
             inputTokens: session.tokensIn,
             outputTokens: session.tokensOut,
@@ -1643,11 +1966,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
         var model = session.model
         var lastActivity = session.lastActivityDate
+        // Nil until a transcript has been read: the session row sums what it cost, which says
+        // nothing about how full its context is, so there is no fallback to compute this from.
+        var context: ContextPressure?
 
         if let path = session.transcriptPath {
             let url = URL(fileURLWithPath: path)
             if let summary = try? await offMain({ try TranscriptMeter.summarize(transcriptAt: url) }) {
                 totals = summary.totals
+                context = ContextPressure(
+                    usedTokens: summary.contextTokens,
+                    limitTokens: ModelCatalog.effectiveContextWindow(for: summary.model ?? model)
+                )
                 model = summary.model ?? model
                 if let seen = summary.lastActivity {
                     lastActivity = lastActivity.map { max($0, seen) } ?? seen
@@ -1664,29 +1994,38 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
         }
 
-        guard let current = try? sessions.get(session.sessionId), current.state.isActive, current.role == .worker else {
+        guard let current = try? sessions.get(session.sessionId), current.state.isActive else {
             stallNotified.remove(session.sessionId)
             return
         }
-        noteStall(current, lastActivity: lastActivity, stallSeconds: stallSeconds)
+        if current.role == .orchestrator, let context {
+            consoles[current.projectId]?.contextPressureObserved(context)
+        }
+        guard current.role == .worker else {
+            stallNotified.remove(session.sessionId)
+            return
+        }
+        noteStall(current, lastActivity: lastActivity, stallSeconds: stallSeconds, awake: awake)
         guard let breach = CapEvaluator.evaluate(
             totals: totals,
             startedAt: current.startedDate,
             lastActivity: lastActivity,
-            now: Date(),
+            toolStartedAt: current.toolStartedDate,
+            awake: awake,
             limits: limits,
             state: current.state
         ) else { return }
-        await enforce(breach, on: current)
+        await enforce(breach, on: current, awake: awake)
     }
 
     /// SPEC §12 case 2: a grandchild process waiting on stdin fires no hook, so a `running` worker whose
     /// activity clock has frozen is only surfaced — never killed. The idle cap still decides that.
-    private func noteStall(_ session: AgentSession, lastActivity: Date?, stallSeconds: Int) {
+    private func noteStall(_ session: AgentSession, lastActivity: Date?, stallSeconds: Int, awake: AwakeElapsed) {
         let stalled = session.state == .running && AttentionSelection.isStalled(
             lastActivity: lastActivity,
             startedAt: session.startedDate,
-            now: Date(),
+            toolStartedAt: session.toolStartedDate,
+            awake: awake,
             threshold: TimeInterval(stallSeconds)
         )
         guard stalled else {
@@ -1696,20 +2035,27 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard stallNotified.insert(session.sessionId).inserted else { return }
         var title: String?
         if let taskId = session.taskId { title = try? tasks.get(taskId)?.title }
-        MacNotifier.post(
-            title: "Worker may be stuck",
-            body: "\(session.displayShortId) has made no tool call in \(stallSeconds)s — \(title ?? "no task"). Attach to check."
+        post(
+            "Worker may be stuck",
+            body: "\(session.displayShortId) has made no tool call in \(stallSeconds)s — \(title ?? "no task"). Attach to check.",
+            projectId: session.projectId,
+            category: .capsAndStalls,
+            subject: .session(session.sessionId)
         )
     }
 
-    private func enforce(_ breach: CapBreach, on session: AgentSession) async {
-        let description = Self.describe(breach)
+    private func enforce(_ breach: CapBreach, on session: AgentSession, awake: AwakeElapsed) async {
+        let description = Self.describe(breach, awake: awake)
         if let shortId = session.shortId {
             try? await runtime.stop(shortId: shortId)
         }
-        _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description))
+        let salvage = await branchSalvage(taskId: session.taskId)
+        _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description), salvage: salvage)
         announceReports(projectId: session.projectId)
-        MacNotifier.post(title: "Worker stopped at cap", body: description)
+        post(
+            "Worker stopped at cap", body: description, projectId: session.projectId,
+            category: .capsAndStalls, subject: .session(session.sessionId)
+        )
     }
 
     private static func capLimits(_ caps: Caps) -> CapLimits {
@@ -1720,14 +2066,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
     }
 
-    private static func describe(_ breach: CapBreach) -> String {
+    private static func describe(_ breach: CapBreach, awake: AwakeElapsed) -> String {
         switch breach {
         case .tokens(let used, let limit):
             return "token cap reached: \(used) of \(limit) tokens"
         case .wallClock(let elapsed, let limit):
-            return "wall clock cap reached: \(Int(elapsed / 60)) of \(Int(limit / 60)) minutes"
+            return "elapsed cap reached: \(Int(elapsed / 60)) of \(Int(limit / 60)) awake minutes"
         case .idle(let since, let limit):
-            let idleFor = Int(Date().timeIntervalSince(since) / 60)
+            let idleFor = Int(awake.secondsAwake(since: since) / 60)
             return "idle cap reached: no activity for \(idleFor) minutes (limit \(Int(limit / 60)))"
         }
     }
@@ -1764,12 +2110,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             .path
     }
 
-    static func resumePrompt(previousStop: String?) -> String {
+    /// The commit step differs by placement: `git commit` is refused in a shared checkout, so a
+    /// resumed co-resident worker told to "commit on this branch" is sent at a command that fails.
+    static func resumePrompt(previousStop: String?, placement: WorkerPlacement = .worktree) -> String {
         var lines = ["Agent Board resumed this session. Continue your task from where you left off; check `git status` and `git log` first."]
         if let previousStop, !previousStop.isEmpty {
             lines.append("The previous run was stopped by Agent Board: \(previousStop).")
         }
-        lines.append("When finished, follow the completion protocol from your original instructions (commit, do not push, call report_complete).")
+        let commit = placement.sharedBranch == nil
+            ? "commit on this branch"
+            : "commit by calling `\(OpeningPrompt.commitToolName)`"
+        lines.append(
+            "When finished: \(commit), do not push, call `report_complete`. "
+            + "If a resume or a compaction has left you without the instructions you were spawned with, "
+            + "read the MCP resource `\(BriefingResourceURI.worker)` — it returns them in full."
+        )
         return lines.joined(separator: " ")
     }
 
@@ -1798,7 +2153,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         branch: String,
         attempt: Int,
         epicGoal: String? = nil,
-        notes: [InjectedNote] = [],
+        notes: SpawnNotes = SpawnNotes(),
         verification: VerificationCommands = VerificationCommands(),
         placement: WorkerPlacement = .worktree,
         workingDirectory: String? = nil

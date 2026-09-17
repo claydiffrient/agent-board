@@ -1,5 +1,4 @@
 import AgentBoardCore
-import AppKit
 import SwiftUI
 
 /// Winding down every project at once, from At a Glance. Raises an order on each project, delivers
@@ -17,11 +16,10 @@ struct GlobalShutdownSheet: View {
     /// show all of them before the wind-down can be read as finished; otherwise the observation
     /// lagging one write behind looks identical to every worker having closed.
     @State private var raisedOrderIds: Set<String>?
-    @State private var quitting = false
     @State private var errorMessage: String?
 
     private var rows: [ShutdownRow] {
-        GlobalShutdown.rows(snapshot.value, now: .nowMillis)
+        GlobalShutdown.rows(snapshot.value, awake: SleepLedger.shared.reading())
     }
 
     var body: some View {
@@ -80,11 +78,16 @@ struct GlobalShutdownSheet: View {
     /// The orders are deliberately left standing. A session that never acknowledged is a detached
     /// `claude --bg` process that outlives the app, and the order still on its project is what
     /// hands it the wind-down through `PreToolUse` once the board server is back.
+    ///
+    /// The sheet is dismissed before the app is asked to go, and that order matters: AppKit refuses
+    /// `NSApplication.terminate` silently while any window has an attached sheet, which is what a
+    /// quit button living inside a sheet always has. `AppQuit` waits for the detachment, and
+    /// reports on the At a Glance screen if the app still will not go — the one outcome this must
+    /// not have is a button that does nothing.
     private func quit() {
-        guard !quitting else { return }
-        quitting = true
         env.supervisor.stopOrchestratorConsoles()
-        NSApplication.shared.terminate(nil)
+        dismiss()
+        env.quitter.requestQuit()
     }
 
     private func run(_ operation: @escaping () async throws -> Void) {

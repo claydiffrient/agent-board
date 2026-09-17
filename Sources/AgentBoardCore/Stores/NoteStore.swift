@@ -62,6 +62,32 @@ public struct NoteStore: Sendable {
         )
     }
 
+    /// Section headings for every note in the project, keyed by note id and in section order.
+    /// Bodies are deliberately not fetched: this feeds a listing whose point is to be cheap.
+    public func headings(projectId: String) throws -> [String: [String]] {
+        try db.reader.read { db in try Self.headings(db, projectId: projectId) }
+    }
+
+    static func headings(_ db: Database, projectId: String) throws -> [String: [String]] {
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT s.note_id AS note_id, s.heading AS heading
+                FROM note_section s JOIN note n ON n.id = s.note_id
+                WHERE n.project_id = ?
+                ORDER BY s.note_id, s.ordering, s.heading
+                """,
+            arguments: [projectId]
+        )
+        var byNote: [String: [String]] = [:]
+        for row in rows {
+            let noteId: String = row["note_id"]
+            let heading: String = row["heading"]
+            byNote[noteId, default: []].append(heading)
+        }
+        return byNote
+    }
+
     public func pinned(projectId: String) throws -> [Note] {
         try db.reader.read { db in
             try Note.fetchAll(

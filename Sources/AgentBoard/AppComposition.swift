@@ -9,9 +9,13 @@ enum AppComposition {
             ?? Wiring.appSupportDir.appendingPathComponent("agentboard.sqlite")
         do {
             let db = try AppDatabase.open(at: url)
-            let supervisor = Wiring.makeSupervisor(db: db)
+            let sleepGuard = SleepGuard()
+            sleepGuard.releaseOnTermination()
+            let supervisor = Wiring.makeSupervisor(db: db, sleepGuard: sleepGuard)
             _Concurrency.Task { await supervisor.start() }
-            return AppEnvironment(db: db, supervisor: supervisor)
+            let environment = AppEnvironment(db: db, supervisor: supervisor, sleepGuard: sleepGuard)
+            MacNotifier.shared.start(router: environment.router)
+            return environment
         } catch {
             fatalError("Agent Board could not open its database at \(url.path): \(error)")
         }
@@ -30,6 +34,11 @@ enum StubError: LocalizedError {
 final class StubSupervisor: WorkerSupervising {
     var serverPort: Int? { nil }
     var lastError: String? { nil }
+    /// Every project the window has focused, in order. `MainWindow.select` is its only caller, so
+    /// a recorded id is proof that a selection went through the sidebar's own funnel.
+    private(set) var focusedProjects: [String?] = []
+
+    func focusChanged(projectId: String?) { focusedProjects.append(projectId) }
 
     func registerProject(repoPath: URL, name: String?, baseBranch: String?) async throws -> Project {
         throw StubError.notWired
@@ -48,6 +57,7 @@ final class StubSupervisor: WorkerSupervising {
     func worktreeDiffstat(taskId: String) async -> String? { nil }
     func worktreeDiffSummary(taskId: String) async -> DiffSummary? { nil }
     func orchestratorConsole(projectId: String) throws -> OrchestratorConsole { throw StubError.notWired }
+    func shellConsole(projectId: String) throws -> ShellConsole { throw StubError.notWired }
     func approve(approvalId: String) async throws { throw StubError.notWired }
     func deny(approvalId: String, reason: String?) async throws { throw StubError.notWired }
     func promote(taskId: String) async throws { throw StubError.notWired }

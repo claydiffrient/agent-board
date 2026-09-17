@@ -71,8 +71,8 @@ public enum SharedCheckoutGuard {
                     Agent Board blocks `git commit` in a shared checkout: another agent is working in this \
                     same tree, and a commit here would carry its unfinished edits under your task. Call the \
                     \(SharedCheckoutGuard.commitToolName) MCP tool with your message instead. Agent Board commits exactly the \
-                    files you have written — it knows them from the locks your writes took — and tags the \
-                    commit with your task id so your work stays reviewable on its own.
+                    files you have written — it knows them from the locks your writes took — and records the \
+                    commit as yours so your work stays reviewable on its own.
                     """
             case .stash:
                 return """

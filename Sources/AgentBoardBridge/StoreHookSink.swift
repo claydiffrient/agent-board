@@ -6,23 +6,30 @@ public final class StoreHookSink: HookSink {
     private let hookEvents: HookEventStore
     private let grants: TokenGrantStore
     private let sessions: SessionStore
+    private let projects: ProjectStore
     private let tasks: TaskStore
     private let progress: ProgressStore
     private let shutdowns: ShutdownOrderStore
     private let deliveries: ShutdownDeliveryStore
+    private let notes: NoteStore
+    private let epics: EpicStore
     private let locks: FileLockStore
-    private let projectStore: ProjectStore
     private let waitPolicy: FileLockWaitPolicy
     private let board: Board
     private let events: any BoardEventSink
     private let queue = DispatchQueue(label: "agent-board.hooks")
+    /// Sessions whose context was just compacted and that have not yet been handed their task back.
+    /// Touched only from `queue`. Deliberately not persisted: the re-brief is worth nothing to a
+    /// session that has since ended, and Agent Board restarting mid-compaction loses nothing else.
+    nonisolated(unsafe) private var awaitingReBrief: Set<String> = []
 
     public static let blockingNotificationTypes: Set<String> = ["permission_prompt", "agent_needs_input"]
 
     private enum FollowUp {
-        case notify(title: String, body: String)
+        case notify(projectId: String, sessionId: String?, title: String, body: String)
         case orchestratorTurnEnded(projectId: String, sessionId: String)
         case reportQueued(projectId: String)
+        case orchestratorCompacted(projectId: String, sessionId: String, manual: Bool)
     }
 
     /// A write whose file another live session holds. Carried out of `process` so the wait happens
@@ -43,6 +50,9 @@ public final class StoreHookSink: HookSink {
         static let none = Outcome()
         static func follow(_ followUps: [FollowUp]) -> Outcome { Outcome(followUps: followUps) }
         static func deny(_ decision: HookDecision) -> Outcome { Outcome(decision: decision) }
+        static func respond(_ decision: HookDecision, _ followUps: [FollowUp] = []) -> Outcome {
+            Outcome(followUps: followUps, decision: decision)
+        }
         static func wait(_ wait: LockWait) -> Outcome { Outcome(lockWait: wait) }
     }
 
@@ -50,12 +60,14 @@ public final class StoreHookSink: HookSink {
         hookEvents = HookEventStore(db)
         grants = TokenGrantStore(db)
         sessions = SessionStore(db)
+        projects = ProjectStore(db)
         tasks = TaskStore(db)
         progress = ProgressStore(db)
         shutdowns = ShutdownOrderStore(db)
         deliveries = ShutdownDeliveryStore(db)
+        notes = NoteStore(db)
+        epics = EpicStore(db)
         locks = FileLockStore(db)
-        projectStore = ProjectStore(db)
         waitPolicy = lockWait
         board = Board(db)
         self.events = events
@@ -69,12 +81,16 @@ public final class StoreHookSink: HookSink {
         }
         for followUp in outcome.followUps {
             switch followUp {
-            case .notify(let title, let body):
-                await events.notify(title: title, body: body)
+            case .notify(let projectId, let sessionId, let title, let body):
+                await events.notify(
+                    projectId: projectId, sessionId: sessionId, title: title, body: body
+                )
             case .orchestratorTurnEnded(let projectId, let sessionId):
                 await events.orchestratorTurnEnded(projectId: projectId, sessionId: sessionId)
             case .reportQueued(let projectId):
                 await events.reportQueued(projectId: projectId)
+            case .orchestratorCompacted(let projectId, let sessionId, let manual):
+                await events.orchestratorCompacted(projectId: projectId, sessionId: sessionId, manual: manual)
             }
         }
         if let wait = outcome.lockWait {
@@ -100,7 +116,7 @@ public final class StoreHookSink: HookSink {
         guard identity.scope == .worker, !sessionId.isEmpty else { return nil }
         guard let session = try? sessions.get(sessionId), session.role == .worker else { return nil }
         guard session.worktreePath == nil else { return nil }
-        guard let project = try? projectStore.get(session.projectId) else { return nil }
+        guard let project = try? projects.get(session.projectId) else { return nil }
         guard let path = FileLockPolicy.key(filePath: event.toolFilePath, repoPath: project.repoPath)
         else { return nil }
         return LockWait(
@@ -113,7 +129,7 @@ public final class StoreHookSink: HookSink {
     private func isSharedWorker(_ identity: TokenIdentity, sessionId: String) -> Bool {
         guard identity.scope == .worker, !sessionId.isEmpty else { return false }
         guard let session = try? sessions.get(sessionId),
-              let project = try? projectStore.get(session.projectId)
+              let project = try? projects.get(session.projectId)
         else { return false }
         return SharedCheckoutGroup.isMember(session, of: project)
     }
@@ -133,7 +149,7 @@ public final class StoreHookSink: HookSink {
         case .restoreScoped(let paths):
             let restore = SharedCheckoutGuard.Violation.restore
             guard let session = try? sessions.get(sessionId),
-                  let project = try? projectStore.get(session.projectId)
+                  let project = try? projects.get(session.projectId)
             else { return (restore.gitCommand, restore.reason) }
             let held = Set(CommitScope.paths((try? locks.held(projectId: session.projectId)) ?? [], sessionId: sessionId))
             let outside = paths.filter { path in
@@ -195,7 +211,12 @@ public final class StoreHookSink: HookSink {
                 try? sessions.setState(wait.sessionId, .running)
             }
             // The waited seconds are not idleness, so they do not carry into the next idle window.
-            try? sessions.recordActivity(wait.sessionId, at: .nowMillis, lastTool: nil)
+            // On success the write itself now starts, which is what `beginToolCall` records.
+            if acquired {
+                try? sessions.beginToolCall(wait.sessionId, at: .nowMillis, tool: nil)
+            } else {
+                try? sessions.recordActivity(wait.sessionId, at: .nowMillis, lastTool: nil)
+            }
             guard !acquired else {
                 if let taskId = wait.taskId {
                     _ = try? progress.append(
@@ -223,7 +244,7 @@ public final class StoreHookSink: HookSink {
     private func windDownToDeliver(sessionId: String, identity: TokenIdentity) -> ShutdownOrder? {
         guard identity.scope == .worker, !sessionId.isEmpty else { return nil }
         guard let order = (try? shutdowns.outstanding(projectId: identity.projectId)) ?? nil else { return nil }
-        let taskId = (try? sessions.get(sessionId))?.taskId ?? identity.taskId
+        let taskId = projectSession(sessionId, identity: identity)?.taskId ?? identity.taskId
         let claimed = (try? deliveries.claimDelivery(
             orderId: order.id, sessionId: sessionId, taskId: taskId, via: .hook
         )) ?? false
@@ -237,6 +258,95 @@ public final class StoreHookSink: HookSink {
         return order
     }
 
+    /// `PreCompact`'s own response cannot carry context: per the hook reference its only decision
+    /// field is a top-level `decision: "block"`, which would block the compaction itself, and it is
+    /// not one of the events that accept `hookSpecificOutput.additionalContext`. So the brief is
+    /// armed here and delivered on the session's next `PostToolUse`, which does accept it and fires
+    /// within one tool call of the compacted session resuming.
+    private func preCompact(_ event: HookEvent, session: AgentSession, taskId: String?) -> Outcome {
+        guard session.role == .worker, let taskId else { return .none }
+        awaitingReBrief.insert(session.sessionId)
+        let trigger = event.compactTrigger == "manual" ? "manually" : "automatically"
+        _ = try? progress.append(
+            taskId: taskId, sessionId: session.sessionId, kind: .status,
+            text: "Context compacted \(trigger); re-sending the task brief."
+        )
+        return .none
+    }
+
+    private func reBrief(session: AgentSession, taskId: String?) -> String? {
+        guard let taskId, let task = try? tasks.get(taskId) else { return nil }
+        let epic = task.epicId.flatMap { try? epics.get($0) } ?? nil
+        let injected = (try? notes.notesForSpawn(
+            projectId: task.projectId, taskId: taskId, epicId: task.epicId
+        )) ?? SpawnNotes()
+        return OpeningPrompt.postCompactionBrief(
+            task: task,
+            branch: session.branch ?? TaskStore.branchName(for: taskId),
+            epicGoal: epic?.goal,
+            notes: injected
+        )
+    }
+
+    /// `PreCompact` carries the trigger; the `SessionStart` that follows it does not. An unreadable
+    /// or missing row reads as manual, because the cost of re-orienting a session that did not need
+    /// it is one wasted turn, and the cost of skipping it is a session that sits idle forever.
+    private func lastCompactTrigger(sessionId: String) -> String? {
+        guard let row = try? hookEvents.mostRecent(sessionId: sessionId, event: "PreCompact"),
+              let data = row.payload.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return object["trigger"] as? String
+    }
+
+    /// `/clear` ends the session and starts a new one under a new id, and the fork payload does not
+    /// name its parent. The grant is the only link back, so an unknown session id arriving on a live
+    /// grant bound to a known session is the fork signal. The old row keeps its state and its spend —
+    /// the fork writes its own transcript, and metering reads transcripts.
+    private func adoptFork(newSessionId: String, identity: TokenIdentity) {
+        guard let priorId = identity.sessionId, priorId != newSessionId,
+              (try? sessions.get(newSessionId)) == nil,
+              let prior = try? sessions.get(priorId),
+              prior.projectId == identity.projectId,
+              prior.role.rawValue == identity.scope.rawValue
+        else { return }
+
+        let adopted = AgentSession(
+            sessionId: newSessionId,
+            shortId: prior.shortId,
+            projectId: identity.projectId,
+            taskId: prior.taskId,
+            role: prior.role,
+            worktreePath: prior.worktreePath,
+            branch: prior.branch,
+            cwd: prior.cwd,
+            state: .running,
+            attempt: prior.attempt,
+            model: prior.model
+        )
+        guard (try? sessions.insert(adopted)) != nil else { return }
+
+        try? grants.bind(token: identity.token, sessionId: newSessionId)
+        if prior.role == .orchestrator {
+            try? projects.setOrchestratorSession(identity.projectId, sessionId: newSessionId)
+        }
+    }
+
+    /// A hook payload names whatever session id it likes, and the grant in the query string decides
+    /// the project. Every session lookup here goes through this, so another project's session reads
+    /// as absent rather than as one this grant may write to.
+    private func projectSession(_ sessionId: String, identity: TokenIdentity) -> AgentSession? {
+        guard let session = try? sessions.get(sessionId), session.projectId == identity.projectId else { return nil }
+        return session
+    }
+
+    /// The tool is about to run, so the session is not idle for however long it takes. Only ever
+    /// called on a `PreToolUse` that passed: a denied call never runs and must buy no grace.
+    private func beginToolCall(_ event: HookEvent, identity: TokenIdentity, sessionId: String) {
+        guard let session = projectSession(sessionId, identity: identity) else { return }
+        try? sessions.beginToolCall(session.sessionId, at: .nowMillis, tool: event.toolName)
+    }
+
     private func process(_ event: HookEvent, identity: TokenIdentity) -> Outcome {
         let sessionId = event.sessionId
         _ = try? hookEvents.append(sessionId: sessionId, event: event.name, payload: event.rawJSON)
@@ -247,7 +357,7 @@ public final class StoreHookSink: HookSink {
             ) {
                 // The deny is decided before any lookup; the row is best-effort so an unrecognized
                 // session can never turn a block into a pass.
-                let session = try? sessions.get(sessionId)
+                let session = projectSession(sessionId, identity: identity)
                 if let taskId = session?.taskId ?? identity.taskId {
                     _ = try? progress.append(
                         taskId: taskId,
@@ -273,17 +383,23 @@ public final class StoreHookSink: HookSink {
                 return .deny(.deny(ShutdownOrder.windDownOrder(reason: order.reason, via: .hook)))
             }
             if FileLockPolicy.locks(toolName: event.toolName), let request = lockRequest(event, identity: identity, sessionId: sessionId) {
-                return claim(request)
+                let outcome = claim(request)
+                if outcome.lockWait == nil { beginToolCall(event, identity: identity, sessionId: sessionId) }
+                return outcome
             }
+            beginToolCall(event, identity: identity, sessionId: sessionId)
             return .none
         }
 
         guard !sessionId.isEmpty else { return .none }
 
+        let known = try? sessions.get(sessionId)
+        if let known, known.projectId != identity.projectId { return .none }
         if identity.sessionId == nil {
             try? grants.bind(token: identity.token, sessionId: sessionId)
         }
-        guard let session = try? sessions.get(sessionId) else { return .none }
+        adoptFork(newSessionId: sessionId, identity: identity)
+        guard let session = projectSession(sessionId, identity: identity) else { return .none }
         let taskId = session.taskId ?? identity.taskId
 
         switch event.name {
@@ -292,9 +408,19 @@ public final class StoreHookSink: HookSink {
             if let path = event.transcriptPath {
                 try? sessions.setTranscriptPath(sessionId, path)
             }
+            // A compaction keeps the session id and writes no `SessionEnd` (measured, SPEC §2), so
+            // nothing is rebound or re-pinned here. A worker's compaction is handled instead by
+            // `PreCompact` arming a re-brief that `PostToolUse` delivers.
+            if event.sessionSource == "compact", session.role == .orchestrator {
+                return .follow([.orchestratorCompacted(
+                    projectId: session.projectId,
+                    sessionId: sessionId,
+                    manual: lastCompactTrigger(sessionId: sessionId) != "auto"
+                )])
+            }
 
         case "PostToolUse":
-            try? sessions.recordActivity(sessionId, at: .nowMillis, lastTool: event.toolName)
+            try? sessions.endToolCall(sessionId, at: .nowMillis, tool: event.toolName)
             if let taskId {
                 if let task = try? tasks.get(taskId), task.blocked {
                     try? board.unblock(taskId: taskId, sessionId: sessionId)
@@ -306,18 +432,35 @@ public final class StoreHookSink: HookSink {
             if [.starting, .idle, .blocked].contains(session.state) {
                 try? sessions.setState(sessionId, .running)
             }
+            if awaitingReBrief.remove(sessionId) != nil, let brief = reBrief(session: session, taskId: taskId) {
+                return .respond(.context(brief))
+            }
+
+        case "SubagentStop":
+            // A subagent can run for many minutes without the parent making a tool call of its own,
+            // so without this the idle clock reads the session as asleep while it is working.
+            try? sessions.recordActivity(sessionId, at: .nowMillis, lastTool: session.lastTool)
+
+        case "PreCompact":
+            return preCompact(event, session: session, taskId: taskId)
 
         case "Notification":
             guard let type = event.notificationType else { return .none }
             if Self.blockingNotificationTypes.contains(type) || type.hasPrefix("elicitation") {
                 let reason = event.notificationMessage ?? type
-                var followUps: [FollowUp] = [.notify(title: "Agent needs input", body: reason)]
-                if let taskId {
-                    if (try? board.block(taskId: taskId, sessionId: sessionId, reason: reason)) != nil {
-                        followUps.append(.reportQueued(projectId: session.projectId))
-                    }
+                var followUps: [FollowUp] = []
+                if let taskId, (try? board.block(taskId: taskId, sessionId: sessionId, reason: reason)) != nil {
+                    followUps.append(.reportQueued(projectId: session.projectId))
                 } else {
+                    // Nothing was marked blocked, so the project's attention signal cannot see this
+                    // and will not raise the banner that owns every blocked worker.
                     try? sessions.setState(sessionId, .blocked)
+                    followUps.append(
+                        .notify(
+                            projectId: session.projectId, sessionId: sessionId,
+                            title: "Agent needs input", body: reason
+                        )
+                    )
                 }
                 return .follow(followUps)
             } else if type == "idle_prompt", session.state.isActive {
@@ -325,6 +468,9 @@ public final class StoreHookSink: HookSink {
             }
 
         case "Stop":
+            // The turn is over, so nothing it launched is still running. This is what stops a
+            // `PostToolUse` lost to an interrupt from leaving a grace window open behind it.
+            try? sessions.clearToolCalls(sessionId)
             if session.role == .orchestrator {
                 return .follow([.orchestratorTurnEnded(projectId: session.projectId, sessionId: sessionId)])
             }
@@ -336,6 +482,7 @@ public final class StoreHookSink: HookSink {
             }
 
         case "SessionEnd":
+            try? sessions.clearToolCalls(sessionId)
             if session.state != .completed && session.state != .failed {
                 try? sessions.setState(sessionId, .stopped, endedAt: .nowMillis)
             }

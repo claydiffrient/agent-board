@@ -136,9 +136,9 @@ public enum IntegrationPlan {
         A branch listed above as shared carries several tasks' commits interleaved on one ref: \
         those tasks ran co-resident in the project's own checkout rather than in a worktree of \
         their own. Merging it brings all of their work in at once, which is the only way it can be \
-        merged — do not try to separate one task's commits out. Each commit names its task in an \
-        `Agent-Board-Task:` trailer if you need to see who wrote what: \
-        `git log --format='%h %s %(trailers:key=Agent-Board-Task,valueonly)' <branch>`.
+        merged — do not try to separate one task's commits out. Which task made which commit is \
+        recorded in Agent Board's own database rather than in the commit, so git alone cannot tell \
+        you: read it off each task's card.
         """
 
     public static func compose(

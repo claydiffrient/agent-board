@@ -64,16 +64,22 @@ public struct WorktreeManager: Sendable {
     public var repoPath: URL
     public var worktreeRoot: URL
     public var hookSettingsURL: URL
+    /// Deliberately has no default: a manager that cannot say who made a commit must say so at the
+    /// construction site, because the two intents — "this one only does git plumbing" and "nobody
+    /// wired the ledger" — are otherwise the same value and only one of them is correct.
+    public var attribution: CommitAttributionSource
 
     public init(
         repoPath: URL,
         worktreeRoot: URL,
         hookSettingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/settings.json")
+            .appendingPathComponent(".claude/settings.json"),
+        attribution: CommitAttributionSource
     ) {
         self.repoPath = repoPath
         self.worktreeRoot = worktreeRoot
         self.hookSettingsURL = hookSettingsURL
+        self.attribution = attribution
     }
 
     /// Reuses `branch` if it already exists so a retry sees what the previous attempt built.
@@ -140,7 +146,13 @@ public struct WorktreeManager: Sendable {
     /// branch to be checked out: a fast-forward moves the ref directly, and anything else borrows a
     /// temporary worktree that is removed again — with the epic branch kept — either way.
     /// A conflict aborts and leaves the epic branch exactly where it was.
-    public func mergeIntoEpic(taskBranch: String, epicBranch: String, worktreeName: String) throws -> EpicMerge {
+    public func mergeIntoEpic(
+        taskBranch: String,
+        epicBranch: String,
+        taskTitle: String,
+        epicTitle: String,
+        worktreeName: String
+    ) throws -> EpicMerge {
         guard try branchExists(taskBranch) else { return .nothingToMerge }
         guard try branchExists(epicBranch) else {
             throw AgentRuntimeError("cannot merge \(taskBranch): no branch \(epicBranch) in \(repoPath.path)")
@@ -159,7 +171,7 @@ public struct WorktreeManager: Sendable {
 
         let worktree = try createForBranch(name: worktreeName, branch: epicBranch)
         defer { try? remove(path: worktree) }
-        let message = "Merge \(taskBranch) into \(epicBranch)"
+        let message = Self.mergeSubject(taskTitle: taskTitle, epicTitle: epicTitle)
         let merge = try gitRaw(mergeConfig() + ["merge", "--no-ff", "--no-edit", "-m", message, taskBranch], cwd: worktree)
         guard merge.status == 0 else {
             let files = conflictedFiles(in: worktree)
@@ -167,6 +179,20 @@ public struct WorktreeManager: Sendable {
             return .conflicted(files: files)
         }
         return .merged(head: try headCommit(worktree: worktree))
+    }
+
+    /// The merge commit's subject, from titles rather than branch names: this commit lands in the
+    /// history of whatever repository the epic's pull request is opened in, and `agentboard/<id>`
+    /// branch names would publish the task and epic UUIDs there permanently (SPEC §5.2).
+    public static func mergeSubject(taskTitle: String, epicTitle: String) -> String {
+        let task = subjectTitle(taskTitle, fallback: "an untitled task")
+        let epic = subjectTitle(epicTitle, fallback: "an untitled epic")
+        return "Merge \(task) into \(epic)"
+    }
+
+    private static func subjectTitle(_ title: String, fallback: String) -> String {
+        let collapsed = title.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        return collapsed.isEmpty ? fallback : collapsed
     }
 
     private func conflictedFiles(in worktree: URL) -> [String] {

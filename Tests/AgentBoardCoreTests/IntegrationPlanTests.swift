@@ -389,7 +389,7 @@ final class IntegrationPlanTests: XCTestCase {
         )
         XCTAssertFalse(prompt.contains("2. `\(shared)`"), prompt)
         XCTAssertTrue(prompt.contains("one branch shared by 2 tasks: alpha; beta"), prompt)
-        XCTAssertTrue(prompt.contains("Agent-Board-Task:"), prompt)
+        XCTAssertTrue(prompt.contains("recorded in Agent Board's own database"), prompt)
     }
 
     /// A member that put no commit on the shared branch is not claimed as contributing to it, and

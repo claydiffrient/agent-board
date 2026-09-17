@@ -174,7 +174,7 @@ final class FileLockSupervisorTests: XCTestCase {
         XCTAssertNil(
             CapEvaluator.evaluate(
                 totals: .zero, startedAt: current.startedDate, lastActivity: current.lastActivityDate,
-                now: Date(), limits: CapLimits(maxTokens: nil, maxWallClockSeconds: 1800, maxIdleSeconds: 300),
+                awake: .init(now: Date()), limits: CapLimits(maxTokens: nil, maxWallClockSeconds: 1800, maxIdleSeconds: 300),
                 state: current.state
             ),
             "a worker waiting on a file lock breached the idle cap"
@@ -183,7 +183,7 @@ final class FileLockSupervisorTests: XCTestCase {
         let attention = AttentionSelection.needingAttention(
             tasks: try fixture.tasks.list(projectId: fixture.project.id),
             sessions: try fixture.sessions.all(projectId: fixture.project.id),
-            now: Date(),
+            awake: .init(now: Date()),
             stallThreshold: 120
         )
         XCTAssertFalse(
@@ -194,8 +194,10 @@ final class FileLockSupervisorTests: XCTestCase {
 }
 
 private actor SilentEventSink: BoardEventSink {
-    func notify(title: String, body: String) async {}
+    func notify(projectId: String, title: String, body: String) async {}
+    func notify(projectId: String, sessionId: String?, title: String, body: String) async {}
     func orchestratorTurnEnded(projectId: String, sessionId: String) async {}
     func reportQueued(projectId: String) async {}
+    func orchestratorCompacted(projectId: String, sessionId: String, manual: Bool) async {}
     func workerAcknowledgedShutdown(projectId: String, sessionId: String) async {}
 }

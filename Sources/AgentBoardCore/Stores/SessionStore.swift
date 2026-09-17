@@ -107,6 +107,52 @@ public struct SessionStore: Sendable {
         }
     }
 
+    /// `PreToolUse`: a call has started and is running. Starting one is itself activity, and the
+    /// row keeps the *oldest* outstanding start, so a short parallel call cannot shorten the grace
+    /// a long one is relying on.
+    public func beginToolCall(_ sessionId: String, at: Int64, tool: String?) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: """
+                UPDATE agent_session
+                SET last_activity = ?, last_tool = COALESCE(?, last_tool),
+                    tool_started_at = COALESCE(tool_started_at, ?),
+                    tools_in_flight = tools_in_flight + 1
+                WHERE session_id = ?
+                """,
+                arguments: [at, tool, at, sessionId]
+            )
+        }
+    }
+
+    /// `PostToolUse`: one call returned. The start only clears when the last outstanding call does;
+    /// SQLite reads every `SET` expression off the pre-update row, so `<= 1` is that test.
+    public func endToolCall(_ sessionId: String, at: Int64, tool: String?) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: """
+                UPDATE agent_session
+                SET last_activity = ?, last_tool = COALESCE(?, last_tool),
+                    tool_started_at = CASE WHEN tools_in_flight <= 1 THEN NULL ELSE tool_started_at END,
+                    tools_in_flight = MAX(tools_in_flight - 1, 0)
+                WHERE session_id = ?
+                """,
+                arguments: [at, tool, sessionId]
+            )
+        }
+    }
+
+    /// A turn boundary. Nothing the model launched is still running once it has stopped, so this is
+    /// what bounds a `PostToolUse` that never arrived to the turn it went missing in.
+    public func clearToolCalls(_ sessionId: String) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE agent_session SET tool_started_at = NULL, tools_in_flight = 0 WHERE session_id = ?",
+                arguments: [sessionId]
+            )
+        }
+    }
+
     public func updateSpend(
         _ sessionId: String, tokensIn: Int, tokensOut: Int, cacheRead: Int, cacheWrite: Int,
         estCostUSD: Double, model: String?

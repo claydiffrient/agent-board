@@ -112,18 +112,19 @@ public struct ShutdownCounts: Sendable, Equatable {
 /// row states and counts out.
 public enum ShutdownSheetModel {
     /// The grace period is measured from `deliveredAt`, never from `orderedAt`. A worker that was
-    /// enrolled but never handed the order has not failed to answer — it was never asked.
+    /// enrolled but never handed the order has not failed to answer — it was never asked. It is
+    /// also awake time, so a suspended worker is not reported as not responding.
     public static func rowState(
         _ delivery: ShutdownDelivery,
         session: AgentSession?,
         graceSeconds: Int,
-        now: Int64
+        awake: AwakeElapsed
     ) -> ShutdownRowState {
         if delivery.isAcknowledged { return .acknowledged }
         guard let session, session.state.isActive else { return .ended }
         if session.state == .blocked { return .waitingOnHuman }
         guard let deliveredAt = delivery.deliveredAt else { return .ordered }
-        return now - deliveredAt >= Int64(graceSeconds) * 1000 ? .notResponding : .closing
+        return awake.millisAwake(since: deliveredAt) >= Int64(graceSeconds) * 1000 ? .notResponding : .closing
     }
 
     public static func rows(
@@ -131,13 +132,13 @@ public enum ShutdownSheetModel {
         sessions: [AgentSession],
         taskTitles: [String: String] = [:],
         graceSeconds: Int,
-        now: Int64,
+        awake: AwakeElapsed,
         projectName: String? = nil
     ) -> [ShutdownRow] {
         let bySession = Dictionary(sessions.map { ($0.sessionId, $0) }, uniquingKeysWith: { first, _ in first })
         return deliveries.map { delivery in
             let session = bySession[delivery.sessionId]
-            let state = rowState(delivery, session: session, graceSeconds: graceSeconds, now: now)
+            let state = rowState(delivery, session: session, graceSeconds: graceSeconds, awake: awake)
             return ShutdownRow(
                 sessionId: delivery.sessionId,
                 shortId: session?.shortId,

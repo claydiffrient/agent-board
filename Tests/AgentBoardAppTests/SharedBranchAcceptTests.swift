@@ -69,8 +69,8 @@ final class SharedBranchAcceptTests: XCTestCase {
         XCTAssertEqual(try mergeCommitCount(epic.branch), 1, "the shared branch was merged more than once")
     }
 
-    /// The acceptance criterion in its own right: a co-resident task's commits, selected by their
-    /// `Agent-Board-Task:` trailer, are on the epic branch once the branch is accepted.
+    /// The acceptance criterion in its own right: a co-resident task's commits, selected by the
+    /// commit ledger, are on the epic branch once the branch is accepted.
     func testAnAcceptedCoResidentTasksOwnCommitsLandOnTheEpicBranch() async throws {
         try write("alpha.txt", "a\n")
         try await commit(alpha, paths: ["alpha.txt"], message: "Add alpha")
@@ -269,14 +269,18 @@ final class SharedBranchAcceptTests: XCTestCase {
         try contents.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// What `commit_my_work` does: commit the body verbatim, then record the sha against the task.
     private func commit(_ task: BoardTask, paths: [String], message: String) async throws {
         let outcome = try await ScopedCommitRunner().commit(
             ScopedCommitRequest(
                 repoPath: fixture.repo.path, branch: branch, taskId: task.id, paths: paths,
-                message: CommitAttribution.message(message, taskId: task.id)
+                message: message
             )
         )
-        guard case .committed = outcome else { return XCTFail("\(task.title) did not commit: \(outcome)") }
+        guard case .committed(let sha, _) = outcome else {
+            return XCTFail("\(task.title) did not commit: \(outcome)")
+        }
+        try TaskCommitStore(fixture.db).record(taskId: task.id, sha: sha)
     }
 
     private func attributedCommits(of task: BoardTask, on ref: String? = nil) throws -> [String] {

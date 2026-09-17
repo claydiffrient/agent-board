@@ -37,7 +37,7 @@ public struct TaskBranchFacts: Sendable, Equatable {
     public var everDispatched: Bool
     /// The branch this task shared with its siblings, when it ran in a project's own checkout
     /// rather than a worktree. `branchExists` then describes that branch, which is nobody's alone,
-    /// and every per-task count here is selected by the `Agent-Board-Task` trailer instead.
+    /// and every per-task count here is selected by the commit ledger instead.
     public var sharedBranch: String?
 
     public init(

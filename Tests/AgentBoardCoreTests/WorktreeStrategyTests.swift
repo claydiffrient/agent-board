@@ -245,7 +245,7 @@ final class OpeningPromptPlacementTests: XCTestCase {
 
         XCTAssertTrue(prompt.contains("`git commit` is refused here"), prompt)
         XCTAssertTrue(prompt.contains("commits exactly the files you have written"), prompt)
-        XCTAssertTrue(prompt.contains("tags the commit with your task id"), prompt)
+        XCTAssertTrue(prompt.contains("records the commit as yours"), prompt)
         XCTAssertTrue(prompt.contains("Commit by calling `commit_my_work(message)`"), prompt)
         XCTAssertFalse(
             prompt.contains("1. Commit on the current branch."),

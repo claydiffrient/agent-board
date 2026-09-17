@@ -87,7 +87,7 @@ final class OpeningPromptNoteWritingTests: XCTestCase {
         let note = try f.notes.create(
             projectId: f.project.id, title: "House rules", sections: [("Commits", "Imperative mood.")]
         )
-        try f.notes.pin(note.id, true)
+        try f.notes.attach(noteId: note.id, taskId: task.id)
         let injected = try f.notes.notesForSpawn(projectId: f.project.id, taskId: task.id, epicId: epic.id)
 
         let text = OpeningPrompt.compose(

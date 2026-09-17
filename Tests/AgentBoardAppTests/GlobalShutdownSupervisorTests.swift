@@ -106,11 +106,11 @@ final class GlobalShutdownSupervisorTests: XCTestCase {
         let snapshot = try GlobalShutdownStore(fixture.db).snapshot()
         XCTAssertEqual(snapshot.projectCount, 2)
         XCTAssertEqual(
-            Set(GlobalShutdown.rows(snapshot, now: .nowMillis).map(\.sessionId)),
+            Set(GlobalShutdown.rows(snapshot, awake: .init(nowMillis: .nowMillis)).map(\.sessionId)),
             [alpha.sessionId, beta.sessionId]
         )
         XCTAssertEqual(
-            Set(GlobalShutdown.rows(snapshot, now: .nowMillis).compactMap(\.projectName)),
+            Set(GlobalShutdown.rows(snapshot, awake: .init(nowMillis: .nowMillis)).compactMap(\.projectName)),
             ["Demo", "Busy"]
         )
     }

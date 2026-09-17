@@ -13,12 +13,19 @@ import XCTest
 /// row therefore cannot be inside a collapsible section.
 ///
 /// What it cannot prove: that the row reads "At a Glance", or anything else about the pixels.
-/// SwiftUI draws text into backing layers and `AXIsProcessTrusted()` is false here, so no string is
-/// readable on this machine.
+/// SwiftUI draws text into backing layers, and the accessibility elements it publishes offscreen
+/// carry no label, title or value, so no string is readable on this machine.
 @MainActor
 final class AtAGlanceRowRenderTests: XCTestCase {
+    private var collapse = IsolatedCollapseState()
+
+    override func setUp() {
+        super.setUp()
+        collapse = IsolatedCollapseState()
+    }
+
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: SidebarCollapseState.key)
+        collapse.remove()
         super.tearDown()
     }
 
@@ -39,12 +46,12 @@ final class AtAGlanceRowRenderTests: XCTestCase {
             )
             try workspaces.assign(projectId: project.id, workspaceId: workspace.id)
         }
-        // Read by `SidebarCollapseState.load()` when `MainWindow`'s state initializes, so it has to
-        // be in place before the mount.
-        SidebarCollapseState.save(collapsingEverything ? [alpha.id, beta.id] : [])
+        // Read when `MainWindow`'s state initializes, so it has to be in place before the mount.
+        collapse.state.save(collapsingEverything ? [alpha.id, beta.id] : [])
 
         let host = NSHostingView(
-            rootView: MainWindow().environment(AppEnvironment(db: db, supervisor: RowStubSupervisor()))
+            rootView: MainWindow(collapseState: collapse.state)
+                .environment(AppEnvironment(db: db, supervisor: RowStubSupervisor()))
         )
         NSApplication.shared.setActivationPolicy(.accessory)
         // Borderless and far offscreen: AppKit constrains a `.titled` window back onto a visible
@@ -105,6 +112,8 @@ private final class RowStubSupervisor: WorkerSupervising {
     func worktreeDiffstat(taskId: String) async -> String? { nil }
     func worktreeDiffSummary(taskId: String) async -> DiffSummary? { nil }
     func orchestratorConsole(projectId: String) throws -> OrchestratorConsole { throw StubError.notWired }
+
+    func shellConsole(projectId: String) throws -> ShellConsole { throw StubError.notWired }
     func approve(approvalId: String) async throws {}
     func deny(approvalId: String, reason: String?) async throws {}
     func promote(taskId: String) async throws {}

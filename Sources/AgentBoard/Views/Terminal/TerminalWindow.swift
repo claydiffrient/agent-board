@@ -68,6 +68,11 @@ struct TerminalHostView: NSViewRepresentable {
     let executable: String
     let arguments: [String]
     let currentDirectory: String
+    /// Attach keeps the board variables an agent session is entitled to; a human shell passes
+    /// `ChildEnvironment.forHumanShell`, which strips them.
+    var environment: [String] = ChildEnvironment.forTerminal()
+    /// A leading `-` makes the child a login shell. Nil for anything that is not one.
+    var execName: String? = nil
     let onExit: @MainActor (Int32?) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -84,8 +89,8 @@ struct TerminalHostView: NSViewRepresentable {
         terminal.startProcess(
             executable: executable,
             args: arguments,
-            environment: Self.childEnvironment(),
-            execName: nil,
+            environment: environment,
+            execName: execName,
             currentDirectory: currentDirectory
         )
         DispatchQueue.main.async {
@@ -100,6 +105,8 @@ struct TerminalHostView: NSViewRepresentable {
         coordinator.terminate()
     }
 
+    /// What an agent session's terminal gets. `OrchestratorConsole` launches its own process and
+    /// reads this rather than mounting the view.
     static func childEnvironment() -> [String] {
         ChildEnvironment.forTerminal()
     }

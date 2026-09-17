@@ -32,6 +32,8 @@ protocol WorkerSupervising: AnyObject {
     func worktreeDiffSummary(taskId: String) async -> DiffSummary?
     /// Creates the project's console on first call and keeps it alive; does not start the process.
     func orchestratorConsole(projectId: String) throws -> OrchestratorConsole
+    /// Creates the project's plain shell on first call and keeps it alive; does not start the shell.
+    func shellConsole(projectId: String) throws -> ShellConsole
     /// Resolves the approval; a spawn approval then runs the spawn path for its task.
     func approve(approvalId: String) async throws
     func deny(approvalId: String, reason: String?) async throws
@@ -69,4 +71,11 @@ protocol WorkerSupervising: AnyObject {
     func stopOrchestratorConsoles()
     /// Wind-down counts per project id, so the progress sheet observes rather than polls.
     var shutdownProgress: [String: ShutdownProgress] { get }
+    /// The project the human has open, or nil for At a Glance. Attention banners for it are
+    /// suppressed while Agent Board is frontmost.
+    func focusChanged(projectId: String?)
+}
+
+extension WorkerSupervising {
+    func focusChanged(projectId: String?) {}
 }

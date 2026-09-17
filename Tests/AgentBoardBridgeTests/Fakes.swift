@@ -6,16 +6,17 @@ import XCTest
 
 actor RecordingEventSink: BoardEventSink {
     enum Event: Equatable {
-        case notify(title: String, body: String)
+        case notify(projectId: String, title: String, body: String)
         case orchestratorTurnEnded(projectId: String, sessionId: String)
         case reportQueued(projectId: String)
+        case orchestratorCompacted(projectId: String, sessionId: String, manual: Bool)
         case workerAcknowledgedShutdown(projectId: String, sessionId: String)
     }
 
     private(set) var events: [Event] = []
 
-    func notify(title: String, body: String) async {
-        events.append(.notify(title: title, body: body))
+    func notify(projectId: String, title: String, body: String) async {
+        events.append(.notify(projectId: projectId, title: title, body: body))
     }
 
     func orchestratorTurnEnded(projectId: String, sessionId: String) async {
@@ -24,6 +25,10 @@ actor RecordingEventSink: BoardEventSink {
 
     func reportQueued(projectId: String) async {
         events.append(.reportQueued(projectId: projectId))
+    }
+
+    func orchestratorCompacted(projectId: String, sessionId: String, manual: Bool) async {
+        events.append(.orchestratorCompacted(projectId: projectId, sessionId: sessionId, manual: manual))
     }
 
     func workerAcknowledgedShutdown(projectId: String, sessionId: String) async {
@@ -67,6 +72,7 @@ struct BridgeFixture {
     var approvals: ApprovalStore { ApprovalStore(db) }
     var notes: NoteStore { NoteStore(db) }
     var progress: ProgressStore { ProgressStore(db) }
+    var hookEvents: HookEventStore { HookEventStore(db) }
     var board: Board { Board(db) }
 
     var orchestratorIdentity: TokenIdentity {
@@ -126,11 +132,11 @@ struct BridgeFixture {
     @discardableResult
     func session(
         _ id: String, role: SessionRole = .worker, state: SessionState = .running, taskId: String? = nil,
-        worktreePath: String? = nil, cwd: String? = nil
+        worktreePath: String? = nil, cwd: String? = nil, branch: String? = nil
     ) throws -> AgentSession {
         let session = AgentSession(
             sessionId: id, projectId: project.id, taskId: taskId, role: role,
-            worktreePath: worktreePath, cwd: cwd ?? worktreePath ?? "/tmp", state: state
+            worktreePath: worktreePath, branch: branch, cwd: cwd ?? worktreePath ?? "/tmp", state: state
         )
         try sessions.insert(session)
         return session
@@ -138,8 +144,21 @@ struct BridgeFixture {
 
     /// A worker co-resident in the project's own checkout: no worktree, standing in the repo.
     @discardableResult
-    func sharedSession(_ id: String, taskId: String, state: SessionState = .running) throws -> AgentSession {
-        try session(id, role: .worker, state: state, taskId: taskId, cwd: project.repoPath)
+    func sharedSession(
+        _ id: String, taskId: String, state: SessionState = .running,
+        branch: String = SharedCheckoutGroup.branch(epicId: nil)
+    ) throws -> AgentSession {
+        try session(id, role: .worker, state: state, taskId: taskId, cwd: project.repoPath, branch: branch)
+    }
+
+    /// A worker in its own worktree, recorded the way a spawn records one: a path of its own and
+    /// the task branch cut for it.
+    @discardableResult
+    func worktreeSession(_ id: String, taskId: String, state: SessionState = .running) throws -> AgentSession {
+        try session(
+            id, role: .worker, state: state, taskId: taskId,
+            worktreePath: "/tmp/demo-worktrees/\(taskId)", branch: TaskStore.branchName(for: taskId)
+        )
     }
 
     @discardableResult
@@ -158,7 +177,7 @@ struct BridgeFixture {
         return epic
     }
 
-    func workerIdentity(sessionId: String, taskId: String) -> TokenIdentity {
+    func workerIdentity(sessionId: String, taskId: String?) -> TokenIdentity {
         TokenIdentity(token: "worker-\(sessionId)", scope: .worker, projectId: project.id, sessionId: sessionId, taskId: taskId)
     }
 

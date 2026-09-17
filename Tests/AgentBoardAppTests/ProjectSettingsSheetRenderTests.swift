@@ -72,7 +72,7 @@ final class ProjectSettingsSheetRenderTests: XCTestCase {
             mounted.settle()
 
             let titles = mounted.popUpButtons.map(\.title)
-            XCTAssertEqual(mounted.popUpButtons.count, 4, "rendered pop-ups: \(titles)")
+            XCTAssertEqual(mounted.popUpButtons.count, 5, "rendered pop-ups: \(titles)")
             XCTAssertTrue(
                 titles.contains(strategy.title),
                 "no pop-up showed \(strategy.title); the sheet rendered \(titles)"
