@@ -66,6 +66,20 @@ final class SharedBranchDiffTests: XCTestCase {
         try TaskCommitStore(fixture.db).record(taskId: task.id, sha: sha)
     }
 
+    /// Every `WorktreeManager` the supervisor hands out has to be able to attribute a commit —
+    /// there is one factory, and it is the one every caller uses. This fails the moment that factory
+    /// stops wiring the ledger, whatever the caller then does with the manager.
+    func testTheSupervisorsOnlyWorktreeManagerCanAttribute() async throws {
+        try write("alpha.txt", "a\n")
+        try await commit(alpha, paths: ["alpha.txt"], message: "Add alpha")
+
+        let manager = fixture.supervisor.worktreeManager(for: fixture.project)
+        XCTAssertEqual(
+            try manager.commits(taskId: alpha.id, on: branch, since: "main").count, 1,
+            "the supervisor's factory built a manager that cannot attribute commits"
+        )
+    }
+
     func testEachTasksDiffHoldsOnlyItsOwnFiles() async throws {
         try write("alpha.txt", "a\n")
         try await commit(alpha, paths: ["alpha.txt"], message: "Add alpha")
@@ -119,7 +133,8 @@ final class SharedBranchDiffTests: XCTestCase {
     func testAWorktreeTaskStillDiffsItsWholeBranch() async throws {
         let isolated = try makeTask("Isolated")
         let manager = WorktreeManager(
-            repoPath: fixture.repo, worktreeRoot: fixture.supportDir.appendingPathComponent("worktrees")
+            repoPath: fixture.repo, worktreeRoot: fixture.supportDir.appendingPathComponent("worktrees"),
+            attribution: .unattributable
         )
         let path = try manager.create(name: isolated.id, branch: "agentboard/\(isolated.id)", base: "main")
         try "x\n".write(to: path.appendingPathComponent("isolated.txt"), atomically: true, encoding: .utf8)

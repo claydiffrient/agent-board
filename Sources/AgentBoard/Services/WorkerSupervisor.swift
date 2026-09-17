@@ -250,10 +250,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
 
         let attempt = try sessions.forTask(taskId).count + 1
-        let manager = WorktreeManager(
-            repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
-        )
+        let manager = worktreeManager(for: project)
         let epic = try task.epicId.flatMap { try epics.get($0) }
         let placement = WorkerPlacementDecision.decide(
             strategy: project.settings.worktreeStrategy,
@@ -538,10 +535,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.capRefused(reason)
         }
 
-        let manager = WorktreeManager(
-            repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
-        )
+        let manager = worktreeManager(for: project)
         let worktreeName = "epic-\(epicId)"
         _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(worktreeName))
         let epicBranch = epic.branch
@@ -736,7 +730,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// accepted the task, and no git failure may put it back.
     private func mergeIntoEpicBranch(task: BoardTask, project: Project) async {
         guard let epicId = task.epicId, let epic = try? epics.get(epicId) else { return }
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let taskBranch = Self.taskBranchPrefix + task.id
         let epicBranch = epic.branch
         let taskTitle = task.title
@@ -943,11 +937,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
               let project = try? projects.get(task.projectId),
               let taskSessions = try? sessions.forTask(taskId)
         else { return nil }
-        let manager = WorktreeManager(
-            repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot),
-            commitLedger: TaskCommitStore(db)
-        )
+        let manager = worktreeManager(for: project)
         // A session with no worktree of its own ran in the shared checkout; its branch carries other
         // tasks' commits too. Preferred over any worktree row, because a task that was retried into
         // a worktree keeps that row and the shared path still answers for the shared attempt.
@@ -1022,7 +1012,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard let taskId, let task = try? tasks.get(taskId),
               let project = try? projects.get(task.projectId)
         else { return nil }
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let branch = Self.taskBranchPrefix + taskId
         let fallbackBase = mergeTargets(for: task, project: project).last ?? project.baseBranch
         let worktree = (try? sessions.forTask(taskId).compactMap(\.worktreePath))?
@@ -1058,7 +1048,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let paths = taskSessions.compactMap(\.worktreePath).reduce(into: [String]()) { unique, path in
             if !unique.contains(path) { unique.append(path) }
         }
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let branch = Self.taskBranchPrefix + task.id
         let bases = mergeTargets(for: task, project: project)
         let notices = await offMainNotices {
@@ -1071,7 +1061,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// worktree behind, as do sessions whose task record is already gone.
     private func reapOrphanedWorktrees(projectId: String, keeping live: Set<String>) async {
         guard let project = try? projects.get(projectId) else { return }
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let bases = [project.baseBranch] + ((try? epics.list(projectId: projectId)) ?? []).map(\.branch)
         let notices = await offMainNotices {
             Self.reap(manager: manager, keeping: live, bases: bases)
@@ -1084,10 +1074,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return [project.baseBranch, epic.branch]
     }
 
-    private static func worktreeManager(for project: Project) -> WorktreeManager {
+    /// The only way this type builds a `WorktreeManager`. It is always ledger-backed: a second
+    /// spelling here is what made attribution depend on which call site a caller happened to copy.
+    func worktreeManager(for project: Project) -> WorktreeManager {
         WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
+            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot),
+            attribution: .ledger(TaskCommitStore(db))
         )
     }
 

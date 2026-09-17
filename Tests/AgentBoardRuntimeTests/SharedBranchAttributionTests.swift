@@ -33,7 +33,8 @@ final class SharedBranchAttributionTests: XCTestCase {
 
         ledger = TaskCommitStore(try AppDatabase.inMemory())
         manager = WorktreeManager(
-            repoPath: repo, worktreeRoot: sandbox.appendingPathComponent("wt"), commitLedger: ledger
+            repoPath: repo, worktreeRoot: sandbox.appendingPathComponent("wt"),
+            attribution: .ledger(ledger)
         )
         runner = ScopedCommitRunner()
     }
@@ -183,16 +184,43 @@ final class SharedBranchAttributionTests: XCTestCase {
         XCTAssertFalse(try manager.diffstat(taskId: alpha, on: branch, since: "main").contains("human.txt"))
     }
 
-    /// With no ledger at all, every commit reads as nobody's — never as somebody's guess.
-    func testAManagerWithNoLedgerAttributesNothing() async throws {
+    /// A manager with no ledger refuses the question instead of answering that nobody committed
+    /// anything. Both halves matter: an unattributable manager throws where a ledger-backed one
+    /// with no matching rows returns an empty result, so the two can never be confused.
+    func testAManagerWithNoLedgerRefusesToAttribute() async throws {
         try write("alpha/one.txt", "a1\n")
         try await commit(task: alpha, paths: ["alpha/one.txt"], message: "Add alpha one")
 
-        let blind = WorktreeManager(repoPath: repo, worktreeRoot: sandbox.appendingPathComponent("wt"))
-        let attributed = try blind.attributedCommits(on: branch, since: "main")
-        XCTAssertEqual(attributed.count, 1)
-        XCTAssertNil(attributed[0].taskId)
-        XCTAssertEqual(try blind.commits(taskId: alpha, on: branch, since: "main"), [])
+        let blind = WorktreeManager(
+            repoPath: repo, worktreeRoot: sandbox.appendingPathComponent("wt"),
+            attribution: .unattributable
+        )
+        for probe in [
+            { _ = try blind.attributedCommits(on: self.branch, since: "main") },
+            { _ = try blind.commits(taskId: self.alpha, on: self.branch, since: "main") },
+            { _ = try blind.diffstat(taskId: self.alpha, on: self.branch, since: "main") },
+            { _ = try blind.diffSummary(taskId: self.alpha, on: self.branch, since: "main") },
+            { _ = try blind.backfillFromTrailers(on: self.branch, since: "main") },
+        ] as [() throws -> Void] {
+            XCTAssertThrowsError(try probe()) { error in
+                XCTAssertTrue(error is CommitAttributionUnavailable, "got \(error)")
+            }
+        }
+
+        // The same questions on a ledger-backed manager answer, emptily, without throwing.
+        XCTAssertEqual(try manager.commits(taskId: gamma, on: branch, since: "main"), [])
+        XCTAssertEqual(try manager.attributedCommits(on: branch, since: "main").count, 1)
+    }
+
+    /// An unattributable manager refuses even when the branch carries nothing, so the refusal never
+    /// depends on whether git happened to find commits.
+    func testRefusalDoesNotDependOnTheBranchHavingCommits() throws {
+        let blind = WorktreeManager(
+            repoPath: repo, worktreeRoot: sandbox.appendingPathComponent("wt"),
+            attribution: .unattributable
+        )
+        XCTAssertThrowsError(try blind.attributedCommits(on: branch, since: "main"))
+        XCTAssertEqual(try manager.attributedCommits(on: branch, since: "main"), [])
     }
 
     /// Branches committed before the ledger existed carry the old trailer. Reading it back once is

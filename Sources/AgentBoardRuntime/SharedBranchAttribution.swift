@@ -1,6 +1,27 @@
 import AgentBoardCore
 import Foundation
 
+/// Where a `WorktreeManager` looks up which task made a commit.
+///
+/// `.unattributable` is not "the ledger happens to be empty" — it is a manager built for git
+/// plumbing that has no database behind it, and every attribution question it is asked throws
+/// `CommitAttributionUnavailable` instead of answering that nobody committed anything.
+public enum CommitAttributionSource: Sendable {
+    case ledger(TaskCommitStore)
+    case unattributable
+}
+
+/// Raised instead of returning an unattributed answer. A task that genuinely committed nothing
+/// gets an empty result; this is the question being unanswerable, which is a different fact.
+public struct CommitAttributionUnavailable: Error, CustomStringConvertible, Sendable {
+    public var branch: String
+
+    public var description: String {
+        "cannot attribute commits on \(branch): this WorktreeManager was built with "
+            + "`attribution: .unattributable`, so it has no commit ledger to read"
+    }
+}
+
 /// One commit on a shared branch and the task that made it.
 public struct AttributedCommit: Sendable, Equatable {
     public var sha: String
@@ -14,16 +35,26 @@ public struct AttributedCommit: Sendable, Equatable {
 
 extension WorktreeManager {
     /// Every commit on `branch` since `base`, newest first, paired with the task the ledger says
-    /// made it.
+    /// made it. Throws when this manager is `.unattributable`.
     ///
     /// A commit with no ledger row reads as `taskId: nil` — nobody's work. That covers a human's own
     /// commit, a commit made outside Agent Board's commit path, and a commit made before the ledger
     /// existed; `backfillFromTrailers` closes the last of those against a branch's old trailers.
     public func attributedCommits(on branch: String, since base: String) throws -> [AttributedCommit] {
+        let ledger = try requireLedger(branch: branch)
         let shas = try shaRange(on: branch, since: base)
         guard !shas.isEmpty else { return [] }
-        let ledger = try commitLedger?.taskIds(forShas: shas) ?? [:]
-        return shas.map { AttributedCommit(sha: $0, taskId: ledger[$0]) }
+        let known = try ledger.taskIds(forShas: shas)
+        return shas.map { AttributedCommit(sha: $0, taskId: known[$0]) }
+    }
+
+    /// Checked before any git runs, so an unanswerable question fails the same way whether or not
+    /// the branch happens to carry commits.
+    func requireLedger(branch: String) throws -> TaskCommitStore {
+        switch attribution {
+        case .ledger(let store): return store
+        case .unattributable: throw CommitAttributionUnavailable(branch: branch)
+        }
     }
 
     /// Records the task id carried by the `Agent-Board-Task` trailer of any commit on `branch` that
@@ -36,7 +67,7 @@ extension WorktreeManager {
     /// task's trailer cannot be mistaken for that task's work.
     @discardableResult
     public func backfillFromTrailers(on branch: String, since base: String) throws -> Int {
-        guard let ledger = commitLedger else { return 0 }
+        let ledger = try requireLedger(branch: branch)
         let shas = try shaRange(on: branch, since: base)
         guard !shas.isEmpty else { return 0 }
         let known = try ledger.taskIds(forShas: shas)

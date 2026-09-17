@@ -198,7 +198,8 @@ struct SupervisorFixture {
         WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot),
-            hookSettingsURL: supportDir.appendingPathComponent("no-hooks.json")
+            hookSettingsURL: supportDir.appendingPathComponent("no-hooks.json"),
+            attribution: .ledger(TaskCommitStore(db))
         )
     }
 
