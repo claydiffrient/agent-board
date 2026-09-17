@@ -52,14 +52,18 @@ final class SharedBranchDiffTests: XCTestCase {
         try contents.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// What `commit_my_work` does: commit the body verbatim, then record the sha against the task.
     private func commit(_ task: BoardTask, paths: [String], message: String) async throws {
         let outcome = try await ScopedCommitRunner().commit(
             ScopedCommitRequest(
                 repoPath: fixture.repo.path, branch: branch, taskId: task.id, paths: paths,
-                message: CommitAttribution.message(message, taskId: task.id)
+                message: message
             )
         )
-        guard case .committed = outcome else { return XCTFail("\(task.title) did not commit: \(outcome)") }
+        guard case .committed(let sha, _) = outcome else {
+            return XCTFail("\(task.title) did not commit: \(outcome)")
+        }
+        try TaskCommitStore(fixture.db).record(taskId: task.id, sha: sha)
     }
 
     func testEachTasksDiffHoldsOnlyItsOwnFiles() async throws {
@@ -99,7 +103,7 @@ final class SharedBranchDiffTests: XCTestCase {
     }
 
     /// A commit made outside Agent Board — the human's own, or a merge — belongs to no task.
-    func testAnUntaggedCommitOnTheSharedBranchIsNobodysWork() async throws {
+    func testAnUnrecordedCommitOnTheSharedBranchIsNobodysWork() async throws {
         try write("human.txt", "by hand\n")
         try SupervisorFixture.git(["add", "human.txt"], cwd: fixture.repo)
         try SupervisorFixture.git(["commit", "-q", "-m", "A hand-made commit"], cwd: fixture.repo)

@@ -10,6 +10,7 @@ public final class WorkerToolHandler: ToolHandler {
     private let notes: NoteTools
     private let projects: ProjectStore
     private let locks: FileLockStore
+    private let taskCommits: TaskCommitStore
     private let scopedCommits: (any ScopedCommitting)?
     private let events: any BoardEventSink
 
@@ -21,6 +22,7 @@ public final class WorkerToolHandler: ToolHandler {
         notes = NoteTools(db: db)
         projects = ProjectStore(db)
         locks = FileLockStore(db)
+        taskCommits = TaskCommitStore(db)
         self.scopedCommits = scopedCommits
         self.events = events
     }
@@ -113,8 +115,8 @@ public final class WorkerToolHandler: ToolHandler {
     public static let commitDescriptor = ToolDescriptor(
         name: "commit_my_work",
         description: "Commit your work in this shared checkout. Agent Board commits exactly the files you have "
-            + "written — it knows them from the per-file locks your writes took — and tags the commit with your "
-            + "task id, so a reviewer sees your changes apart from the other agents' in this same tree. Another "
+            + "written — it knows them from the per-file locks your writes took — and records the commit as "
+            + "yours, so a reviewer sees your changes apart from the other agents' in this same tree. Another "
             + "agent's edits are never swept in. Use this instead of `git commit`, which is refused here. You may "
             + "call it more than once.",
         inputSchema: ToolSchema.object(
@@ -317,19 +319,21 @@ public final class WorkerToolHandler: ToolHandler {
                 branch: session.branch ?? SharedCheckoutGroup.branch(epicId: task.epicId),
                 taskId: task.id,
                 paths: paths,
-                message: CommitAttribution.message(message, taskId: task.id)
+                message: message
             )
         )
         switch outcome {
         case .committed(let sha, let committed):
+            // The ledger row is written here rather than swept up later: a crash between the commit
+            // and a later pass would lose the attribution with nothing in the commit to rebuild it from.
+            try taskCommits.record(taskId: task.id, sha: sha)
             let text = "Committed \(String(sha.prefix(8))) on \(session.branch ?? "the shared branch"), "
-                + "tagged \(CommitAttribution.trailer(taskId: task.id)), containing only: "
+                + "recorded as this task's, containing only: "
                 + committed.joined(separator: ", ")
             try progress.append(taskId: task.id, sessionId: sessionId, kind: .status, text: text)
             return .json(.object([
                 "commit": .string(sha),
                 "paths": .array(committed.map { .string($0) }),
-                "trailer": .string(CommitAttribution.trailer(taskId: task.id)),
             ]))
         case .nothingToCommit(let claimed):
             return ToolResult(

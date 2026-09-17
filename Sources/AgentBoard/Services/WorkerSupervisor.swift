@@ -99,6 +99,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var lastArchiveSweep: Int64 = 0
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
     @ObservationIgnored private var stallNotified: Set<String> = []
+    /// `<project-id>\u{01}<branch>` for each shared branch whose pre-ledger `Agent-Board-Task`
+    /// trailers have already been read back this run.
+    @ObservationIgnored private var trailersBackfilled: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
     @ObservationIgnored private var shellConsoles: [String: ShellConsole] = [:]
     /// Keyed by setup session id, so a test — or a human stopping a worker mid-setup — can wait on
@@ -891,6 +894,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             case .worktree(let path):
                 return try context.manager.diffstat(worktree: path, against: context.base)
             case .sharedBranch(let branch):
+                context.backfillTrailers(branch: branch)
                 return try context.manager.diffstat(taskId: taskId, on: branch, since: context.base)
             }
         }
@@ -903,6 +907,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             case .worktree(let path):
                 return try context.manager.diffSummary(worktree: path, against: context.base)
             case .sharedBranch(let branch):
+                context.backfillTrailers(branch: branch)
                 return try context.manager.diffSummary(taskId: taskId, on: branch, since: context.base)
             }
         }
@@ -911,7 +916,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private enum DiffSite {
         case worktree(URL)
         /// The task's commits are interleaved with its siblings' on one branch, so the diff is
-        /// selected by the attribution trailer rather than by the branch's whole range.
+        /// selected by the `task_commit` ledger rather than by the branch's whole range.
         case sharedBranch(String)
     }
 
@@ -919,6 +924,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var manager: WorktreeManager
         var site: DiffSite
         var base: String
+        /// Set for the first shared-branch read of a branch this run, which is the one that turns
+        /// pre-ledger `Agent-Board-Task` trailers into rows. Off main, because it runs git.
+        var readTrailers: Bool = false
+
+        func backfillTrailers(branch: String) {
+            guard readTrailers else { return }
+            _ = try? manager.backfillFromTrailers(on: branch, since: base)
+        }
     }
 
     private func diffContext(taskId: String) -> DiffContext? {
@@ -928,14 +941,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         else { return nil }
         let manager = WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
+            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot),
+            commitLedger: TaskCommitStore(db)
         )
         // A session with no worktree of its own ran in the shared checkout; its branch carries other
         // tasks' commits too. Preferred over any worktree row, because a task that was retried into
         // a worktree keeps that row and the shared path still answers for the shared attempt.
         if let shared = taskSessions.last(where: { $0.worktreePath == nil && $0.branch != nil }),
            let branch = shared.branch {
-            return DiffContext(manager: manager, site: .sharedBranch(branch), base: project.baseBranch)
+            return DiffContext(
+                manager: manager, site: .sharedBranch(branch), base: project.baseBranch,
+                readTrailers: trailersBackfilled.insert("\(project.id)\u{01}\(branch)").inserted
+            )
         }
         guard let worktreePath = taskSessions
             .map({ $0.worktreePath ?? $0.cwd })

@@ -9,6 +9,7 @@ final class SharedBranchAttributionTests: XCTestCase {
     private var repo: URL!
     private var manager: WorktreeManager!
     private var runner: ScopedCommitRunner!
+    private var ledger: TaskCommitStore!
 
     private let branch = "agentboard/shared-epic-demo"
     private let alpha = "11111111-1111-1111-1111-111111111111"
@@ -30,7 +31,10 @@ final class SharedBranchAttributionTests: XCTestCase {
         try git(["commit", "-q", "-m", "Initial commit"])
         try git(["checkout", "-q", "-b", branch])
 
-        manager = WorktreeManager(repoPath: repo, worktreeRoot: sandbox.appendingPathComponent("wt"))
+        ledger = TaskCommitStore(try AppDatabase.inMemory())
+        manager = WorktreeManager(
+            repoPath: repo, worktreeRoot: sandbox.appendingPathComponent("wt"), commitLedger: ledger
+        )
         runner = ScopedCommitRunner()
     }
 
@@ -55,14 +59,17 @@ final class SharedBranchAttributionTests: XCTestCase {
         try contents.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// Mirrors `commit_my_work`: the runner commits the body verbatim and the ledger row is written
+    /// in the same step, which is what makes the commit attributable at all.
     @discardableResult
     private func commit(task: String, paths: [String], message: String) async throws -> ScopedCommitOutcome {
-        try await runner.commit(
+        let outcome = try await runner.commit(
             ScopedCommitRequest(
-                repoPath: repo.path, branch: branch, taskId: task, paths: paths,
-                message: CommitAttribution.message(message, taskId: task)
+                repoPath: repo.path, branch: branch, taskId: task, paths: paths, message: message
             )
         )
+        if case .committed(let sha, _) = outcome { try ledger.record(taskId: task, sha: sha) }
+        return outcome
     }
 
     private func filesIn(_ sha: String) throws -> [String] {
@@ -135,18 +142,82 @@ final class SharedBranchAttributionTests: XCTestCase {
         )
     }
 
-    func testEveryCommitCarriesItsTasksTrailer() async throws {
+    /// Attribution must not reach the commit object: on a work repository a task-id trailer is
+    /// permanent and public in whatever repository the pull request lands in.
+    func testTheCommitMessageIsExactlyTheBodyTheAgentGaveAndNamesNoTask() async throws {
         try write("alpha/one.txt", "a1\n")
-        guard case .committed(let sha, _) = try await commit(task: alpha, paths: ["alpha/one.txt"], message: "Add alpha one")
+        let body = "Add alpha one\n\nA second paragraph the agent wrote."
+        guard case .committed(let sha, _) = try await commit(task: alpha, paths: ["alpha/one.txt"], message: body)
         else { return XCTFail("no commit") }
 
         let message = try git(["log", "-1", "--format=%B", sha])
-        XCTAssertTrue(message.contains("Add alpha one"), message)
-        XCTAssertTrue(message.contains("Agent-Board-Task: \(alpha)"), message)
-
-        let parsed = try git(["log", "-1", "--format=%(trailers:key=Agent-Board-Task,valueonly)", sha])
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        XCTAssertEqual(parsed, alpha, "git does not read it back as a real trailer")
+        XCTAssertEqual(message, body)
+        XCTAssertFalse(message.contains(alpha), message)
+        XCTAssertFalse(message.contains("Agent-Board-Task"), message)
+
+        XCTAssertEqual(try ledger.shas(taskId: alpha), [sha])
+        XCTAssertEqual(
+            try manager.attributedCommits(on: branch, since: "main"),
+            [AttributedCommit(sha: sha, taskId: alpha)]
+        )
+    }
+
+    /// A commit nothing recorded is nobody's work: it is dropped from every task's diff rather than
+    /// falling into one of them.
+    func testACommitWithNoLedgerRowBelongsToNoTask() async throws {
+        try write("alpha/one.txt", "a1\n")
+        guard case .committed(let mine, _) = try await commit(task: alpha, paths: ["alpha/one.txt"], message: "Add alpha one")
+        else { return XCTFail("no commit") }
+
+        try write("human.txt", "by hand\n")
+        try git(["add", "human.txt"])
+        try git(["commit", "-q", "-m", "A hand-made commit"])
+        let byHand = try git(["rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        XCTAssertEqual(
+            try manager.attributedCommits(on: branch, since: "main"),
+            [AttributedCommit(sha: byHand, taskId: nil), AttributedCommit(sha: mine, taskId: alpha)]
+        )
+        XCTAssertEqual(try manager.commits(taskId: alpha, on: branch, since: "main"), [mine])
+        XCTAssertFalse(try manager.diffstat(taskId: alpha, on: branch, since: "main").contains("human.txt"))
+    }
+
+    /// With no ledger at all, every commit reads as nobody's — never as somebody's guess.
+    func testAManagerWithNoLedgerAttributesNothing() async throws {
+        try write("alpha/one.txt", "a1\n")
+        try await commit(task: alpha, paths: ["alpha/one.txt"], message: "Add alpha one")
+
+        let blind = WorktreeManager(repoPath: repo, worktreeRoot: sandbox.appendingPathComponent("wt"))
+        let attributed = try blind.attributedCommits(on: branch, since: "main")
+        XCTAssertEqual(attributed.count, 1)
+        XCTAssertNil(attributed[0].taskId)
+        XCTAssertEqual(try blind.commits(taskId: alpha, on: branch, since: "main"), [])
+    }
+
+    /// Branches committed before the ledger existed carry the old trailer. Reading it back once is
+    /// what keeps their per-task diffs working; no commit is rewritten and none gains a trailer.
+    func testTrailersOnPreLedgerCommitsAreReadBackIntoTheLedger() async throws {
+        try write("alpha/one.txt", "a1\n")
+        try git(["add", "alpha/one.txt"])
+        try git(["commit", "-q", "-m", "Add alpha one\n\nAgent-Board-Task: \(alpha)"])
+        let old = try git(["rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        try write("beta/one.txt", "b1\n")
+        guard case .committed(let new, _) = try await commit(task: beta, paths: ["beta/one.txt"], message: "Add beta one")
+        else { return XCTFail("no commit") }
+
+        XCTAssertNil(try manager.attributedCommits(on: branch, since: "main").last?.taskId)
+
+        XCTAssertEqual(try manager.backfillFromTrailers(on: branch, since: "main"), 1)
+        XCTAssertEqual(
+            try manager.attributedCommits(on: branch, since: "main"),
+            [AttributedCommit(sha: new, taskId: beta), AttributedCommit(sha: old, taskId: alpha)]
+        )
+
+        // Idempotent: a second pass finds nothing left to add.
+        XCTAssertEqual(try manager.backfillFromTrailers(on: branch, since: "main"), 0)
+        XCTAssertEqual(try ledger.shas(taskId: alpha), [old])
     }
 
     func testAPerTaskDiffShowsOnlyThatTasksCommits() async throws {

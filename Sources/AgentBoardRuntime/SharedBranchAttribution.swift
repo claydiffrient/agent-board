@@ -13,24 +13,56 @@ public struct AttributedCommit: Sendable, Equatable {
 }
 
 extension WorktreeManager {
-    /// Every commit on `branch` since `base`, newest first, paired with the task its trailer names.
+    /// Every commit on `branch` since `base`, newest first, paired with the task the ledger says
+    /// made it.
     ///
-    /// Read through git's own `%(trailers)` atom rather than `--grep`, because that atom parses only
-    /// genuine trailers in the message's last paragraph: a commit body that quotes another task's
-    /// trailer cannot be mistaken for that task's work.
+    /// A commit with no ledger row reads as `taskId: nil` — nobody's work. That covers a human's own
+    /// commit, a commit made outside Agent Board's commit path, and a commit made before the ledger
+    /// existed; `backfillFromTrailers` closes the last of those against a branch's old trailers.
     public func attributedCommits(on branch: String, since base: String) throws -> [AttributedCommit] {
-        guard try commitExists(base), try commitExists(branch) else { return [] }
-        let format = "--format=%x01%H%x02%(trailers:key=\(CommitAttribution.trailerKey),valueonly)"
+        let shas = try shaRange(on: branch, since: base)
+        guard !shas.isEmpty else { return [] }
+        let ledger = try commitLedger?.taskIds(forShas: shas) ?? [:]
+        return shas.map { AttributedCommit(sha: $0, taskId: ledger[$0]) }
+    }
+
+    /// Records the task id carried by the `Agent-Board-Task` trailer of any commit on `branch` that
+    /// predates the ledger, and returns how many rows it added.
+    ///
+    /// The trailer is no longer written — it published a task's UUID into whatever repository the
+    /// pull request landed in. This reads history back once so a branch that already carries it
+    /// stays attributable; it never writes a trailer, and no commit is rewritten. `%(trailers:key=)`
+    /// parses only genuine trailers in the message's last paragraph, so a body that quotes another
+    /// task's trailer cannot be mistaken for that task's work.
+    @discardableResult
+    public func backfillFromTrailers(on branch: String, since base: String) throws -> Int {
+        guard let ledger = commitLedger else { return 0 }
+        let shas = try shaRange(on: branch, since: base)
+        guard !shas.isEmpty else { return 0 }
+        let known = try ledger.taskIds(forShas: shas)
+        guard known.count < shas.count else { return 0 }
+        let format = "--format=%x01%H%x02%(trailers:key=Agent-Board-Task,valueonly)"
         let output = try gitChecked(["log", format, "--no-merges", "\(base)..\(branch)"], cwd: repoPath).stdout
-        return output.split(separator: "\u{01}").compactMap { record in
+        let rows: [(taskId: String, sha: String)] = output.split(separator: "\u{01}").compactMap { record in
             let halves = record.split(separator: "\u{02}", maxSplits: 1, omittingEmptySubsequences: false)
             let sha = halves[0].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard sha.count == 40 else { return nil }
-            let value = halves.count > 1
-                ? halves[1].split(separator: "\n").first.map(String.init) ?? ""
-                : ""
-            return AttributedCommit(sha: sha, taskId: CommitAttribution.taskId(trailerValue: value))
+            guard sha.count == 40, known[sha] == nil, halves.count > 1 else { return nil }
+            let taskId = halves[1].split(separator: "\n").first
+                .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+            return taskId.isEmpty ? nil : (taskId: taskId, sha: sha)
         }
+        try ledger.record(rows)
+        return rows.count
+    }
+
+    /// The shas on `branch` that `base` does not have, newest first. Empty when either ref is gone.
+    private func shaRange(on branch: String, since base: String) throws -> [String] {
+        guard try commitExists(base), try commitExists(branch) else { return [] }
+        return try gitChecked(["log", "--format=%H", "--no-merges", "\(base)..\(branch)"], cwd: repoPath)
+            .stdout
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count == 40 }
     }
 
     public func commits(taskId: String, on branch: String, since base: String) throws -> [String] {

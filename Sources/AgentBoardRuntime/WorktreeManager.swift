@@ -64,16 +64,21 @@ public struct WorktreeManager: Sendable {
     public var repoPath: URL
     public var worktreeRoot: URL
     public var hookSettingsURL: URL
+    /// Who made which commit on a shared branch. Nil for every path that does not attribute one;
+    /// `attributedCommits` then reports every commit as nobody's.
+    public var commitLedger: TaskCommitStore?
 
     public init(
         repoPath: URL,
         worktreeRoot: URL,
         hookSettingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/settings.json")
+            .appendingPathComponent(".claude/settings.json"),
+        commitLedger: TaskCommitStore? = nil
     ) {
         self.repoPath = repoPath
         self.worktreeRoot = worktreeRoot
         self.hookSettingsURL = hookSettingsURL
+        self.commitLedger = commitLedger
     }
 
     /// Reuses `branch` if it already exists so a retry sees what the previous attempt built.

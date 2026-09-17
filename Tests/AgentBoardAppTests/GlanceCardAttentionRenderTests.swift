@@ -127,16 +127,22 @@ final class GlanceCardAttentionReasonTests: XCTestCase {
 /// changed, or what either now says — the capture is a comparison, not a reading.
 @MainActor
 final class AtAGlanceAttentionLiveTests: XCTestCase {
-    /// The 220-point sidebar, doubled by the backing scale of the capture. Everything past it is
-    /// the detail pane, which is the At a Glance page.
-    private static let detail = 460..<Int.max
+    /// The 220-point sidebar plus its inset; everything past it is the detail pane, which is the At
+    /// a Glance page. In window points, not capture pixels.
+    ///
+    /// This was the pixel constant `460..<Int.max`. The capture scale on a Mac with no display is
+    /// neither 2 nor stable across a session, and above 2 that constant starts inside the sidebar —
+    /// whose badge changes with the same approval this page is watching. See `Capture.columns(_:)`.
+    private static let detail = 230..<Int.max
+
+    private var collapse = IsolatedCollapseState()
 
     private func mount(_ db: AppDatabase) -> OffscreenMount {
-        OffscreenMount(MainWindow().environment(renderEnvironment(db: db)))
+        OffscreenMount(MainWindow(collapseState: collapse.state).environment(renderEnvironment(db: db)))
     }
 
     private func detailDiff(_ a: Capture, _ b: Capture) -> Int {
-        a.diff(b, columns: Self.detail).count
+        a.diff(b, columns: a.columns(Self.detail)).count
     }
 
     private func register(_ db: AppDatabase, _ name: String) throws -> Project {
@@ -146,8 +152,13 @@ final class AtAGlanceAttentionLiveTests: XCTestCase {
         )
     }
 
+    override func setUp() {
+        super.setUp()
+        collapse = IsolatedCollapseState()
+    }
+
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: SidebarCollapseState.key)
+        collapse.remove()
         super.tearDown()
     }
 
@@ -155,13 +166,13 @@ final class AtAGlanceAttentionLiveTests: XCTestCase {
     func testTwoMountsOfTheSameQuietPageAreIdentical() throws {
         let db = try AppDatabase.inMemory()
         _ = try register(db, "Alpha")
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
         let first = mount(db)
         let second = mount(db)
         defer { first.close(); second.close() }
         XCTAssertEqual(
-            detailDiff(try first.capture(columns: Self.detail), try second.capture(columns: Self.detail)), 0,
+            detailDiff(try first.capture(points: Self.detail), try second.capture(points: Self.detail)), 0,
             "the page must render deterministically"
         )
     }
@@ -170,24 +181,24 @@ final class AtAGlanceAttentionLiveTests: XCTestCase {
         let db = try AppDatabase.inMemory()
         let alpha = try register(db, "Alpha")
         _ = try register(db, "Beta")
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
         let page = mount(db)
         defer { page.close() }
-        let quiet = try page.capture(columns: Self.detail)
+        let quiet = try page.capture(points: Self.detail)
 
         let approval = try ApprovalStore(db).create(
             projectId: alpha.id, kind: .spawn, taskId: nil, epicId: nil,
             requestedBy: "orchestrator", reason: "spawn a worker"
         )
         XCTAssertGreaterThan(
-            detailDiff(quiet, try page.capture(columns: Self.detail) { self.detailDiff(quiet, $0) > 0 }), 0,
+            detailDiff(quiet, try page.capture(points: Self.detail) { self.detailDiff(quiet, $0) > 0 }), 0,
             "a pending approval must reach the page, which is what the review-column proxy missed"
         )
 
         try ApprovalStore(db).resolve(approval.id, .denied)
         XCTAssertEqual(
-            detailDiff(quiet, try page.capture(columns: Self.detail) { self.detailDiff(quiet, $0) == 0 }), 0,
+            detailDiff(quiet, try page.capture(points: Self.detail) { self.detailDiff(quiet, $0) == 0 }), 0,
             "resolving the approval must restore the quiet page exactly"
         )
     }
@@ -206,13 +217,13 @@ final class AtAGlanceAttentionLiveTests: XCTestCase {
             )
             return db
         }
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
         let first = mount(try board(waiting: 0))
         let second = mount(try board(waiting: 1))
         defer { first.close(); second.close() }
         XCTAssertGreaterThan(
-            detailDiff(try first.capture(columns: Self.detail), try second.capture(columns: Self.detail)), 0,
+            detailDiff(try first.capture(points: Self.detail), try second.capture(points: Self.detail)), 0,
             "the same headline over a differently-marked card must not render identically"
         )
     }

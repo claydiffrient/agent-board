@@ -11,8 +11,15 @@ struct MainWindow: View {
     @State private var settingsProject: Project?
     @State private var workspaceEdit: WorkspaceEdit?
     @State private var workspaceToDelete: Workspace?
-    @State private var collapsed = SidebarCollapseState.load()
+    @State private var collapsed: Set<String>
     @State private var errorMessage: String?
+
+    private let collapseState: SidebarCollapseState
+
+    init(collapseState: SidebarCollapseState = .standard) {
+        self.collapseState = collapseState
+        _collapsed = State(initialValue: collapseState.load())
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -207,7 +214,7 @@ struct MainWindow: View {
                 } else {
                     collapsed.insert(sectionId)
                 }
-                SidebarCollapseState.save(collapsed)
+                collapseState.save(collapsed)
             }
         )
     }
@@ -243,7 +250,7 @@ struct MainWindow: View {
         do {
             try WorkspaceStore(env.db).delete(workspace.id)
             collapsed.remove(workspace.id)
-            SidebarCollapseState.save(collapsed)
+            collapseState.save(collapsed)
         } catch {
             errorMessage = errorText(error)
         }
