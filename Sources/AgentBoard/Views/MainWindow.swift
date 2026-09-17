@@ -113,7 +113,7 @@ struct MainWindow: View {
                 }
                 .padding(8)
                 NotificationsOffNotice()
-                AccountUsageFooter()
+                AccountUsageFooter(model: env.accountUsage)
             }
         }
         .overlay {
