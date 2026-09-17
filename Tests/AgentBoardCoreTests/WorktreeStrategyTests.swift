@@ -253,6 +253,24 @@ final class OpeningPromptPlacementTests: XCTestCase {
         )
     }
 
+    func testTheSharedPromptNamesEveryGitCommandThatIsRefusedInTheCheckout() {
+        let prompt = sharedPrompt()
+        for command in ["stash", "checkout", "switch", "reset", "clean", "rm", "merge", "rebase", "pull"] {
+            XCTAssertTrue(prompt.contains("`git \(command)`"), "the prompt does not mention `git \(command)`")
+        }
+        XCTAssertTrue(prompt.contains("git restore -- <path>"), prompt)
+        XCTAssertTrue(prompt.contains("locked"), prompt)
+    }
+
+    func testAWorktreePromptSaysNothingAboutRefusedGitCommands() {
+        let prompt = OpeningPrompt.compose(
+            task: task(), branch: "agentboard/t1", attempt: 1, placement: .worktree,
+            workingDirectory: "/repos/wt"
+        )
+        XCTAssertFalse(prompt.contains("`git stash`"), prompt)
+        XCTAssertFalse(prompt.contains("refused"), prompt)
+    }
+
     func testAnUnknownDirectoryDegradesToAPhraseRatherThanAnEmptyBacktickPair() {
         let prompt = sharedPrompt(directory: nil)
 

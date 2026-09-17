@@ -118,6 +118,33 @@ public final class StoreHookSink: HookSink {
         return SharedCheckoutGroup.isMember(session, of: project)
     }
 
+    /// The reason to refuse a shared worker's git command, or nil when the command is the one
+    /// allowed form: `git restore -- <paths>` where every path is one this session's own writes
+    /// have locked. The lock store is consulted here rather than in the guard, which is in a target
+    /// with no database.
+    private func sharedCheckoutDenial(
+        _ verdict: SharedCheckoutGuard.Verdict, sessionId: String
+    ) -> (command: String, reason: String)? {
+        switch verdict {
+        case .allow:
+            return nil
+        case .deny(let violation):
+            return (violation.gitCommand, violation.reason)
+        case .restoreScoped(let paths):
+            let restore = SharedCheckoutGuard.Violation.restore
+            guard let session = try? sessions.get(sessionId),
+                  let project = try? projectStore.get(session.projectId)
+            else { return (restore.gitCommand, restore.reason) }
+            let held = Set(CommitScope.paths((try? locks.held(projectId: session.projectId)) ?? [], sessionId: sessionId))
+            let outside = paths.filter { path in
+                guard let key = FileLockPolicy.key(filePath: path, repoPath: project.repoPath) else { return true }
+                return !held.contains(key)
+            }
+            guard !outside.isEmpty else { return nil }
+            return (restore.gitCommand, SharedCheckoutGuard.restoreOutOfScopeReason(outside))
+        }
+    }
+
     private func claim(_ request: LockWait) -> Outcome {
         guard let outcome = try? locks.acquire(
             projectId: request.projectId, path: request.path,
@@ -231,15 +258,16 @@ public final class StoreHookSink: HookSink {
                 }
                 return .deny(.deny(violation.reason(for: identity.scope)))
             }
-            if SharedCheckoutGuard.deniesCommit(toolName: event.toolName, command: event.toolCommand),
-               isSharedWorker(identity, sessionId: sessionId) {
+            let verdict = SharedCheckoutGuard.inspect(toolName: event.toolName, command: event.toolCommand)
+            if verdict != .allow, isSharedWorker(identity, sessionId: sessionId),
+               let denial = sharedCheckoutDenial(verdict, sessionId: sessionId) {
                 if let taskId = (try? sessions.get(sessionId))?.taskId ?? identity.taskId {
                     _ = try? progress.append(
                         taskId: taskId, sessionId: sessionId, kind: .error,
-                        text: "Blocked `git commit` in the shared checkout: \(event.toolCommand ?? "")"
+                        text: "Blocked `git \(denial.command)` in the shared checkout: \(event.toolCommand ?? "")"
                     )
                 }
-                return .deny(.deny(SharedCheckoutGuard.commitReason))
+                return .deny(.deny(denial.reason))
             }
             if let order = windDownToDeliver(sessionId: sessionId, identity: identity) {
                 return .deny(.deny(ShutdownOrder.windDownOrder(reason: order.reason, via: .hook)))
