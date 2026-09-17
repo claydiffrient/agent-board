@@ -9,9 +9,11 @@ enum AppComposition {
             ?? Wiring.appSupportDir.appendingPathComponent("agentboard.sqlite")
         do {
             let db = try AppDatabase.open(at: url)
-            let supervisor = Wiring.makeSupervisor(db: db)
+            let sleepGuard = SleepGuard()
+            sleepGuard.releaseOnTermination()
+            let supervisor = Wiring.makeSupervisor(db: db, sleepGuard: sleepGuard)
             _Concurrency.Task { await supervisor.start() }
-            let environment = AppEnvironment(db: db, supervisor: supervisor)
+            let environment = AppEnvironment(db: db, supervisor: supervisor, sleepGuard: sleepGuard)
             MacNotifier.shared.start(router: environment.router)
             return environment
         } catch {
