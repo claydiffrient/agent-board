@@ -283,7 +283,8 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "branch that is neither `agentboard/<something>` nor the project's base branch. A push is "
                 + "outward-facing and cannot be taken back, so this always waits on human approval regardless of the "
                 + "autonomy setting: the call returns a pending approval, not a finished push. You will learn the "
-                + "decision through list_reports.",
+                + "decision through list_reports. If this project names its remote branches, the branch is published "
+                + "under a name built from the epic's or task's title; the local branch is unchanged.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "branch": ToolSchema.string("Branch to push, e.g. `agentboard/epic-<id>`."),
@@ -301,7 +302,8 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "of the autonomy setting: the call returns a pending approval, not a finished pull request. On "
                 + "approval the pull request's URL is recorded against the epic or task and reaches you through "
                 + "list_reports. An epic whose tasks are not all `done` is allowed — the approval says so, and the "
-                + "human decides whether early review is what you meant.",
+                + "human decides whether early review is what you meant. If this project names its remote branches, "
+                + "the pull request's head is the published name, not the local `agentboard/…` one.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "epic_id": ToolSchema.string("Epic whose integration branch to open the pull request from."),
@@ -874,17 +876,22 @@ public final class OrchestratorToolHandler: ToolHandler {
         let project = try requireProject(identity)
         let branch = try ownedBranch(try ToolArguments.requiredString("branch", in: arguments), project: project)
         let target = try publishTarget(branch: branch, identity: identity)
+        let published = try publishedName(for: branch, project: project)
+        let head = published ?? branch
         let approval = try board.requestPublish(
             projectId: project.id,
             kind: .push,
-            request: PublishRequest(branch: branch),
+            request: PublishRequest(branch: branch, publishedBranch: published),
             taskId: target.taskId,
             epicId: target.epicId,
             requestedBy: identity.sessionId ?? "orchestrator",
-            reason: "Push \(branch) to the project's git remote."
+            reason: published == nil
+                ? "Push \(branch) to the project's git remote."
+                : "Push \(branch) to the project's git remote as \(head)."
         )
-        return ToolResult(text: "push approval \(approval.id) pending; the human must approve before \(branch) "
-            + "reaches the remote. You will be told via list_reports.")
+        let destination = published == nil ? "reaches the remote" : "reaches the remote as \(head)"
+        return ToolResult(text: "push approval \(approval.id) pending; the human must approve before "
+            + "\(branch) \(destination). You will be told via list_reports.")
     }
 
     private func openPullRequest(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
@@ -905,7 +912,12 @@ public final class OrchestratorToolHandler: ToolHandler {
         let body = ToolArguments.optionalString("body", in: arguments) ?? ""
         let target = try publishTarget(branch: branch, identity: identity)
 
-        var reason = "Open a pull request from \(branch) into \(base): \(title)"
+        let published = try publishedName(for: branch, project: project)
+        let head = published ?? branch
+        var reason = "Open a pull request from \(head) into \(base): \(title)"
+        if let published, published != branch {
+            reason += "\n\(branch) is published as \(published); the local branch is not renamed."
+        }
         if let epic, !(try board.epicReadyForIntegration(epicId: epic.id)) {
             let counts = try taskCounts(epic)
             reason += counts.total == 0
@@ -916,7 +928,9 @@ public final class OrchestratorToolHandler: ToolHandler {
         let approval = try board.requestPublish(
             projectId: project.id,
             kind: .pullRequest,
-            request: PublishRequest(branch: branch, base: base, title: title, body: body),
+            request: PublishRequest(
+                branch: branch, base: base, title: title, body: body, publishedBranch: published
+            ),
             taskId: target.taskId,
             epicId: epic?.id ?? target.epicId,
             requestedBy: identity.sessionId ?? "orchestrator",
@@ -924,6 +938,16 @@ public final class OrchestratorToolHandler: ToolHandler {
         )
         return ToolResult(text: "pull request approval \(approval.id) pending; nothing is pushed and no pull request "
             + "exists until the human approves. The URL reaches you via list_reports.")
+    }
+
+    private func publishedName(for branch: String, project: Project) throws -> String? {
+        do {
+            return try RemoteBranchResolver(db).publishedName(branch: branch, project: project)
+        } catch let error as RemoteNamingError {
+            throw ToolError(error.description)
+        } catch let error as RemoteRefPolicyError {
+            throw ToolError(error.description)
+        }
     }
 
     private func ownedBranch(_ raw: String, project: Project) throws -> String {

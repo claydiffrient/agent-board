@@ -1241,19 +1241,26 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         do {
             switch approval.kind {
             case .push:
-                let result = try await offMain { try publisher.push(branch: request.branch, remote: request.remote) }
+                let result = try await offMain {
+                    try publisher.push(
+                        branch: request.branch, publishedAs: request.publishedBranch, remote: request.remote
+                    )
+                }
                 try board.recordPublished(approval: approval, summary: "Push approved: \(result.summary).")
             case .pullRequest:
                 let result = try await offMain {
                     try publisher.openPullRequest(
-                        branch: request.branch, base: base, title: request.title ?? request.branch,
-                        body: request.body ?? "", remote: request.remote
+                        branch: request.branch, publishedAs: request.publishedBranch, base: base,
+                        title: request.title ?? request.branch, body: request.body ?? "", remote: request.remote
                     )
                 }
                 let verb = result.alreadyOpen ? "Pull request already open" : "Pull request opened"
+                let from = request.head == request.branch
+                    ? request.branch
+                    : "\(request.head) (local \(request.branch))"
                 try board.recordPublished(
                     approval: approval,
-                    summary: "\(verb) from \(request.branch) into \(base).",
+                    summary: "\(verb) from \(from) into \(base).",
                     url: result.url
                 )
             case .spawn, .integration:
@@ -1317,7 +1324,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
             let opener = PullRequestOpener(repoPath: URL(fileURLWithPath: project.repoPath))
             let base = project.baseBranch
-            let head = epic.branch
+            // The same name the approved path would publish, so the button does not aim the compare
+            // page at a ref the remote does not have under that name.
+            let head = try RemoteBranchResolver(db).publishedName(branch: epic.branch, project: project)
+                ?? epic.branch
             let outcome = try await offMain { try opener.open(baseBranch: base, headBranch: head) }
             if case .openInBrowser(let url, _) = outcome {
                 NSWorkspace.shared.open(url)

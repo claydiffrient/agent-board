@@ -36,14 +36,22 @@ public enum PublishFailure: Error, CustomStringConvertible, Equatable, Sendable 
 /// What publishing did. `alreadyUpToDate` and `alreadyOpen` are successes: the caller asked for a
 /// state, and the state already holds.
 public enum PushResult: Sendable, Equatable {
-    case pushed(branch: String, remote: String)
-    case alreadyUpToDate(branch: String, remote: String)
+    case pushed(branch: String, remote: String, published: String? = nil)
+    case alreadyUpToDate(branch: String, remote: String, published: String? = nil)
 
     public var summary: String {
         switch self {
-        case .pushed(let branch, let remote): return "pushed \(branch) to \(remote)"
-        case .alreadyUpToDate(let branch, let remote): return "\(branch) was already up to date on \(remote)"
+        case .pushed(let branch, let remote, let published):
+            return "pushed \(branch) to \(remote)\(Self.suffix(branch: branch, published: published))"
+        case .alreadyUpToDate(let branch, let remote, let published):
+            return "\(branch) was already up to date on \(remote)\(Self.suffix(branch: branch, published: published))"
         }
+    }
+
+    /// The published name is named only when it differs, so the untemplated case reads as it always did.
+    private static func suffix(branch: String, published: String?) -> String {
+        guard let published, published != branch else { return "" }
+        return " as \(published)"
     }
 }
 
@@ -65,8 +73,10 @@ public struct PullRequestResult: Sendable, Equatable {
 public enum PublishCommand {
     /// A fully-qualified refspec on both sides: an argument that reads as a branch name and cannot
     /// be mistaken for a remote, a tag, or — with an empty source — a delete.
-    public static func push(remote: String, branch: String) -> [String] {
-        ["push", "--set-upstream", remote, "refs/heads/\(branch):refs/heads/\(branch)"]
+    /// `published` renames the ref on the remote without touching the local branch: git writes the
+    /// source ref to a differently named destination natively. Nil publishes the local name.
+    public static func push(remote: String, branch: String, published: String? = nil) -> [String] {
+        ["push", "--set-upstream", remote, "refs/heads/\(branch):refs/heads/\(published ?? branch)"]
     }
 
     public static func branchExists(_ branch: String) -> [String] {
@@ -150,30 +160,35 @@ public struct BranchPublisher: Sendable {
 
     // MARK: Actions
 
-    public func push(branch: String, remote: String = "origin") throws -> PushResult {
+    /// `publishedAs` is the name the branch takes on the remote; the local branch is never renamed.
+    public func push(branch: String, publishedAs: String? = nil, remote: String = "origin") throws -> PushResult {
         try requireRemote(remote)
         try requireBranch(branch)
-        let result = try git(PublishCommand.push(remote: remote, branch: branch))
+        let result = try git(PublishCommand.push(remote: remote, branch: branch, published: publishedAs))
         guard result.status == 0 else {
             throw PublishFailure.pushFailed(branch: branch, detail: Self.detail(result))
         }
         let said = result.stdout + result.stderr
         return said.contains("Everything up-to-date")
-            ? .alreadyUpToDate(branch: branch, remote: remote)
-            : .pushed(branch: branch, remote: remote)
+            ? .alreadyUpToDate(branch: branch, remote: remote, published: publishedAs)
+            : .pushed(branch: branch, remote: remote, published: publishedAs)
     }
 
+    /// The pull request's head is the published name, not the local one — `gh` is only ever handed a
+    /// ref that exists on the remote.
     public func openPullRequest(
-        branch: String, base: String, title: String, body: String, remote: String = "origin"
+        branch: String, publishedAs: String? = nil, base: String, title: String, body: String,
+        remote: String = "origin"
     ) throws -> PullRequestResult {
         try requireRemote(remote)
         try requireBranch(branch)
         let gh = try requireGh()
-        let pushed = try push(branch: branch, remote: remote)
+        let pushed = try push(branch: branch, publishedAs: publishedAs, remote: remote)
+        let head = publishedAs ?? branch
 
         let created = try ProcessRunner.run(
             executable: gh,
-            arguments: PublishCommand.pullRequestCreate(base: base, head: branch, title: title, body: body),
+            arguments: PublishCommand.pullRequestCreate(base: base, head: head, title: title, body: body),
             cwd: repoPath,
             environment: ghEnvironment
         )
@@ -183,7 +198,7 @@ public struct BranchPublisher: Sendable {
             }
             return PullRequestResult(url: url, push: pushed, alreadyOpen: false)
         }
-        if let existing = try openPullRequestURL(branch: branch, gh: gh) {
+        if let existing = try openPullRequestURL(branch: head, gh: gh) {
             return PullRequestResult(url: existing, push: pushed, alreadyOpen: true)
         }
         throw PublishFailure.pullRequestFailed(detail: Self.detail(created))

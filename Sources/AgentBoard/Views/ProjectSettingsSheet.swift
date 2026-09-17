@@ -130,6 +130,16 @@ struct ProjectSettingsSheet: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Publishing") {
+                    TextField("Remote branch name", text: Binding(
+                        get: { settings.remoteBranchTemplate ?? "" },
+                        set: { settings.remoteBranchTemplate = $0.isEmpty ? nil : $0 }
+                    ), prompt: Text("e.g. clay/{slug}"))
+                    Text("The name a branch takes on the remote. \(RemoteBranchTemplate.slugToken) comes from the epic's or task's title; \(RemoteBranchTemplate.idToken) is an optional short id. The local branch stays agentboard/<id> either way. Left empty, the local name is what reaches the remote.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Archive") {
                     Picker("Archive done tasks", selection: $archiveMode) {
                         ForEach(ArchivePolicyMode.allCases, id: \.self) { mode in
