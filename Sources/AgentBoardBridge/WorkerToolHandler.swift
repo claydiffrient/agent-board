@@ -57,12 +57,18 @@ public final class WorkerToolHandler: ToolHandler {
         ToolDescriptor(
             name: "propose_task",
             description: "Propose follow-up work you discovered but should not do as part of your task. It lands in the "
-                + "Proposed column for a human to review; it is not assigned to you.",
+                + "Proposed column for a human to review; it is not assigned to you. Name `epic_id` to say which epic "
+                + "it belongs in — your own task's epic is in `get_my_task`\'s `epic_id` — and promoting the proposal "
+                + "puts it there.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "title": ToolSchema.string(),
                     "body": ToolSchema.string("What needs to be done and where."),
                     "rationale": ToolSchema.string("Why this is worth doing."),
+                    "epic_id": ToolSchema.string(
+                        "Epic the proposal should land in when promoted. Any live epic in this project, "
+                            + "your own task\'s included. Omit to leave placement to the human."
+                    ),
                 ],
                 required: ["title"]
             )
@@ -145,16 +151,7 @@ public final class WorkerToolHandler: ToolHandler {
             try progress.append(taskId: task.id, sessionId: identity.sessionId, kind: .note, text: text)
             return ToolResult(text: "Logged.")
         case "propose_task":
-            let title = try ToolArguments.requiredString("title", in: arguments)
-            let proposed = try board.propose(
-                projectId: identity.projectId,
-                title: title,
-                body: arguments["body"]?.stringValue,
-                rationale: arguments["rationale"]?.stringValue,
-                sessionId: identity.sessionId
-            )
-            await events.reportQueued(projectId: identity.projectId)
-            return .json(.object(["id": .string(proposed.id), "column": .string(proposed.column.rawValue)]))
+            return try await proposeTask(arguments, identity: identity)
         case "commit_my_work":
             return try await commitMyWork(task, arguments: arguments, identity: identity)
         case "report_complete":
@@ -218,6 +215,32 @@ public final class WorkerToolHandler: ToolHandler {
         return sessionId
     }
 
+    /// The epic is validated here rather than only at promotion so the worker is told at once,
+    /// while it still has the context to pick another one. `Board.promote` checks again.
+    private func proposeTask(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+        let title = try ToolArguments.requiredString("title", in: arguments)
+        let epicId = ToolArguments.optionalString("epic_id", in: arguments).flatMap { $0.isEmpty ? nil : $0 }
+        let proposed: BoardTask
+        do {
+            proposed = try board.propose(
+                projectId: identity.projectId,
+                title: title,
+                body: arguments["body"]?.stringValue,
+                rationale: arguments["rationale"]?.stringValue,
+                sessionId: identity.sessionId,
+                epicId: epicId
+            )
+        } catch let refusal as ProposalEpicRefusal {
+            throw ToolError(refusal.reason)
+        }
+        await events.reportQueued(projectId: identity.projectId)
+        return .json(.object([
+            "id": .string(proposed.id),
+            "column": .string(proposed.column.rawValue),
+            "epic_id": .optional(proposed.epicId),
+        ]))
+    }
+
     private func getMyTask(_ task: BoardTask, identity: TokenIdentity) throws -> ToolResult {
         let dependencies: [JSONValue] = try tasks.deps(of: task.id).compactMap { depId in
             guard let dep = try tasks.get(depId) else { return nil }
@@ -236,6 +259,7 @@ public final class WorkerToolHandler: ToolHandler {
             "acceptance": .optional(task.acceptance),
             "priority": .optional(task.priority),
             "column": .string(task.column.rawValue),
+            "epic_id": .optional(task.epicId),
             "epic_goal": .null,
             "dependencies": .array(dependencies),
             "attempt": .number(Double(attempt)),

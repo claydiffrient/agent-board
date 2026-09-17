@@ -158,10 +158,10 @@ final class BoardAnnouncementTests: XCTestCase {
 
     func testPromoteReportsTheNewlyReadyIds() throws {
         let proposed = try f.board.propose(
-            projectId: f.project.id, title: "Add lint", body: nil, rationale: nil, sessionId: nil
+            projectId: f.project.id, title: "Add lint", body: nil, rationale: nil, sessionId: nil, epicId: nil
         )
 
-        XCTAssertEqual(try f.board.promote(taskId: proposed.id), [proposed.id])
+        XCTAssertEqual(try f.board.promote(taskId: proposed.id).newlyReady, [proposed.id])
 
         let decision = try XCTUnwrap(pending().last)
         XCTAssertEqual(decision.kind, .decision)

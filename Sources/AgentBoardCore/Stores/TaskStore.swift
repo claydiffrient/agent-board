@@ -90,15 +90,17 @@ public struct TaskStore: Sendable {
     public static func branchName(for id: String) -> String { branchPrefix + id }
 
     public func setEpic(_ id: String, epicId: String?) throws {
-        try db.writer.write { db in
-            guard try Task.exists(db, key: id) else {
-                throw BoardError.taskNotFound(id)
-            }
-            try db.execute(
-                sql: "UPDATE task SET epic_id = ?, updated_at = ? WHERE id = ?",
-                arguments: [epicId, Int64.nowMillis, id]
-            )
+        try db.writer.write { db in try Self.setEpic(db, id, epicId: epicId) }
+    }
+
+    static func setEpic(_ db: Database, _ id: String, epicId: String?) throws {
+        guard try Task.exists(db, key: id) else {
+            throw BoardError.taskNotFound(id)
         }
+        try db.execute(
+            sql: "UPDATE task SET epic_id = ?, updated_at = ? WHERE id = ?",
+            arguments: [epicId, Int64.nowMillis, id]
+        )
     }
 
     public func update(_ task: Task) throws {

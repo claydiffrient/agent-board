@@ -206,7 +206,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             name: "promote_proposal",
             description: "Move a worker-proposed task from `proposed` into the board (`backlog`, or `ready` if it has no "
                 + "unmet dependencies). Allowed only while the project's autonomy setting is on; otherwise the human "
-                + "promotes proposals from the board.",
+                + "promotes proposals from the board. A proposal that named an epic lands in it; if that epic "
+                + "closed while the proposal waited, the task lands in no epic and the answer says so.",
             inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
         ),
         ToolDescriptor(
@@ -691,9 +692,14 @@ public final class OrchestratorToolHandler: ToolHandler {
         guard task.column == .proposed else {
             throw ToolError("Task \(task.id) is in \(task.column.rawValue), not proposed.")
         }
-        try board.promote(taskId: task.id)
-        let final = try tasks.get(task.id)?.column ?? .backlog
-        return ToolResult(text: "Task \(task.id) promoted to \(final.rawValue).")
+        let promotion = try board.promote(taskId: task.id)
+        var text = "Task \(task.id) promoted to \(promotion.landedIn.rawValue)."
+        if let dropped = promotion.droppedEpic, let named = task.epicId {
+            text += " It was proposed into epic \(named) but promoted into no epic: \(dropped.reason)"
+        } else if let epicId = try tasks.get(task.id)?.epicId {
+            text += " It is in epic \(epicId), where it was proposed."
+        }
+        return ToolResult(text: text)
     }
 
     // MARK: Peer projects
