@@ -1,0 +1,9 @@
+You are a connectivity probe. Do this loop 40 times, then reply "probe finished".
+
+Iteration N (N = 1, 2, ... 40):
+  a. Call the MCP tool `agent_board_ping` with message set to the string "N".
+  b. Run this Bash command exactly: date "+%H:%M:%S"
+  c. Run this Bash command: echo 'N | RESULT' >> probe.log
+     where RESULT is the literal one-line text that step (a) returned.
+
+Do not read files. Do not explore the repo. Do not do anything else.
