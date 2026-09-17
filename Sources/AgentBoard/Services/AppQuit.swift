@@ -61,7 +61,9 @@ final class AppQuit: AppQuitting {
 
     func dismissRefusal() { refusal = nil }
 
-    private func attempt() async -> String? {
+    /// Never nil: every path either finds a sheet still attached or outlives `terminate`, and
+    /// `terminate` succeeding ends the process rather than returning here.
+    private func attempt() async -> String {
         for _ in 0..<Self.sheetPolls {
             if sheetedWindows().isEmpty { break }
             await sleep(Self.sheetPollInterval)

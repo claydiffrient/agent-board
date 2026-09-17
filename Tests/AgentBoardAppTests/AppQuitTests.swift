@@ -34,9 +34,13 @@ final class AppQuitTests: XCTestCase {
 
         sheets = []
         quitter.requestQuit()
-        await settle(until: { terminated > 0 })
+        XCTAssertNil(quitter.refusal, "the stale refusal was still showing while the retry ran")
+        await settle(until: { quitter.refusal != nil })
         XCTAssertEqual(terminated, 1, "a second attempt after a refusal did nothing")
-        XCTAssertNil(quitter.refusal, "the stale refusal survived the attempt that cleared it")
+        XCTAssertEqual(
+            quitter.refusal, Self.terminateDidNotLand,
+            "the retry reported the first attempt's sheet refusal instead of its own outcome"
+        )
     }
 
     /// `NSApplication.terminate` returns normally whether or not it worked, so an attempt that
@@ -78,9 +82,12 @@ final class AppQuitTests: XCTestCase {
             sleep: { _ in await _Concurrency.Task.yield() }
         )
         quitter.requestQuit()
-        await settle(until: { terminated > 0 })
+        await settle(until: { quitter.refusal != nil })
         XCTAssertEqual(terminated, 1)
-        XCTAssertNil(quitter.refusal)
+        XCTAssertEqual(
+            quitter.refusal, Self.terminateDidNotLand,
+            "the attempt gave up on the sheet instead of waiting for it to detach"
+        )
     }
 
     func testASecondRequestWhileOneIsInFlightIsNotADoubleTerminate() async {
@@ -95,7 +102,25 @@ final class AppQuitTests: XCTestCase {
         XCTAssertEqual(terminated, 1)
     }
 
-    private func settle(until done: () -> Bool, turns: Int = 5_000) async {
-        for _ in 0..<turns where !done() { await _Concurrency.Task.yield() }
+    /// `done` must be a condition that stays true once it holds. A proxy that fires part-way
+    /// through an attempt lets the attempt finish between this returning and the assertion.
+    private func settle(
+        until done: () -> Bool,
+        turns: Int = 5_000,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<turns {
+            if done() { return }
+            await _Concurrency.Task.yield()
+        }
+        XCTFail("settle ran \(turns) turns and the condition never held", file: file, line: line)
     }
+
+    /// `AppQuit.attempt` returns this once `terminate` has been called and the process is still
+    /// here, which is every termination path under an injected `terminate`.
+    private static let terminateDidNotLand =
+        "macOS did not quit Agent Board when it was asked to. Nothing was undone by the "
+        + "attempt — the shutdown orders still stand — so quitting again, or from the Agent "
+        + "Board menu, is safe."
 }
