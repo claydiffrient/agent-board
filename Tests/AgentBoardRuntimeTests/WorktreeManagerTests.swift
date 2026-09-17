@@ -23,7 +23,10 @@ final class WorktreeManagerTests: XCTestCase {
         try git(["add", "."], cwd: repo)
         try commit("Initial commit", cwd: repo)
 
-        manager = WorktreeManager(repoPath: repo, worktreeRoot: worktrees, hookSettingsURL: hookSettings)
+        manager = WorktreeManager(
+            repoPath: repo, worktreeRoot: worktrees, hookSettingsURL: hookSettings,
+            attribution: .unattributable
+        )
     }
 
     override func tearDownWithError() throws {
@@ -459,7 +462,8 @@ final class WorktreeManagerTests: XCTestCase {
         let spaced = WorktreeManager(
             repoPath: repo,
             worktreeRoot: sandbox.appendingPathComponent("Agent Board/worktrees"),
-            hookSettingsURL: hookSettings
+            hookSettingsURL: hookSettings,
+            attribution: .unattributable
         )
 
         let error = try XCTUnwrapError {
@@ -482,7 +486,8 @@ final class WorktreeManagerTests: XCTestCase {
         let spaced = WorktreeManager(
             repoPath: repo,
             worktreeRoot: sandbox.appendingPathComponent("Agent Board/worktrees"),
-            hookSettingsURL: hookSettings
+            hookSettingsURL: hookSettings,
+            attribution: .unattributable
         )
 
         let error = try XCTUnwrapError {
