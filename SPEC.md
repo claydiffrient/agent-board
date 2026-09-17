@@ -218,6 +218,18 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   `FileLockPolicy.hookTimeoutSeconds` (120) twice per write in a shared
   checkout, with the lock not actually held. A refused endpoint costs nothing
   measurable.
+- **AppKit refuses `NSApplication.terminate` while any window has an attached
+  sheet, and says nothing about it.** Measured 2026-09-17 against the shipped
+  binary by `QuitProbe` (`AGENTBOARD_QUIT_PROBE`, the same shape as the
+  `AGENTBOARD_E2E_REPO` hook). No delegate is consulted — this app implements no
+  `applicationShouldTerminate` — no `NSApplication.willTerminateNotification` is
+  posted, nothing is logged, and the call returns as if it had worked. It is the
+  attached sheet specifically: a second ordinary window does not block, and the
+  same app quits once the sheet has ended. A SwiftUI sheet cannot be cleared
+  with `endSheet` behind its binding's back — it re-attaches while
+  `isPresented` is still true, and the refusal stands; only dismissing it
+  through the binding clears the way. So any control that quits the app from
+  inside a sheet must dismiss first and wait for the detachment.
 
 ---
 
@@ -1374,7 +1386,13 @@ the one outcome cancelling must not produce.
 
 Orchestrator consoles are stopped deliberately before terminating rather than
 left to die with the process, so each session is marked `stopped` instead of
-looking active to the next launch. A session still in `setup` is untouched: the
+looking active to the next launch. The sheet is then dismissed *before* the app
+is asked to go, because AppKit refuses `NSApplication.terminate` silently while
+a sheet is attached (§2) — a quit button living in a sheet cannot simply call
+it. `AppQuit` waits for the detachment, and if the app is still running
+afterwards it says so in an alert on At a Glance naming what is in the way,
+with a Try Again that is not disabled by the failed attempt. A quit that cannot
+happen is reported; it is never a button that does nothing. A session still in `setup` is untouched: the
 wind-down never enrolls one (it has no agent to acknowledge), so it is still
 sitting in `setup` when the app goes, and `failInterruptedSetups()` on the next
 launch is what puts its task back in `ready`.
@@ -1421,8 +1439,8 @@ reads as one of:
   that dies mid-shutdown cannot hold the sheet at X/Y forever.
 
 When every row is closed the header reads "Y/Y agents closed" and a **Quit
-Agent Board** button appears, stopping the orchestrator console and
-terminating the app. **Cancel Shutdown** lifts the standing refusal so
+Agent Board** button appears, stopping the orchestrator console, dismissing the
+sheet and terminating the app — in that order, for the reason above. **Cancel Shutdown** lifts the standing refusal so
 spawning resumes; it restarts nothing — workers that already acknowledged
 stay stopped, their tasks sitting in `ready` with their resume notes.
 
