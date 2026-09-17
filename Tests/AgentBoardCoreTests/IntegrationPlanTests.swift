@@ -354,6 +354,85 @@ final class IntegrationPlanTests: XCTestCase {
         XCTAssertEqual(task.projectId, f.project.id)
     }
 
+    // MARK: - a branch several tasks shared
+
+    private var sharedEpic: Epic {
+        Epic(
+            id: "e1", projectId: "p", title: "Ship search", goal: nil, branch: "agentboard/epic-e1",
+            state: .integrating, createdAt: .nowMillis
+        )
+    }
+
+    func testTasksThatSharedABranchAreMergedAsOneBranchNamedOnce() throws {
+        let shared = "agentboard/shared-epic-e1"
+        let alpha = task("alpha")
+        let beta = task("beta")
+
+        let branches = IntegrationPlan.classify(
+            [alpha, beta],
+            facts: [
+                alpha.id: TaskBranchFacts(branchExists: true, ownCommits: 2, sharedBranch: shared),
+                beta.id: TaskBranchFacts(branchExists: true, ownCommits: 1, sharedBranch: shared),
+            ]
+        )
+        let prompt = IntegrationPlan.compose(
+            epic: sharedEpic,
+            baseBranch: "main", branches: branches, verification: swiftCommands
+        )
+
+        XCTAssertEqual(branches.map(\.branch), [shared, shared])
+        XCTAssertEqual(branches.map(\.disposition), [.merge, .merge])
+        XCTAssertTrue(branches.allSatisfy(\.isShared))
+        XCTAssertEqual(
+            prompt.components(separatedBy: "1. `\(shared)`").count - 1, 1,
+            "the shared branch is listed more than once in the merge list:\n\(prompt)"
+        )
+        XCTAssertFalse(prompt.contains("2. `\(shared)`"), prompt)
+        XCTAssertTrue(prompt.contains("one branch shared by 2 tasks: alpha; beta"), prompt)
+        XCTAssertTrue(prompt.contains("Agent-Board-Task:"), prompt)
+    }
+
+    /// A member that put no commit on the shared branch is not claimed as contributing to it, and
+    /// the branch is still merged for whoever did.
+    func testASharedMemberThatCommittedNothingIsReportedAsMissingNotAsABranchToMerge() throws {
+        let shared = "agentboard/shared-epic-e1"
+        let alpha = task("alpha")
+        let idle = task("idle")
+
+        let branches = IntegrationPlan.classify(
+            [alpha, idle],
+            facts: [
+                alpha.id: TaskBranchFacts(branchExists: true, ownCommits: 2, sharedBranch: shared),
+                idle.id: TaskBranchFacts(branchExists: true, ownCommits: 0, sharedBranch: shared),
+            ]
+        )
+
+        XCTAssertEqual(branches.map(\.disposition), [.merge, .missing])
+    }
+
+    /// Once the shared branch is reaped, its members read from the ledger exactly as a worktree
+    /// task does — what changes is that one branch answers for several of them.
+    func testAReapedSharedBranchLandsRatherThanReadingAsUnknown() throws {
+        let shared = "agentboard/shared-epic-e1"
+        let alpha = task("alpha")
+
+        let branches = IntegrationPlan.classify(
+            [alpha],
+            facts: [alpha.id: TaskBranchFacts(
+                recordedBase: "base", recordedTip: "tip", tipOnEpicBranch: true, ownCommits: 2,
+                sharedBranch: shared
+            )]
+        )
+        let prompt = IntegrationPlan.compose(
+            epic: sharedEpic,
+            baseBranch: "main", branches: branches, verification: swiftCommands
+        )
+
+        XCTAssertEqual(branches.map(\.disposition), [.landed])
+        XCTAssertTrue(prompt.contains("`\(shared)` (shared) — alpha"), prompt)
+        XCTAssertFalse(prompt.contains("Branches to merge, in dependency order\n\n1."), prompt)
+    }
+
     private func task(_ title: String) -> BoardTask {
         BoardTask(
             id: BoardId.new(), projectId: "p", epicId: nil, title: title, body: nil, acceptance: nil,

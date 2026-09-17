@@ -19,22 +19,32 @@ public struct IntegrationBranch: Sendable, Equatable {
     public var disposition: Disposition
     /// The recorded tip of a branch git no longer has, when one was recorded.
     public var commit: String?
+    /// `branch` is shared with this task's siblings rather than its own. Several entries then name
+    /// one branch, and merging it brings all of their work in at once.
+    public var isShared: Bool
 
     public init(
         taskId: String,
         title: String,
         branch: String,
         disposition: Disposition,
-        commit: String? = nil
+        commit: String? = nil,
+        isShared: Bool = false
     ) {
         self.taskId = taskId
         self.title = title
         self.branch = branch
         self.disposition = disposition
         self.commit = commit
+        self.isShared = isShared
     }
 
     var shortCommit: String? { commit.map { String($0.prefix(8)) } }
+
+    /// One line in a section that is not the merge list, where the branch is named per task.
+    var listing: String {
+        isShared ? "`\(branch)` (shared) — \(title)" : "`\(branch)` — \(title)"
+    }
 }
 
 /// The integrator's opening prompt (§5.2 step 3). Pure, so the branch ordering and the skip list
@@ -66,12 +76,19 @@ public enum IntegrationPlan {
     /// than from its own absence: it was just as likely deleted for having been merged.
     public static func classify(_ tasks: [BoardTask], facts: [String: TaskBranchFacts]) -> [IntegrationBranch] {
         tasks.map { task in
-            let branch = branchName(taskId: task.id)
             let fact = facts[task.id] ?? TaskBranchFacts()
+            let isShared = fact.sharedBranch != nil
+            let branch = fact.sharedBranch ?? branchName(taskId: task.id)
             guard !fact.branchExists else {
+                // A shared branch that exists still has to be merged for its siblings, but a member
+                // that committed nothing on it contributed nothing to that merge.
+                let contributed = !isShared || (fact.ownCommits ?? 1) > 0
+                let disposition: IntegrationBranch.Disposition = !contributed
+                    ? .missing
+                    : (fact.mergedIntoEpic ? .alreadyMerged : .merge)
                 return IntegrationBranch(
                     taskId: task.id, title: task.title, branch: branch,
-                    disposition: fact.mergedIntoEpic ? .alreadyMerged : .merge
+                    disposition: disposition, isShared: isShared
                 )
             }
             let disposition: IntegrationBranch.Disposition
@@ -89,10 +106,40 @@ public enum IntegrationPlan {
                 disposition = .unknown
             }
             return IntegrationBranch(
-                taskId: task.id, title: task.title, branch: branch, disposition: disposition, commit: commit
+                taskId: task.id, title: task.title, branch: branch, disposition: disposition,
+                commit: commit, isShared: isShared
             )
         }
     }
+
+    /// The merge list, with the tasks that share one branch collapsed onto one numbered line: the
+    /// integrator merges a branch, and a shared branch listed twice would be merged twice.
+    static func mergeList(_ branches: [IntegrationBranch]) -> [String] {
+        var order: [String] = []
+        var byBranch: [String: [IntegrationBranch]] = [:]
+        for entry in branches {
+            if byBranch[entry.branch] == nil { order.append(entry.branch) }
+            byBranch[entry.branch, default: []].append(entry)
+        }
+        return order.enumerated().map { index, name in
+            let group = byBranch[name] ?? []
+            guard group.count > 1 else { return "\(index + 1). `\(name)` — \(group.first?.title ?? name)" }
+            return "\(index + 1). `\(name)` — one branch shared by \(group.count) tasks: "
+                + group.map(\.title).joined(separator: "; ")
+        }
+    }
+
+    /// Said once, in the merge list, when any branch in it is shared. The three claims a branch can
+    /// carry — merge, landed, never committed — are unchanged; what a shared branch adds is that
+    /// one of them covers several tasks at once.
+    static let sharedBranchNote = """
+        A branch listed above as shared carries several tasks' commits interleaved on one ref: \
+        those tasks ran co-resident in the project's own checkout rather than in a worktree of \
+        their own. Merging it brings all of their work in at once, which is the only way it can be \
+        merged — do not try to separate one task's commits out. Each commit names its task in an \
+        `Agent-Board-Task:` trailer if you need to see who wrote what: \
+        `git log --format='%h %s %(trailers:key=Agent-Board-Task,valueonly)' <branch>`.
+        """
 
     public static func compose(
         epic: Epic,
@@ -119,40 +166,44 @@ public enum IntegrationPlan {
             merge.append("Nothing is left to merge. Verify the state of `\(epic.branch)` and report what you found.")
         } else {
             merge.append("Merge these into `\(epic.branch)` in exactly this order — each is listed after the branches it depends on.")
-            merge.append(toMerge.enumerated().map { "\($0.offset + 1). `\($0.element.branch)` — \($0.element.title)" }
-                .joined(separator: "\n"))
+            merge.append(mergeList(toMerge).joined(separator: "\n"))
+            if toMerge.contains(where: \.isShared) { merge.append(sharedBranchNote) }
         }
         sections.append(merge.joined(separator: "\n\n"))
 
         if !alreadyMerged.isEmpty {
             sections.append("""
             ## Already merged into `\(epic.branch)` — skip these
-            \(alreadyMerged.map { "- `\($0.branch)` — \($0.title)" }.joined(separator: "\n"))
+            \(alreadyMerged.map { "- " + $0.listing }.joined(separator: "\n"))
             """)
         }
         if !landed.isEmpty {
             sections.append("""
             ## Already on `\(epic.branch)` — their branches were deleted, nothing to do
-            \(landed.map { "- `\($0.branch)` — \($0.title)\($0.shortCommit.map { " (landed as \($0))" } ?? "")" }
+            \(landed.map { "- " + $0.listing + ($0.shortCommit.map { " (landed as \($0))" } ?? "") }
                 .joined(separator: "\n"))
 
             Each of these merged into `\(epic.branch)` and its branch was then deleted, which is the \
-            normal end of an accepted task. Their work is in the history you are standing on. Do not \
-            try to merge them, do not report them as missing, and do not rebuild any of it.
+            normal end of an accepted task. A branch marked shared was one branch for several tasks \
+            and was deleted once, after the last of them was accepted. Their work is in the history \
+            you are standing on. Do not try to merge them, do not report them as missing, and do not \
+            rebuild any of it.
             """)
         }
         if !missing.isEmpty {
             sections.append("""
             ## No branch exists for these tasks
-            \(missing.map { "- `\($0.branch)` — \($0.title)" }.joined(separator: "\n"))
+            \(missing.map { "- " + $0.listing }.joined(separator: "\n"))
 
-            Nothing was ever committed on them. Do not try to merge them; name them in your report.
+            Nothing was ever committed on them. A branch marked shared may still be listed above \
+            for its other tasks — this task simply put no commit on it. Do not try to merge \
+            anything on their behalf; name them in your report.
             """)
         }
         if !unknown.isEmpty {
             sections.append("""
             ## Branch gone, outcome unknown — check before you report on these
-            \(unknown.map { "- `\($0.branch)` — \($0.title)\($0.shortCommit.map { " (last recorded tip \($0))" } ?? "")" }
+            \(unknown.map { "- " + $0.listing + ($0.shortCommit.map { " (last recorded tip \($0))" } ?? "") }
                 .joined(separator: "\n"))
 
             Agent Board cannot tell whether their work reached `\(epic.branch)`. A missing branch is \
