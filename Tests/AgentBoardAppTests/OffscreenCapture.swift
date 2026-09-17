@@ -225,3 +225,32 @@ func renderEnvironment(
         )
     )
 }
+
+/// A sidebar collapse preference under a key of this test's own, and the cleanup that removes it.
+///
+/// `UserDefaults.standard` under `xctest` resolves to `com.apple.dt.xctest.tool`, and every
+/// `swift test` process on the machine shares it. Several agent-board workers run the suite at
+/// once here, so a mount that reads the real key can draw a section a different process just
+/// expanded — measured, four concurrent runs lost 225-303 of 400 write-then-read round trips to
+/// each other, and three of four concurrent runs of `SidebarAttentionLiveTests` then failed on
+/// `viewCount 2 != 1` with a whole-sidebar pixel diff behind it.
+///
+/// A key rather than a `UserDefaults(suiteName:)`: a suite is a persistent domain, and
+/// `removePersistentDomain` empties it but leaves the plist, so a suite per test would add one
+/// file per test per run to `~/Library/Preferences` (measured: 87 after two runs).
+///
+/// Every mount of `MainWindow` in this target must pass one of these, including the mounts that
+/// never collapse anything: reading the shared key is enough to draw the wrong sidebar.
+struct IsolatedCollapseState {
+    let key = "\(SidebarCollapseState.key).test-\(UUID().uuidString)"
+    let state: SidebarCollapseState
+
+    init() {
+        state = SidebarCollapseState(key: key)
+    }
+
+    /// Call from `tearDown`.
+    func remove() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+}

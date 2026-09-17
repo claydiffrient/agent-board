@@ -131,8 +131,10 @@ final class AtAGlanceAttentionLiveTests: XCTestCase {
     /// the detail pane, which is the At a Glance page.
     private static let detail = 460..<Int.max
 
+    private var collapse = IsolatedCollapseState()
+
     private func mount(_ db: AppDatabase) -> OffscreenMount {
-        OffscreenMount(MainWindow().environment(renderEnvironment(db: db)))
+        OffscreenMount(MainWindow(collapseState: collapse.state).environment(renderEnvironment(db: db)))
     }
 
     private func detailDiff(_ a: Capture, _ b: Capture) -> Int {
@@ -146,8 +148,13 @@ final class AtAGlanceAttentionLiveTests: XCTestCase {
         )
     }
 
+    override func setUp() {
+        super.setUp()
+        collapse = IsolatedCollapseState()
+    }
+
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: SidebarCollapseState.key)
+        collapse.remove()
         super.tearDown()
     }
 
@@ -155,7 +162,7 @@ final class AtAGlanceAttentionLiveTests: XCTestCase {
     func testTwoMountsOfTheSameQuietPageAreIdentical() throws {
         let db = try AppDatabase.inMemory()
         _ = try register(db, "Alpha")
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
         let first = mount(db)
         let second = mount(db)
@@ -170,7 +177,7 @@ final class AtAGlanceAttentionLiveTests: XCTestCase {
         let db = try AppDatabase.inMemory()
         let alpha = try register(db, "Alpha")
         _ = try register(db, "Beta")
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
         let page = mount(db)
         defer { page.close() }
@@ -206,7 +213,7 @@ final class AtAGlanceAttentionLiveTests: XCTestCase {
             )
             return db
         }
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
         let first = mount(try board(waiting: 0))
         let second = mount(try board(waiting: 1))

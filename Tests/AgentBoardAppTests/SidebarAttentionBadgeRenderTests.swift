@@ -135,8 +135,15 @@ final class CollapsedSectionSummaryTests: XCTestCase {
 /// accessibility trees (measured: every `toolTip` is nil and `accessibilityChildren()` is empty).
 @MainActor
 final class SidebarAttentionLiveTests: XCTestCase {
+    private var collapse = IsolatedCollapseState()
+
+    override func setUp() {
+        super.setUp()
+        collapse = IsolatedCollapseState()
+    }
+
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: SidebarCollapseState.key)
+        collapse.remove()
         super.tearDown()
     }
 
@@ -144,7 +151,7 @@ final class SidebarAttentionLiveTests: XCTestCase {
     private static let sidebar = 0..<460
 
     private func mount(_ db: AppDatabase) -> OffscreenMount {
-        OffscreenMount(MainWindow().environment(renderEnvironment(db: db)))
+        OffscreenMount(MainWindow(collapseState: collapse.state).environment(renderEnvironment(db: db)))
     }
 
     private func diff(_ a: Capture, _ b: Capture) -> PixelDiff {
@@ -163,7 +170,7 @@ final class SidebarAttentionLiveTests: XCTestCase {
     func testTwoMountsOfTheSameQuietBoardAreIdentical() throws {
         let db = try AppDatabase.inMemory()
         _ = try register(db, "Alpha")
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
         let first = mount(db)
         let second = mount(db)
@@ -178,7 +185,7 @@ final class SidebarAttentionLiveTests: XCTestCase {
         let db = try AppDatabase.inMemory()
         let alpha = try register(db, "Alpha")
         _ = try register(db, "Beta")
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
         let board = mount(db)
         defer { board.close() }
@@ -228,9 +235,8 @@ final class SidebarAttentionLiveTests: XCTestCase {
         }
 
         let (quietDb, workspaceId) = try board(withApproval: false)
-        // Read by `SidebarCollapseState.load()` when `MainWindow`'s state initializes, so it has to
-        // be in place before the mount.
-        SidebarCollapseState.save([workspaceId])
+        // Read when `MainWindow`'s state initializes, so it has to be in place before the mount.
+        collapse.state.save([workspaceId])
         let quietMount = mount(quietDb)
         defer { quietMount.close() }
         let quiet = try quietMount.capture(columns: Self.sidebar)
@@ -240,7 +246,7 @@ final class SidebarAttentionLiveTests: XCTestCase {
         )
 
         let (waitingDb, waitingWorkspaceId) = try board(withApproval: true)
-        SidebarCollapseState.save([waitingWorkspaceId])
+        collapse.state.save([waitingWorkspaceId])
         let waitingMount = mount(waitingDb)
         defer { waitingMount.close() }
         let waiting = try waitingMount.capture(columns: Self.sidebar)
@@ -261,7 +267,7 @@ final class SidebarAttentionLiveTests: XCTestCase {
         let alpha = try workspaces.create(name: "Alpha")
         let shown = try register(db, "Shown")
         try workspaces.assign(projectId: shown.id, workspaceId: alpha.id)
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
         let board = mount(db)
         defer { board.close() }

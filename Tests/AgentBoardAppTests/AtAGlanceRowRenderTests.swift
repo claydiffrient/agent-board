@@ -17,8 +17,15 @@ import XCTest
 /// readable on this machine.
 @MainActor
 final class AtAGlanceRowRenderTests: XCTestCase {
+    private var collapse = IsolatedCollapseState()
+
+    override func setUp() {
+        super.setUp()
+        collapse = IsolatedCollapseState()
+    }
+
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: SidebarCollapseState.key)
+        collapse.remove()
         super.tearDown()
     }
 
@@ -39,12 +46,12 @@ final class AtAGlanceRowRenderTests: XCTestCase {
             )
             try workspaces.assign(projectId: project.id, workspaceId: workspace.id)
         }
-        // Read by `SidebarCollapseState.load()` when `MainWindow`'s state initializes, so it has to
-        // be in place before the mount.
-        SidebarCollapseState.save(collapsingEverything ? [alpha.id, beta.id] : [])
+        // Read when `MainWindow`'s state initializes, so it has to be in place before the mount.
+        collapse.state.save(collapsingEverything ? [alpha.id, beta.id] : [])
 
         let host = NSHostingView(
-            rootView: MainWindow().environment(AppEnvironment(db: db, supervisor: RowStubSupervisor()))
+            rootView: MainWindow(collapseState: collapse.state)
+                .environment(AppEnvironment(db: db, supervisor: RowStubSupervisor()))
         )
         NSApplication.shared.setActivationPolicy(.accessory)
         // Borderless and far offscreen: AppKit constrains a `.titled` window back onto a visible
