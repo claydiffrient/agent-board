@@ -175,7 +175,7 @@ public enum OpeningPrompt {
                     + "task first, and call `report_blocked` naming the file only when nothing else is left.",
                 "- `git commit` is refused here. Call the `\(commitToolName)` tool instead: Agent Board "
                     + "commits exactly the files you have written, taken from those locks rather than "
-                    + "from your memory, and tags the commit with your task id so your work can be "
+                    + "from your memory, and records the commit as yours so your work can be "
                     + "reviewed apart from the other agents'. Nothing a sibling has edited goes into "
                     + "your commit.",
             ].joined(separator: "\n")
@@ -193,8 +193,8 @@ public enum OpeningPrompt {
         case .shared:
             return "Commit by calling `\(commitToolName)(message)` — not `git commit`, which is refused "
                 + "in this checkout. Write the message in imperative mood, with no conventional-commit "
-                + "prefix. Agent Board commits only the files you wrote and tags the commit with your "
-                + "task id; you may call it more than once."
+                + "prefix. Agent Board commits only the files you wrote and records the commit as "
+                + "yours; you may call it more than once."
         }
     }
 
