@@ -19,7 +19,7 @@ public struct ScopedCommitRequest: Sendable, Equatable {
     /// Repo-relative and already scoped; the runner passes these to git as a pathspec and never
     /// widens them.
     public var paths: [String]
-    /// The agent's message, with the attribution trailer already on it.
+    /// The agent's message, committed verbatim. Attribution is a `task_commit` row, not a trailer.
     public var message: String
 
     public init(repoPath: String, branch: String, taskId: String, paths: [String], message: String) {
