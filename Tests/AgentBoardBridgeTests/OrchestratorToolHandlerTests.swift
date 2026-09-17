@@ -271,7 +271,9 @@ final class OrchestratorToolHandlerTests: XCTestCase {
     // MARK: Approvals and proposals
 
     func testPromoteProposalRequiresAutonomy() async throws {
-        let proposed = try f.board.propose(projectId: f.project.id, title: "idea", body: nil, rationale: nil, sessionId: nil)
+        let proposed = try f.board.propose(
+            projectId: f.project.id, title: "idea", body: nil, rationale: nil, sessionId: nil, epicId: nil
+        )
         await XCTAssertToolError(try await f.call("promote_proposal", ["task_id": .string(proposed.id)]), containing: "autonomy is off")
         XCTAssertEqual(try f.tasks.get(proposed.id)?.column, .proposed)
 

@@ -581,6 +581,16 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
 - `proposed` — created by a worker via `propose_task`. Neither the orchestrator
   nor a worker may promote a worker proposal without human approval when
   autonomy is off; with autonomy on, the orchestrator may promote.
+  A proposal may name the epic it should land in (`propose_task(epic_id)`), any
+  live epic in the same project — a planning task's own epic being the case the
+  parameter exists for. The epic is checked when the proposal is written, so
+  the worker learns at once, and again when it is promoted, because an epic can
+  close while a proposal waits: a proposal whose epic is gone, closed, or in
+  another project by then is promoted into **no** epic, and the decision report
+  says which rule it broke. Promotion never drops an unfinished task into a
+  finished epic, and never fails over it. The same rule governs both promotion
+  paths — `promote_proposal` and the human's Promote button — because both run
+  through `Board.promote`.
 - `ready` — **the only column the orchestrator may pull from.** A task becomes
   eligible when every row in `task_dep` points at a task in `done`.
 - `running` — an `agent_session` row holds it. The board shows the agent, its
@@ -777,7 +787,7 @@ is reached by neither.
 
 | Tool | Effect |
 |---|---|
-| `get_my_task()` | The task bound to this token, plus its epic goal and dependency summaries |
+| `get_my_task()` | The task bound to this token, plus its `epic_id` and dependency summaries |
 | `update_status(state, detail)` | Appends to `progress`; sets `blocked`/`failed` flags |
 | `log_progress(text)` | Appends to `progress` |
 | `search_notes(query)` | FTS over this project's notes |
@@ -785,7 +795,7 @@ is reached by neither.
 | `append_section(note_id, heading, body, if_version)` | Section-scoped write |
 | `replace_section(note_id, heading, body, if_version)` | Section-scoped write |
 | `create_note(title, sections)` | New note, unpinned |
-| `propose_task(title, body, rationale)` | Inserts into `proposed` |
+| `propose_task(title, body, rationale, epic_id)` | Inserts into `proposed`, carrying `epic_id` onto the row so promotion lands it there |
 | `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review` |
 | `report_blocked(reason)` | Inserts a `report`; sets `blocked` |
 | `acknowledge_shutdown(note)` | Answers a wind-down order (§8). Records `note` against the delivery and the task, then Agent Board stops the session. The task goes back to `ready`, never `review` (§5) — this is not `report_complete` |
