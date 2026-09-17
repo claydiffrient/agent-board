@@ -70,6 +70,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Sampled once per metering tick. Every cap and grace deadline is measured against it so a
     /// suspended machine does not count against a worker.
     @ObservationIgnored private let sleepLedger: SleepLedger
+    /// Nil in tests that do not care; the app always supplies one. SPEC §8.3.
+    @ObservationIgnored private let sleepGuard: SleepGuard?
     @ObservationIgnored private let projects: ProjectStore
     @ObservationIgnored private let tasks: TaskStore
     @ObservationIgnored private let sessions: SessionStore
@@ -121,7 +123,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         appSupportDir: URL,
         worktreeBase: URL,
         projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
-        sleepLedger: SleepLedger = .shared
+        sleepLedger: SleepLedger = .shared,
+        sleepGuard: SleepGuard? = nil
     ) {
         self.db = db
         self.runtime = runtime
@@ -130,6 +133,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         self.worktreeBase = worktreeBase
         self.projectsRoot = projectsRoot
         self.sleepLedger = sleepLedger
+        self.sleepGuard = sleepGuard
         projects = ProjectStore(db)
         tasks = TaskStore(db)
         sessions = SessionStore(db)
@@ -163,6 +167,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         sweepStaleFileLocks()
         await sweepLeakedAgents()
         await migrateWorktreeRoots()
+        refreshSleepAssertion()
         startMetering()
     }
 
@@ -624,6 +629,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             try board.terminate(sessionId: sessionId, cause: .stoppedByHuman, salvage: salvage)
             try grants.revokeAll(sessionId: sessionId)
             announceReports(projectId: session.projectId)
+            refreshSleepAssertion()
         }
     }
 
@@ -701,6 +707,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
             }
             announceReports(projectId: projectId)
+            refreshSleepAssertion()
             if let firstFailure { throw firstFailure }
         }
     }
@@ -876,6 +883,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if queuedReport { announceReports(projectId: projectId) }
         await recoverStrandedTasks(projectId: projectId)
         await reapOrphanedWorktrees(projectId: projectId, keeping: liveWorktrees)
+        refreshSleepAssertion()
     }
 
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? {
@@ -1700,6 +1708,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 await meter(session, limits: limits, stallSeconds: stallSeconds, awake: awake)
             }
         }
+        refreshSleepAssertion(all)
+    }
+
+    /// Driven by the observed `agent_session` rows and nothing else, so a worker that died without
+    /// reporting stops holding the Mac awake the moment `reconcile` or the leaked-agent sweep flips
+    /// its row inactive — there is no spawn-side counter that could be left one too high. SPEC §8.3.
+    func refreshSleepAssertion(_ all: [Project]? = nil) {
+        guard let sleepGuard else { return }
+        let projectList = all ?? ((try? projects.list()) ?? [])
+        sleepGuard.apply(projectList.flatMap { ((try? sessions.all(projectId: $0.id)) ?? []).map(\.state) })
     }
 
     /// A pending approval and a blocked worker each stop work outright and nothing else announces

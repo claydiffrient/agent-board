@@ -1131,6 +1131,37 @@ any way. `send_message`'s own refusals — no addressing yourself, unknown
 project, blank or oversized body — narrow when the hole may be used without
 widening what using it is allowed to do.
 
+### 8.3 Sleep prevention
+
+A Mac that sleeps with workers running kills them, and the idle cap counts the
+sleeping minutes as silence — so twenty minutes of suspend reaps everything
+that was running. While at least one `agent_session` row is in an active state
+(§4), the app holds one `kIOPMAssertPreventUserIdleSystemSleep` assertion named
+`Agent Board — an agent is running`, and releases it when the count reaches
+zero, when the setting goes off, or when the app quits. The name is what
+`pmset -g assertions` prints: the only place a human can see who is holding
+their Mac awake.
+
+The decision reads the observed session rows and nothing else — never a
+spawn-side counter — so a worker that dies without reporting stops holding the
+Mac awake the moment `reconcile` or the leaked-agent sweep (§3) flips its row
+inactive. It is re-evaluated on the metering tick and immediately after `stop`,
+`pauseAll` and `reconcile`.
+
+**What it does not cover.** Idle system sleep only. Display sleep has its own
+assertion type and is deliberately never asserted — a screen lit all night is
+not what keeps a worker alive. A lid close is a different cause: measured on
+this project's development Mac from `pmset -g log`, 2026-09-13 15:59:18, on AC
+power with the display on and two live `PreventUserIdleSystemSleep` assertions,
+closing the lid entered dark wake as `Clamshell Sleep` and slept five seconds
+later. Only external power plus an external display keeps a closed laptop
+running. The Status footer (§10) says so in its help text rather than implying
+full coverage.
+
+The setting lives in `UserDefaults` under `sleep.preventWhileRunning`, defaults
+on, and is toggled from the Status footer, which also shows whether an
+assertion is held right now.
+
 ---
 
 ## 9. Orchestrator
