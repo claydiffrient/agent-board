@@ -256,6 +256,13 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     /// Set when a shared-checkout write gave up waiting for another session's lock. `report_blocked`
     /// reads it to decide that the task belongs back in `ready` rather than held in `running`.
     public var blockedOnPath: String?
+    /// When the oldest tool call this session has not seen return started, nil when none is in
+    /// flight. `PostToolUse` fires only on return, so this is the only thing that tells a worker
+    /// inside a long command apart from one that has stopped working.
+    public var toolStartedAt: Int64?
+    /// `PreToolUse` calls not yet matched by a `PostToolUse`. A count rather than a flag because
+    /// Claude runs parallel tool calls: a short one returning must not end a long one's grace.
+    public var toolsInFlight: Int
 
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -281,6 +288,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case lastTool = "last_tool"
         case stopReason = "stop_reason"
         case blockedOnPath = "blocked_on_path"
+        case toolStartedAt = "tool_started_at"
+        case toolsInFlight = "tools_in_flight"
     }
 
     public init(
@@ -289,7 +298,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         startedAt: Int64 = .nowMillis, endedAt: Int64? = nil, lastActivity: Int64? = nil,
         transcriptPath: String? = nil, tokensIn: Int = 0, tokensOut: Int = 0, cacheRead: Int = 0,
         cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil,
-        lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil
+        lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil,
+        toolStartedAt: Int64? = nil, toolsInFlight: Int = 0
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -314,12 +324,15 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.lastTool = lastTool
         self.stopReason = stopReason
         self.blockedOnPath = blockedOnPath
+        self.toolStartedAt = toolStartedAt
+        self.toolsInFlight = toolsInFlight
     }
 
     public var id: String { sessionId }
     public var startedDate: Date { startedAt.asDate }
     public var endedDate: Date? { endedAt?.asDate }
     public var lastActivityDate: Date? { lastActivity?.asDate }
+    public var toolStartedDate: Date? { toolStartedAt?.asDate }
     public var totalTokens: Int { tokensIn + tokensOut + cacheRead + cacheWrite }
     /// What the token cap meters: uncached input plus output (see CapEvaluator).
     public var countedTokens: Int { tokensIn + tokensOut }

@@ -72,6 +72,13 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("message") { db in
             try db.execute(sql: Schema.message)
         }
+        migrator.registerMigration("session_tool_in_flight") { db in
+            try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN tool_started_at INTEGER")
+            try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN tools_in_flight INTEGER NOT NULL DEFAULT 0")
+        }
+        migrator.registerMigration("task_commit") { db in
+            try db.execute(sql: Schema.taskCommit)
+        }
         return migrator
     }
 }

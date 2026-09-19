@@ -1,0 +1,18 @@
+You are a connectivity probe. Do exactly the loop below, 40 times, then stop.
+
+Iteration N (N = 1, 2, ... 40):
+  a. Call the MCP tool `agent_board_ping` with message set to the string "N".
+  b. Run this Bash command exactly: date "+%H:%M:%S" && sleep 4
+  c. Run this Bash command, substituting N and the RESULT: echo 'N | RESULT' >> probe.log
+     where RESULT is the literal text step (a) returned - the pong text if it
+     succeeded, or the FULL VERBATIM error text if it failed. Never paraphrase an
+     error. Copy it character for character. Keep it on one line.
+
+Rules, in order of importance:
+- If `agent_board_ping` fails, DO NOT stop. DO NOT skip ahead. DO NOT give up and
+  do something else. Record the verbatim error in probe.log and continue to the
+  next iteration. Failures are the point of this probe.
+- Do not read files, do not explore the repo, do not write any other file.
+- Do not batch iterations. One ping, one sleep, one log line, then the next.
+
+After iteration 40, reply with exactly: probe finished

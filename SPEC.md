@@ -199,6 +199,37 @@ proven by the runtime spike in `spike/` on 2026-09-11.
 - `~/.claude/projects/<worktree-slug>/memory/` is created empty for each new
   worktree. The existing convention on this machine symlinks it to the canonical
   project memory dir (confirmed across ~20 Derivita checkouts).
+- **A worker survives its board endpoint going away, and recovers with no
+  handshake.** Measured 2026-09-16 against 2.1.273 by `spike/outage-probe/`.
+  With the port refused an MCP tool call returns `is_error` in ~3s carrying
+  `Unable to connect. Is the computer able to access the url?`; with the socket
+  accepted but never answered it hangs ~62s and returns `The operation timed
+  out.`. The session stays `busy`/`working` through either, the model records
+  the error and moves to its next step without retrying the call or abandoning
+  the task, and the first call after the endpoint returns succeeds. The client
+  handshakes once and reuses the `Mcp-Session-Id` it was given before the outage
+  for the life of the session; `BoardServer` writes that header and never reads
+  it, so no board restart invalidates a live worker, and adding validation would
+  break every worker alive across one.
+- **An unreachable hook endpoint fails open exactly like a slow one**, and every
+  hook posted during an outage is lost with none replayed. A hook held open is
+  abandoned at its declared `timeout` and the tool then runs, so a blackholed
+  endpoint costs 5s per `PreToolUse` and 5s per `PostToolUse` — and
+  `FileLockPolicy.hookTimeoutSeconds` (120) twice per write in a shared
+  checkout, with the lock not actually held. A refused endpoint costs nothing
+  measurable.
+- **AppKit refuses `NSApplication.terminate` while any window has an attached
+  sheet, and says nothing about it.** Measured 2026-09-17 against the shipped
+  binary by `QuitProbe` (`AGENTBOARD_QUIT_PROBE`, the same shape as the
+  `AGENTBOARD_E2E_REPO` hook). No delegate is consulted — this app implements no
+  `applicationShouldTerminate` — no `NSApplication.willTerminateNotification` is
+  posted, nothing is logged, and the call returns as if it had worked. It is the
+  attached sheet specifically: a second ordinary window does not block, and the
+  same app quits once the sheet has ended. A SwiftUI sheet cannot be cleared
+  with `endSheet` behind its binding's back — it re-attaches while
+  `isPresented` is still true, and the refusal stands; only dismissing it
+  through the binding clears the way. So any control that quits the app from
+  inside a sheet must dismiss first and wait for the detachment.
 
 ---
 
@@ -383,7 +414,9 @@ CREATE TABLE agent_session (
   attempt        INTEGER NOT NULL DEFAULT 1,
   model          TEXT,
   last_tool      TEXT,
-  stop_reason    TEXT
+  stop_reason    TEXT,
+  tool_started_at INTEGER,           -- oldest tool call not yet seen to return
+  tools_in_flight INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE token_grant (
@@ -560,6 +593,16 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
 - `proposed` — created by a worker via `propose_task`. Neither the orchestrator
   nor a worker may promote a worker proposal without human approval when
   autonomy is off; with autonomy on, the orchestrator may promote.
+  A proposal may name the epic it should land in (`propose_task(epic_id)`), any
+  live epic in the same project — a planning task's own epic being the case the
+  parameter exists for. The epic is checked when the proposal is written, so
+  the worker learns at once, and again when it is promoted, because an epic can
+  close while a proposal waits: a proposal whose epic is gone, closed, or in
+  another project by then is promoted into **no** epic, and the decision report
+  says which rule it broke. Promotion never drops an unfinished task into a
+  finished epic, and never fails over it. The same rule governs both promotion
+  paths — `promote_proposal` and the human's Promote button — because both run
+  through `Board.promote`.
 - `ready` — **the only column the orchestrator may pull from.** A task becomes
   eligible when every row in `task_dep` points at a task in `done`.
 - `running` — an `agent_session` row holds it. The board shows the agent, its
@@ -593,6 +636,11 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
   leaves the epic branch where it was, and queues a `decision` report naming the
   task, the epic branch and the conflicting files, so the orchestrator can
   dispatch a fix rather than discover the divergence at integration time.
+  The merge commit's subject is `Merge <task title> into <epic title>` — titles,
+  never branch names, because this commit is on the branch the epic's pull
+  request is opened from and `agentboard/<id>` names would publish the task and
+  epic identifiers into that repository's history permanently (§6.1 renames the
+  branch, not commits already made).
   Nothing here pushes: it is a local branch-to-branch merge.
 - `archived` — also a flag, not a column, with `blocked` and `failed` as the
   precedent: D7's six columns (`proposed`/`backlog`/`ready`/`running`/`review`/
@@ -687,7 +735,7 @@ than one that is finished; they merge nothing and are not part of this sequence.
    implementation detail: under the default policy, the integrator's own
    completion produces no review-queue entry. Every other archive policy
    leaves it in `review` for a human, exactly as before this feature existed.
-5. The PR from `agentboard/epic-<id>` → base is opened either **by you**, from
+5. The PR from the epic branch → base is opened either **by you**, from
    the button on the epic, or by the orchestrator calling `open_pull_request`
    (§6) — which does not open one either. It creates an approval row, exactly
    as `request_integration` does, and the branch is pushed and the pull request
@@ -695,6 +743,10 @@ than one that is finished; they merge nothing and are not part of this sequence.
    The resulting URL is written to `progress` against the epic's integrator
    task, so the board records that the pull request exists without anyone
    reading a terminal, and reaches the orchestrator as a `decision` report.
+
+   The pull request's head is the **published** name (§6.1), not the local
+   `agentboard/epic-<id>`, on both routes — the button's compare page and the
+   approved `open_pull_request` aim at the same ref.
 
    An epic whose tasks are not all `done` is **not** refused here, unlike
    `request_integration`. Opening a pull request early for review is a real
@@ -752,7 +804,7 @@ is reached by neither.
 
 | Tool | Effect |
 |---|---|
-| `get_my_task()` | The task bound to this token, plus its epic goal and dependency summaries |
+| `get_my_task()` | The task bound to this token, plus its `epic_id` and dependency summaries |
 | `update_status(state, detail)` | Appends to `progress`; sets `blocked`/`failed` flags |
 | `log_progress(text)` | Appends to `progress` |
 | `search_notes(query)` | FTS over this project's notes |
@@ -760,7 +812,7 @@ is reached by neither.
 | `append_section(note_id, heading, body, if_version)` | Section-scoped write |
 | `replace_section(note_id, heading, body, if_version)` | Section-scoped write |
 | `create_note(title, sections)` | New note, unpinned |
-| `propose_task(title, body, rationale)` | Inserts into `proposed` |
+| `propose_task(title, body, rationale, epic_id)` | Inserts into `proposed`, carrying `epic_id` onto the row so promotion lands it there |
 | `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review` |
 | `report_blocked(reason)` | Inserts a `report`; sets `blocked` |
 | `acknowledge_shutdown(note)` | Answers a wind-down order (§8). Records `note` against the delivery and the task, then Agent Board stops the session. The task goes back to `ready`, never `review` (§5) — this is not `report_complete` |
@@ -795,8 +847,41 @@ Everything in worker scope over any task in the project, plus:
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Refused unless every task in the epic is `done` (names how many remain); otherwise creates a human approval row, or returns the one already pending |
 | `close_epic(epic_id, state)` | Ends the epic without integrating it. `state` is `done` or `abandoned`; both are terminal. Board state and a `decision` report and nothing else — no merge, no push, no branch or worktree deleted, no task deleted, archived or moved out. Refused while any session in the epic is active, and refused for an epic that is already terminal |
-| `push_branch(branch)` | Always creates a human approval row. Refused for any branch that is not `agentboard/<something>` or the project's base branch |
-| `open_pull_request(epic_id \| branch, title, body, base?)` | Always creates a human approval row. Same branch rule; `base` defaults to the project's base branch. On approval the branch is pushed if the remote lacks it, the pull request is opened, and its URL lands in `progress` and in a `decision` report |
+| `push_branch(branch)` | Always creates a human approval row. Refused for any branch that is not `agentboard/<something>` or the project's base branch. The approval carries both the local branch and the name it takes on the remote (§6.1) |
+| `open_pull_request(epic_id \| branch, title, body, base?)` | Always creates a human approval row. Same branch rule; `base` defaults to the project's base branch. On approval the branch is pushed if the remote lacks it, the pull request is opened from the **published** name (§6.1), and its URL lands in `progress` and in a `decision` report |
+
+### 6.1 Remote branch naming
+
+The local branch is always `agentboard/<task-id>` or `agentboard/epic-<epic-id>`:
+it is the ownership marker `PublishPolicy` checks, and nothing renames it. What
+reaches the remote is a separate question, because those names leak the tool and
+then spend themselves on a UUID that means nothing to a reviewer.
+
+`ProjectSettings.remoteBranchTemplate` names the published branch, e.g.
+`clay/{slug}`. Two placeholders and no more: `{slug}`, required, from the epic's
+or task's **title**, and `{id}`, optional, a short id. Everything else in the
+template is literal, and the literal text before the first placeholder is the
+**namespace** the published name must sit inside.
+
+- The slug is lowercase ASCII words joined by hyphens, capped at 48 characters
+  on a word boundary. Canonical decomposition folds `é` to `e`; nothing is
+  transliterated, so a wholly non-Latin title slugs to nothing and the short id
+  is used instead. The same title always produces the same slug.
+- Two records that slug identically are separated by creation order: the older
+  keeps the bare slug, every later one takes `-<short id>`. A third colliding
+  record never renames the first two, so a branch is stable for the life of the
+  board. A template carrying `{id}` is unique by construction and never takes a
+  suffix.
+- With **no template set**, the local name is published unchanged — what every
+  project did before this existed.
+- The base branch is published under its own name; it is the one ref on the
+  remote Agent Board does not rename.
+
+`RemoteRefPolicy` guards the destination side of the refspec, which is a
+different question from `PublishPolicy`'s. It refuses a name that is not
+well-formed, is a fully-qualified ref, is the base branch, or sits outside the
+template's namespace. Both policies apply to every publish; neither weakens the
+other. The rename itself is native git — `refs/heads/<local>:refs/heads/<published>`.
 
 While a shutdown order is outstanding (§8), `spawn_worker` refuses immediately
 — before caps are even checked — with the fixed string `"shutdown in progress;
@@ -895,7 +980,11 @@ Claude Code nor Agent Board, so nothing is posted and `last_activity` simply
 stops advancing. The metering tick (already running every 5s, already reading
 `last_activity`) flags a `running` worker whose activity clock has not moved
 for `caps.stallSeconds` — default 120s, deliberately below the 300s idle cap so
-it surfaces before the cap kills it. A stall is a suspicion, not a reported
+it surfaces before the cap kills it. A worker inside a tool call that has
+started and not returned is excused for 6 × `caps.stallSeconds` (720s at the
+default), because `PostToolUse` fires only on return and one command can
+legitimately run for minutes (§8); past that the command itself is what looks
+wedged and the stall is raised. A stall is a suspicion, not a reported
 state: nothing is written to the task, nothing is killed, one macOS
 notification ("Worker may be stuck") is raised on the transition, and the
 sidebar shows the row until activity resumes or the human acts.
@@ -911,7 +1000,7 @@ Per project, overridable:
 | Concurrent workers | 3 (lower for large repos — Derivita) | Spawn refused; orchestrator told why |
 | Tokens per agent (uncached input + output) | off until set | Agent stopped, task flagged, Resume offered |
 | Elapsed per agent, sleep excluded | 30 min | Agent stopped, task flagged, Resume offered |
-| Idle (no tool use, no output), sleep excluded | 5 min | Agent stopped, task flagged |
+| Idle (no tool use, no output), sleep excluded | 5 min (6× while a tool call is running) | Agent stopped, task flagged |
 | Project session ceiling | configurable | Spawn refused |
 
 - A stopped agent's task returns to `ready` with its `failure_reason` set, and a
@@ -936,6 +1025,23 @@ Per project, overridable:
   counted every sleeping minute against it. Archive retention
   (`ArchivePolicy.afterDays`) stays on the wall clock: it bounds calendar time,
   not work. So does the token cap, which is a count, not a duration.
+- **A tool call that has started and not returned is not silence.** `PreToolUse`
+  fires before a tool runs and `PostToolUse` only when it returns, so a single
+  long command writes no hook for its whole duration. A cold `swift build` on
+  Agent Board itself measures 544s, and a worker with 376 counted tokens and
+  `Bash` as its last tool was executed mid-command for "no activity for 15
+  minutes". `PreToolUse` records the start on the session row
+  (`tool_started_at`, `tools_in_flight`) and `PostToolUse` clears it; an
+  outstanding call then extends both the idle cap and the stall threshold by
+  `ToolCallGrace.multiplier` — 6×, so 1800s and 720s at the defaults, the
+  former exactly the default elapsed cap. The grace is finite by construction
+  and is only ever consulted after a deadline has already been breached, so a
+  command that never returns is still reaped, and a `tool_started_at` left
+  behind by a lost `PostToolUse` costs a worker its grace rather than its life.
+  `Stop` and `SessionEnd` clear the marker, bounding any lost `PostToolUse` to
+  the turn it went missing in. `tools_in_flight` counts rather than flags
+  because Claude runs parallel tool calls: the row keeps the oldest outstanding
+  start, so a short call returning cannot end a long one's grace.
 - **Autonomy is off on first run.** Every `spawn_worker` creates a pending
   approval until you turn it on. This is a setting, not a rebuild.
 - **Stopping is not destructive.** Every session has a pinned `--session-id`, so
@@ -1036,6 +1142,37 @@ stopping, or otherwise acting on anything running there; mutating its board in
 any way. `send_message`'s own refusals — no addressing yourself, unknown
 project, blank or oversized body — narrow when the hole may be used without
 widening what using it is allowed to do.
+
+### 8.3 Sleep prevention
+
+A Mac that sleeps with workers running kills them, and the idle cap counts the
+sleeping minutes as silence — so twenty minutes of suspend reaps everything
+that was running. While at least one `agent_session` row is in an active state
+(§4), the app holds one `kIOPMAssertPreventUserIdleSystemSleep` assertion named
+`Agent Board — an agent is running`, and releases it when the count reaches
+zero, when the setting goes off, or when the app quits. The name is what
+`pmset -g assertions` prints: the only place a human can see who is holding
+their Mac awake.
+
+The decision reads the observed session rows and nothing else — never a
+spawn-side counter — so a worker that dies without reporting stops holding the
+Mac awake the moment `reconcile` or the leaked-agent sweep (§3) flips its row
+inactive. It is re-evaluated on the metering tick and immediately after `stop`,
+`pauseAll` and `reconcile`.
+
+**What it does not cover.** Idle system sleep only. Display sleep has its own
+assertion type and is deliberately never asserted — a screen lit all night is
+not what keeps a worker alive. A lid close is a different cause: measured on
+this project's development Mac from `pmset -g log`, 2026-09-13 15:59:18, on AC
+power with the display on and two live `PreventUserIdleSystemSleep` assertions,
+closing the lid entered dark wake as `Clamshell Sleep` and slept five seconds
+later. Only external power plus an external display keeps a closed laptop
+running. The Status footer (§10) says so in its help text rather than implying
+full coverage.
+
+The setting lives in `UserDefaults` under `sleep.preventWhileRunning`, defaults
+on, and is toggled from the Status footer, which also shows whether an
+assertion is held right now.
 
 ---
 
@@ -1285,7 +1422,13 @@ the one outcome cancelling must not produce.
 
 Orchestrator consoles are stopped deliberately before terminating rather than
 left to die with the process, so each session is marked `stopped` instead of
-looking active to the next launch. A session still in `setup` is untouched: the
+looking active to the next launch. The sheet is then dismissed *before* the app
+is asked to go, because AppKit refuses `NSApplication.terminate` silently while
+a sheet is attached (§2) — a quit button living in a sheet cannot simply call
+it. `AppQuit` waits for the detachment, and if the app is still running
+afterwards it says so in an alert on At a Glance naming what is in the way,
+with a Try Again that is not disabled by the failed attempt. A quit that cannot
+happen is reported; it is never a button that does nothing. A session still in `setup` is untouched: the
 wind-down never enrolls one (it has no agent to acknowledge), so it is still
 sitting in `setup` when the app goes, and `failInterruptedSetups()` on the next
 launch is what puts its task back in `ready`.
@@ -1332,8 +1475,8 @@ reads as one of:
   that dies mid-shutdown cannot hold the sheet at X/Y forever.
 
 When every row is closed the header reads "Y/Y agents closed" and a **Quit
-Agent Board** button appears, stopping the orchestrator console and
-terminating the app. **Cancel Shutdown** lifts the standing refusal so
+Agent Board** button appears, stopping the orchestrator console, dismissing the
+sheet and terminating the app — in that order, for the reason above. **Cancel Shutdown** lifts the standing refusal so
 spawning resumes; it restarts nothing — workers that already acknowledged
 stay stopped, their tasks sitting in `ready` with their resume notes.
 
@@ -1416,7 +1559,9 @@ how permission prompts get answered (D15).
 
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
-section.
+section. Each section header carries a copy button that puts that section on the
+clipboard as `## heading` followed by the text on screen — unsaved edits
+included, since that is what the human is looking at.
 
 **Project sidebar** — projects grouped into workspaces. Each workspace is a
 collapsible section in `workspace.ordering` order holding the projects whose
@@ -1555,8 +1700,10 @@ entity, epic branches cut lazily at first task spawn into them, task
 branches from the epic branch, integration worktree and integrator, human-
 opened PR.
 
-**M4 — notes.** Note store, section ops, FTS, pinning, attachment, spawn-time
-injection.
+**M4 — notes. DONE 2026-09-15 (70 tests across `NoteStoreTests`,
+`OpeningPromptNoteTests`, `OpeningPromptNoteWritingTests`, `NoteResourceTests`,
+`WorkerNoteToolTests`, `SpawnNoteIndexTests`).** Note store, section ops, FTS,
+pinning, attachment, spawn-time injection.
 
 Notes is last deliberately: it is the lowest-risk screen and it benefits most
 from knowing how the agents actually behave first.
@@ -1663,8 +1810,8 @@ from knowing how the agents actually behave first.
   stub runtime. The progress sheet (§10) fares no better: it was mounted
   offscreen via `NSHostingView` and proven to re-render off the database, but
   its rendered text could not be read back on this machine at all —
-  `AXIsProcessTrusted()` is false here, so the accessibility tree comes back
-  empty — and the human click-through steps its own report wrote out (open
+  the accessibility elements SwiftUI publishes offscreen carry no label, title
+  or value, so the tree comes back empty — and the human click-through steps its own report wrote out (open
   the console, click Stop All, watch rows move `ordered` → `closing` →
   `acknowledged`, let one go overdue, attach to a blocked one, quit) were
   explicitly never run. Unlike the M3 push-block verification above, which
@@ -1681,18 +1828,34 @@ from knowing how the agents actually behave first.
   even when stdout is a pipe, so `ClaudeCLI.parseShortId` rejected the hex id
   and every spawn failed with "exited 0 but no short id was found" while the
   session kept running orphaned. ANSI escapes are now stripped before parsing.
-- **Specified but not built: abandoning an epic.** `EpicState.abandoned` and
-  its badge color have existed since M3's schema landed, but nothing in the
-  app ever writes it — there is no action that moves an epic there. A
-  decomposition that turns out wrong currently has no path except letting its
-  tasks sit unfinished forever; an epic can only ever reach `done`, via
-  integration.
-- **Unresolved:** the localhost port is ephemeral per app launch, but
-  `--bg --resume` reuses the saved `--settings`/`--mcp-config` paths. Either
-  rewrite both files before every resume (current plan) or pick a stable
-  per-project port.
+- **Resolved: abandoning an epic is built.** `EpicState.abandoned`, present
+  since M3's schema, is now reachable: `Board.closeEpic(epicId:as:)` writes
+  it, exposed both as the `close_epic` MCP tool (`state: "abandoned"`) and as
+  the epic lane header's **Abandon** menu action (§10, §5.2). A decomposition
+  that turns out wrong has a real path off the board instead of its tasks
+  sitting unfinished forever. See `EpicClosureTests`, `CloseEpicToolTests`,
+  `EpicCloseTests`, `EpicLaneTests`.
+- **Resolved: the port problem is solved by rewriting config files before
+  every resume, plus a persisted preferred port.** `WorkerSupervisor`'s
+  private `resume(_:prompt:)` calls `SessionConfigWriter.write` with the
+  session's current `serverPort` immediately before every `claude --bg
+  --resume`, so a worker's `--settings`/`--mcp-config` paths always point at
+  wherever the server is actually listening this launch, regardless of where
+  it listened when the worker was spawned. `BoardServer.start(preferredPort:)`
+  additionally persists the last bound port to an `appSupportDir`-relative
+  `server-port` file and tries that port first on the next app launch, falling
+  back to an ephemeral one only if it's taken — so the port is usually stable
+  across relaunches, and the resume rewrite covers it when it isn't. See
+  `SessionConfigTests.testRewriteOverwritesInPlaceWithNewPort`.
 - **Unresolved:** which globally configured MCP servers should be allowlisted
-  back into workers past `--strict-mcp-config`. Starting position: none.
+  back into workers past `--strict-mcp-config`. Starting position: none — and
+  still none reach a worker in practice. `ProjectSettings.extraMcpServers` and
+  a matching Project Settings field exist, and `SessionConfigWriter.write` can
+  merge named servers into a worker's `mcpServers` block, but every real
+  spawn/resume call site (`WorkerSupervisor`'s `launch` and `resume`,
+  `OrchestratorConsole`'s session start) hardcodes `extraMcpServers: nil`, so
+  the setting is stored and rendered but never consumed. The policy question
+  is still open; only the plumbing for acting on an answer has been started.
 - **Unresolved:** whether the `PostToolUse` round trip is cheap enough to leave
   on permanently, or needs a matcher narrowing it to interesting tools.
 - **Was an accepted limitation, now readable:** budgets still meter only what

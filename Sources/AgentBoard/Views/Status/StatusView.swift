@@ -174,6 +174,7 @@ struct StatusView: View {
     private var footer: some View {
         HStack(spacing: 16) {
             Label(serverPort.map { "Server port \($0)" } ?? "Server not listening", systemImage: "network")
+            SleepFooterItem(guard: env.sleepGuard)
             if let lastError {
                 Label(lastError, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
@@ -219,6 +220,24 @@ struct StatusView: View {
     StatusView(project: preview.project)
         .environment(preview.environment)
         .frame(width: 1100, height: 500)
+}
+
+/// Says whether the Mac is being held awake, and by how much. The `.help` carries the part the
+/// label cannot: idle sleep only, and a closed lid still sleeps. SPEC §8.3.
+struct SleepFooterItem: View {
+    @Bindable var `guard`: SleepGuard
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: `guard`.isHolding ? "cup.and.saucer.fill" : "powersleep")
+                .foregroundStyle(`guard`.isHolding ? .primary : .secondary)
+            Text(`guard`.footerLabel)
+            Toggle("Keep awake", isOn: $guard.isEnabled)
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+        }
+        .help(`guard`.footerHelp)
+    }
 }
 
 struct SessionStateLabel: View {

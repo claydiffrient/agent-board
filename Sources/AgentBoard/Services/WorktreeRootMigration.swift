@@ -62,7 +62,7 @@ struct WorktreeRootMigration: Sendable {
         guard FileManager.default.fileExists(atPath: repo.appendingPathComponent(".git").path) else {
             return ["\(project.name): \(repo.path) is no longer a git repository; only the recorded root moved"]
         }
-        let manager = WorktreeManager(repoPath: repo, worktreeRoot: destination)
+        let manager = WorktreeManager(repoPath: repo, worktreeRoot: destination, attribution: .unattributable)
         var notices: [String] = []
         for worktree in try manager.list() where isUnder(worktree.path, oldRoot) {
             let target = destination.appendingPathComponent(worktree.path.lastPathComponent)

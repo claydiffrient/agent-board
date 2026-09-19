@@ -13,8 +13,9 @@ import XCTest
 /// shell pid in place. That is the scrollback surviving: it lives in the retained terminal view.
 ///
 /// What it cannot prove: anything about the pixels. No string in the header is readable on this
-/// machine (SwiftUI draws `Text` into backing layers and `AXIsProcessTrusted()` is false under
-/// xctest), so the working directory and state copy are verified by reading the source, not by eye.
+/// machine (SwiftUI draws `Text` into backing layers, and the accessibility elements it publishes
+/// offscreen carry no label, title or value), so the working directory and state copy are verified
+/// by reading the source, not by eye.
 @MainActor
 final class TerminalScreenMountTests: XCTestCase {
     private var fixture: SupervisorFixture!

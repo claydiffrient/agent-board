@@ -13,14 +13,29 @@ import XCTest
 /// Notification Center is unreachable under `xctest` and nobody can read the rendered segment.
 @MainActor
 final class NotificationRoutingMountTests: XCTestCase {
+    private var collapse = IsolatedCollapseState()
+
+    override func setUp() {
+        super.setUp()
+        collapse = IsolatedCollapseState()
+    }
+
+    override func tearDown() {
+        collapse.remove()
+        super.tearDown()
+    }
+
     @MainActor
     private final class Mount {
         let window: NSWindow
         let host: NSView
 
-        init(db: AppDatabase, supervisor: StubSupervisor, router: NotificationRouter) {
+        init(
+            db: AppDatabase, supervisor: StubSupervisor, router: NotificationRouter,
+            collapse: SidebarCollapseState
+        ) {
             host = NSHostingView(
-                rootView: MainWindow()
+                rootView: MainWindow(collapseState: collapse)
                     .environment(AppEnvironment(db: db, supervisor: supervisor, router: router))
             )
             NSApplication.shared.setActivationPolicy(.accessory)
@@ -54,11 +69,11 @@ final class NotificationRoutingMountTests: XCTestCase {
         let db = try AppDatabase.inMemory()
         _ = try register(db, "Alpha")
         let beta = try register(db, "Beta")
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
         let supervisor = StubSupervisor()
         let router = NotificationRouter()
-        let mount = Mount(db: db, supervisor: supervisor, router: router)
+        let mount = Mount(db: db, supervisor: supervisor, router: router, collapse: collapse.state)
         defer { mount.close() }
         mount.settle()
         XCTAssertEqual(supervisor.focusedProjects, [], "nothing is selected before the click")
@@ -77,11 +92,11 @@ final class NotificationRoutingMountTests: XCTestCase {
     func testARouteToAnUnknownProjectSelectsNothing() throws {
         let db = try AppDatabase.inMemory()
         _ = try register(db, "Alpha")
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
         let supervisor = StubSupervisor()
         let router = NotificationRouter()
-        let mount = Mount(db: db, supervisor: supervisor, router: router)
+        let mount = Mount(db: db, supervisor: supervisor, router: router, collapse: collapse.state)
         defer { mount.close() }
         mount.settle()
 

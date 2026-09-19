@@ -37,11 +37,13 @@ public enum CapEvaluator {
     ///
     /// `state` only excuses the idle check. A session that is waiting on a file lock, blocked, or
     /// still in setup makes no tool call by design, and killing it would throw away exactly the work
-    /// it is waiting to do; the token and elapsed caps still apply to it unchanged.
+    /// it is waiting to do; the token and elapsed caps still apply to it unchanged. `toolStartedAt`
+    /// excuses it the same way for as long as `ToolCallGrace` allows one call to run.
     public static func evaluate(
         totals: UsageTotals,
         startedAt: Date,
         lastActivity: Date?,
+        toolStartedAt: Date? = nil,
         awake: AwakeElapsed,
         limits: CapLimits,
         state: SessionState = .running
@@ -56,9 +58,12 @@ public enum CapEvaluator {
         }
         guard !state.idlesByDesign else { return nil }
         let since = lastActivity ?? startedAt
-        if awake.secondsAwake(since: since) >= TimeInterval(limits.maxIdleSeconds) {
-            return .idle(since: since, limit: TimeInterval(limits.maxIdleSeconds))
-        }
-        return nil
+        guard awake.secondsAwake(since: since) >= TimeInterval(limits.maxIdleSeconds) else { return nil }
+        // Checked after the breach, never instead of it: a `tool_started_at` left behind by a
+        // `PostToolUse` that never arrived can cost a worker its grace, never its life.
+        guard !ToolCallGrace.excusesSilence(
+            toolStartedAt: toolStartedAt, awake: awake, threshold: TimeInterval(limits.maxIdleSeconds)
+        ) else { return nil }
+        return .idle(since: since, limit: TimeInterval(limits.maxIdleSeconds))
     }
 }
