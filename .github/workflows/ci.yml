@@ -9,10 +9,21 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # The ten slowest suites in AgentBoardAppTests: 312s of its 584s, measured on run 35479173029.
+  # app-rest selects by --skip rather than a second list, so a suite added later joins it
+  # automatically instead of going unrun in both shards.
+  SLOW_SUITES: TerminalScreenMountTests|WorktreeCleanupTests|EpicAcceptMergeTests|EpicIntegrationTests|DeadWorkerRecoveryTests|AcceptLandingTests|QuitRefusalAlertTests|WorktreeShellTests|SharedCheckoutSpawnTests|MessageSidebarRenderTests
+
 jobs:
-  build-and-test:
+  test:
+    name: test (${{ matrix.shard }})
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [headless, app-slow, app-rest]
     steps:
       - uses: actions/checkout@v5
 
@@ -21,6 +32,9 @@ jobs:
           xcodebuild -version
           swift --version
 
+      # One key for all three shards: each builds the same way, so sharing stores 772 MiB per
+      # commit instead of three copies against the repo's 10 GB cache budget. The two shards
+      # that lose the race to save log a harmless "cache already exists".
       - name: Restore SwiftPM build cache
         uses: actions/cache@v6
         with:
@@ -35,10 +49,16 @@ jobs:
       - name: Build
         run: swift build --build-tests
 
-      # Split so a window-server failure in the app target cannot be mistaken for a
-      # failure in the four targets that need no display.
-      - name: Test headless targets
-        run: swift test --filter 'AgentBoardCoreTests|AgentBoardRuntimeTests|AgentBoardServerTests|AgentBoardBridgeTests'
-
-      - name: Test app target
-        run: swift test --filter AgentBoardAppTests
+      - name: Test
+        run: |
+          case "${{ matrix.shard }}" in
+            headless)
+              swift test --filter 'AgentBoardCoreTests|AgentBoardRuntimeTests|AgentBoardServerTests|AgentBoardBridgeTests'
+              ;;
+            app-slow)
+              swift test --filter "AgentBoardAppTests.($SLOW_SUITES)"
+              ;;
+            app-rest)
+              swift test --filter AgentBoardAppTests --skip "$SLOW_SUITES"
+              ;;
+          esac
