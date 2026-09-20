@@ -720,72 +720,124 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             // Teardown runs first so `deleteBranchIfMerged` still sees the task branch as unmerged
             // and keeps it; the integrator reads the surviving branch as its ledger of what is in.
             await tearDownWorktrees(of: taskSessions, task: task, project: project)
-            await mergeIntoEpicBranch(task: task, project: project)
+            await landAcceptedBranch(task: task, project: project)
             announceReports(projectId: task.projectId)
         }
     }
 
-    /// §5.2: the epic branch accumulates each accepted task, so a sibling spawned afterwards branches
-    /// from work that is already in. Deliberately outside the acceptance transaction — the human
-    /// accepted the task, and no git failure may put it back.
-    private func mergeIntoEpicBranch(task: BoardTask, project: Project) async {
-        guard let epicId = task.epicId, let epic = try? epics.get(epicId) else { return }
+    /// §5: an accepted task's branch is merged into the branch meant to carry it — the epic branch
+    /// for a task in an epic, the project's base branch otherwise — and, whatever happens, the
+    /// task's `landing` records where the work ended up. Deliberately outside the acceptance
+    /// transaction: the human accepted the task, and no git failure may put it back. What a git
+    /// failure does instead is leave `landing` at `.unlanded`, which the board shows, so `done`
+    /// cannot quietly mean "done, and the work is nowhere".
+    private func landAcceptedBranch(task: BoardTask, project: Project) async {
+        let epic = task.epicId.flatMap { try? epics.get($0) }
         let manager = worktreeManager(for: project)
         let taskBranch = Self.taskBranchPrefix + task.id
-        let epicBranch = epic.branch
+        let target = epic?.branch ?? project.baseBranch
         let taskTitle = task.title
-        let epicTitle = epic.title
+        let targetTitle = epic?.title ?? project.baseBranch
         let projectBase = project.baseBranch
+        let epicBranch = epic?.branch
         let worktreeName = "merge-\(task.id)"
-        let outcome: EpicMerge
+        let outcome: BranchMerge
         do {
             outcome = try await offMain {
-                try manager.ensureBranch(epicBranch, from: projectBase)
-                return try manager.mergeIntoEpic(
-                    taskBranch: taskBranch, epicBranch: epicBranch,
-                    taskTitle: taskTitle, epicTitle: epicTitle,
+                // Only an epic branch is ever cut here. A missing base branch comes back as
+                // `.noTargetBranch` instead, because creating one would land the work on a ref
+                // nobody pulls and call it done.
+                if let epicBranch { try manager.ensureBranch(epicBranch, from: projectBase) }
+                return try manager.merge(
+                    taskBranch: taskBranch, into: target,
+                    taskTitle: taskTitle, targetTitle: targetTitle,
                     worktreeName: worktreeName
                 )
             }
         } catch {
-            queueEpicMergeReport(
-                task: task, epic: epic,
-                body: "could not be merged into the epic branch `\(epicBranch)`: \(describe(error))"
-                    + "\nThe epic branch is behind. Dispatch a task to merge `\(taskBranch)` into it by hand."
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(taskBranch)` could not be merged into `\(target)`: \(describe(error))",
+                advice: "Merge `\(taskBranch)` into `\(target)` by hand."
             )
             return
         }
         switch outcome {
-        case .alreadyMerged, .fastForwarded, .merged, .nothingToMerge:
-            return
+        case .nothingToMerge:
+            // No branch is two different facts. `tearDownWorktrees` runs first and deletes a task
+            // branch whose work is already in, so "gone" can mean landed; the ledger tip ref, which
+            // outlives the branch, is what tells the two apart. A tip that the target does not
+            // contain is the worst case of all — the work is now reachable from no branch at all.
+            let reaped = (try? await offMain {
+                try manager.refCommit(TaskBranchLedger.tipRef(taskId: task.id)).map {
+                    (tip: $0, merged: try manager.isMerged(commit: $0, into: "refs/heads/\(target)"))
+                }
+            }) ?? nil
+            switch reaped {
+            case .none:
+                recordLanding(task: task, epic: epic, landing: .noBranch, detail: nil, advice: nil)
+            case .some(let reaped) where reaped.merged:
+                recordLanding(
+                    task: task, epic: epic, landing: .landed,
+                    detail: "`\(taskBranch)` was merged into `\(target)` and reaped.", advice: nil
+                )
+            case .some(let reaped):
+                recordLanding(
+                    task: task, epic: epic, landing: .unlanded,
+                    detail: "`\(taskBranch)` is gone and `\(target)` does not contain \(reaped.tip).",
+                    advice: "Recover the commit with `git branch <name> \(reaped.tip)` and merge it into `\(target)`."
+                )
+            }
+        case .alreadyMerged, .fastForwarded, .merged:
+            recordLanding(
+                task: task, epic: epic, landing: .landed,
+                detail: "`\(taskBranch)` is in `\(target)`.", advice: nil
+            )
+        case .noTargetBranch(let missing):
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(taskBranch)` has nowhere to land: `\(missing)` does not exist in \(project.repoPath).",
+                advice: "Create `\(missing)` or correct the project's base branch, then merge `\(taskBranch)` into it."
+            )
         case .conflicted(let files):
             let listed = files.isEmpty ? "(git reported no paths)" : files.map { "- `\($0)`" }.joined(separator: "\n")
-            queueEpicMergeReport(
-                task: task, epic: epic,
-                body: "conflicts with the epic branch `\(epicBranch)`, which is unchanged and now behind."
-                    + "\n\nConflicting files:\n\(listed)"
-                    + "\n\nDispatch a task to merge `\(taskBranch)` into `\(epicBranch)` and resolve these."
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(taskBranch)` conflicts with `\(target)`, which is unchanged and now behind.",
+                advice: "Merge `\(taskBranch)` into `\(target)` and resolve these:\n\(listed)"
             )
         case .skippedCheckedOut(let path):
-            queueEpicMergeReport(
-                task: task, epic: epic,
-                body: "was not merged into the epic branch `\(epicBranch)`: that branch is checked out at \(path)."
-                    + "\nWhoever holds it — the integrator, normally — must merge `\(taskBranch)` themselves."
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(taskBranch)` was not merged into `\(target)`: that branch is checked out at \(path).",
+                advice: "Whoever holds that checkout must merge `\(taskBranch)` themselves."
             )
         }
     }
 
-    private func queueEpicMergeReport(task: BoardTask, epic: Epic, body: String) {
-        let text = "Task \(task.id) (\(task.title)) was accepted into done, but its branch \(body)"
+    /// Writes the landing and, when the human has something to do about it, queues a `decision`
+    /// report. The write comes first: a report that fails to insert must not also lose the state
+    /// the board renders.
+    private func recordLanding(
+        task: BoardTask, epic: Epic?, landing: TaskLanding, detail: String?, advice: String?
+    ) {
+        do {
+            try tasks.setLanding(task.id, landing, detail: detail)
+        } catch {
+            report(["could not record where \(task.id) landed: \(describe(error))"])
+        }
+        guard landing.needsAttention, let detail else { return }
+        let text = "Task \(task.id) (\(task.title)) was accepted into done, but its branch "
+            + detail + (advice.map { "\n" + $0 } ?? "")
         do {
             try ReportStore(db).insert(
                 projectId: task.projectId, taskId: task.id, sessionId: nil, kind: .decision, body: text
             )
         } catch {
-            report(["could not queue the epic merge report for \(task.id): \(describe(error))"])
+            report(["could not queue the landing report for \(task.id): \(describe(error))"])
             return
         }
-        report(["epic \(epic.id): \(text)"])
+        report([epic.map { "epic \($0.id): " + text } ?? text])
     }
 
     func reopen(taskId: String) async throws {

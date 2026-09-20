@@ -118,6 +118,7 @@ struct TaskInspectorView: View {
                 Text(task.origin.rawValue)
                 if task.blocked { FlagBadge(text: "blocked") }
                 if task.failed { FlagBadge(text: "failed") }
+                if task.needsLanding { FlagBadge(text: task.landing?.label ?? TaskLanding.pending.label) }
                 if let archived = task.archivedDate {
                     Label("archived \(Format.relative(archived))", systemImage: "archivebox")
                 }
@@ -128,6 +129,15 @@ struct TaskInspectorView: View {
                 Text(reason)
                     .font(.caption)
                     .foregroundStyle(.red)
+            }
+            // Shown for every landing a `done` task has, not only the alarming ones: "nothing to
+            // land" has to be readable as its own answer, or a task that never had a branch looks
+            // the same as one whose branch went missing.
+            if task.column == .done, let landing = task.landing {
+                Text(task.landingDetail ?? landing.label)
+                    .font(.caption)
+                    .foregroundStyle(landing.needsAttention ? .red : .secondary)
+                    .textSelection(.enabled)
             }
             Text(task.id)
                 .font(.caption2.monospaced())
