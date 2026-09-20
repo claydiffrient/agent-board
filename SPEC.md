@@ -1610,6 +1610,88 @@ workspaces plus **None**) or by dragging its row onto a section header. Which
 sections the viewer has collapsed is a per-viewer convenience and lives in
 `UserDefaults`, not the database.
 
+**What's New in Agent Board** — the release notes, opened from the Help menu and
+once on their own after an update installs. A `Window` scene rather than a
+`WindowGroup`, so choosing the menu item again — or a second launch that decides
+to show them — brings the open window forward instead of stacking a second one;
+resizable, scrollable, closed with ⌘W, and never a sheet, because notes are read
+beside the board rather than in front of it. Every release in the bundled
+`RELEASES.md` is in one scroll, newest first, with the running version marked —
+three entries need no navigation, and a version list beside a detail pane is what
+this wants once there are twenty.
+
+`RELEASES.md` at the repo root is the one source: one `## <version>` heading per
+release, optionally ` — YYYY-MM-DD`, free Markdown beneath, newest first, with
+everything above the first heading a preamble `ReleaseNotesParser` skips.
+`Scripts/bundle.sh` copies it byte for byte into `Contents/Resources` alongside
+`Info.plist` and the icon — nothing about the file is generated or rewritten at
+build time. `AppBundle.isAppBundle` (a bundle identifier and a `.app` path
+extension) gates every read: the `.build/debug/AgentBoard` binary `README.md`
+documents for E2E runs has neither, so `ReleaseNotesLoader` returns
+`.unavailable` before it looks for a version or a file at all. That is a
+deliberate silence, not a hidden error — the same predicate `MacNotifier`
+already used for the same reason — and the Help item still opens the window,
+which says plainly that this run has no notes to show rather than pretending
+the menu item isn't there.
+
+Markdown is rendered by splitting each release body into blocks
+(`ReleaseNotesMarkdown`) and handing only the inline markup of each block to
+`AttributedString(markdown:)`. Passing a whole body instead loses every block
+boundary: measured, a paragraph, a two-item list and a heading come back as one
+run-on line with the bullets and hashes stripped, because `Text` does not consume
+the `presentationIntent` attributes the parser writes.
+
+The menu item is always present and always opens the window. A build that ships
+no readable notes — the bare `AgentBoard` binary, or an `.app` whose
+`RELEASES.md` will not parse — gets a window saying which of those it is. Hiding
+the item would read as "this app has no release notes", and a disabled item gives
+no reason at all.
+
+**Shown once, after an update.** `UserDefaults` holds the last version whose
+notes were shown — per-user app state, so not the database, and not worth a
+schema migration for one string. On launch the window opens by itself when the
+running version is above that record *and* `RELEASES.md` has an entry for it;
+the record then moves to the running version. Shown counts as shown whether or
+not the human read it: whether the window was looked at is not something to
+detect, and trying would mean showing it again to someone who closed it on
+purpose.
+
+The two cases this hinges on are **no record** and **a record from an older
+version**. No record is a first ever install: it records the running version and
+stays silent, because someone opening the app for the first time wants the app,
+not a changelog of a product they have never used. Reading it as an upgrade
+instead would greet every new user with a release-notes window.
+
+A **downgrade** — running a build older than the record — shows nothing and
+leaves the record alone; the record names the newest notes a human has been
+given, and running an older build does not un-give them. An **upgrade the author
+wrote no entry for** shows nothing but still records, so the decision is not
+re-made on every launch until a version with notes arrives. The `.unavailable`
+and unparsable-`RELEASES.md` states do nothing at all, record included: burning
+the record on a build whose notes will not parse would swallow those notes for
+good once the file is fixed.
+
+It opens **last in the launch sequence**, after `supervisor.start()` has returned
+— the server bind, the stale-lock sweep and the worktree-root migration — and
+with the board already on screen. Each of those writes to the board the human is
+about to be shown, and a window over the middle of that hides work still
+settling.
+
+It does **not** stand aside for a board that already needs a human. Deferring has
+no later that is better: holding the record back starves the notes on every
+launch that has an approval waiting, and releasing it mid-session puts the window
+over whatever the human is then doing rather than over a board they have not
+touched yet. The notes are a separate, non-modal, ⌘W-closable window, and every
+attention signal is still standing behind it when it is closed or ignored.
+
+The Help menu is added to with `CommandGroup(after: .help)`, never
+`replacing:`. The `.help` group holds two items in this app — **AgentBoard Help**
+and **Toggle Sidebar** (⌃⌘S), which SwiftUI files under Help because the View
+menu is empty — and replacing the group deletes both, taking the shortcut with
+it. Neither placement affects the Help search field: AppKit adds that to whatever
+menu is `NSApp.helpMenu` when the menu opens, and it is never an item in the
+built menu.
+
 ---
 
 ## 11. Milestones

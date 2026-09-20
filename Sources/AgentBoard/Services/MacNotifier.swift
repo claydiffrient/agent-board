@@ -31,9 +31,7 @@ final class MacNotifier {
         authorization = Self.isAppBundle ? .notAsked : .unavailable
     }
 
-    static var isAppBundle: Bool {
-        Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app"
-    }
+    static var isAppBundle: Bool { AppBundle.isAppBundle() }
 
     /// Called from `AppComposition` at launch. Authorization is asked for only while the answer is
     /// still outstanding: asking again would re-prompt a user who has already said no.
