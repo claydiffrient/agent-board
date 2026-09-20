@@ -147,6 +147,12 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     /// Set when a human pulls the task back out of the archive. While it is set, no automatic
     /// policy archives this task again — only the manual button will.
     public var unarchivedAt: Int64?
+    /// Where the accept put this task's work. Nil only for tasks accepted before Agent Board
+    /// recorded it; every accept since writes a value, so `done` can never mean "and the work is
+    /// nowhere" without the board saying so (SPEC §5).
+    public var landing: TaskLanding?
+    /// Why `landing` is what it is, for the cases a human has to act on.
+    public var landingDetail: String?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -169,6 +175,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case archivedAt = "archived_at"
         case doneAt = "done_at"
         case unarchivedAt = "unarchived_at"
+        case landing
+        case landingDetail = "landing_detail"
     }
 
     public init(
@@ -176,8 +184,11 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         priority: String?, column: TaskColumn, blocked: Bool = false, blockedReason: String? = nil,
         failed: Bool = false, failureReason: String? = nil, ordering: Double, origin: TaskOrigin,
         createdAt: Int64, updatedAt: Int64, model: String? = nil, archivedAt: Int64? = nil,
-        doneAt: Int64? = nil, unarchivedAt: Int64? = nil
+        doneAt: Int64? = nil, unarchivedAt: Int64? = nil,
+        landing: TaskLanding? = nil, landingDetail: String? = nil
     ) {
+        self.landing = landing
+        self.landingDetail = landingDetail
         self.model = model
         self.archivedAt = archivedAt
         self.doneAt = doneAt
@@ -207,6 +218,10 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var archivedDate: Date? { archivedAt?.asDate }
     public var isArchived: Bool { archivedAt != nil }
     public var doneDate: Date? { doneAt?.asDate }
+
+    /// A `done` task whose work the human still has to place somewhere. False for `noBranch`,
+    /// which is a task that legitimately had nothing to land.
+    public var needsLanding: Bool { column == .done && landing?.needsAttention == true }
 }
 
 public typealias BoardTask = Task
