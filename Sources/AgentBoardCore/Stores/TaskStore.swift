@@ -249,6 +249,20 @@ public struct TaskStore: Sendable {
         )
     }
 
+    public func setRosterAgent(_ id: String, _ rosterAgentId: String?) throws {
+        try db.writer.write { db in try Self.setRosterAgent(db, id, rosterAgentId) }
+    }
+
+    /// Only an assignment to a rostered agent writes this; an anonymous worker leaves whoever was
+    /// last on the task in place, so the card still says who did the previous pass.
+    static func setRosterAgent(_ db: Database, _ id: String, _ rosterAgentId: String?) throws {
+        guard let rosterAgentId else { return }
+        try db.execute(
+            sql: "UPDATE task SET roster_agent_id = ?, updated_at = ? WHERE id = ?",
+            arguments: [rosterAgentId, Int64.nowMillis, id]
+        )
+    }
+
     public func setFailed(_ id: String, _ failed: Bool, reason: String?) throws {
         try db.writer.write { db in
             try Self.setFailed(db, id, failed, reason: reason)
@@ -342,6 +356,9 @@ public enum BoardError: Error, Equatable, Sendable {
     case approvalAlreadyResolved(String)
     case epicNotFound(String)
     case rosterAgentNotFound(String)
+    /// A reviewer was to be spawned for a task that is no longer in `review`, so there is nothing
+    /// left for it to decide.
+    case taskNotInReview(taskId: String, column: TaskColumn)
     /// An active worker session already holds the task; a second one would share its worktree.
     case taskAlreadyHeld(taskId: String, sessionId: String)
     /// An active session already holds the worktree the new session was about to be launched into.

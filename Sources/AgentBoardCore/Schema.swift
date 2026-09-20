@@ -162,15 +162,15 @@ enum Schema {
 
     static let roster = """
     CREATE TABLE roster_agent (
-      id            TEXT PRIMARY KEY,
-      name          TEXT NOT NULL,
-      role          TEXT NOT NULL,
-      system_prompt TEXT NOT NULL,
-      model         TEXT,
-      tool_scope    TEXT NOT NULL DEFAULT '[]',
-      enabled       INTEGER NOT NULL DEFAULT 1,
-      created_at    INTEGER NOT NULL,
-      updated_at    INTEGER NOT NULL
+      id               TEXT PRIMARY KEY,
+      name             TEXT NOT NULL,
+      role             TEXT NOT NULL,
+      system_prompt    TEXT NOT NULL,
+      model            TEXT,
+      disallowed_tools TEXT NOT NULL DEFAULT '[]',
+      enabled          INTEGER NOT NULL DEFAULT 1,
+      created_at       INTEGER NOT NULL,
+      updated_at       INTEGER NOT NULL
     );
 
     CREATE TABLE project_roster_agent (
@@ -180,6 +180,13 @@ enum Schema {
       PRIMARY KEY (project_id, roster_agent_id)
     );
     CREATE INDEX project_roster_agent_order ON project_roster_agent(project_id, ordering);
+    """
+
+    /// Split from `roster` rather than folded into it: `roster` is already merged, and GRDB skips a
+    /// migration whose identifier is recorded, so rewriting one that has shipped can never re-run.
+    static let rosterAssignment = """
+    ALTER TABLE agent_session ADD COLUMN roster_agent_id TEXT REFERENCES roster_agent(id);
+    ALTER TABLE task ADD COLUMN roster_agent_id TEXT REFERENCES roster_agent(id);
     """
 
     /// `epic.review_level` is nullable on purpose: NULL means "inherit the project's level", which is

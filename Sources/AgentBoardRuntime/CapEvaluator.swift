@@ -2,13 +2,15 @@ import AgentBoardCore
 import Foundation
 
 public struct CapLimits: Sendable, Equatable {
+    /// nil on any of the three means that cap is not enforced at all, which is what a rostered
+    /// session gets for the elapsed and idle clocks. Never spell "no cap" as a very large number.
     public var maxTokens: Int?
-    public var maxWallClockSeconds: Int
-    public var maxIdleSeconds: Int
+    public var maxWallClockSeconds: Int?
+    public var maxIdleSeconds: Int?
 
     public static let `default` = CapLimits(maxTokens: nil, maxWallClockSeconds: 30 * 60, maxIdleSeconds: 5 * 60)
 
-    public init(maxTokens: Int?, maxWallClockSeconds: Int, maxIdleSeconds: Int) {
+    public init(maxTokens: Int?, maxWallClockSeconds: Int?, maxIdleSeconds: Int?) {
         self.maxTokens = maxTokens
         self.maxWallClockSeconds = maxWallClockSeconds
         self.maxIdleSeconds = maxIdleSeconds
@@ -38,6 +40,8 @@ public enum CapEvaluator {
     /// `state` only excuses the idle check. A session that is waiting on a file lock, blocked, or
     /// still in setup makes no tool call by design, and killing it would throw away exactly the work
     /// it is waiting to do; the token and elapsed caps still apply to it unchanged.
+    ///
+    /// A nil limit is skipped outright, so an exempt session can never breach that cap.
     public static func evaluate(
         totals: UsageTotals,
         startedAt: Date,
@@ -50,14 +54,18 @@ public enum CapEvaluator {
         if let maxTokens = limits.maxTokens, used >= maxTokens {
             return .tokens(used: used, limit: maxTokens)
         }
-        let elapsed = awake.secondsAwake(since: startedAt)
-        if elapsed >= TimeInterval(limits.maxWallClockSeconds) {
-            return .wallClock(elapsed: elapsed, limit: TimeInterval(limits.maxWallClockSeconds))
+        if let maxWallClockSeconds = limits.maxWallClockSeconds {
+            let elapsed = awake.secondsAwake(since: startedAt)
+            if elapsed >= TimeInterval(maxWallClockSeconds) {
+                return .wallClock(elapsed: elapsed, limit: TimeInterval(maxWallClockSeconds))
+            }
         }
         guard !state.idlesByDesign else { return nil }
-        let since = lastActivity ?? startedAt
-        if awake.secondsAwake(since: since) >= TimeInterval(limits.maxIdleSeconds) {
-            return .idle(since: since, limit: TimeInterval(limits.maxIdleSeconds))
+        if let maxIdleSeconds = limits.maxIdleSeconds {
+            let since = lastActivity ?? startedAt
+            if awake.secondsAwake(since: since) >= TimeInterval(maxIdleSeconds) {
+                return .idle(since: since, limit: TimeInterval(maxIdleSeconds))
+            }
         }
         return nil
     }

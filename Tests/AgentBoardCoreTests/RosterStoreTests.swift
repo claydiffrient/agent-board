@@ -12,26 +12,26 @@ final class RosterStoreTests: XCTestCase {
         let f = try Fixture.make()
         let agent = try f.roster.create(
             name: "Ada", role: "frontend", systemPrompt: "You own the Lit components.",
-            model: "claude-opus-5", toolScope: ["Read", "Edit"]
+            model: "claude-opus-5", disallowedTools: ["Read", "Edit"]
         )
 
         XCTAssertEqual(agent.name, "Ada")
         XCTAssertEqual(agent.role, "frontend")
         XCTAssertEqual(agent.systemPrompt, "You own the Lit components.")
         XCTAssertEqual(agent.model, "claude-opus-5")
-        XCTAssertEqual(agent.toolScope, ["Read", "Edit"])
+        XCTAssertEqual(agent.disallowedTools, ["Read", "Edit"])
         XCTAssertTrue(agent.enabled)
         XCTAssertGreaterThan(agent.createdAt, 0)
         XCTAssertEqual(agent.updatedAt, agent.createdAt)
         XCTAssertEqual(try f.roster.get(agent.id), agent)
     }
 
-    func testCreateDefaultsModelAndToolScope() throws {
+    func testCreateDefaultsModelAndDisallowedTools() throws {
         let f = try Fixture.make()
         let agent = try f.roster.create(name: "Basic", role: "reviewer", systemPrompt: "Review.")
         XCTAssertNil(agent.model)
-        XCTAssertEqual(agent.toolScope, [])
-        XCTAssertEqual(try f.roster.get(agent.id)?.toolScope, [])
+        XCTAssertEqual(agent.disallowedTools, [])
+        XCTAssertEqual(try f.roster.get(agent.id)?.disallowedTools, [])
     }
 
     func testRosterIsNotScopedToAProject() throws {
@@ -65,7 +65,7 @@ final class RosterStoreTests: XCTestCase {
         agent.role = "reviewer"
         agent.systemPrompt = "You hold review authority."
         agent.model = "claude-sonnet-5"
-        agent.toolScope = ["Read"]
+        agent.disallowedTools = ["Read"]
         agent.updatedAt = 0
         try f.roster.update(agent)
 
@@ -74,7 +74,7 @@ final class RosterStoreTests: XCTestCase {
         XCTAssertEqual(stored.role, "reviewer")
         XCTAssertEqual(stored.systemPrompt, "You hold review authority.")
         XCTAssertEqual(stored.model, "claude-sonnet-5")
-        XCTAssertEqual(stored.toolScope, ["Read"])
+        XCTAssertEqual(stored.disallowedTools, ["Read"])
         XCTAssertEqual(stored.createdAt, createdAt)
         XCTAssertGreaterThanOrEqual(stored.updatedAt, createdAt)
     }

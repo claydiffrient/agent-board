@@ -384,6 +384,9 @@ public final class WorkerToolHandler: ToolHandler {
             taskId: task.id, sessionId: try requiredSession(identity), summary: String(decoding: data, as: UTF8.self)
         )
         guard outcome.autoAccept else {
+            if case .agentReview(let agentId, let agentName) = outcome.routing {
+                return await spawnReviewer(task, agentId: agentId, agentName: agentName)
+            }
             return ToolResult(text: "Report recorded. The task is now in Review. Stop here; do not start further work.")
         }
         // Not a second accept path: this is the call the Accept button makes, so the newly-ready
@@ -400,5 +403,28 @@ public final class WorkerToolHandler: ToolHandler {
             text: "Report recorded. This project needs no review, so the task went straight to Done and its "
                 + "worktree has been removed. Stop here; do not start further work."
         )
+    }
+
+    /// The reviewer runs in this worker's own worktree on its own branch: `spawn` keys the checkout
+    /// on the task id, so reviewing the work needs no worktree of its own and no merge to see it.
+    /// A reviewer that cannot be started leaves the task in `review` for a person, which is the same
+    /// place `humanReview` would have parked it, so the worker's own report is never lost to it.
+    private func spawnReviewer(_ task: BoardTask, agentId: String, agentName: String) async -> ToolResult {
+        do {
+            _ = try await control.assignAgent(taskId: task.id, rosterAgentId: agentId, scope: .reviewer)
+            return ToolResult(
+                text: "Report recorded. The task is now in Review, held by rostered reviewer \(agentName), "
+                    + "which is starting in your worktree on your branch. Stop here; do not start further work."
+            )
+        } catch {
+            try? progress.append(
+                taskId: task.id, sessionId: nil, kind: .error,
+                text: "Agent review: reviewer \(agentName) could not be started (\(error)), so this task needs a person."
+            )
+            return ToolResult(
+                text: "Report recorded. The task is now in Review. Its rostered reviewer could not be started, "
+                    + "so a person will look at it. Stop here; do not start further work."
+            )
+        }
     }
 }

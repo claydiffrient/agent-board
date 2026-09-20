@@ -43,7 +43,10 @@ actor RecordingEventSink: BoardEventSink {
 
 actor FakeWorkerControl: WorkerControl {
     private(set) var spawned: [String] = []
+    private(set) var assigned: [(taskId: String, rosterAgentId: String, scope: AgentBoardCore.TokenScope)] = []
     private(set) var stopped: [String] = []
+    /// Set to make `assignAgent` throw, which is how the reviewer-spawn failure path is driven.
+    var assignFailure: Error?
     private(set) var accepted: [(taskId: String, acceptedBy: TaskAcceptance)] = []
     /// Stands in for the supervisor: the bridge tests assert the board effects, and the supervisor's
     /// own side effects (grants, worktrees) are asserted in AgentBoardAppTests.
@@ -60,6 +63,22 @@ actor FakeWorkerControl: WorkerControl {
             worktreePath: "/tmp/worktrees/\(taskId)",
             branch: "agentboard/\(taskId)"
         )
+    }
+
+    func assignAgent(
+        taskId: String, rosterAgentId: String, scope: AgentBoardCore.TokenScope
+    ) async throws -> WorkerSpawn {
+        if let assignFailure { throw assignFailure }
+        assigned.append((taskId, rosterAgentId, scope))
+        return WorkerSpawn(
+            setupSessionId: "setup-for-\(taskId)-\(rosterAgentId)",
+            worktreePath: "/tmp/worktrees/\(taskId)",
+            branch: "agentboard/\(taskId)"
+        )
+    }
+
+    func setAssignFailure(_ error: Error?) {
+        assignFailure = error
     }
 
     func stopWorker(sessionId: String) async throws {

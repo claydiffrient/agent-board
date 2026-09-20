@@ -87,6 +87,13 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         return try await target.spawnWorker(taskId: taskId)
     }
 
+    func assignAgent(
+        taskId: String, rosterAgentId: String, scope: AgentBoardCore.TokenScope
+    ) async throws -> WorkerSpawn {
+        guard let target else { throw SupervisorError.serverNotRunning }
+        return try await target.assignAgent(taskId: taskId, rosterAgentId: rosterAgentId, scope: scope)
+    }
+
     func stopWorker(sessionId: String) async throws {
         guard let target else { throw SupervisorError.serverNotRunning }
         try await target.stopWorker(sessionId: sessionId)

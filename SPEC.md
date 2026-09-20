@@ -350,6 +350,7 @@ CREATE TABLE task (
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
   reviewer_agent_id TEXT REFERENCES roster_agent(id),  -- the rostered reviewer holding it in `review`
+  roster_agent_id TEXT REFERENCES roster_agent(id),    -- the rostered agent that last worked it
   archived_at    INTEGER,          -- non-null = archived: hidden from the board, never deleted
   done_at        INTEGER,          -- entered done; cleared on leaving. The afterDays clock
   unarchived_at  INTEGER           -- a human pulled it back; no automatic policy touches it again
@@ -385,7 +386,8 @@ CREATE TABLE agent_session (
   attempt        INTEGER NOT NULL DEFAULT 1,
   model          TEXT,
   last_tool      TEXT,
-  stop_reason    TEXT
+  stop_reason    TEXT,
+  roster_agent_id TEXT REFERENCES roster_agent(id)  -- the rostered identity this session runs as
 );
 
 CREATE TABLE token_grant (
@@ -487,7 +489,8 @@ CREATE TABLE roster_agent (
   role          TEXT NOT NULL,          -- free-text specialty: frontend | reviewer | ...
   system_prompt TEXT NOT NULL,          -- identity and specialty, injected at spawn
   model         TEXT,                   -- overrides project settings.defaultModel
-  tool_scope    TEXT NOT NULL DEFAULT '[]',  -- JSON array; empty inherits the project's worker tools
+  disallowed_tools TEXT NOT NULL DEFAULT '[]',  -- JSON array of extra --disallowedTools patterns;
+                                                -- a deny-list, so empty = a full worker's authority
   enabled       INTEGER NOT NULL DEFAULT 1,
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
@@ -527,6 +530,13 @@ never a billed amount.
 Notes are sectioned rather than a single body specifically so three concurrent
 workers appending to one note do not silently lose each other's writes. Whole-
 document replace is not offered.
+
+`roster_agent.disallowed_tools` is a **deny-list**, not an allow-list: its
+patterns are appended to the worker default `--disallowedTools` at spawn, so a
+rostered agent can only ever have *less* authority than a plain worker and can
+never grant itself anything. That is why `NOT NULL DEFAULT '[]'` is the right
+default — an empty list is exactly a full worker's authority, which is the status
+quo for an unrostered one.
 
 `roster_agent.role` is a plain string, not an enum: the roster is user-defined,
 so adding a specialty must not need a migration. A project's *usable* set is
@@ -680,6 +690,17 @@ the level accepts the task, it runs **the same acceptance a human Accept runs** 
 the newly-ready announcement, the grant revocation and the worktree removal are
 one code path (`WorkerControl.accept`), not a second one that has to be kept in
 step. The worker's return text tells it which happened.
+
+Under `agent` review the reviewer is **started**, not merely recorded:
+`report_complete` resolves the routing, writes `reviewer_agent_id`, and then
+spawns the reviewer through `WorkerControl.assignAgent(taskId:rosterAgentId:
+scope:)` with `reviewer` scope. The spawn is keyed on the task id, so the
+reviewer lands in the worker's own worktree on the worker's branch — the work is
+there to read with no merge and no checkout of its own — and it is the one spawn
+that does **not** move the task to `running`: a review must stay in `review` or
+its own `accept_task` has nothing to decide. A reviewer that cannot be started
+leaves the task in `review` for a person and says so in a `progress` row, which
+is where `task` review would have parked it anyway.
 
 A rostered reviewer under `agent` review gets its own token scope (§6), narrower
 than a worker's: `get_my_task`, `log_progress`, `accept_task(verdict)` and
@@ -898,6 +919,8 @@ Everything in worker scope over any task in the project, plus:
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
 | `pin_note(note_id, pinned)` | Every future agent sees it in its note index and can fetch it |
 | `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting |
+| `list_roster_agents()` | The rostered agents this project has enabled, in its own preference order |
+| `assign_to_agent(task_id, roster_agent_id)` | `spawn_worker` carrying a rostered identity: the same caps, shutdown and autonomy gates, worker scope, and the agent's own deny list layered on. An agent outside the project's usable set is refused |
 | `stop_worker(session_id)` | `claude stop` |
 | `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |

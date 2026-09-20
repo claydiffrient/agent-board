@@ -11,12 +11,12 @@ public struct RosterStore: Sendable {
     @discardableResult
     public func create(
         name: String, role: String, systemPrompt: String,
-        model: String? = nil, toolScope: [String] = [], enabled: Bool = true
+        model: String? = nil, disallowedTools: [String] = [], enabled: Bool = true
     ) throws -> RosterAgent {
         let now = Int64.nowMillis
         let agent = RosterAgent(
             id: RosterAgent.newId(), name: name, role: role, systemPrompt: systemPrompt,
-            model: model, toolScope: toolScope, enabled: enabled, createdAt: now, updatedAt: now
+            model: model, disallowedTools: disallowedTools, enabled: enabled, createdAt: now, updatedAt: now
         )
         try db.writer.write { db in try agent.insert(db) }
         return agent
@@ -77,6 +77,12 @@ public struct RosterStore: Sendable {
     /// The subset the project can actually spawn: opted in *and* enabled in the roster.
     public func usableAgents(forProject projectId: String) throws -> [RosterAgent] {
         try db.reader.read { db in try Self.agents(db, forProject: projectId, enabledOnly: true) }
+    }
+
+    /// One agent, but only if the project may actually be given work on it. Nil is the single
+    /// refusal for "no such agent", "disabled" and "not opted into" — the caller says which.
+    public func usableAgent(_ id: String, forProject projectId: String) throws -> RosterAgent? {
+        try usableAgents(forProject: projectId).first { $0.id == id }
     }
 
     static func agents(_ db: Database, forProject projectId: String, enabledOnly: Bool) throws -> [RosterAgent] {

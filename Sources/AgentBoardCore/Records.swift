@@ -148,6 +148,9 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var model: String?
     /// Under agent review, the rostered reviewer this task was handed to when it entered `review`.
     public var reviewerAgentId: String?
+    /// The rostered agent that last worked this task, if one did rather than an anonymous worker.
+    /// A handoff rewrites it, so it names the most recent agent, not every agent that has touched it.
+    public var rosterAgentId: String?
     /// Non-nil means archived: hidden from the default board query, and when it happened.
     public var archivedAt: Int64?
     /// When the task most recently entered `done`, cleared when it leaves again. The archive
@@ -176,6 +179,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case updatedAt = "updated_at"
         case model
         case reviewerAgentId = "reviewer_agent_id"
+        case rosterAgentId = "roster_agent_id"
         case archivedAt = "archived_at"
         case doneAt = "done_at"
         case unarchivedAt = "unarchived_at"
@@ -186,10 +190,12 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         priority: String?, column: TaskColumn, blocked: Bool = false, blockedReason: String? = nil,
         failed: Bool = false, failureReason: String? = nil, ordering: Double, origin: TaskOrigin,
         createdAt: Int64, updatedAt: Int64, model: String? = nil, reviewerAgentId: String? = nil,
-        archivedAt: Int64? = nil, doneAt: Int64? = nil, unarchivedAt: Int64? = nil
+        rosterAgentId: String? = nil, archivedAt: Int64? = nil, doneAt: Int64? = nil,
+        unarchivedAt: Int64? = nil
     ) {
         self.model = model
         self.reviewerAgentId = reviewerAgentId
+        self.rosterAgentId = rosterAgentId
         self.archivedAt = archivedAt
         self.doneAt = doneAt
         self.unarchivedAt = unarchivedAt
@@ -267,6 +273,9 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     /// Set when a shared-checkout write gave up waiting for another session's lock. `report_blocked`
     /// reads it to decide that the task belongs back in `ready` rather than held in `running`.
     public var blockedOnPath: String?
+    /// The rostered identity this session is running as. The roster entry is not itself a session;
+    /// this is a back-reference to durable identity, nothing more.
+    public var rosterAgentId: String?
 
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -292,6 +301,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case lastTool = "last_tool"
         case stopReason = "stop_reason"
         case blockedOnPath = "blocked_on_path"
+        case rosterAgentId = "roster_agent_id"
     }
 
     public init(
@@ -300,7 +310,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         startedAt: Int64 = .nowMillis, endedAt: Int64? = nil, lastActivity: Int64? = nil,
         transcriptPath: String? = nil, tokensIn: Int = 0, tokensOut: Int = 0, cacheRead: Int = 0,
         cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil,
-        lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil
+        lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil,
+        rosterAgentId: String? = nil
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -325,9 +336,12 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.lastTool = lastTool
         self.stopReason = stopReason
         self.blockedOnPath = blockedOnPath
+        self.rosterAgentId = rosterAgentId
     }
 
     public var id: String { sessionId }
+    /// Rostered sessions are exempt from the idle and wall-clock caps; see `WorkerSupervisor.capLimits`.
+    public var isRostered: Bool { rosterAgentId != nil }
     public var startedDate: Date { startedAt.asDate }
     public var endedDate: Date? { endedAt?.asDate }
     public var lastActivityDate: Date? { lastActivity?.asDate }
@@ -680,8 +694,9 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
     public var systemPrompt: String
     /// Overrides the project's default model for this agent's sessions.
     public var model: String?
-    /// Tools this agent may use; empty inherits whatever the project grants a worker.
-    public var toolScope: [String]
+    /// Extra `--disallowedTools` patterns layered onto the worker default list. A deny-list: it can
+    /// only narrow a rostered session's authority, never widen it, so empty means "a full worker's".
+    public var disallowedTools: [String]
     public var enabled: Bool
     public var createdAt: Int64
     public var updatedAt: Int64
@@ -692,7 +707,7 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
         case role
         case systemPrompt = "system_prompt"
         case model
-        case toolScope = "tool_scope"
+        case disallowedTools = "disallowed_tools"
         case enabled
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -700,14 +715,14 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
 
     public init(
         id: String, name: String, role: String, systemPrompt: String, model: String? = nil,
-        toolScope: [String] = [], enabled: Bool = true, createdAt: Int64, updatedAt: Int64
+        disallowedTools: [String] = [], enabled: Bool = true, createdAt: Int64, updatedAt: Int64
     ) {
         self.id = id
         self.name = name
         self.role = role
         self.systemPrompt = systemPrompt
         self.model = model
-        self.toolScope = toolScope
+        self.disallowedTools = disallowedTools
         self.enabled = enabled
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -717,6 +732,11 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
 
     public var createdDate: Date { createdAt.asDate }
     public var updatedDate: Date { updatedAt.asDate }
+
+    /// What `OpeningPrompt.compose` renders ahead of the task.
+    public var identity: AgentIdentity {
+        AgentIdentity(name: name, role: role, systemPrompt: systemPrompt)
+    }
 }
 
 public struct ProjectRosterAgent: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {

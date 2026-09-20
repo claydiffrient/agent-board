@@ -66,6 +66,14 @@ public protocol WorkerControl: Sendable {
     /// The caller has already passed `Board.requestSpawn`. Returns once the worktree exists and the
     /// session row is written, with setup still running.
     func spawnWorker(taskId: String) async throws -> WorkerSpawn
+    /// `spawnWorker` carrying a rostered agent's identity, model and deny-list additions. `scope`
+    /// decides what the session may do once it is up: `.worker` claims the task into `running`,
+    /// `.reviewer` leaves it in `review` and mints a reviewer grant instead. Nothing here widens
+    /// authority — a rostered agent's `disallowedTools` can only narrow what a plain worker gets.
+    /// The caller has already checked the agent is usable by the project.
+    func assignAgent(
+        taskId: String, rosterAgentId: String, scope: AgentBoardCore.TokenScope
+    ) async throws -> WorkerSpawn
     func stopWorker(sessionId: String) async throws
     /// The single acceptance path, whoever triggered it: the board accept, the newly-ready
     /// announcement, the grant revocation and the worktree removal. A no-review completion and a

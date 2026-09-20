@@ -302,9 +302,41 @@ public struct Board: Sendable {
             session.state = .setup
             session.attempt = previousAttempts + 1
             try session.insert(db)
+            // A rostered assignment is readable from the task as well as the session, so the board,
+            // Status and the next agent in a handoff can all see who is on it.
+            try TaskStore.setRosterAgent(db, taskId, session.rosterAgentId)
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             try TaskStore.setFailed(db, taskId, false, reason: nil)
             try TaskStore.move(db, taskId, to: .running, before: nil)
+            return session
+        }
+    }
+
+    /// The reviewer's counterpart to `assign`. A review holds a task that is already in `review` and
+    /// must stay there: moving it to `running` would take it out of the review queue and make the
+    /// reviewer's own `accept_task` guard refuse. Nothing is written to the task at all.
+    @discardableResult
+    public func assignReviewer(taskId: String, session: AgentSession) throws -> AgentSession {
+        try db.writer.write { db in
+            let task = try Self.requireTask(db, taskId)
+            guard task.column == .review else {
+                throw BoardError.taskNotInReview(taskId: taskId, column: task.column)
+            }
+            if let holder = try SessionStore.activeHolder(db, taskId: taskId) {
+                throw BoardError.taskAlreadyHeld(taskId: taskId, sessionId: holder.sessionId)
+            }
+            let previousAttempts = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM agent_session WHERE task_id = ?",
+                arguments: [taskId]
+            ) ?? 0
+            var session = session
+            session.taskId = taskId
+            session.projectId = task.projectId
+            session.role = .worker
+            session.state = .setup
+            session.attempt = previousAttempts + 1
+            try session.insert(db)
             return session
         }
     }

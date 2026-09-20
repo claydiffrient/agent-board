@@ -35,7 +35,7 @@ final class SchemaTests: XCTestCase {
             XCTAssertFalse(rosterColumns.contains("project_id"), "the roster is cross-project")
             XCTAssertEqual(
                 rosterColumns,
-                ["id", "name", "role", "system_prompt", "model", "tool_scope", "enabled", "created_at", "updated_at"]
+                ["id", "name", "role", "system_prompt", "model", "disallowed_tools", "enabled", "created_at", "updated_at"]
             )
             XCTAssertEqual(
                 try db.columns(in: "project_roster_agent").map(\.name),
