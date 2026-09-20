@@ -55,6 +55,11 @@ struct TaskCardView: View {
                 agentSummary(session)
             }
 
+            if task.needsLanding {
+                FlagBadge(text: task.landing?.label ?? TaskLanding.pending.label)
+                    .help(task.landingDetail ?? "This task reached done and its work is not in any other branch.")
+            }
+
             if task.column == .review {
                 reviewDetails
             }

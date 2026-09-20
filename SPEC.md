@@ -626,22 +626,54 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
   Derivita), and `agentboard/<task-id>` is deleted once it is merged into the
   base or epic branch. An unmerged branch, or a worktree with uncommitted
   changes, is kept and the reason surfaced in the status bar.
-  A task that belongs to an epic then has its branch merged into
-  `agentboard/epic-<id>` (§5.2), so the next sibling spawned into the epic
-  branches from work that is already in. The merge runs after the acceptance
+
+  The accept then merges the task's branch into the branch meant to carry it:
+  `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling
+  spawned into the epic branches from work that is already in, and the project's
+  base branch for a task in none. The merge runs after the acceptance
   transaction and off the main actor: nothing it does can hold the task out of
-  `done`. When the epic branch is an ancestor of the task branch the ref is
-  advanced directly; otherwise a temporary worktree on the epic branch carries
-  the merge and is removed afterwards, keeping the branch. A conflict aborts,
-  leaves the epic branch where it was, and queues a `decision` report naming the
-  task, the epic branch and the conflicting files, so the orchestrator can
-  dispatch a fix rather than discover the divergence at integration time.
-  The merge commit's subject is `Merge <task title> into <epic title>` — titles,
-  never branch names, because this commit is on the branch the epic's pull
-  request is opened from and `agentboard/<id>` names would publish the task and
-  epic identifiers into that repository's history permanently (§6.1 renames the
-  branch, not commits already made).
-  Nothing here pushes: it is a local branch-to-branch merge.
+  `done`. When the target branch is an ancestor of the task branch the ref is
+  advanced directly; otherwise a temporary worktree on the target branch carries
+  the merge and is removed afterwards, keeping the branch. A conflict aborts and
+  leaves the target branch where it was. The merge commit's subject is
+  `Merge <task title> into <epic title or base branch name>` — titles, never
+  `agentboard/<id>` branch names, because this commit is on the branch a pull
+  request is opened from and those names would publish the task and epic
+  identifiers into that repository's history permanently (§6.1 renames the
+  branch, not commits already made). Nothing here pushes: it is a local
+  branch-to-branch merge.
+
+  Two things the merge will not do. It never cuts a missing base branch — a
+  project whose base branch does not exist is misconfigured, and creating one
+  would land the work on a ref nobody pulls. And it never advances a branch that
+  a working tree holds, which is the ordinary case for the base branch: the
+  human's own checkout is on it. `git update-ref` does not refuse such a branch;
+  it moves the ref and leaves that working tree reporting every newly-merged
+  file as deleted. So the accept defers instead.
+
+  Because the accept therefore cannot always land the work, every task carries a
+  **landing**, written by the accept and cleared when the task leaves `done`:
+
+  - `pending` — armed on entry to `done`, by any route including a human
+    dragging the card, and overwritten as soon as git answers. It survives only
+    when the app died in between, which is precisely when the board must not
+    claim the work landed.
+  - `no_branch` — the task committed nothing. A task with no code to land
+    finishes here and is not stranded; this is a separate value from `unlanded`
+    for exactly that reason.
+  - `landed` — the target branch contains the task's commits.
+  - `unlanded` — the task has commits and the target branch does not contain
+    them. The work is reachable only from `agentboard/<task-id>`.
+
+  `pending` and `unlanded` show as a badge on the card and in the inspector, and
+  queue a `decision` report naming the task, the branch, the target and the
+  reason, so the orchestrator can dispatch a fix rather than discover the
+  divergence at integration time. The board can therefore never say `done` while
+  silently meaning "done, and the work is nowhere": reaching `done` writes a
+  landing, and the default value is the one that asks for attention.
+
+  A landing recorded before this existed is `NULL`, which claims nothing either
+  way; it is not rendered as an alarm.
 - `archived` — also a flag, not a column, with `blocked` and `failed` as the
   precedent: D7's six columns (`proposed`/`backlog`/`ready`/`running`/`review`/
   `done`) are unchanged by the archive feature. Only a `done` task can be

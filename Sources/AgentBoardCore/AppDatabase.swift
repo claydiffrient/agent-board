@@ -79,6 +79,12 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("task_commit") { db in
             try db.execute(sql: Schema.taskCommit)
         }
+        // Left NULL for tasks already in done: they predate the tracking and the board must say
+        // "unknown" rather than invent either answer for them.
+        migrator.registerMigration("task_landing") { db in
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN landing TEXT")
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN landing_detail TEXT")
+        }
         return migrator
     }
 }

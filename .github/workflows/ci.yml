@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Report toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Restore SwiftPM build cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            .build
+            ~/.cache/org.swift.swiftpm
+          key: swiftpm-macos26-${{ hashFiles('Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            swiftpm-macos26-${{ hashFiles('Package.resolved') }}-
+            swiftpm-macos26-
+
+      - name: Build
+        run: swift build --build-tests
+
+      # Split so a window-server failure in the app target cannot be mistaken for a
+      # failure in the four targets that need no display.
+      - name: Test headless targets
+        run: swift test --filter 'AgentBoardCoreTests|AgentBoardRuntimeTests|AgentBoardServerTests|AgentBoardBridgeTests'
+
+      - name: Test app target
+        run: swift test --filter AgentBoardAppTests
