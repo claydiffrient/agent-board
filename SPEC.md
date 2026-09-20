@@ -34,6 +34,7 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D17 | Swift + SwiftUI | Literal reading of "native Mac app" | Tauri |
 | D18 | Runtime spike → board → orchestrator → epics → notes | The riskiest assumption is provable in 200 lines | Build everything |
 | D19 | The Terminal screen and worktree shells (§10) run with the human's own authority: `IntegrationGuard` and `--disallowedTools` deliberately do not gate them, and no Agent Board grant token may reach the shell's environment | A human typing `git push` is entitled to push — those mechanisms bound what an unattended agent may do under `--permission-mode auto`, and there is no agent here; a shell holding a grant token would let anything running in it act with that session's authority over the board | Route the shell through a worker-scoped grant |
+| D20 | A cross-project roster of specialized agents (§4), assigned a task with `assign_to_agent` and returned to the queue with `hand_off` (§6) | A rostered identity outlives any single task, and mediating handoff through the board queue keeps D6's worktree-per-task model instead of building a second coordination path | Hive's model: every agent works on `main`, and a privileged orchestrator arbitrates conflicts between them |
 
 **D8 amended.** As first written, D8 said the pull request was opened by the
 human and by nobody else, and §5.2 step 5 said the same. The orchestrator half
@@ -235,6 +236,15 @@ each session's token are written into that session's generated `--mcp-config`
 and `--settings` files, so nothing is discoverable by a process that wasn't
 spawned by Agent Board.
 
+A rostered agent (§4) is not a third kind of process: it is one of the same
+`Workers (N, capped)` boxes, spawned through the same `AgentRuntime`, just
+carrying a `RosterAgent` identity that names it in the opening prompt and
+narrows its `--disallowedTools` (§3.1). A rostered reviewer under `agent`
+review (§5) is the same worker box again, holding a `reviewer`-scoped token
+instead of `worker`, spawned into the same task's worktree rather than a new
+one. Neither gets a dedicated column in the diagram above; `role` in
+`agent_session` is still only `orchestrator` or `worker` for both.
+
 ### 3.1 Spawn procedure
 
 For a task `T` in project `P`:
@@ -272,6 +282,21 @@ For a task `T` in project `P`:
    `claude agents --json`, and resolve the setup row into it, carrying the
    worktree path, branch and attempt across. The token grant is bound to the
    session at this point, not before spawn.
+
+`assign_to_agent` (§6) runs this same procedure with a `RosterAgent` resolved
+up front against `RosterStore.usableAgent` (refused if the agent is not
+enabled and selected for this project) and threaded through three of the
+steps above rather than a fourth path of its own: step 6's prompt gains an
+identity section before the task body (`OpeningPrompt.renderIdentity` — name,
+role, and the agent's own system prompt, "this identity is yours across every
+task you are given"); step 6's `--model` becomes `task.model ?? agent.model ??
+project default`, most specific override wins; and step 7's
+`--disallowedTools` gains the agent's own `disallowed_tools` patterns appended
+after the fixed push/PR block. `assign_to_agent` under `reviewer` scope (used
+only to start a rostered reviewer, §5.1) skips the `running` transition step 8
+would otherwise make — the task stays in `review` — and lands the reviewer in
+the *worker's own* worktree rather than cutting one, since it is keyed on the
+same task id.
 
 Steps 1-2 are synchronous; `spawn_worker` answers between step 2 and step 3,
 with a row in `agent_session` under a placeholder id and state `setup`, and the
@@ -314,8 +339,6 @@ CREATE TABLE project (
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
                                    -- reviewLevel, buildCommand, testCommand, archivePolicy
-  created_at      INTEGER NOT NULL
-  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance
   created_at      INTEGER NOT NULL,
   workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
 );
@@ -546,6 +569,16 @@ anyone's selection. Deleting a rostered agent clears its `project_roster_agent`
 rows and nothing else: the tasks it worked, its sessions, and the `progress`
 rows naming it all survive it.
 
+There is no `is_reviewer` flag. `RosterAgent.isReviewer` reads
+`role.lowercased().contains("review")` — a "reviewer", "Reviewer", or "code
+reviewer" role all qualify, because the roster is user-defined text and a
+second field would just be a second way to say the same thing. Under `agent`
+review (§5), `ReviewPolicy.routing` takes the project's usable, enabled
+reviewers and picks `reviewers.first` — the first in `project_roster_agent`'s
+own `ordering`, not by task type, workload, or rotation. One project with two
+reviewer-role agents always routes to whichever sorts first; there is no way
+to route different tasks to different reviewers today.
+
 `settings_json.reviewLevel` is one of `none`, `agent`, `task` or `epic` and
 defaults to **`task`**, so a project that predates the setting behaves exactly as
 it did. `epic.review_level` overrides it for that epic's tasks; NULL inherits.
@@ -640,6 +673,16 @@ than accepting work nobody reviewed.
   worker stopped and what remains"), not a `failed` report. A worker that
   vanishes or is cap-killed still gets the old `failed` shape; only an
   acknowledged wind-down gets this one.
+- **Handed off** — a rostered agent that did only the portion matching its
+  specialty calls `hand_off` (§6) instead of `report_complete`. Like a
+  wind-down, the task goes back to `ready`, **never to `review`**, and
+  `failed` is never set; unlike a wind-down, nothing asked it to stop — it
+  decided its part was done. The worktree and branch are kept, so the next
+  agent assigned works the same checkout (D6), and `Board.assign` refuses a
+  second session into a task or worktree an active one still holds. This is
+  the fourth termination shape alongside a cap kill, a human stop, and an
+  acknowledged wind-down; each is distinguishable by report kind
+  (`handoff`, `failed`, none, `decision`) and by the session's `stop_reason`.
 - `blocked` — a flag, not a column. Set by the `Notification` hook, cleared on
   the next `PostToolUse`. The card keeps its position and shows why.
 - `review` — worker has committed on `agentboard/<task-id>` and called
@@ -1048,6 +1091,19 @@ Per project, overridable:
 | Idle (no tool use, no output), sleep excluded | 5 min | Agent stopped, task flagged |
 | Project session ceiling | configurable | Spawn refused |
 
+- **A rostered session (`agent_session.roster_agent_id` set — a worker spawned
+  by `assign_to_agent`, or a reviewer spawned under `agent` review) is exempt
+  from the elapsed and idle caps.** `WorkerSupervisor.exempting` overrides both
+  to `nil` before `CapEvaluator.evaluate` runs, so a rostered agent can neither
+  stall out nor run long and be stopped for it. **This is deliberate, not an
+  oversight** — the epic that built the roster decided no caps apply to it for
+  now, on the reasoning that a durable, human-curated identity is not the same
+  liability as an unattended one-off worker — and it is meant to be revisited,
+  not treated as the final shape. The token cap is unchanged for a rostered
+  session: it meters spend, not liveness, so it still applies when a project
+  sets one. The concurrent-workers and session-ceiling caps are unaffected
+  too, since both count on `role = 'worker'` in `agent_session`, which a
+  rostered session still is.
 - A stopped agent's task returns to `ready` with its `failure_reason` set, and a
   `failed` report goes to the orchestrator (§9.1). Leaving it in `running` with
   no session strands it: nothing can be spawned from `running`.
@@ -1548,6 +1604,17 @@ as dead rather than phantom-running. Per agent: task, state, elapsed, spend
 against cap, last tool used. A blocked agent's row opens its terminal, which is
 how permission prompts get answered (D15).
 
+**Roster** — specified as a `Projects`/`Roster` switch above the sidebar's
+project list (the roster outlives any one project, so it does not join Task
+Board and Status inside a project), listing each rostered agent's name, role,
+model, and an enabled switch, with a sheet to create or edit one and a
+per-project settings picker for which agents that project has selected. **Not
+present in this codebase.** It was built once, completely, on its own task
+branch (`46bd2e6`), but that branch was never merged into this epic — see §12.
+The data model, spawn path, hand-off, and agent-review routing it would drive
+are all real (§4-§6); there is simply no way to reach them yet, in the app or
+over MCP, other than writing a `roster_agent` row directly into the database.
+
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
 section.
@@ -1825,3 +1892,38 @@ from knowing how the agents actually behave first.
   metering tick, throttled to once per 5 minutes) and there is no indicator of
   when it last ran or how many tasks are currently past their threshold and
   waiting for the next tick — you only see the effect once a card disappears.
+- **Specified and built, but never landed: the Roster screen (§10).** Task
+  `53622b86` ("Add the Roster tab and per-project agent selection") shows
+  `done` like every other task in the Agent roster epic, and its commit
+  `46bd2e6` is real and complete — `RosterView`, `RosterAgentSheet`,
+  `RosterActivity`, the `ProjectSettingsSheet` per-project picker, the
+  `MainWindow` tab wiring. But that branch was never merged into the epic
+  branch, by that task or by any task after it, all the way through the
+  epic's last commit. Checked directly: `git merge-base --is-ancestor 46bd2e6
+  <epic tip>` says not an ancestor; `git branch --contains 46bd2e6` names only
+  its own task branch; a search for `Views/Roster/` on the epic branch finds
+  nothing. Net effect: the roster's data model, spawn path, hand-off, and
+  agent-review routing all ship and are exercised by tests, but there is no
+  way — in the app or over MCP — to create a rostered agent, enable one for a
+  project, or see one anywhere. `RosterStore` is instantiated three times in
+  production code (`WorkerSupervisor`, `OrchestratorToolHandler`,
+  `ReviewerToolHandler`) and only ever read from; nothing writes to it outside
+  tests. Whoever picks this up next should merge `46bd2e6` rather than rebuild
+  it — see the "Epic branches" project note for how to bring in a sibling's
+  work that outlived its own branch.
+- **Settled by reasoning, not by measurement: which `roster_agent` schema to
+  keep, and what its deny-list column means.** Two epic tasks independently
+  built incompatible schemas for `roster_agent`/`project_roster_agent` (one
+  with `ordering REAL`, one with an orderless `opted_in` boolean; one
+  documenting `tool_scope` as an allow-list, one treating it as a deny-list in
+  working code) before either was merged. The reconciliation
+  (commit `3df54d5`) picked a side by reading which behavior was already
+  wired — `ReviewPolicy.routing` needs `ordering` to pick a reviewer
+  deterministically, and only the deny-list interpretation has a consumer
+  (`WorkerSupervisor` appending `disallowed_tools` to `--disallowedTools`) —
+  not by running both and observing a difference. No database had ever
+  applied either migration, which is what made the choice cheap rather than a
+  live-data migration; had one been live, "which one matches production" would
+  have been the actual answer, and reasoning about the code would not have
+  been enough. See the "two roster_agent schemas" project note for the full
+  comparison.
