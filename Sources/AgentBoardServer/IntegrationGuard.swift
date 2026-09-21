@@ -130,12 +130,6 @@ public enum IntegrationGuard {
         word == "git" || word.hasSuffix("/git")
     }
 
-    /// `git`, or any path ending in it. `tokens` does not split on `/`, so `/usr/bin/git` arrives
-    /// whole.
-    private static func isGit(_ word: Substring) -> Bool {
-        word == "git" || word.hasSuffix("/git")
-    }
-
     /// `gh`, or any path ending in it, by the same rule as `isGit`.
     private static func isGh(_ word: Substring) -> Bool {
         word == "gh" || word.hasSuffix("/gh")
