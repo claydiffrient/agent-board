@@ -33,6 +33,7 @@ final class EpicAcceptMergeTests: XCTestCase {
         XCTAssertEqual(try mergeCommitCount(epic.branch), 0, "a fast-forward should not have made a merge commit")
         XCTAssertEqual(try worktreePaths(), [], "a fast-forward needed no worktree")
         XCTAssertEqual(try column(task.id), .done)
+        XCTAssertEqual(try landing(task.id), .landed)
         XCTAssertEqual(try mergeReports(), [])
     }
 
@@ -77,6 +78,7 @@ final class EpicAcceptMergeTests: XCTestCase {
         XCTAssertTrue(try fixture.manager.branchExists(epic.branch))
         XCTAssertEqual(try headOf("agentboard/\(task.id)"), taskHead, "the task branch was rewritten")
         XCTAssertEqual(try column(task.id), .done, "a conflict must not hold the task out of done")
+        XCTAssertEqual(try landing(task.id), .unlanded, "a conflicted merge left no record that the work is out")
 
         let body = try XCTUnwrap(try mergeReports().first)
         XCTAssertTrue(body.contains(task.id), body)
@@ -121,23 +123,20 @@ final class EpicAcceptMergeTests: XCTestCase {
         XCTAssertEqual(try mergeReports(), [])
     }
 
-    func testATaskWithNoEpicTouchesNoBranch() async throws {
+    /// A task in no epic targets the base branch, never some other epic's. Its own landing is
+    /// `AcceptLandingTests`' subject; what matters here is that no epic branch moves for it.
+    func testATaskWithNoEpicLeavesEveryEpicBranchAlone() async throws {
         let epic = try makeEpic()
         try fixture.manager.ensureBranch(epic.branch, from: "main")
         let epicHeadBefore = try headOf(epic.branch)
-        let mainBefore = try headOf("main")
         let task = try makeTask(epicId: nil)
         let session = try fixture.worktreeWorker(task: task)
         try fixture.commitInto(try XCTUnwrap(session.worktreePath))
-        let taskHead = try headOf("agentboard/\(task.id)")
 
         try await fixture.supervisor.accept(taskId: task.id)
 
         XCTAssertEqual(try headOf(epic.branch), epicHeadBefore)
-        XCTAssertEqual(try headOf("main"), mainBefore)
-        XCTAssertEqual(try headOf("agentboard/\(task.id)"), taskHead)
         XCTAssertEqual(try column(task.id), .done)
-        XCTAssertEqual(try mergeReports(), [])
     }
 
     /// `ensureBranch` normally cuts the epic branch at first spawn; a missing one must not crash.
@@ -243,6 +242,10 @@ final class EpicAcceptMergeTests: XCTestCase {
 
     private func column(_ taskId: String) throws -> TaskColumn {
         try XCTUnwrap(try fixture.tasks.get(taskId)).column
+    }
+
+    private func landing(_ taskId: String) throws -> TaskLanding? {
+        try XCTUnwrap(try fixture.tasks.get(taskId)).landing
     }
 
     /// Acceptance always queues its own `decision` report; only the merge failures name the branch.

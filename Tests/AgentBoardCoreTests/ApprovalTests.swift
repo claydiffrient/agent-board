@@ -29,7 +29,7 @@ final class ApprovalMigrationTests: XCTestCase {
             XCTAssertTrue(indexes.contains("approval_pending"))
         }
         let applied = try db.writer.read { try AppDatabase.migrator.appliedIdentifiers($0) }
-        XCTAssertEqual(applied, ["v1", "task_model", "approval", "note_section_written_by", "shutdown_order", "shutdown_delivery", "task_archived_at", "task_done_at", "workspace", "approval_payload", "file_lock", "message"])
+        XCTAssertEqual(applied, ["v1", "task_model", "approval", "note_section_written_by", "shutdown_order", "shutdown_delivery", "task_archived_at", "task_done_at", "workspace", "approval_payload", "file_lock", "message", "session_tool_in_flight", "task_commit", "task_landing"])
     }
 
     func testApprovalRequiresExistingProjectAndTask() throws {

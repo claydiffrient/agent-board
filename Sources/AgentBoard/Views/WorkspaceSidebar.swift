@@ -59,15 +59,30 @@ struct WorkspaceNameSheet: View {
 
 /// Which sidebar sections the viewer has collapsed. Per-viewer convenience, so it
 /// lives in `UserDefaults` rather than the board database.
-enum SidebarCollapseState {
+///
+/// The key is a parameter because `UserDefaults.standard` under `xctest` resolves to
+/// `com.apple.dt.xctest.tool` — one domain shared by every `swift test` process on the machine, and
+/// several run at once here. Measured with four concurrent runs writing this key and reading it
+/// straight back: 225-303 of 400 round trips came back as another process's value or empty. A test
+/// gives itself a key no other process writes.
+struct SidebarCollapseState {
     static let key = "sidebar.collapsedWorkspaces"
+    static let standard = SidebarCollapseState()
 
-    static func load() -> Set<String> {
-        Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+    private let defaults: UserDefaults
+    private let key: String
+
+    init(defaults: UserDefaults = .standard, key: String = SidebarCollapseState.key) {
+        self.defaults = defaults
+        self.key = key
     }
 
-    static func save(_ collapsed: Set<String>) {
-        UserDefaults.standard.set(Array(collapsed).sorted(), forKey: key)
+    func load() -> Set<String> {
+        Set(defaults.stringArray(forKey: key) ?? [])
+    }
+
+    func save(_ collapsed: Set<String>) {
+        defaults.set(Array(collapsed).sorted(), forKey: key)
     }
 }
 

@@ -299,8 +299,11 @@ struct ApprovalsSidebar: View {
         }
     }
 
+    /// Both names when they differ: the human is approving a write to the published ref, and the
+    /// local branch is what they would look at to check it.
     private func branchOf(_ approval: Approval) -> String {
-        (try? approval.publishRequest().branch) ?? "?"
+        guard let request = try? approval.publishRequest() else { return "?" }
+        return request.head == request.branch ? request.branch : "\(request.head) (local \(request.branch))"
     }
 
     private func requester(_ requestedBy: String) -> String {

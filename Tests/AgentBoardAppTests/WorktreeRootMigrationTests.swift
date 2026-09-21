@@ -49,7 +49,8 @@ final class WorktreeRootMigrationTests: XCTestCase {
         WorktreeManager(
             repoPath: repo,
             worktreeRoot: oldRoot,
-            hookSettingsURL: sandbox.appendingPathComponent("no-hooks.json")
+            hookSettingsURL: sandbox.appendingPathComponent("no-hooks.json"),
+            attribution: .unattributable
         )
     }
 
@@ -238,7 +239,8 @@ final class DefaultWorktreeRootTests: XCTestCase {
         try await fixture.db.writer.write { db in try legacy.insert(db) }
         let manager = WorktreeManager(
             repoPath: legacyRepo, worktreeRoot: legacyRoot,
-            hookSettingsURL: fixture.supportDir.appendingPathComponent("no-hooks.json")
+            hookSettingsURL: fixture.supportDir.appendingPathComponent("no-hooks.json"),
+            attribution: .unattributable
         )
         let worktree = try manager.create(name: "task-1", branch: "agentboard/task-1", base: "main")
         try fixture.commitInto(worktree.path)

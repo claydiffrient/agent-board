@@ -10,6 +10,7 @@ public final class WorkerToolHandler: ToolHandler {
     private let notes: NoteTools
     private let projects: ProjectStore
     private let locks: FileLockStore
+    private let taskCommits: TaskCommitStore
     private let scopedCommits: (any ScopedCommitting)?
     private let events: any BoardEventSink
 
@@ -21,6 +22,7 @@ public final class WorkerToolHandler: ToolHandler {
         notes = NoteTools(db: db)
         projects = ProjectStore(db)
         locks = FileLockStore(db)
+        taskCommits = TaskCommitStore(db)
         self.scopedCommits = scopedCommits
         self.events = events
     }
@@ -57,12 +59,18 @@ public final class WorkerToolHandler: ToolHandler {
         ToolDescriptor(
             name: "propose_task",
             description: "Propose follow-up work you discovered but should not do as part of your task. It lands in the "
-                + "Proposed column for a human to review; it is not assigned to you.",
+                + "Proposed column for a human to review; it is not assigned to you. Name `epic_id` to say which epic "
+                + "it belongs in — your own task's epic is in `get_my_task`\'s `epic_id` — and promoting the proposal "
+                + "puts it there.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "title": ToolSchema.string(),
                     "body": ToolSchema.string("What needs to be done and where."),
                     "rationale": ToolSchema.string("Why this is worth doing."),
+                    "epic_id": ToolSchema.string(
+                        "Epic the proposal should land in when promoted. Any live epic in this project, "
+                            + "your own task\'s included. Omit to leave placement to the human."
+                    ),
                 ],
                 required: ["title"]
             )
@@ -107,8 +115,8 @@ public final class WorkerToolHandler: ToolHandler {
     public static let commitDescriptor = ToolDescriptor(
         name: "commit_my_work",
         description: "Commit your work in this shared checkout. Agent Board commits exactly the files you have "
-            + "written — it knows them from the per-file locks your writes took — and tags the commit with your "
-            + "task id, so a reviewer sees your changes apart from the other agents' in this same tree. Another "
+            + "written — it knows them from the per-file locks your writes took — and records the commit as "
+            + "yours, so a reviewer sees your changes apart from the other agents' in this same tree. Another "
             + "agent's edits are never swept in. Use this instead of `git commit`, which is refused here. You may "
             + "call it more than once.",
         inputSchema: ToolSchema.object(
@@ -145,16 +153,7 @@ public final class WorkerToolHandler: ToolHandler {
             try progress.append(taskId: task.id, sessionId: identity.sessionId, kind: .note, text: text)
             return ToolResult(text: "Logged.")
         case "propose_task":
-            let title = try ToolArguments.requiredString("title", in: arguments)
-            let proposed = try board.propose(
-                projectId: identity.projectId,
-                title: title,
-                body: arguments["body"]?.stringValue,
-                rationale: arguments["rationale"]?.stringValue,
-                sessionId: identity.sessionId
-            )
-            await events.reportQueued(projectId: identity.projectId)
-            return .json(.object(["id": .string(proposed.id), "column": .string(proposed.column.rawValue)]))
+            return try await proposeTask(arguments, identity: identity)
         case "commit_my_work":
             return try await commitMyWork(task, arguments: arguments, identity: identity)
         case "report_complete":
@@ -218,6 +217,32 @@ public final class WorkerToolHandler: ToolHandler {
         return sessionId
     }
 
+    /// The epic is validated here rather than only at promotion so the worker is told at once,
+    /// while it still has the context to pick another one. `Board.promote` checks again.
+    private func proposeTask(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+        let title = try ToolArguments.requiredString("title", in: arguments)
+        let epicId = ToolArguments.optionalString("epic_id", in: arguments).flatMap { $0.isEmpty ? nil : $0 }
+        let proposed: BoardTask
+        do {
+            proposed = try board.propose(
+                projectId: identity.projectId,
+                title: title,
+                body: arguments["body"]?.stringValue,
+                rationale: arguments["rationale"]?.stringValue,
+                sessionId: identity.sessionId,
+                epicId: epicId
+            )
+        } catch let refusal as ProposalEpicRefusal {
+            throw ToolError(refusal.reason)
+        }
+        await events.reportQueued(projectId: identity.projectId)
+        return .json(.object([
+            "id": .string(proposed.id),
+            "column": .string(proposed.column.rawValue),
+            "epic_id": .optional(proposed.epicId),
+        ]))
+    }
+
     private func getMyTask(_ task: BoardTask, identity: TokenIdentity) throws -> ToolResult {
         let dependencies: [JSONValue] = try tasks.deps(of: task.id).compactMap { depId in
             guard let dep = try tasks.get(depId) else { return nil }
@@ -236,6 +261,7 @@ public final class WorkerToolHandler: ToolHandler {
             "acceptance": .optional(task.acceptance),
             "priority": .optional(task.priority),
             "column": .string(task.column.rawValue),
+            "epic_id": .optional(task.epicId),
             "epic_goal": .null,
             "dependencies": .array(dependencies),
             "attempt": .number(Double(attempt)),
@@ -293,19 +319,21 @@ public final class WorkerToolHandler: ToolHandler {
                 branch: session.branch ?? SharedCheckoutGroup.branch(epicId: task.epicId),
                 taskId: task.id,
                 paths: paths,
-                message: CommitAttribution.message(message, taskId: task.id)
+                message: message
             )
         )
         switch outcome {
         case .committed(let sha, let committed):
+            // The ledger row is written here rather than swept up later: a crash between the commit
+            // and a later pass would lose the attribution with nothing in the commit to rebuild it from.
+            try taskCommits.record(taskId: task.id, sha: sha)
             let text = "Committed \(String(sha.prefix(8))) on \(session.branch ?? "the shared branch"), "
-                + "tagged \(CommitAttribution.trailer(taskId: task.id)), containing only: "
+                + "recorded as this task's, containing only: "
                 + committed.joined(separator: ", ")
             try progress.append(taskId: task.id, sessionId: sessionId, kind: .status, text: text)
             return .json(.object([
                 "commit": .string(sha),
                 "paths": .array(committed.map { .string($0) }),
-                "trailer": .string(CommitAttribution.trailer(taskId: task.id)),
             ]))
         case .nothingToCommit(let claimed):
             return ToolResult(

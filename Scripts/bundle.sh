@@ -10,6 +10,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp ".build/$config/AgentBoard" "$app/Contents/MacOS/AgentBoard"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp RELEASES.md "$app/Contents/Resources/RELEASES.md"
 for bundle in .build/"$config"/*.bundle; do
   [ -e "$bundle" ] && cp -R "$bundle" "$app/Contents/Resources/"
 done

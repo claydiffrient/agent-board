@@ -40,7 +40,8 @@ public struct TaskStore: Sendable {
             createdAt: now,
             updatedAt: now,
             model: model,
-            doneAt: column == .done ? now : nil
+            doneAt: column == .done ? now : nil,
+            landing: column == .done ? .noBranch : nil
         )
         try task.insert(db)
         return task
@@ -90,15 +91,17 @@ public struct TaskStore: Sendable {
     public static func branchName(for id: String) -> String { branchPrefix + id }
 
     public func setEpic(_ id: String, epicId: String?) throws {
-        try db.writer.write { db in
-            guard try Task.exists(db, key: id) else {
-                throw BoardError.taskNotFound(id)
-            }
-            try db.execute(
-                sql: "UPDATE task SET epic_id = ?, updated_at = ? WHERE id = ?",
-                arguments: [epicId, Int64.nowMillis, id]
-            )
+        try db.writer.write { db in try Self.setEpic(db, id, epicId: epicId) }
+    }
+
+    static func setEpic(_ db: Database, _ id: String, epicId: String?) throws {
+        guard try Task.exists(db, key: id) else {
+            throw BoardError.taskNotFound(id)
         }
+        try db.execute(
+            sql: "UPDATE task SET epic_id = ?, updated_at = ? WHERE id = ?",
+            arguments: [epicId, Int64.nowMillis, id]
+        )
     }
 
     public func update(_ task: Task) throws {
@@ -136,20 +139,36 @@ public struct TaskStore: Sendable {
             sql: "UPDATE task SET column_name = ?, ordering = ?, updated_at = ? WHERE id = ?",
             arguments: [column, ordering, now, id]
         )
-        try stampDoneAt(db, id, entering: column, from: task.column, at: now)
+        try stampDoneTransition(db, id, entering: column, from: task.column, at: now)
     }
 
     /// `done_at` is the only reliable measure of time-in-done: reordering inside `done`, archiving
     /// and every other edit move `updated_at`. Leaving `done` clears it along with the manual
     /// unarchive, so a reopened task starts the policy clock — and the policy itself — from scratch.
-    static func stampDoneAt(_ db: Database, _ id: String, entering: TaskColumn, from: TaskColumn, at: Int64) throws {
+    ///
+    /// Entering `done` also arms `landing` at `.pending`, here rather than in `Board.accept`, so
+    /// that every route into the column is covered — a human dragging a card across the board is
+    /// otherwise a second way for `done` to mean "and the work is nowhere" in silence. The accept
+    /// overwrites it once git has answered.
+    static func stampDoneTransition(
+        _ db: Database, _ id: String, entering: TaskColumn, from: TaskColumn, at: Int64
+    ) throws {
         switch (from, entering) {
         case (.done, .done):
             return
         case (_, .done):
-            try db.execute(sql: "UPDATE task SET done_at = ? WHERE id = ?", arguments: [at, id])
+            try db.execute(
+                sql: "UPDATE task SET done_at = ?, landing = ?, landing_detail = NULL WHERE id = ?",
+                arguments: [at, TaskLanding.pending.rawValue, id]
+            )
         default:
-            try db.execute(sql: "UPDATE task SET done_at = NULL, unarchived_at = NULL WHERE id = ?", arguments: [id])
+            try db.execute(
+                sql: """
+                UPDATE task SET done_at = NULL, unarchived_at = NULL, landing = NULL, landing_detail = NULL
+                WHERE id = ?
+                """,
+                arguments: [id]
+            )
         }
     }
 
@@ -248,6 +267,37 @@ public struct TaskStore: Sendable {
             sql: "UPDATE task SET failed = ?, failure_reason = ?, updated_at = ? WHERE id = ?",
             arguments: [failed, failed ? reason : nil, Int64.nowMillis, id]
         )
+    }
+
+    public func setLanding(_ id: String, _ landing: TaskLanding, detail: String?) throws {
+        try db.writer.write { db in
+            try Self.setLanding(db, id, landing, detail: detail)
+        }
+    }
+
+    static func setLanding(_ db: Database, _ id: String, _ landing: TaskLanding, detail: String?) throws {
+        try db.execute(
+            sql: "UPDATE task SET landing = ?, landing_detail = ?, updated_at = ? WHERE id = ?",
+            arguments: [landing.rawValue, detail, Int64.nowMillis, id]
+        )
+    }
+
+    /// Every `done` task the human still has to place somewhere, oldest acceptance first.
+    /// `no_branch` and `landed` are excluded; a NULL predates the tracking and claims nothing.
+    /// Archived tasks are included: the incident that went undetected longest was an archived one,
+    /// and hiding a card does not put its commits anywhere.
+    public func awaitingLanding(projectId: String) throws -> [BoardTask] {
+        try db.reader.read { db in
+            try BoardTask.fetchAll(
+                db,
+                sql: """
+                SELECT * FROM task
+                WHERE project_id = ? AND column_name = 'done' AND landing IN ('pending', 'unlanded')
+                ORDER BY done_at
+                """,
+                arguments: [projectId]
+            )
+        }
     }
 
     /// Hides a done task from the board by stamping `archived_at`. Nothing else changes:
