@@ -1994,16 +1994,22 @@ as dead rather than phantom-running. Per agent: task, state, elapsed, spend
 against cap, last tool used. A blocked agent's row opens its terminal, which is
 how permission prompts get answered (D15).
 
-**Roster** — specified as a `Projects`/`Roster` switch above the sidebar's
-project list (the roster outlives any one project, so it does not join Task
-Board and Status inside a project), listing each rostered agent's name, role,
-model, and an enabled switch, with a sheet to create or edit one and a
-per-project settings picker for which agents that project has selected. **Not
-present in this codebase.** It was built once, completely, on its own task
-branch (`46bd2e6`), but that branch was never merged into this epic — see §12.
-The data model, spawn path, hand-off, and agent-review routing it would drive
-are all real (§4-§6); there is simply no way to reach them yet, in the app or
-over MCP, other than writing a `roster_agent` row directly into the database.
+**Roster** — the cross-project register of specialists (§4), and the one screen
+not scoped to a project: a `Roster` row in the sidebar beside `At a Glance` and
+above the workspace sections, so it does not join Task Board and Status inside a
+project. Per agent: name, role, model, an enabled switch, and the task it is
+mid-way through. Add, edit and delete; the editor covers name, role, system
+prompt, model and enabled. Deleting an agent that is working is **refused**, and
+the confirmation names the task holding it, because deleting would leave a live
+session with no identity behind it. Which agents a project uses is chosen in
+that project's settings sheet, one toggle per rostered agent, writing
+`project_roster_agent` immediately rather than on Save — those are join rows,
+not part of the settings blob the Save button rewrites.
+
+Enabled agents sort above disabled ones, then by name case-insensitively, then
+by id so the order is stable. "Working" means a live `agent_session` carrying
+that agent's `roster_agent_id` (`RosterStore.assignments`); a session that has
+ended does not count, or a finished pass would strand its agent undeletable.
 
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
@@ -2384,25 +2390,21 @@ from knowing how the agents actually behave first.
   metering tick, throttled to once per 5 minutes) and there is no indicator of
   when it last ran or how many tasks are currently past their threshold and
   waiting for the next tick — you only see the effect once a card disappears.
-- **Specified and built, but never landed: the Roster screen (§10).** Task
-  `53622b86` ("Add the Roster tab and per-project agent selection") shows
-  `done` like every other task in the Agent roster epic, and its commit
-  `46bd2e6` is real and complete — `RosterView`, `RosterAgentSheet`,
-  `RosterActivity`, the `ProjectSettingsSheet` per-project picker, the
-  `MainWindow` tab wiring. But that branch was never merged into the epic
-  branch, by that task or by any task after it, all the way through the
-  epic's last commit. Checked directly: `git merge-base --is-ancestor 46bd2e6
-  <epic tip>` says not an ancestor; `git branch --contains 46bd2e6` names only
-  its own task branch; a search for `Views/Roster/` on the epic branch finds
-  nothing. Net effect: the roster's data model, spawn path, hand-off, and
-  agent-review routing all ship and are exercised by tests, but there is no
-  way — in the app or over MCP — to create a rostered agent, enable one for a
-  project, or see one anywhere. `RosterStore` is instantiated three times in
-  production code (`WorkerSupervisor`, `OrchestratorToolHandler`,
-  `ReviewerToolHandler`) and only ever read from; nothing writes to it outside
-  tests. Whoever picks this up next should merge `46bd2e6` rather than rebuild
-  it — see the "Epic branches" project note for how to bring in a sibling's
-  work that outlived its own branch.
+- **Landed late, and what that cost: the Roster screen (§10).** Task
+  `53622b86` ("Add the Roster tab and per-project agent selection") showed
+  `done` like every other task in the Agent roster epic, but its commit
+  `46bd2e6` was never merged into the epic branch, by that task or by any task
+  after it. For the length of the epic the roster's data model, spawn path,
+  hand-off and agent-review routing all shipped and were exercised by tests
+  while there was no way — in the app or over MCP — to create a rostered agent
+  or enable one for a project. `46bd2e6` has since been merged rather than
+  rebuilt, and the screen is reachable.
+  Two things survive that gap. A task reading `done` can mean "committed on a
+  branch nobody merged", which only an audit of `git branch --contains` finds,
+  not the board. And `46bd2e6` was written against a `MainWindow` that has
+  since gained workspaces and At a Glance, so the `Projects`/`Roster` segmented
+  switch it specified became a `SidebarSelection.roster` row instead — porting
+  a view that sat unmerged costs a rewrite of its host, not just a merge.
 - **Settled by reasoning, not by measurement: which `roster_agent` schema to
   keep, and what its deny-list column means.** Two epic tasks independently
   built incompatible schemas for `roster_agent`/`project_roster_agent` (one

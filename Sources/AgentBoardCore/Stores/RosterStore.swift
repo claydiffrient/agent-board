@@ -138,8 +138,6 @@ public struct RosterStore: Sendable {
 
     /// Rewrites the project's preference order. Ids the project has not opted into are ignored;
     /// ones it uses but that are absent from `agentIds` keep their relative order after the listed ones.
-    /// Rewrites the project's preference order. Ids the project has not opted into are ignored;
-    /// ones it uses but that are absent from `agentIds` keep their relative order after the listed ones.
     public func setOrder(forProject projectId: String, agentIds: [String]) throws {
         try db.writer.write { db in
             let current = try String.fetchAll(
@@ -153,6 +151,32 @@ public struct RosterStore: Sendable {
                 try db.execute(
                     sql: "UPDATE project_roster_agent SET ordering = ? WHERE project_id = ? AND roster_agent_id = ?",
                     arguments: [Double(index + 1), projectId, id]
+                )
+            }
+        }
+    }
+
+    /// Every rostered agent holding a live session right now, across every project. A session that
+    /// has ended must not appear: the roster screen badges these and its delete guard refuses on
+    /// them, and refusing on a finished session would strand the agent permanently.
+    public func assignments() throws -> [RosterAssignment] {
+        try db.reader.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                SELECT s.roster_agent_id AS agent_id, t.id AS task_id, t.title AS task_title,
+                       p.name AS project_name
+                FROM agent_session s
+                JOIN task t ON t.id = s.task_id
+                JOIN project p ON p.id = s.project_id
+                WHERE s.roster_agent_id IS NOT NULL
+                  AND s.state IN (\(SessionStore.activeStatesSQL))
+                ORDER BY s.started_at
+                """
+            ).map {
+                RosterAssignment(
+                    agentId: $0["agent_id"], taskId: $0["task_id"],
+                    taskTitle: $0["task_title"], projectName: $0["project_name"]
                 )
             }
         }

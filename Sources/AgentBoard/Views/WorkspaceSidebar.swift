@@ -90,6 +90,8 @@ struct SidebarCollapseState {
 /// `atAGlance`, which is the app's landing view, so the detail pane is never empty.
 enum SidebarSelection: Hashable {
     case atAGlance
+    /// The roster is cross-project, so it sits beside At a Glance rather than inside a project.
+    case roster
     case project(String)
 
     var projectId: String? {
