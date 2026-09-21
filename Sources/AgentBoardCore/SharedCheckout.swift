@@ -115,6 +115,37 @@ public enum WorkerPlacementDecision {
     }
 }
 
+/// One task that shares a branch with others, as acceptance sees it.
+public struct SharedBranchMember: Sendable, Equatable {
+    public var taskId: String
+    public var isAccepted: Bool
+    /// Its worker is still in the checkout. Accepted or not, nothing may be reaped under it.
+    public var isLive: Bool
+
+    public init(taskId: String, isAccepted: Bool, isLive: Bool) {
+        self.taskId = taskId
+        self.isAccepted = isAccepted
+        self.isLive = isLive
+    }
+}
+
+/// When a shared branch may be merged into its epic branch and reaped.
+///
+/// A shared branch merges once, as a whole, when every member is accepted and none is still
+/// running: its members' commits are interleaved on one ref, so there is no range that is one
+/// task's work and no way to leave a sibling's out. A member that was rejected, failed, or is being
+/// redone therefore holds the whole branch until it is accepted on that same branch — Agent Board
+/// does not unpick commits.
+public enum SharedBranchAcceptance {
+    public static func isReadyToMerge(_ members: [SharedBranchMember]) -> Bool {
+        !members.isEmpty && members.allSatisfy { $0.isAccepted && !$0.isLive }
+    }
+
+    public static func waitingOn(_ members: [SharedBranchMember]) -> [String] {
+        members.filter { !$0.isAccepted || $0.isLive }.map(\.taskId)
+    }
+}
+
 /// Where a worker is actually standing, read back from its own session row.
 ///
 /// A resource read carries no arguments, so a briefing has only the token's identity to go on.

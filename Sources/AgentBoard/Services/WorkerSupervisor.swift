@@ -554,10 +554,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let branchNames = ordered.map { IntegrationPlan.branchName(taskId: $0.id) }
         let dispatched = Set(ordered.filter { ((try? sessions.forTask($0.id)) ?? []).isEmpty == false }.map(\.id))
         let taskIds = ordered.map(\.id)
+        let shared = ordered.reduce(into: [String: String]()) { map, member in
+            map[member.id] = sharedBranch(of: member)
+        }
+        let projectBase = project.baseBranch
         let facts = try await offMain { () -> [String: TaskBranchFacts] in
             let merged = try manager.mergeStatus(worktree: worktree, branches: branchNames)
             return try Self.branchFacts(
-                manager, taskIds: taskIds, epicBranch: epicBranch, merged: merged, dispatched: dispatched
+                manager, taskIds: taskIds, epicBranch: epicBranch, baseBranch: projectBase,
+                sharedBranches: shared, merged: merged, dispatched: dispatched
             )
         }
         let branches = IntegrationPlan.classify(ordered, facts: facts)
@@ -716,6 +721,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let taskSessions = try sessions.forTask(taskId)
             for session in taskSessions {
                 try grants.revokeAll(sessionId: session.sessionId)
+                try fileLocks.releaseAll(sessionId: session.sessionId)
             }
             // Teardown runs first so `deleteBranchIfMerged` still sees the task branch as unmerged
             // and keeps it; the integrator reads the surviving branch as its ledger of what is in.
@@ -733,6 +739,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// cannot quietly mean "done, and the work is nowhere".
     private func landAcceptedBranch(task: BoardTask, project: Project) async {
         let epic = task.epicId.flatMap { try? epics.get($0) }
+        // A shared branch holds several tasks' commits on one ref, so it lands as a unit when its
+        // last member is accepted (§8.4) rather than once per task.
+        if let epic, let shared = sharedBranch(of: task) {
+            await mergeSharedBranch(task: task, epic: epic, project: project, branch: shared)
+            return
+        }
         let manager = worktreeManager(for: project)
         let taskBranch = Self.taskBranchPrefix + task.id
         let target = epic?.branch ?? project.baseBranch
@@ -813,6 +825,155 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 advice: "Whoever holds that checkout must merge `\(taskBranch)` themselves."
             )
         }
+    }
+
+    /// The shared branch `task` ran on, or nil when it had a worktree of its own. Read from its
+    /// newest session that carries a branch, so a task retried into a worktree after a shared
+    /// attempt is treated as the worktree task it now is.
+    private func sharedBranch(of task: BoardTask) -> String? {
+        guard let rows = try? sessions.forTask(task.id) else { return nil }
+        guard let newest = rows.last(where: { $0.branch != nil }) else { return nil }
+        guard newest.worktreePath == nil, let branch = newest.branch,
+              branch.hasPrefix(SharedCheckoutGroup.branchPrefix)
+        else { return nil }
+        return branch
+    }
+
+    /// Every task that has run on `branch`, newest session state per task.
+    private func sharedMembers(projectId: String, branch: String) throws -> [SharedBranchMember] {
+        var members: [String: SharedBranchMember] = [:]
+        var order: [String] = []
+        for row in try sessions.all(projectId: projectId)
+        where row.role == .worker && row.worktreePath == nil && row.branch == branch {
+            // A discarded member's task row is gone, so there is nobody left to accept it and it
+            // cannot hold the branch. Its commits still merge with everyone else's.
+            guard let taskId = row.taskId, let task = try tasks.get(taskId) else { continue }
+            if members[taskId] == nil {
+                order.append(taskId)
+                members[taskId] = SharedBranchMember(taskId: taskId, isAccepted: task.column == .done, isLive: false)
+            }
+            if row.state.isActive { members[taskId]?.isLive = true }
+        }
+        return order.compactMap { members[$0] }
+    }
+
+    /// A shared branch merges into the epic branch once, when its last member is accepted. Until
+    /// then the accepted task is recorded as accepted and nothing is merged or reaped: its commits
+    /// are interleaved with its siblings' on one ref, so there is no range that is its work alone.
+    private func mergeSharedBranch(task: BoardTask, epic: Epic, project: Project, branch: String) async {
+        let members = (try? sharedMembers(projectId: project.id, branch: branch)) ?? []
+        guard SharedBranchAcceptance.isReadyToMerge(members) else {
+            let waiting = SharedBranchAcceptance.waitingOn(members)
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(branch)` carries \(members.count) tasks' commits and has not been merged into the "
+                    + "epic branch `\(epic.branch)`."
+                    + "\nA shared branch merges once, when every task on it has been accepted and no worker is "
+                    + "still standing in the checkout: its members' commits are interleaved on one ref, so there "
+                    + "is no range that is one task's work alone and Agent Board does not unpick commits."
+                    + "\n\nStill outstanding on `\(branch)`:\n"
+                    + waiting.map { "- \($0)" }.joined(separator: "\n"),
+                advice: nil
+            )
+            return
+        }
+
+        let manager = worktreeManager(for: project)
+        let epicBranch = epic.branch
+        let epicTitle = epic.title
+        let projectBase = project.baseBranch
+        let memberIds = members.map(\.taskId)
+        let mergeTitle = sharedMergeTitle(memberIds)
+        let worktreeName = "merge-shared-\(epic.id)"
+        let outcome: BranchMerge
+        do {
+            outcome = try await offMain {
+                try manager.ensureBranch(epicBranch, from: projectBase)
+                let base = try manager.mergeBase(branch, epicBranch) ?? projectBase
+                // A branch that predates the ledger has its attribution only in its old trailers,
+                // and this is the last moment anything reads it: reaping deletes the ref.
+                _ = try? manager.backfillFromTrailers(on: branch, since: base)
+                // Written before the merge, because the branch is about to be deleted and the refs
+                // are all that is left to say which commit was whose.
+                try manager.recordSharedLedger(branch: branch, base: base, taskIds: memberIds)
+                return try manager.merge(
+                    taskBranch: branch, into: epicBranch, taskTitle: mergeTitle,
+                    targetTitle: epicTitle, worktreeName: worktreeName
+                )
+            }
+        } catch {
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(branch)`, shared by \(memberIds.count) task\(memberIds.count == 1 ? "" : "s"), "
+                    + "could not be merged into the epic branch `\(epicBranch)`: \(describe(error))",
+                advice: "The epic branch is behind. Dispatch a task to merge `\(branch)` into it by hand."
+            )
+            return
+        }
+        switch outcome {
+        case .alreadyMerged, .fastForwarded, .merged, .nothingToMerge:
+            recordSharedLanding(memberIds, epic: epic, landing: .landed)
+            await reapSharedBranch(branch, epic: epic, project: project)
+        case .conflicted(let files):
+            let listed = files.isEmpty ? "(git reported no paths)" : files.map { "- `\($0)`" }.joined(separator: "\n")
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(branch)`, shared by \(memberIds.count) tasks, conflicts with the epic branch "
+                    + "`\(epicBranch)`, which is unchanged and now behind."
+                    + "\n\nConflicting files:\n\(listed)",
+                advice: "Dispatch a task to merge `\(branch)` into `\(epicBranch)` and resolve these. "
+                    + "That one merge carries every task on the branch."
+            )
+        case .skippedCheckedOut(let path):
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(branch)`, shared by \(memberIds.count) tasks, was not merged into the epic branch "
+                    + "`\(epicBranch)`: that branch is checked out at \(path).",
+                advice: "Whoever holds it — the integrator, normally — must merge `\(branch)` themselves."
+            )
+        case .noTargetBranch(let missing):
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(branch)`, shared by \(memberIds.count) tasks, has nowhere to land: "
+                    + "`\(missing)` does not exist in \(project.repoPath).",
+                advice: "Create `\(missing)`, then merge `\(branch)` into it."
+            )
+        }
+    }
+
+    /// A shared branch's members all land at the same moment — the one merge carries every one of
+    /// them — so a sibling accepted earlier has its `unlanded` corrected here rather than staying
+    /// flagged for a human who has nothing left to do.
+    private func recordSharedLanding(_ taskIds: [String], epic: Epic, landing: TaskLanding) {
+        for id in taskIds {
+            guard let member = (try? tasks.get(id)) ?? nil else { continue }
+            recordLanding(task: member, epic: epic, landing: landing, detail: nil, advice: nil)
+        }
+    }
+
+    /// What the merge commit calls a branch that belongs to several tasks. Never an id: this subject
+    /// lands in whatever repository the epic's pull request is opened in (SPEC §5.2).
+    private func sharedMergeTitle(_ taskIds: [String]) -> String {
+        let titles = taskIds.compactMap { try? tasks.get($0)?.title }.compactMap { $0 }
+        guard titles.count != 1 else { return titles[0] }
+        return "\(taskIds.count) tasks sharing a checkout"
+    }
+
+    /// The project's own checkout is standing on the shared branch, so it has to step off before
+    /// git will delete the ref. A dirty checkout keeps the branch rather than losing anything.
+    private func reapSharedBranch(_ branch: String, epic: Epic, project: Project) async {
+        let manager = worktreeManager(for: project)
+        let epicBranch = epic.branch
+        let bases = [project.baseBranch, epicBranch]
+        let notices = await offMainNotices {
+            do {
+                try manager.releaseSharedBranch(branch, to: epicBranch)
+            } catch {
+                return ["kept shared branch \(branch): \(error)"]
+            }
+            return Self.deleteBranch(manager, branch, bases: bases)
+        }
+        report(notices)
     }
 
     /// Writes the landing and, when the human has something to do about it, queues a `decision`
@@ -1015,12 +1176,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         _ manager: WorktreeManager,
         taskIds: [String],
         epicBranch: String,
+        baseBranch: String,
+        sharedBranches: [String: String],
         merged: [String: Bool],
         dispatched: Set<String>
     ) throws -> [String: TaskBranchFacts] {
         let epicRef = "refs/heads/\(epicBranch)"
         var facts: [String: TaskBranchFacts] = [:]
         for taskId in taskIds {
+            if let shared = sharedBranches[taskId] {
+                facts[taskId] = try sharedBranchFacts(
+                    manager, taskId: taskId, branch: shared, epicBranch: epicBranch,
+                    epicRef: epicRef, baseBranch: baseBranch
+                )
+                continue
+            }
             let branch = IntegrationPlan.branchName(taskId: taskId)
             var fact = TaskBranchFacts(
                 branchExists: try manager.branchExists(branch),
@@ -1040,6 +1210,34 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             facts[taskId] = fact
         }
         return facts
+    }
+
+    /// A shared branch belongs to no one task, so every count here is selected by the commit ledger
+    /// rather than by the branch's range. Once the branch is reaped, the same selection still works
+    /// against the epic branch, where the commits now live.
+    private nonisolated static func sharedBranchFacts(
+        _ manager: WorktreeManager,
+        taskId: String,
+        branch: String,
+        epicBranch: String,
+        epicRef: String,
+        baseBranch: String
+    ) throws -> TaskBranchFacts {
+        var fact = TaskBranchFacts(branchExists: try manager.branchExists(branch), sharedBranch: branch)
+        fact.recordedBase = try manager.refCommit(TaskBranchLedger.baseRef(taskId: taskId))
+        fact.recordedTip = try manager.refCommit(TaskBranchLedger.tipRef(taskId: taskId))
+        if fact.branchExists {
+            let base = try fact.recordedBase ?? manager.mergeBase(branch, epicBranch) ?? baseBranch
+            let own = try manager.commits(taskId: taskId, on: branch, since: base)
+            fact.ownCommits = own.count
+            fact.recordedTip = fact.recordedTip ?? own.first
+            fact.mergedIntoEpic = try !own.isEmpty && own.allSatisfy { try manager.isMerged(commit: $0, into: epicRef) }
+            return fact
+        }
+        guard let base = fact.recordedBase, let tip = fact.recordedTip else { return fact }
+        fact.tipOnEpicBranch = try manager.isMerged(commit: tip, into: epicRef)
+        fact.ownCommits = try manager.commits(taskId: taskId, on: epicBranch, since: base).count
+        return fact
     }
 
     /// A session death that never reached `terminate` — the row already inactive when the cap or

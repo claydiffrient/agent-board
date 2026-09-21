@@ -76,12 +76,52 @@ public enum IntegrationGuard {
     /// Whether the command invokes `git <subcommand>` anywhere in it, by the same scan `match` uses,
     /// so a chained or env-prefixed invocation is seen too.
     public static func invokesGit(_ subcommand: String, toolName: String?, command: String?) -> Bool {
-        guard toolName == "Bash", let command, !command.isEmpty else { return false }
-        let words = tokens(command)
-        for index in words.indices where isGit(words[index]) {
-            if self.subcommand(after: index, in: words)?.word == Substring(subcommand) { return true }
+        gitInvocations(toolName: toolName, command: command).contains { $0.subcommand == subcommand }
+    }
+
+    /// One `git <subcommand>` found in a command, with the words that follow it.
+    ///
+    /// `arguments` is everything after the subcommand to the end of the whole command, so it is
+    /// only meaningful for an invocation that stands alone: in `git a -- x && git b`, the first
+    /// invocation's arguments run into the second. A caller that reads them must establish that
+    /// itself.
+    public struct GitInvocation: Sendable, Equatable {
+        public var subcommand: String
+        public var arguments: [String]
+        /// A global option before the subcommand moved git somewhere else (`-C`, `--git-dir`,
+        /// `--work-tree`), so a path in `arguments` is not relative to the session's directory.
+        public var relocated: Bool
+
+        public init(subcommand: String, arguments: [String], relocated: Bool) {
+            self.subcommand = subcommand
+            self.arguments = arguments
+            self.relocated = relocated
         }
-        return false
+    }
+
+    /// Every `git <subcommand>` in the command. An absolute or wrapped path (`/usr/bin/git`) counts,
+    /// which a bare `== "git"` comparison misses.
+    public static func gitInvocations(toolName: String?, command: String?) -> [GitInvocation] {
+        guard toolName == "Bash", let command, !command.isEmpty else { return [] }
+        let words = tokens(command)
+        var found: [GitInvocation] = []
+        for index in words.indices where isGit(words[index]) {
+            guard let sub = subcommand(after: index, in: words) else { continue }
+            let globals = words[(index + 1)..<sub.index]
+            found.append(GitInvocation(
+                subcommand: String(sub.word),
+                arguments: words[(sub.index + 1)...].map(String.init),
+                relocated: globals.contains(where: relocates)
+            ))
+        }
+        return found
+    }
+
+    private static let relocatingFlags: Set<String> = ["-C", "--git-dir", "--work-tree"]
+
+    private static func relocates(_ word: Substring) -> Bool {
+        relocatingFlags.contains(String(word))
+            || word.hasPrefix("--git-dir=") || word.hasPrefix("--work-tree=")
     }
 
     /// `git`, or any path ending in it. `tokens` does not split on `/`, so `/usr/bin/git` arrives

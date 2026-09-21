@@ -35,6 +35,10 @@ public struct TaskBranchFacts: Sendable, Equatable {
     public var ownCommits: Int?
     /// False only when Agent Board is sure no worker was ever spawned on the task.
     public var everDispatched: Bool
+    /// The branch this task shared with its siblings, when it ran in a project's own checkout
+    /// rather than a worktree. `branchExists` then describes that branch, which is nobody's alone,
+    /// and every per-task count here is selected by the commit ledger instead.
+    public var sharedBranch: String?
 
     public init(
         branchExists: Bool = false,
@@ -43,7 +47,8 @@ public struct TaskBranchFacts: Sendable, Equatable {
         recordedTip: String? = nil,
         tipOnEpicBranch: Bool? = nil,
         ownCommits: Int? = nil,
-        everDispatched: Bool = true
+        everDispatched: Bool = true,
+        sharedBranch: String? = nil
     ) {
         self.branchExists = branchExists
         self.mergedIntoEpic = mergedIntoEpic
@@ -52,6 +57,7 @@ public struct TaskBranchFacts: Sendable, Equatable {
         self.tipOnEpicBranch = tipOnEpicBranch
         self.ownCommits = ownCommits
         self.everDispatched = everDispatched
+        self.sharedBranch = sharedBranch
     }
 }
 

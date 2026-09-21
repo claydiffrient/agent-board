@@ -178,12 +178,24 @@ public enum OpeningPrompt {
                     + "from your memory, and records the commit as yours so your work can be "
                     + "reviewed apart from the other agents'. Nothing a sibling has edited goes into "
                     + "your commit.",
+                "- These git commands are refused here as well, because each of them reaches past "
+                    + "your own files into the other agents': \(refusedGitCommands). Reading the tree "
+                    + "is unrestricted — `git status`, `git diff`, `git log`, `git show`. The one "
+                    + "narrow exception is `git restore -- <path>`, which is allowed when every path "
+                    + "you name is a file your own writes have locked.",
             ].joined(separator: "\n")
         }
     }
 
     /// Named here rather than imported from the server target, which Core does not depend on.
     public static let commitToolName = "commit_my_work"
+
+    /// Mirrors `SharedCheckoutGuard.Violation`, for the same reason: Core cannot see the server
+    /// target. Told up front so the deny is a reminder rather than a surprise.
+    static let refusedGitCommands = [
+        "commit", "stash", "checkout", "switch", "restore", "reset", "clean", "rm",
+        "sparse-checkout", "merge", "rebase", "pull", "cherry-pick", "revert", "am", "bisect",
+    ].map { "`git \($0)`" }.joined(separator: ", ")
 
     static func commitStep(placement: WorkerPlacement) -> String {
         switch placement {

@@ -100,6 +100,48 @@ extension WorktreeManager {
         try attributedCommits(on: branch, since: base).filter { $0.taskId == taskId }.map(\.sha)
     }
 
+    /// Where `branch` was cut from `other`, which is what "since the base" means for a shared branch:
+    /// the epic branch it came from has usually moved on since.
+    public func mergeBase(_ branch: String, _ other: String) throws -> String? {
+        let result = try gitRaw(["merge-base", branch, other], cwd: repoPath)
+        guard result.status == 0 else { return nil }
+        let commit = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return commit.isEmpty ? nil : commit
+    }
+
+    /// Writes the per-task ledger for every member of a shared branch, before the branch is deleted.
+    ///
+    /// A shared branch's tip belongs to no single task, so recording it as one member's would be a
+    /// claim the branch cannot support. Each member gets its own newest attributed commit instead,
+    /// and a member that committed nothing gets the base, which is how the ledger already says
+    /// "carried nothing its base did not".
+    @discardableResult
+    public func recordSharedLedger(branch: String, base: String, taskIds: [String]) throws -> [String: String] {
+        guard let baseCommit = try refCommit(base) else { return [:] }
+        var tips: [String: String] = [:]
+        for commit in try attributedCommits(on: branch, since: base) {
+            guard let taskId = commit.taskId, tips[taskId] == nil else { continue }
+            tips[taskId] = commit.sha
+        }
+        for taskId in taskIds {
+            try? setRef(TaskBranchLedger.baseRef(taskId: taskId), to: baseCommit)
+            try? setRef(TaskBranchLedger.tipRef(taskId: taskId), to: tips[taskId] ?? baseCommit)
+        }
+        return tips
+    }
+
+    /// Moves the project's own checkout off a shared branch so the branch can be deleted. Throws
+    /// rather than discarding anything when the checkout is dirty — the branch then survives.
+    public func releaseSharedBranch(_ branch: String, to fallback: String) throws {
+        guard try currentBranch(at: repoPath) == branch else { return }
+        if try hasUncommittedChanges(worktree: repoPath) {
+            throw AgentRuntimeError(
+                "\(repoPath.path) has uncommitted changes, so it cannot be moved off \(branch)"
+            )
+        }
+        try gitChecked(["checkout", fallback], cwd: repoPath)
+    }
+
     /// The per-file totals across `commits`, summed. A file touched by two of a task's commits is
     /// one changed file with both commits' lines, which is what "what did this task change" means.
     public func fileTotals(commits: [String]) throws -> [FileDiffTotal] {
