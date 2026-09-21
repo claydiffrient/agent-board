@@ -980,7 +980,7 @@ is reached by neither.
 | `replace_section(note_id, heading, body, if_version)` | Section-scoped write |
 | `create_note(title, sections)` | New note, unpinned |
 | `propose_task(title, body, rationale, epic_id)` | Inserts into `proposed`, carrying `epic_id` onto the row so promotion lands it there |
-| `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review` |
+| `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review` — or straight to `done` under `afterEpicMerge` (§5.2), which is what the answer names. Idempotent per `(session_id, task_id)`: the MCP client resends the call when the answer is lost, and it is routinely lost because the handler stops the worker before replying, so a second call returns the first report's id and re-runs nothing — no second row, no second move, no second stop |
 | `report_blocked(reason)` | Inserts a `report`; sets `blocked` |
 | `acknowledge_shutdown(note)` | Answers a wind-down order (§8). Records `note` against the delivery and the task, then Agent Board stops the session. The task goes back to `ready`, never `review` (§5) — this is not `report_complete` |
 

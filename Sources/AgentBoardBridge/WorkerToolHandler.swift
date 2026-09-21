@@ -157,12 +157,13 @@ public final class WorkerToolHandler: ToolHandler {
         case "commit_my_work":
             return try await commitMyWork(task, arguments: arguments, identity: identity)
         case "report_complete":
-            let result = try reportComplete(task, arguments: arguments, identity: identity)
+            let completion = try reportComplete(task, arguments: arguments, identity: identity)
+            guard !completion.wasAlreadyComplete else { return Self.completionResult(completion) }
             if let sessionId = identity.sessionId {
                 await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
             }
             await events.reportQueued(projectId: identity.projectId)
-            return result
+            return Self.completionResult(completion)
         case "acknowledge_shutdown":
             let note = try ToolArguments.requiredString("note", in: arguments)
             let sessionId = try requiredSession(identity)
@@ -343,7 +344,7 @@ public final class WorkerToolHandler: ToolHandler {
         }
     }
 
-    private func reportComplete(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+    private func reportComplete(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> Board.TaskCompletion {
         let summary = try ToolArguments.requiredString("summary", in: arguments)
         let files = arguments["files_changed"]?.arrayValue ?? []
         let body: JSONValue = .object([
@@ -355,7 +356,19 @@ public final class WorkerToolHandler: ToolHandler {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(body)
-        try board.complete(taskId: task.id, sessionId: try requiredSession(identity), summary: String(decoding: data, as: UTF8.self))
-        return ToolResult(text: "Report recorded. The task is now in Review. Stop here; do not start further work.")
+        return try board.complete(
+            taskId: task.id, sessionId: try requiredSession(identity), summary: String(decoding: data, as: UTF8.self)
+        )
+    }
+
+    private static func completionResult(_ completion: Board.TaskCompletion) -> ToolResult {
+        let id = completion.report.id.map(String.init) ?? "—"
+        let recorded = completion.wasAlreadyComplete
+            ? "Report \(id) was already recorded for this task; this call changed nothing."
+            : "Report \(id) recorded."
+        return ToolResult(
+            text: "\(recorded) The task is now in \(completion.column.rawValue.capitalized). "
+                + "Stop here; do not start further work."
+        )
     }
 }

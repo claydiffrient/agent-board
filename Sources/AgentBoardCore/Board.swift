@@ -300,10 +300,24 @@ public struct Board: Sendable {
         }
     }
 
+    /// `report_complete` reaches the server more than once for one tool call: the handler stops the
+    /// worker before answering it, the answer is lost with the process, and the MCP client resends.
+    /// A resent call finds the first report and re-runs nothing, so `wasAlreadyComplete` is what
+    /// tells the caller not to fire the completion's events a second time. SPEC §6, worker scope.
+    public struct TaskCompletion: Sendable, Equatable {
+        public let report: Report
+        /// Where the task actually sits: `review`, or `done` under `afterEpicMerge`.
+        public let column: TaskColumn
+        public let wasAlreadyComplete: Bool
+    }
+
     @discardableResult
-    public func complete(taskId: String, sessionId: String, summary: String) throws -> Report {
+    public func complete(taskId: String, sessionId: String, summary: String) throws -> TaskCompletion {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
+            if let existing = try ReportStore.completion(db, taskId: taskId, sessionId: sessionId) {
+                return TaskCompletion(report: existing, column: task.column, wasAlreadyComplete: true)
+            }
             let report = try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .complete, body: summary
             )
@@ -315,7 +329,8 @@ public struct Board: Sendable {
             // reaching `done` in this same transaction is its acceptance, and a task the sweep is about
             // to archive has no business sitting in the review queue. Every other policy leaves it in
             // `review` for a human, exactly as before.
-            try TaskStore.move(db, taskId, to: sweepsOnMerge ? .done : .review, before: nil)
+            let column: TaskColumn = sweepsOnMerge ? .done : .review
+            try TaskStore.move(db, taskId, to: column, before: nil)
             try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
             try FileLockStore.releaseAll(db, sessionId: sessionId)
             if let mergedEpicId {
@@ -324,7 +339,7 @@ public struct Board: Sendable {
                     _ = try ArchiveSweep.archiveEpic(db, epicId: mergedEpicId, at: .nowMillis)
                 }
             }
-            return report
+            return TaskCompletion(report: report, column: column, wasAlreadyComplete: false)
         }
     }
 

@@ -39,6 +39,17 @@ public struct ReportStore: Sendable {
         try db.reader.read { db in try Report.fetchOne(db, key: id) }
     }
 
+    /// The `complete` report this session already filed for this task, if any. Read inside
+    /// `Board.complete`'s write transaction so a resent `report_complete` cannot insert a second
+    /// one — see `TaskCompletion`.
+    static func completion(_ db: Database, taskId: String, sessionId: String) throws -> Report? {
+        try Report.fetchOne(
+            db,
+            sql: "SELECT * FROM report WHERE task_id = ? AND session_id = ? AND kind = ? ORDER BY id LIMIT 1",
+            arguments: [taskId, sessionId, ReportKind.complete.rawValue]
+        )
+    }
+
     public func latest(taskId: String) throws -> Report? {
         try db.reader.read { db in
             try Report.fetchOne(
