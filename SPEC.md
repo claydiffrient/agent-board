@@ -1093,9 +1093,15 @@ Per project, overridable:
      returns a deny from its own process, so the block does not depend on the
      session's permission mode. The scan tokenizes on shell punctuation as
      well as whitespace, so a chained, quoted, piped or env-prefixed
-     invocation (`cd x && git push`, `git -C d push`) is caught too. Every
-     denial appends an `error` progress row naming the blocked command, so the
-     human sees the attempt on the task card.
+     invocation (`cd x && git push`, `git -C d push`) is caught too, and a
+     token counts as `git` or `gh` when its trailing path component is, so
+     `/usr/bin/git push` and `/opt/homebrew/bin/gh pr create` are caught as
+     the bare spelling is. It remains a heuristic: an invocation assembled at
+     runtime (`$G push`, an `eval` of an encoded string), reached through a
+     wrapper script or an alias, or spelled in another case gets past it, and
+     a merely mentioned `echo git push` is over-matched. Every denial appends
+     an `error` progress row naming the blocked command, so the human sees the
+     attempt on the task card.
 
   The verdict is scoped at the grant, not the prompt (D4): the guard reads
   `identity.scope`, and the deny text differs accordingly. An orchestrator grant
