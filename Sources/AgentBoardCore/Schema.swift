@@ -267,10 +267,20 @@ enum Schema {
     CREATE INDEX message_to_project_delivered ON message(to_project_id, delivered_at);
     """
 
+    static let taskCommit = """
+    CREATE TABLE task_commit (
+      task_id TEXT NOT NULL,
+      sha     TEXT NOT NULL,
+      PRIMARY KEY (task_id, sha)
+    );
+    CREATE INDEX task_commit_sha ON task_commit(sha);
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
         "approval", "shutdown_order", "shutdown_delivery", "workspace", "file_lock", "message",
+        "task_commit",
         "roster_agent", "project_roster_agent",
     ]
 }

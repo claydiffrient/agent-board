@@ -95,7 +95,8 @@ final class BoardTests: XCTestCase {
     func testProposeAndPromote() throws {
         let f = try Fixture.make()
         let proposed = try f.board.propose(
-            projectId: f.project.id, title: "Add lint", body: "Run eslint", rationale: "caught a bug", sessionId: nil
+            projectId: f.project.id, title: "Add lint", body: "Run eslint", rationale: "caught a bug",
+            sessionId: nil, epicId: nil
         )
         XCTAssertEqual(proposed.column, .proposed)
         XCTAssertEqual(proposed.origin, .workerProposal)
@@ -105,9 +106,11 @@ final class BoardTests: XCTestCase {
         XCTAssertEqual(reports[0].taskId, proposed.id)
         XCTAssertTrue(reports[0].body.contains("caught a bug"))
 
-        let nowReady = try f.board.promote(taskId: proposed.id)
-        XCTAssertEqual(nowReady, [proposed.id])
+        let promotion = try f.board.promote(taskId: proposed.id)
+        XCTAssertEqual(promotion.newlyReady, [proposed.id])
+        XCTAssertNil(promotion.droppedEpic)
         XCTAssertEqual(try f.tasks.get(proposed.id)?.column, .ready)
+        XCTAssertNil(try f.tasks.get(proposed.id)?.epicId)
 
         XCTAssertThrowsError(try f.board.promote(taskId: proposed.id)) { error in
             XCTAssertEqual(error as? BoardError, .invalidTransition(taskId: proposed.id, from: .ready, to: .backlog))
@@ -117,10 +120,12 @@ final class BoardTests: XCTestCase {
     func testPromoteWithUnmetDepsStaysInBacklog() throws {
         let f = try Fixture.make()
         let blocker = try f.task("blocker")
-        let proposed = try f.board.propose(projectId: f.project.id, title: "later", body: nil, rationale: nil, sessionId: nil)
+        let proposed = try f.board.propose(
+            projectId: f.project.id, title: "later", body: nil, rationale: nil, sessionId: nil, epicId: nil
+        )
         try f.tasks.setDeps(proposed.id, dependsOn: [blocker.id])
-        let nowReady = try f.board.promote(taskId: proposed.id)
-        XCTAssertEqual(nowReady, [blocker.id])
+        let promotion = try f.board.promote(taskId: proposed.id)
+        XCTAssertEqual(promotion.newlyReady, [blocker.id])
         XCTAssertEqual(try f.tasks.get(proposed.id)?.column, .backlog)
     }
 

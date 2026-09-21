@@ -38,6 +38,19 @@ final class IntegrationDenyTests: XCTestCase {
         XCTAssertEqual(try f.progress.list(taskId: task.id).filter { $0.kind == .error }.count, 2)
     }
 
+    func testAnAbsolutePathIsDeniedAndRecordedLikeTheBareSpelling() async throws {
+        let pushed = await f.preToolUse("/usr/bin/git push -u origin HEAD", sessionId: "w1", identity: identity)
+        XCTAssertEqual(pushed?.permissionDecision, "deny")
+        XCTAssertEqual(pushed?.reason, IntegrationGuard.Violation.push.reason)
+
+        let opened = await f.preToolUse("/opt/homebrew/bin/gh pr create --draft", sessionId: "w1", identity: identity)
+        XCTAssertEqual(opened?.reason, IntegrationGuard.Violation.pullRequestCreate.reason)
+
+        let entries = try f.progress.list(taskId: task.id).filter { $0.kind == .error }
+        XCTAssertEqual(entries.count, 2)
+        XCTAssertTrue(entries.contains { $0.text.contains("/usr/bin/git push -u origin HEAD") }, "\(entries)")
+    }
+
     func testUnrelatedBashIsAllowedAndLeavesNoDenialRow() async throws {
         let decision = await f.preToolUse("git commit -m \"Add hello.txt\"", sessionId: "w1", identity: identity)
         XCTAssertNil(decision)

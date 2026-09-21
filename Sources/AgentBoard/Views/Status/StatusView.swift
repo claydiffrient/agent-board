@@ -5,7 +5,6 @@ struct StatusView: View {
     let project: Project
 
     @Environment(AppEnvironment.self) private var env
-    @Environment(\.openWindow) private var openWindow
     @State private var sessions = Observed<[AgentSession]>([])
     @State private var tasks = Observed<[BoardTask]>([])
     @State private var serverPort: Int?
@@ -129,19 +128,7 @@ struct StatusView: View {
 
             TableColumn("Actions") { session in
                 HStack(spacing: 4) {
-                    Button {
-                        openWindow(id: "terminal", value: session.sessionId)
-                    } label: {
-                        Image(systemName: "terminal")
-                    }
-                    .help("Attach to this agent's own Claude session")
-                    Button {
-                        openWindow(id: "worktree-shell", value: session.sessionId)
-                    } label: {
-                        Image(systemName: "apple.terminal")
-                    }
-                    .disabled(!WorktreeShellAvailability.canOpen(session))
-                    .help(WorktreeShellAvailability.buttonHelp(session))
+                    SessionActionButtons(session: session, showsTitle: false)
                     if session.state.isActive {
                         Button("Stop") { run { try await env.supervisor.stop(sessionId: session.sessionId) } }
                     } else if session.state == .stopped || session.state == .failed {
@@ -174,6 +161,7 @@ struct StatusView: View {
     private var footer: some View {
         HStack(spacing: 16) {
             Label(serverPort.map { "Server port \($0)" } ?? "Server not listening", systemImage: "network")
+            SleepFooterItem(guard: env.sleepGuard)
             if let lastError {
                 Label(lastError, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
@@ -219,6 +207,24 @@ struct StatusView: View {
     StatusView(project: preview.project)
         .environment(preview.environment)
         .frame(width: 1100, height: 500)
+}
+
+/// Says whether the Mac is being held awake, and by how much. The `.help` carries the part the
+/// label cannot: idle sleep only, and a closed lid still sleeps. SPEC §8.3.
+struct SleepFooterItem: View {
+    @Bindable var `guard`: SleepGuard
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: `guard`.isHolding ? "cup.and.saucer.fill" : "powersleep")
+                .foregroundStyle(`guard`.isHolding ? .primary : .secondary)
+            Text(`guard`.footerLabel)
+            Toggle("Keep awake", isOn: $guard.isEnabled)
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+        }
+        .help(`guard`.footerHelp)
+    }
 }
 
 struct SessionStateLabel: View {

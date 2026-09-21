@@ -11,7 +11,7 @@ public actor ScopedCommitRunner: ScopedCommitting {
 
     public func commit(_ request: ScopedCommitRequest) async throws -> ScopedCommitOutcome {
         let repo = URL(fileURLWithPath: request.repoPath, isDirectory: true)
-        let manager = WorktreeManager(repoPath: repo, worktreeRoot: repo)
+        let manager = WorktreeManager(repoPath: repo, worktreeRoot: repo, attribution: .unattributable)
         guard !request.paths.isEmpty else { throw ScopedCommitError.noPathsHeld }
 
         let staged = try Self.committable(request.paths, manager: manager, repo: repo)

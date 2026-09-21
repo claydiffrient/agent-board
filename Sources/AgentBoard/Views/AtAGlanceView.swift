@@ -55,6 +55,19 @@ struct AtAGlanceView: View {
             GlobalShutdownSheet()
                 .environment(env)
         }
+        // The sheet that asked for the quit is gone by the time an attempt can fail — AppKit will
+        // not terminate while it is up — so the refusal is reported here instead.
+        .alert(
+            "Agent Board is still running",
+            isPresented: Binding(
+                get: { env.quitter.refusal != nil },
+                set: { if !$0 { env.quitter.dismissRefusal() } }
+            ),
+            presenting: env.quitter.refusal
+        ) { _ in
+            Button("Try Again") { env.quitter.requestQuit() }
+            Button("OK", role: .cancel) {}
+        } message: { Text($0) }
     }
 
     private var headline: some View {

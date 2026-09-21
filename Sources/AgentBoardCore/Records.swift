@@ -159,6 +159,12 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     /// Set when a human pulls the task back out of the archive. While it is set, no automatic
     /// policy archives this task again — only the manual button will.
     public var unarchivedAt: Int64?
+    /// Where the accept put this task's work. Nil only for tasks accepted before Agent Board
+    /// recorded it; every accept since writes a value, so `done` can never mean "and the work is
+    /// nowhere" without the board saying so (SPEC §5).
+    public var landing: TaskLanding?
+    /// Why `landing` is what it is, for the cases a human has to act on.
+    public var landingDetail: String?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -183,6 +189,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case archivedAt = "archived_at"
         case doneAt = "done_at"
         case unarchivedAt = "unarchived_at"
+        case landing
+        case landingDetail = "landing_detail"
     }
 
     public init(
@@ -191,8 +199,10 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         failed: Bool = false, failureReason: String? = nil, ordering: Double, origin: TaskOrigin,
         createdAt: Int64, updatedAt: Int64, model: String? = nil, reviewerAgentId: String? = nil,
         rosterAgentId: String? = nil, archivedAt: Int64? = nil, doneAt: Int64? = nil,
-        unarchivedAt: Int64? = nil
+        unarchivedAt: Int64? = nil, landing: TaskLanding? = nil, landingDetail: String? = nil
     ) {
+        self.landing = landing
+        self.landingDetail = landingDetail
         self.model = model
         self.reviewerAgentId = reviewerAgentId
         self.rosterAgentId = rosterAgentId
@@ -224,6 +234,10 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var archivedDate: Date? { archivedAt?.asDate }
     public var isArchived: Bool { archivedAt != nil }
     public var doneDate: Date? { doneAt?.asDate }
+
+    /// A `done` task whose work the human still has to place somewhere. False for `noBranch`,
+    /// which is a task that legitimately had nothing to land.
+    public var needsLanding: Bool { column == .done && landing?.needsAttention == true }
 }
 
 public typealias BoardTask = Task
@@ -276,6 +290,13 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     /// The rostered identity this session is running as. The roster entry is not itself a session;
     /// this is a back-reference to durable identity, nothing more.
     public var rosterAgentId: String?
+    /// When the oldest tool call this session has not seen return started, nil when none is in
+    /// flight. `PostToolUse` fires only on return, so this is the only thing that tells a worker
+    /// inside a long command apart from one that has stopped working.
+    public var toolStartedAt: Int64?
+    /// `PreToolUse` calls not yet matched by a `PostToolUse`. A count rather than a flag because
+    /// Claude runs parallel tool calls: a short one returning must not end a long one's grace.
+    public var toolsInFlight: Int
 
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -302,6 +323,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case stopReason = "stop_reason"
         case blockedOnPath = "blocked_on_path"
         case rosterAgentId = "roster_agent_id"
+        case toolStartedAt = "tool_started_at"
+        case toolsInFlight = "tools_in_flight"
     }
 
     public init(
@@ -311,7 +334,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         transcriptPath: String? = nil, tokensIn: Int = 0, tokensOut: Int = 0, cacheRead: Int = 0,
         cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil,
         lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil,
-        rosterAgentId: String? = nil
+        rosterAgentId: String? = nil, toolStartedAt: Int64? = nil, toolsInFlight: Int = 0
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -337,6 +360,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.stopReason = stopReason
         self.blockedOnPath = blockedOnPath
         self.rosterAgentId = rosterAgentId
+        self.toolStartedAt = toolStartedAt
+        self.toolsInFlight = toolsInFlight
     }
 
     public var id: String { sessionId }
@@ -345,6 +370,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     public var startedDate: Date { startedAt.asDate }
     public var endedDate: Date? { endedAt?.asDate }
     public var lastActivityDate: Date? { lastActivity?.asDate }
+    public var toolStartedDate: Date? { toolStartedAt?.asDate }
     public var totalTokens: Int { tokensIn + tokensOut + cacheRead + cacheWrite }
     /// What the token cap meters: uncached input plus output (see CapEvaluator).
     public var countedTokens: Int { tokensIn + tokensOut }

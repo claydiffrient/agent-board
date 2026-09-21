@@ -745,13 +745,20 @@ public struct Board: Sendable {
     }
 
     @discardableResult
-    public func propose(projectId: String, title: String, body: String?, rationale: String?, sessionId: String?) throws -> Task {
+    public func propose(
+        projectId: String, title: String, body: String?, rationale: String?, sessionId: String?,
+        epicId: String?
+    ) throws -> Task {
         try db.writer.write { db in
+            if let epicId {
+                _ = try Self.proposalEpic(db, epicId: epicId, projectId: projectId)
+            }
             let task = try TaskStore.insert(
                 db, projectId: projectId, title: title, body: body, acceptance: nil, priority: nil,
-                column: .proposed, origin: .workerProposal, epicId: nil
+                column: .proposed, origin: .workerProposal, epicId: epicId
             )
             var lines = ["Proposed task: \(title)", "Task id: \(task.id)"]
+            if let epicId { lines.append("Proposed into epic: \(epicId)") }
             if let body, !body.isEmpty { lines.append(body) }
             if let rationale, !rationale.isEmpty { lines.append("Rationale: \(rationale)") }
             _ = try ReportStore.insert(
@@ -762,23 +769,52 @@ public struct Board: Sendable {
         }
     }
 
+    /// The epic a proposal names must still be a destination when the proposal is promoted, which
+    /// can be much later — so this re-checks and, when the epic has stopped being one, promotes the
+    /// task into no epic and says so on the decision report rather than refusing the promotion or
+    /// dropping an unfinished task into a finished epic. SPEC §5.
     @discardableResult
-    public func promote(taskId: String) throws -> [String] {
+    public func promote(taskId: String) throws -> Promotion {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
             guard task.column == .proposed else {
                 throw BoardError.invalidTransition(taskId: taskId, from: task.column, to: .backlog)
             }
+            var dropped: ProposalEpicRefusal?
+            if let epicId = task.epicId {
+                do {
+                    _ = try Self.proposalEpic(db, epicId: epicId, projectId: task.projectId)
+                } catch let refusal as ProposalEpicRefusal {
+                    dropped = refusal
+                    try TaskStore.setEpic(db, taskId, epicId: nil)
+                }
+            }
             try TaskStore.move(db, taskId, to: .backlog, before: nil)
             let ready = try Self.newlyReady(db, projectId: task.projectId)
             let landed = try Task.fetchOne(db, key: taskId)?.column ?? .backlog
             var body = "Proposal \(taskId) (\(task.title)) was promoted to \(landed.rawValue)."
+            if let dropped, let named = task.epicId {
+                body += "\n\nIt was proposed into epic \(named) but promoted into no epic: \(dropped.reason)"
+            }
             body += "\n\n" + (try Self.describeNewlyReady(db, ready))
             _ = try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision, body: body
             )
-            return ready
+            return Promotion(newlyReady: ready, landedIn: landed, droppedEpic: dropped)
         }
+    }
+
+    static func proposalEpic(_ db: Database, epicId: String, projectId: String) throws -> Epic {
+        guard let epic = try Epic.fetchOne(db, key: epicId) else {
+            throw ProposalEpicRefusal.notFound(epicId)
+        }
+        guard epic.projectId == projectId else {
+            throw ProposalEpicRefusal.otherProject(epicId: epicId)
+        }
+        guard !epic.state.isTerminal else {
+            throw ProposalEpicRefusal.closed(epicId: epicId, state: epic.state)
+        }
+        return epic
     }
 
     /// Creates the epic and every task in `tasks` in one transaction, wiring `task_dep` rows from

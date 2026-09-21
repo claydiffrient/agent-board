@@ -16,7 +16,7 @@ enum Wiring {
 
     static var worktreeBase: URL { SupportPaths.worktreeBase() }
 
-    static func makeSupervisor(db: AppDatabase) -> WorkerSupervisor {
+    static func makeSupervisor(db: AppDatabase, sleepGuard: SleepGuard? = nil) -> WorkerSupervisor {
         let sink = LateBoundSink()
         let server = BoardServer(
             tokens: StoreTokenResolver(db: db),
@@ -37,7 +37,8 @@ enum Wiring {
             runtime: BackgroundSessionRuntime(),
             server: server,
             appSupportDir: appSupportDir,
-            worktreeBase: worktreeBase
+            worktreeBase: worktreeBase,
+            sleepGuard: sleepGuard
         )
         sink.target = supervisor
         return supervisor

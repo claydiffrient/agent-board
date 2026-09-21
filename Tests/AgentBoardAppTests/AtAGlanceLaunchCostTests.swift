@@ -14,10 +14,23 @@ import XCTest
 /// view is mounted, so the negative is not vacuous.
 ///
 /// What it cannot prove: anything about the rendered text or layout. SwiftUI draws into backing
-/// layers and `AXIsProcessTrusted()` is false here, so no string is readable — the wording and
-/// grouping are covered by `GlancePresentationTests` in AgentBoardCoreTests instead.
+/// layers, and the accessibility elements it publishes offscreen carry no label, title or value, so
+/// no string is readable — the wording and grouping are covered by `GlancePresentationTests` in
+/// AgentBoardCoreTests instead.
 @MainActor
 final class AtAGlanceLaunchCostTests: XCTestCase {
+    private var collapse = IsolatedCollapseState()
+
+    override func setUp() {
+        super.setUp()
+        collapse = IsolatedCollapseState()
+    }
+
+    override func tearDown() {
+        collapse.remove()
+        super.tearDown()
+    }
+
     private struct Mounted {
         let window: NSWindow
         let host: NSView
@@ -58,7 +71,9 @@ final class AtAGlanceLaunchCostTests: XCTestCase {
     func testLaunchingWithNothingSelectedStartsNoOrchestrator() throws {
         let db = try AppDatabase.inMemory()
         _ = try projects(db, ["Alpha", "Beta", "Gamma"])
-        let mounted = mount(MainWindow(), db: db, supervisor: ConsoleRecordingSupervisor())
+        let mounted = mount(
+            MainWindow(collapseState: collapse.state), db: db, supervisor: ConsoleRecordingSupervisor()
+        )
         mounted.settle()
 
         XCTAssertEqual(

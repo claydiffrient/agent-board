@@ -46,7 +46,12 @@ final class WorktreeCleanupTests: XCTestCase {
         XCTAssertEqual(try worktreePaths(), [], "the worktree should still go even when the branch stays")
         let notice = try XCTUnwrap(fixture.supervisor.lastError)
         XCTAssertTrue(notice.contains("agentboard/\(task.id)"), notice)
-        XCTAssertTrue(notice.contains("not merged into main"), notice)
+        XCTAssertTrue(notice.contains("not merged into"), notice)
+        XCTAssertTrue(notice.contains("main"), notice)
+        XCTAssertEqual(
+            try XCTUnwrap(try fixture.tasks.get(task.id)).landing, .unlanded,
+            "the kept branch was not recorded on the task, so only the transient notice said so"
+        )
     }
 
     func testAcceptRemovesEveryAttemptsWorktree() async throws {

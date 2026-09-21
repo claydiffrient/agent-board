@@ -118,12 +118,14 @@ struct BridgeFixture {
     }
 
     static func make(
-        lockWait: FileLockWaitPolicy = .default, scopedCommits: RecordingScopedCommits? = nil
+        lockWait: FileLockWaitPolicy = .default,
+        scopedCommits: RecordingScopedCommits? = nil,
+        repoPath: String? = nil
     ) throws -> BridgeFixture {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
             name: "Demo",
-            repoPath: "/tmp/demo-\(UUID().uuidString)",
+            repoPath: repoPath ?? "/tmp/demo-\(UUID().uuidString)",
             baseBranch: "main",
             worktreeRoot: "/tmp/demo-worktrees",
             memoryDir: nil

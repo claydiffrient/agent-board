@@ -76,7 +76,8 @@ final class DiffSummaryTests: XCTestCase {
         let manager = WorktreeManager(
             repoPath: repo,
             worktreeRoot: sandbox.appendingPathComponent("worktrees"),
-            hookSettingsURL: sandbox.appendingPathComponent("settings.json")
+            hookSettingsURL: sandbox.appendingPathComponent("settings.json"),
+            attribution: .unattributable
         )
         let summary = try manager.diffSummary(worktree: repo, against: "HEAD~1")
         XCTAssertEqual(summary, DiffSummary(filesChanged: 2, insertions: 3, deletions: 0, binaryFiles: 0))

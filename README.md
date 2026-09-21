@@ -23,6 +23,12 @@ Scripts/bundle.sh            # wraps the binary in .build/AgentBoard.app (bundle
 open .build/AgentBoard.app
 ```
 
+Release notes live in `RELEASES.md` at the repo root, newest first, one
+`## <version>` heading per release with an optional ` — YYYY-MM-DD`.
+`Scripts/bundle.sh` copies it into `Contents/Resources`; the unbundled
+`.build/debug/AgentBoard` has neither an `Info.plist` nor that resource, so it
+reports no release notes rather than an empty list.
+
 Environment overrides: `AGENTBOARD_DB` (sqlite path), `AGENTBOARD_SUPPORT_DIR`
 (session configs, server port file, and worktrees). Default support dir is
 `~/Library/Application Support/AgentBoard`; worktrees default to

@@ -109,6 +109,10 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// What this project may interrupt the human for. Banners only — the sidebar badge and the
     /// rest of the attention signal are unaffected by it.
     public var notifications: NotificationPreferences = NotificationPreferences()
+    /// How a branch is named on the remote, e.g. `clay/{slug}`. `{slug}` comes from the epic's or
+    /// task's title and is required; `{id}` is an optional short id. Nil publishes the local
+    /// `agentboard/<id>` name unchanged, which is what every project had before this existed.
+    public var remoteBranchTemplate: String? = nil
 
     public init(
         caps: Caps = Caps(),
@@ -123,7 +127,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         archivePolicy: ArchivePolicy = .afterEpicMerge,
         worktreeStrategy: WorktreeStrategy = .worktree,
         sharedCheckoutMaxAgents: Int = 3,
-        notifications: NotificationPreferences = NotificationPreferences()
+        notifications: NotificationPreferences = NotificationPreferences(),
+        remoteBranchTemplate: String? = nil
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -138,6 +143,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.worktreeStrategy = worktreeStrategy
         self.sharedCheckoutMaxAgents = sharedCheckoutMaxAgents
         self.notifications = notifications
+        self.remoteBranchTemplate = remoteBranchTemplate
     }
 
     public init(from decoder: Decoder) throws {
@@ -157,6 +163,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
             ?? ProjectSettings().sharedCheckoutMaxAgents
         notifications = try c.decodeIfPresent(NotificationPreferences.self, forKey: .notifications)
             ?? NotificationPreferences()
+        remoteBranchTemplate = try c.decodeIfPresent(String.self, forKey: .remoteBranchTemplate)
     }
 
     public static func decode(_ json: String) -> ProjectSettings {
