@@ -10,7 +10,6 @@ struct TaskInspectorView: View {
     let onClose: () -> Void
 
     @Environment(AppEnvironment.self) private var env
-    @Environment(\.openWindow) private var openWindow
     @State private var draftBody = ""
     @State private var draftAcceptance = ""
     @State private var draftModel: String?
@@ -232,19 +231,7 @@ struct TaskInspectorView: View {
                     } else {
                         Button("Resume") { run { try await env.supervisor.resume(sessionId: session.sessionId) } }
                     }
-                    Button {
-                        openWindow(id: "terminal", value: session.sessionId)
-                    } label: {
-                        Image(systemName: "terminal")
-                    }
-                    .help("Attach to this agent's own Claude session")
-                    Button {
-                        openWindow(id: "worktree-shell", value: session.sessionId)
-                    } label: {
-                        Image(systemName: "apple.terminal")
-                    }
-                    .disabled(!WorktreeShellAvailability.canOpen(session))
-                    .help(WorktreeShellAvailability.buttonHelp(session))
+                    SessionActionButtons(session: session, showsTitle: true)
                 }
                 .controlSize(.small)
                 .padding(6)
