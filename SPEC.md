@@ -35,6 +35,34 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D18 | Runtime spike → board → orchestrator → epics → notes | The riskiest assumption is provable in 200 lines | Build everything |
 | D19 | The Terminal screen and worktree shells (§10) run with the human's own authority: `IntegrationGuard` and `--disallowedTools` deliberately do not gate them, and no Agent Board grant token may reach the shell's environment | A human typing `git push` is entitled to push — those mechanisms bound what an unattended agent may do under `--permission-mode auto`, and there is no agent here; a shell holding a grant token would let anything running in it act with that session's authority over the board | Route the shell through a worker-scoped grant |
 
+**D6 amended.** As first written, D6 said every task gets its own worktree and
+its own branch bound to the task id. That now holds only under
+`worktreeStrategy: worktree` (§4) — the default, so no existing project changes
+on upgrade. Under `shared`, a task instead runs in the project's own checkout,
+co-resident with up to `sharedCheckoutMaxAgents` others, all committing to one
+branch named for their shared base rather than to `agentboard/<task-id>`
+(§3.1). A task under `shared` no longer owns a branch; it owns an attributed
+range of commits on a branch it shares, recorded in `task_commit` (§4) rather
+than in the branch name, and acceptance waits for every task on that branch
+before any of it is merged into the epic (§5). `auto` picks between the two per
+spawn — share only when a compatible group already holds the checkout with
+room, worktree otherwise (§3.1) — and starts no group of its own.
+
+Two costs are the deliberate price of `shared`, not a gap in it. Per-task
+revert is gone: rejecting a task after a sibling on the same branch has already
+been accepted means unpicking commits, and Agent Board does not do that — the
+branch waits for every member to be accepted before any of it merges (§5),
+which is the epic's answer, not a fix for it. And a shared-checkout agent is
+editing the human's own working copy: its writes land in whatever editor
+already has that checkout open, and the branch under it moves as siblings
+commit, not only as the human's own tools move it.
+
+What the amendment leaves untouched: a worker still commits and stops — through
+`commit_my_work` rather than `git commit` under `shared` (§8), but a commit
+either way — and still never pushes, still refused by `IntegrationGuard` at the
+`PreToolUse` layer, regardless of placement. D8 governs that refusal and is
+unchanged by this amendment.
+
 **D8 amended.** As first written, D8 said the pull request was opened by the
 human and by nobody else, and §5.2 step 5 said the same. The orchestrator half
 of that is now relaxed: the orchestrator may call `push_branch` and
@@ -272,10 +300,41 @@ For a task `T` in project `P`:
 
 1. Ensure the epic branch exists (`agentboard/epic-<epic-id>`, cut from `P`'s
    base branch) if `T` belongs to an epic.
-2. `git worktree add <worktrees>/<task-id> -b agentboard/<task-id> <base>` where
-   `<base>` is the epic branch, or the project base branch for a standalone task.
+2. Decide where `T`'s worker runs: `WorkerPlacementDecision.decide(strategy:
+   project.settings.worktreeStrategy, wantedSharedBranch:
+   SharedCheckoutGroup.branch(epicId:), group: SharedCheckoutGroup.current(...))`.
+   `wantedSharedBranch` is `agentboard/shared`, or `agentboard/shared-epic-<id>`
+   inside an epic — a shared branch is cut once per base, so a task based on a
+   different epic (or no epic) never joins one already running. The group
+   itself is nothing persisted: it is read back from `agent_session` rows with
+   `role = worker` and no `worktree_path`, carrying a shared branch (§4), so a
+   detached `claude --bg` worker that outlives the app is still found on the
+   next launch.
+   - **`worktree`** always places, and always worktrees: `git worktree add
+     <worktrees>/<task-id> -b agentboard/<task-id> <base>` where `<base>` is
+     the epic branch, or the project base branch for a standalone task. This
+     is every project's behavior from before this setting existed.
+   - **`shared`** places in the project's own checkout — `P`'s repository root,
+     not a path under `<worktrees>` — checking the wanted branch out there
+     (`git checkout <branch>`, or `git checkout -b <branch> <base>` the first
+     time) instead of adding a worktree. No `git worktree add` runs, so the
+     post-checkout hook this setting exists to stop paying per spawn never
+     fires for a shared task; a repository whose hook installs packages and
+     builds pays that cost once for the whole co-resident group, not once per
+     task. A group already at `sharedCheckoutMaxAgents` (§4), or built on a
+     branch this task is not based on, is not joined — the task worktrees
+     instead, exactly as `worktree` would place it.
+   - **`auto`** worktrees unless a compatible group already holds the checkout
+     with room; it never starts a group itself, only joins one `shared` or an
+     earlier `auto` task already started.
+   - Whichever is chosen, a git failure adopting the shared branch — the
+     checkout is dirty, the branch is held by another worktree — degrades to
+     `worktree` rather than failing the spawn, and queues a notice naming why.
 3. Symlink `~/.claude/projects/<worktree-slug>/memory` → the canonical project
-   memory dir. **Skipping this makes every worker amnesiac.**
+   memory dir. **Skipping this makes every worker amnesiac.** For a shared
+   placement the "worktree" is the project's own checkout, so every co-resident
+   worker resolves to the same slug and re-links the same already-correct
+   symlink; the step is idempotent and costs nothing extra.
 4. Generate `settings-<session>.json`: `http` hook definitions pointing at
    `/hooks?token=…` (a `command` + `curl` hook for `SessionStart`, see §2), plus
    the project's `autoMode` block. On resume, rewrite this file and the MCP
@@ -301,8 +360,9 @@ For a task `T` in project `P`:
    `--disallowedTools` is variadic and would swallow a trailing positional.
 8. Parse the short id from stdout, look up the session uuid in
    `claude agents --json`, and resolve the setup row into it, carrying the
-   worktree path, branch and attempt across. The token grant is bound to the
-   session at this point, not before spawn.
+   worktree path, branch and attempt across — nil for the worktree path under a
+   shared placement, since there is no per-task worktree to record. The token
+   grant is bound to the session at this point, not before spawn.
 
 Steps 1-2 are synchronous; `spawn_worker` answers between step 2 and step 3,
 with a row in `agent_session` under a placeholder id and state `setup`, and the
@@ -344,9 +404,8 @@ CREATE TABLE project (
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
-                                   -- buildCommand, testCommand, archivePolicy
-  created_at      INTEGER NOT NULL
-  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance
+                                   -- buildCommand, testCommand, archivePolicy, worktreeStrategy,
+                                   -- sharedCheckoutMaxAgents
   created_at      INTEGER NOT NULL,
   workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
 );
@@ -401,7 +460,8 @@ CREATE TABLE agent_session (
   worktree_path  TEXT,
   branch         TEXT,
   cwd            TEXT NOT NULL,
-  state          TEXT NOT NULL,      -- setup|starting|running|idle|blocked|stopped|failed|completed
+  state          TEXT NOT NULL,      -- setup|starting|running|idle|blocked|waiting_on_lock|stopped|
+                                     -- failed|completed
   started_at     INTEGER NOT NULL,
   ended_at       INTEGER,
   last_activity  INTEGER,
@@ -416,7 +476,8 @@ CREATE TABLE agent_session (
   last_tool      TEXT,
   stop_reason    TEXT,
   tool_started_at INTEGER,           -- oldest tool call not yet seen to return
-  tools_in_flight INTEGER NOT NULL DEFAULT 0
+  tools_in_flight INTEGER NOT NULL DEFAULT 0,
+  blocked_on_path TEXT                -- §8.4: the shared-checkout file lock this session is waiting on
 );
 
 CREATE TABLE token_grant (
@@ -428,6 +489,30 @@ CREATE TABLE token_grant (
   created_at  INTEGER NOT NULL,
   revoked_at  INTEGER
 );
+
+-- §8.4: one file in a project's own checkout, claimed by the session editing it. Only a
+-- shared-checkout session takes these — a worktree worker cannot collide with anyone.
+CREATE TABLE file_lock (
+  project_id TEXT NOT NULL REFERENCES project(id),
+  path       TEXT NOT NULL,    -- repo-relative, so two absolute spellings of one file are one lock
+  session_id TEXT NOT NULL,
+  task_id    TEXT,
+  held_since INTEGER NOT NULL,
+  PRIMARY KEY (project_id, path)
+);
+CREATE INDEX file_lock_session ON file_lock(session_id);
+
+-- Which task made which commit on a shared branch (§5, §8.4). Not a commit trailer: that would
+-- publish the task's UUID into whatever repository the pull request lands in, permanently (as
+-- §6.1 already avoids for branch names). The cost is that a cherry-picked or rebased commit is a
+-- new object this table does not know, and attribution is no longer rebuildable from the
+-- repository alone.
+CREATE TABLE task_commit (
+  task_id TEXT NOT NULL,
+  sha     TEXT NOT NULL,
+  PRIMARY KEY (task_id, sha)
+);
+CREATE INDEX task_commit_sha ON task_commit(sha);
 
 CREATE TABLE progress (
   id          INTEGER PRIMARY KEY,
@@ -576,6 +661,25 @@ clock and the policy from scratch. The picker for the three modes lives in
 Project Settings, next to the day count it disables outside `afterDays`; the
 Task Board's own archive controls are in §10.
 
+`worktreeStrategy` (D6 amended, §1) is `worktree`, `shared`, or `auto`;
+`sharedCheckoutMaxAgents` bounds how many workers may be co-resident in a
+`shared` or `auto` checkout at once, defaulting to `caps.maxConcurrentWorkers`
+(3) so shared mode adds no second, tighter ceiling to discover. Neither setting
+gets its own table: the co-resident group they describe is nothing persisted,
+only read back from `agent_session` rows with `role = worker` and no
+`worktree_path`, sharing one `branch` — a detached worker that outlives the app
+is still found in it on the next launch, with no separate row to fall out of
+sync with the sessions it describes.
+
+`file_lock` exists only for that group: a worktree worker cannot collide with
+anyone, so it never takes one. A lock is claimed by a session's first write to
+a path and held until the session ends; `agent_session.blocked_on_path` records
+what a session is waiting on while it holds (§8.4). `task_commit` is the
+companion ledger for a branch several tasks commit to — the only way, once
+commits from different tasks interleave on one ref, to say afterwards which
+task made which commit, since the branch name can no longer carry that the way
+`agentboard/<task-id>` does.
+
 ---
 
 ## 5. Task lifecycle
@@ -619,8 +723,11 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
   acknowledged wind-down gets this one.
 - `blocked` — a flag, not a column. Set by the `Notification` hook, cleared on
   the next `PostToolUse`. The card keeps its position and shows why.
-- `review` — worker has committed on `agentboard/<task-id>` and called
-  `report_complete`. The worktree is retained.
+- `review` — worker has committed and called `report_complete`. Under
+  `worktree` that means a commit on `agentboard/<task-id>`, and the worktree is
+  retained; under `shared` it means an attributed commit — via `commit_my_work`,
+  never `git commit` (§8.4) — on the branch the task shared with its
+  co-resident siblings, and there is no per-task worktree to retain.
 - `done` — you accept it. Every attempt's worktree is removed (firing the
   existing `WorktreeRemove` hook, which reclaims Bazel `output_base` on
   Derivita), and `agentboard/<task-id>` is deleted once it is merged into the
@@ -642,6 +749,23 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
   epic identifiers into that repository's history permanently (§6.1 renames the
   branch, not commits already made).
   Nothing here pushes: it is a local branch-to-branch merge.
+
+  **A task accepted off a shared branch (D6 amended, §1) does not merge or
+  remove anything by itself.** Its branch carries every co-resident sibling's
+  commits interleaved on one ref, so there is no range that is this task's
+  work alone — accepting it only marks this task accepted and checks whether
+  it was the last one still owed: every task that ever ran on the branch must
+  be accepted, and none still `isLive` (a worker of theirs still standing in
+  the checkout). Short of that, acceptance queues a `decision` report naming
+  what the branch is still waiting on and merges nothing. Once it holds, the
+  branch's attribution is written to `task_commit` for every member (backfilling
+  from any pre-ledger `Agent-Board-Task` trailer first, since this is the last
+  moment before the ref disappears), the whole branch is merged into the epic
+  branch exactly as a task branch is, and the project's checkout is moved off
+  it before the branch is deleted — a dirty checkout at that moment keeps the
+  branch rather than losing anything. A conflict or a branch still checked out
+  elsewhere reports the same way a task branch's would, naming that the one
+  merge carries every task on it.
 - `archived` — also a flag, not a column, with `blocked` and `failed` as the
   precedent: D7's six columns (`proposed`/`backlog`/`ready`/`running`/`review`/
   `done`) are unchanged by the archive feature. Only a `done` task can be
@@ -651,14 +775,23 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
 Reconcile also reaps worktrees under the project's worktree root that no active
 session owns, and deletes merged `agentboard/*` branches that no longer have a
 worktree. Anything dirty or unmerged is left alone and reported. Epic
-integration worktrees and `agentboard/epic-*` branches are out of scope.
+integration worktrees and `agentboard/epic-*` branches are out of scope. So is
+a shared branch (`agentboard/shared*`): it has no worktree under this reaping
+either way, and it is deleted only by acceptance finding it fully accepted and
+idle, above — never by reconcile's orphan sweep, which has no notion of "every
+member" to check.
 
 ### 5.1 Completion protocol
 
-A worker's closing instructions, injected at spawn:
+A worker's closing instructions, injected at spawn, worded per placement
+(`OpeningPrompt.closeout(placement:)`):
 
-1. Commit on the current branch. Message in imperative mood, no conventional
-   commit prefix.
+1. Commit. Message in imperative mood, no conventional commit prefix. Under
+   `worktree`, this is `git commit` on the current branch, as it always was.
+   Under `shared`, `git commit` is refused (§8.4) and the worker is told to
+   call `commit_my_work(message)` instead, which commits exactly the files its
+   own writes have locked — never a sibling's — and may be called more than
+   once.
 2. **Do not push. Do not open a PR.** Both are denied at the tool layer
    (`--disallowedTools` and the `PreToolUse` hook, §8); the instruction exists
    so the agent does not waste a turn discovering that.
@@ -1173,6 +1306,65 @@ full coverage.
 The setting lives in `UserDefaults` under `sleep.preventWhileRunning`, defaults
 on, and is toggled from the Status footer, which also shows whether an
 assertion is held right now.
+
+### 8.4 Shared-checkout file locks
+
+A `worktree` worker owns its whole tree and needs no lock. A `shared` or `auto`
+worker (D6 amended, §1) stands in the project's own checkout alongside other
+agents' co-resident work, so a second control exists for exactly that
+placement, enforced the same way as everything else in this section: denying
+`PreToolUse` (§7) before the tool runs, which is the only layer measured to
+stop an unattended `--permission-mode auto` worker (§12). The same
+`PreToolUse` handler checks `IntegrationGuard` (workers never push, above)
+first, then the git-command guard below, then shutdown-order delivery, and
+only then a file-lock claim — so a push is always denied ahead of a lock wait,
+and a worker mid-wind-down is handed the order before it ever starts one.
+
+**The lock.** `FileLockPolicy.lockedTools` is `Write`, `Edit`, `MultiEdit`,
+`NotebookEdit` — deliberately not `Bash`, whose target is not knowable from
+its command text the way `IntegrationGuard`'s push/PR scan already accepts.
+The matcher that routes these tools through the lock check is written only
+into a shared session's `--settings`, so a `worktree` worker's calls never
+reach it at all. A session's first write to a repo-relative path claims
+`file_lock` for it — one row per `(project, path)` — and holds it until the
+session ends; every later write to that path by any other session waits.
+
+**The wait.** Waiting is polling, not signalling: the holder may be a detached
+`claude --bg` process in another app run, so there is no in-process release to
+wake on. `FileLockPolicy.pollInterval` (0.5s) re-claims until
+`FileLockPolicy.waitTimeout` (90s) runs out — comfortably under
+`caps.stallSeconds` (120, §8) so a wait can never itself be read as a wedge,
+and small enough that a holder settled in for half an hour does not silently
+consume a contender's whole session. The waiting session moves to
+`agent_session.state = waiting_on_lock` (§4) for the duration — active and
+exempt from the idle and stall clocks, the same shape `setup` and `blocked`
+already have, because a session doing exactly what it was told to do is not
+silence. `agent_session.blocked_on_path` (§4) names what it is waiting on. A
+wait that expires is refused with `FileLockPolicy.waitReason`, which tells the
+worker to call `report_blocked` naming the path rather than retry the write
+itself, returning the task to `ready`; a wait that succeeds resumes the tool
+call as if it had never paused, and the waited seconds do not carry into the
+next idle window.
+
+**The rest of the checkout is guarded too, by a second, narrower control.**
+`SharedCheckoutGuard` denies the git subcommands that reach past a session's
+own locked files into the shared tree regardless of any lock — `git commit`
+(a bare or `-a` commit would sweep a sibling's staged-but-uncommitted edit into
+this task's commit), `stash`, `checkout`, `reset`, `clean`, `rm`,
+`sparse-checkout`, `switch`, `merge`, `rebase`, `pull`, `cherry-pick`,
+`revert`, `am`, and `bisect` — because each one either takes the whole working
+tree or moves the branch every co-resident agent is committing to, and the
+per-file lock does not cover a shell command's target. `git restore` is
+allowed only as `git restore -- <path>`, one plain command naming paths the
+session's own writes have locked; any wider form (no pathspec, a glob, another
+session's file) is denied the same way. Reading the tree — `git status`,
+`git diff`, `git log`, `git show` — is unrestricted. In place of `git commit`,
+a shared worker commits by calling the `commit_my_work(message)` MCP tool
+(§5.1): it commits exactly the paths this session's own locks name, taken from
+`file_lock` rather than from the agent's memory of what it touched, and
+records the commit's task in `task_commit` (§4) — the ledger that makes a
+task's work on a shared branch reviewable on its own, and that acceptance
+reads to decide whether every member is in (§5).
 
 ---
 
