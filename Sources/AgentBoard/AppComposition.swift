@@ -12,8 +12,10 @@ enum AppComposition {
             let sleepGuard = SleepGuard()
             sleepGuard.releaseOnTermination()
             let supervisor = Wiring.makeSupervisor(db: db, sleepGuard: sleepGuard)
-            _Concurrency.Task { await supervisor.start() }
-            let environment = AppEnvironment(db: db, supervisor: supervisor, sleepGuard: sleepGuard)
+            let startup = _Concurrency.Task { await supervisor.start() }
+            let environment = AppEnvironment(
+                db: db, supervisor: supervisor, sleepGuard: sleepGuard, startup: startup
+            )
             MacNotifier.shared.start(router: environment.router)
             return environment
         } catch {

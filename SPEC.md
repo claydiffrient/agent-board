@@ -733,22 +733,22 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
   Derivita), and `agentboard/<task-id>` is deleted once it is merged into the
   base or epic branch. An unmerged branch, or a worktree with uncommitted
   changes, is kept and the reason surfaced in the status bar.
-  A task that belongs to an epic then has its branch merged into
-  `agentboard/epic-<id>` (§5.2), so the next sibling spawned into the epic
-  branches from work that is already in. The merge runs after the acceptance
+
+  The accept then merges the task's branch into the branch meant to carry it:
+  `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling
+  spawned into the epic branches from work that is already in, and the project's
+  base branch for a task in none. The merge runs after the acceptance
   transaction and off the main actor: nothing it does can hold the task out of
-  `done`. When the epic branch is an ancestor of the task branch the ref is
-  advanced directly; otherwise a temporary worktree on the epic branch carries
-  the merge and is removed afterwards, keeping the branch. A conflict aborts,
-  leaves the epic branch where it was, and queues a `decision` report naming the
-  task, the epic branch and the conflicting files, so the orchestrator can
-  dispatch a fix rather than discover the divergence at integration time.
-  The merge commit's subject is `Merge <task title> into <epic title>` — titles,
-  never branch names, because this commit is on the branch the epic's pull
-  request is opened from and `agentboard/<id>` names would publish the task and
-  epic identifiers into that repository's history permanently (§6.1 renames the
-  branch, not commits already made).
-  Nothing here pushes: it is a local branch-to-branch merge.
+  `done`. When the target branch is an ancestor of the task branch the ref is
+  advanced directly; otherwise a temporary worktree on the target branch carries
+  the merge and is removed afterwards, keeping the branch. A conflict aborts and
+  leaves the target branch where it was. The merge commit's subject is
+  `Merge <task title> into <epic title or base branch name>` — titles, never
+  `agentboard/<id>` branch names, because this commit is on the branch a pull
+  request is opened from and those names would publish the task and epic
+  identifiers into that repository's history permanently (§6.1 renames the
+  branch, not commits already made). Nothing here pushes: it is a local
+  branch-to-branch merge.
 
   **A task accepted off a shared branch (D6 amended, §1) does not merge or
   remove anything by itself.** Its branch carries every co-resident sibling's
@@ -765,7 +765,41 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
   it before the branch is deleted — a dirty checkout at that moment keeps the
   branch rather than losing anything. A conflict or a branch still checked out
   elsewhere reports the same way a task branch's would, naming that the one
-  merge carries every task on it.
+  merge carries every task on it. The members' landings are written together, by
+  the one merge that carries them: until it runs, each accepted member is
+  `unlanded`, and that merge marks every member `landed` at once.
+
+  Two things the merge will not do. It never cuts a missing base branch — a
+  project whose base branch does not exist is misconfigured, and creating one
+  would land the work on a ref nobody pulls. And it never advances a branch that
+  a working tree holds, which is the ordinary case for the base branch: the
+  human's own checkout is on it. `git update-ref` does not refuse such a branch;
+  it moves the ref and leaves that working tree reporting every newly-merged
+  file as deleted. So the accept defers instead.
+
+  Because the accept therefore cannot always land the work, every task carries a
+  **landing**, written by the accept and cleared when the task leaves `done`:
+
+  - `pending` — armed on entry to `done`, by any route including a human
+    dragging the card, and overwritten as soon as git answers. It survives only
+    when the app died in between, which is precisely when the board must not
+    claim the work landed.
+  - `no_branch` — the task committed nothing. A task with no code to land
+    finishes here and is not stranded; this is a separate value from `unlanded`
+    for exactly that reason.
+  - `landed` — the target branch contains the task's commits.
+  - `unlanded` — the task has commits and the target branch does not contain
+    them. The work is reachable only from `agentboard/<task-id>`.
+
+  `pending` and `unlanded` show as a badge on the card and in the inspector, and
+  queue a `decision` report naming the task, the branch, the target and the
+  reason, so the orchestrator can dispatch a fix rather than discover the
+  divergence at integration time. The board can therefore never say `done` while
+  silently meaning "done, and the work is nowhere": reaching `done` writes a
+  landing, and the default value is the one that asks for attention.
+
+  A landing recorded before this existed is `NULL`, which claims nothing either
+  way; it is not rendered as an alarm.
 - `archived` — also a flag, not a column, with `blocked` and `failed` as the
   precedent: D7's six columns (`proposed`/`backlog`/`ready`/`running`/`review`/
   `done`) are unchanged by the archive feature. Only a `done` task can be
@@ -1684,11 +1718,10 @@ relaunch — SIGHUP to the shell's process group, escalating to SIGKILL) is the
 way back. It carries no board authority — D19 (§1).
 
 A worker's worktree gets its own shell instead of using this screen: the
-terminal button beside **Attach** on a session row (Status's Actions column,
-the task inspector's session rows) opens a `worktree-shell` window keyed by
-session id, its working directory the session's recorded `worktree_path` —
-never composed from a worktree base, since the default root has moved and
-older sessions still hold the old one. It is a separate window, not a tab on
+`apple.terminal` button beside the attach button on a session row opens a
+`worktree-shell` window keyed by session id, its working directory the
+session's recorded `worktree_path` — never composed from a worktree base,
+since the default root has moved and older sessions still hold the old one. It is a separate window, not a tab on
 this screen, because this screen's console is memoized for the app's lifetime,
 which is wrong for a directory `accept_task` reaps out from under it; the
 worktree-shell window instead disappears with the worktree, or, if the
@@ -1696,6 +1729,19 @@ directory vanishes while the window is still open, shows a banner over a shell
 that keeps running so the human can `cd` out. A session recorded with no
 worktree — it ran in the project's own checkout — points at this screen
 instead.
+
+The pair is `bubble.left.fill` for attach and `apple.terminal` for the worktree
+shell, monochrome and unstyled — the same glyph the shell window itself shows
+for a ready worktree, so the button and the window agree. They were one terminal
+glyph twice until the symbols were split; `terminal` and `apple.terminal` are in
+fact the same image on macOS 26, so the old pair was indistinguishable rather
+than merely similar. The two sites differ deliberately: Status's Actions column
+is width-constrained and shows icons only (a title truncates to `Ag…` there),
+while the task inspector's session rows show **Agent** and **Shell**. Because
+the Status column carries no visible label, the buttons' accessibility labels —
+"Attach to agent session" and "Open shell in worktree", divergent from the first
+word, since VoiceOver reads them consecutively along the row — are the only
+thing naming them there.
 
 **Task Board** — columns from §5, swimlanes by epic. A card shows title, epic,
 assigned agent, elapsed, spend, and its `blocked`/`failed` flag. Drag between
@@ -1769,6 +1815,88 @@ ungrouped. A project is assigned from its settings sheet (a picker of the
 workspaces plus **None**) or by dragging its row onto a section header. Which
 sections the viewer has collapsed is a per-viewer convenience and lives in
 `UserDefaults`, not the database.
+
+**What's New in Agent Board** — the release notes, opened from the Help menu and
+once on their own after an update installs. A `Window` scene rather than a
+`WindowGroup`, so choosing the menu item again — or a second launch that decides
+to show them — brings the open window forward instead of stacking a second one;
+resizable, scrollable, closed with ⌘W, and never a sheet, because notes are read
+beside the board rather than in front of it. Every release in the bundled
+`RELEASES.md` is in one scroll, newest first, with the running version marked —
+three entries need no navigation, and a version list beside a detail pane is what
+this wants once there are twenty.
+
+`RELEASES.md` at the repo root is the one source: one `## <version>` heading per
+release, optionally ` — YYYY-MM-DD`, free Markdown beneath, newest first, with
+everything above the first heading a preamble `ReleaseNotesParser` skips.
+`Scripts/bundle.sh` copies it byte for byte into `Contents/Resources` alongside
+`Info.plist` and the icon — nothing about the file is generated or rewritten at
+build time. `AppBundle.isAppBundle` (a bundle identifier and a `.app` path
+extension) gates every read: the `.build/debug/AgentBoard` binary `README.md`
+documents for E2E runs has neither, so `ReleaseNotesLoader` returns
+`.unavailable` before it looks for a version or a file at all. That is a
+deliberate silence, not a hidden error — the same predicate `MacNotifier`
+already used for the same reason — and the Help item still opens the window,
+which says plainly that this run has no notes to show rather than pretending
+the menu item isn't there.
+
+Markdown is rendered by splitting each release body into blocks
+(`ReleaseNotesMarkdown`) and handing only the inline markup of each block to
+`AttributedString(markdown:)`. Passing a whole body instead loses every block
+boundary: measured, a paragraph, a two-item list and a heading come back as one
+run-on line with the bullets and hashes stripped, because `Text` does not consume
+the `presentationIntent` attributes the parser writes.
+
+The menu item is always present and always opens the window. A build that ships
+no readable notes — the bare `AgentBoard` binary, or an `.app` whose
+`RELEASES.md` will not parse — gets a window saying which of those it is. Hiding
+the item would read as "this app has no release notes", and a disabled item gives
+no reason at all.
+
+**Shown once, after an update.** `UserDefaults` holds the last version whose
+notes were shown — per-user app state, so not the database, and not worth a
+schema migration for one string. On launch the window opens by itself when the
+running version is above that record *and* `RELEASES.md` has an entry for it;
+the record then moves to the running version. Shown counts as shown whether or
+not the human read it: whether the window was looked at is not something to
+detect, and trying would mean showing it again to someone who closed it on
+purpose.
+
+The two cases this hinges on are **no record** and **a record from an older
+version**. No record is a first ever install: it records the running version and
+stays silent, because someone opening the app for the first time wants the app,
+not a changelog of a product they have never used. Reading it as an upgrade
+instead would greet every new user with a release-notes window.
+
+A **downgrade** — running a build older than the record — shows nothing and
+leaves the record alone; the record names the newest notes a human has been
+given, and running an older build does not un-give them. An **upgrade the author
+wrote no entry for** shows nothing but still records, so the decision is not
+re-made on every launch until a version with notes arrives. The `.unavailable`
+and unparsable-`RELEASES.md` states do nothing at all, record included: burning
+the record on a build whose notes will not parse would swallow those notes for
+good once the file is fixed.
+
+It opens **last in the launch sequence**, after `supervisor.start()` has returned
+— the server bind, the stale-lock sweep and the worktree-root migration — and
+with the board already on screen. Each of those writes to the board the human is
+about to be shown, and a window over the middle of that hides work still
+settling.
+
+It does **not** stand aside for a board that already needs a human. Deferring has
+no later that is better: holding the record back starves the notes on every
+launch that has an approval waiting, and releasing it mid-session puts the window
+over whatever the human is then doing rather than over a board they have not
+touched yet. The notes are a separate, non-modal, ⌘W-closable window, and every
+attention signal is still standing behind it when it is closed or ignored.
+
+The Help menu is added to with `CommandGroup(after: .help)`, never
+`replacing:`. The `.help` group holds two items in this app — **AgentBoard Help**
+and **Toggle Sidebar** (⌃⌘S), which SwiftUI files under Help because the View
+menu is empty — and replacing the group deletes both, taking the shortcut with
+it. Neither placement affects the Help search field: AppKit adds that to whatever
+menu is `NSApp.helpMenu` when the menu opens, and it is never an item in the
+built menu.
 
 ---
 

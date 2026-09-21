@@ -17,11 +17,17 @@ final class AppEnvironment {
     /// Quitting is not `NSApplication.terminate` on its own — see `AppQuitting` — and a test needs
     /// a seam that does not end the test process.
     let quitter: any AppQuitting
+    let releaseNotes: ReleaseNotesAnnouncer
+    /// `supervisor.start()`, so a launch-time screen can wait for the server bind, the stale-lock
+    /// sweep and the worktree-root migration to finish. Nil everywhere the supervisor is a stub.
+    let startup: _Concurrency.Task<Void, Never>?
 
     init(
         db: AppDatabase, supervisor: any WorkerSupervising, router: NotificationRouter? = nil,
         accountUsage: AccountUsageModel? = nil, sleepGuard: SleepGuard? = nil,
-        quitter: (any AppQuitting)? = nil
+        quitter: (any AppQuitting)? = nil,
+        releaseNotes: ReleaseNotesAnnouncer = ReleaseNotesAnnouncer(),
+        startup: _Concurrency.Task<Void, Never>? = nil
     ) {
         self.db = db
         self.supervisor = supervisor
@@ -29,5 +35,7 @@ final class AppEnvironment {
         self.accountUsage = accountUsage ?? AccountUsageModel()
         self.sleepGuard = sleepGuard ?? SleepGuard()
         self.quitter = quitter ?? AppQuit()
+        self.releaseNotes = releaseNotes
+        self.startup = startup
     }
 }

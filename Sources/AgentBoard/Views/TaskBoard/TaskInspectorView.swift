@@ -10,7 +10,6 @@ struct TaskInspectorView: View {
     let onClose: () -> Void
 
     @Environment(AppEnvironment.self) private var env
-    @Environment(\.openWindow) private var openWindow
     @State private var draftBody = ""
     @State private var draftAcceptance = ""
     @State private var draftModel: String?
@@ -118,6 +117,7 @@ struct TaskInspectorView: View {
                 Text(task.origin.rawValue)
                 if task.blocked { FlagBadge(text: "blocked") }
                 if task.failed { FlagBadge(text: "failed") }
+                if task.needsLanding { FlagBadge(text: task.landing?.label ?? TaskLanding.pending.label) }
                 if let archived = task.archivedDate {
                     Label("archived \(Format.relative(archived))", systemImage: "archivebox")
                 }
@@ -128,6 +128,15 @@ struct TaskInspectorView: View {
                 Text(reason)
                     .font(.caption)
                     .foregroundStyle(.red)
+            }
+            // Shown for every landing a `done` task has, not only the alarming ones: "nothing to
+            // land" has to be readable as its own answer, or a task that never had a branch looks
+            // the same as one whose branch went missing.
+            if task.column == .done, let landing = task.landing {
+                Text(task.landingDetail ?? landing.label)
+                    .font(.caption)
+                    .foregroundStyle(landing.needsAttention ? .red : .secondary)
+                    .textSelection(.enabled)
             }
             Text(task.id)
                 .font(.caption2.monospaced())
@@ -222,19 +231,7 @@ struct TaskInspectorView: View {
                     } else {
                         Button("Resume") { run { try await env.supervisor.resume(sessionId: session.sessionId) } }
                     }
-                    Button {
-                        openWindow(id: "terminal", value: session.sessionId)
-                    } label: {
-                        Image(systemName: "terminal")
-                    }
-                    .help("Attach to this agent's own Claude session")
-                    Button {
-                        openWindow(id: "worktree-shell", value: session.sessionId)
-                    } label: {
-                        Image(systemName: "apple.terminal")
-                    }
-                    .disabled(!WorktreeShellAvailability.canOpen(session))
-                    .help(WorktreeShellAvailability.buttonHelp(session))
+                    SessionActionButtons(session: session, showsTitle: true)
                 }
                 .controlSize(.small)
                 .padding(6)
