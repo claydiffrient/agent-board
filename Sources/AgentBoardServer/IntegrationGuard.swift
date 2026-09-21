@@ -51,22 +51,23 @@ public enum IntegrationGuard {
     }
 
     /// What the command is, regardless of who is calling. `violation` applies the scope on top.
+    ///
+    /// A token counts as `git` or `gh` when its trailing path component is, so `/usr/bin/git push`
+    /// and `/opt/homebrew/bin/gh pr create` are seen. The scan is still a heuristic: a wrapper
+    /// script, an alias, or an invocation assembled at runtime gets past it.
     public static func match(toolName: String?, command: String?) -> Violation? {
         guard toolName == "Bash", let command, !command.isEmpty else { return nil }
         let words = tokens(command)
         for index in words.indices {
-            switch words[index] {
-            case "git":
+            if isGit(words[index]) {
                 if subcommand(after: index, in: words)?.word == "push" { return .push }
-            case "gh":
+            } else if isGh(words[index]) {
                 guard let pr = subcommand(after: index, in: words), pr.word == "pr" else { continue }
                 switch subcommand(after: pr.index, in: words)?.word {
                 case "create": return .pullRequestCreate
                 case "merge": return .pullRequestMerge
                 default: continue
                 }
-            default:
-                continue
             }
         }
         return nil
@@ -127,6 +128,17 @@ public enum IntegrationGuard {
     /// whole.
     private static func isGit(_ word: Substring) -> Bool {
         word == "git" || word.hasSuffix("/git")
+    }
+
+    /// `git`, or any path ending in it. `tokens` does not split on `/`, so `/usr/bin/git` arrives
+    /// whole.
+    private static func isGit(_ word: Substring) -> Bool {
+        word == "git" || word.hasSuffix("/git")
+    }
+
+    /// `gh`, or any path ending in it, by the same rule as `isGit`.
+    private static func isGh(_ word: Substring) -> Bool {
+        word == "gh" || word.hasSuffix("/gh")
     }
 
     private static func subcommand(after index: Int, in words: [Substring]) -> (word: Substring, index: Int)? {
