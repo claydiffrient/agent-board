@@ -4,7 +4,7 @@ import IOKit.pwr_mgt
 
 /// Holds `kIOPMAssertPreventUserIdleSystemSleep` and nothing else. Display sleep has its own
 /// assertion type, `kIOPMAssertPreventUserIdleDisplaySleep`, which is deliberately never taken: a
-/// screen lit all night is not what keeps a worker alive.
+/// screen lit all night is not what keeps a worker alive. SPEC §8.3.
 public final class IOKitSleepAssertion: SleepAssertion {
     private var assertionId: IOPMAssertionID?
 
