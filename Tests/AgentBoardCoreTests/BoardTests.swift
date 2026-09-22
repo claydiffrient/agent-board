@@ -19,7 +19,7 @@ final class BoardTests: XCTestCase {
         XCTAssertEqual(try f.tasks.get(t.id)?.column, .running)
         XCTAssertEqual(try f.sessions.get("s1"), inserted)
 
-        let report = try f.board.complete(taskId: t.id, sessionId: "s1", summary: "shipped")
+        let report = try f.board.complete(taskId: t.id, sessionId: "s1", summary: "shipped").report
         XCTAssertEqual(report.kind, .complete)
         XCTAssertEqual(report.body, "shipped")
         XCTAssertNotNil(report.id)
@@ -33,6 +33,34 @@ final class BoardTests: XCTestCase {
         XCTAssertEqual(nowReady, [downstream.id])
         XCTAssertEqual(try f.tasks.get(t.id)?.column, .done)
         XCTAssertEqual(try f.tasks.get(downstream.id)?.column, .ready)
+    }
+
+    /// The guard is keyed on the session, not the task: a retried call from the same worker is a
+    /// no-op, but the next attempt's worker files a report of its own.
+    func testCompleteIsIdempotentPerSessionAndNotPerTask() throws {
+        let f = try Fixture.make()
+        let t = try f.task("build it", column: .ready)
+        try f.board.assign(taskId: t.id, session: f.session("s1", state: .running))
+
+        let first = try f.board.complete(taskId: t.id, sessionId: "s1", summary: "shipped")
+        try f.tasks.move(t.id, to: .done)
+        let again = try f.board.complete(taskId: t.id, sessionId: "s1", summary: "shipped")
+
+        XCTAssertFalse(first.wasAlreadyComplete)
+        XCTAssertEqual(first.column, .review)
+        XCTAssertTrue(again.wasAlreadyComplete)
+        XCTAssertEqual(again.report.id, first.report.id)
+        XCTAssertEqual(again.column, .done, "the retry moved a task it should not have touched")
+        XCTAssertEqual(try f.tasks.get(t.id)?.column, .done)
+
+        try f.board.reopen(taskId: t.id)
+        try f.board.assign(taskId: t.id, session: f.session("s2", state: .running))
+        let retry = try f.board.complete(taskId: t.id, sessionId: "s2", summary: "shipped again")
+        XCTAssertFalse(retry.wasAlreadyComplete)
+        XCTAssertNotEqual(retry.report.id, first.report.id)
+
+        let completes = try f.reports.unconsumed(projectId: f.project.id).filter { $0.kind == .complete }
+        XCTAssertEqual(completes.count, 2)
     }
 
     func testAttemptCounterIncrementsPerTask() throws {
@@ -95,7 +123,8 @@ final class BoardTests: XCTestCase {
     func testProposeAndPromote() throws {
         let f = try Fixture.make()
         let proposed = try f.board.propose(
-            projectId: f.project.id, title: "Add lint", body: "Run eslint", rationale: "caught a bug", sessionId: nil
+            projectId: f.project.id, title: "Add lint", body: "Run eslint", rationale: "caught a bug",
+            sessionId: nil, epicId: nil
         )
         XCTAssertEqual(proposed.column, .proposed)
         XCTAssertEqual(proposed.origin, .workerProposal)
@@ -105,9 +134,11 @@ final class BoardTests: XCTestCase {
         XCTAssertEqual(reports[0].taskId, proposed.id)
         XCTAssertTrue(reports[0].body.contains("caught a bug"))
 
-        let nowReady = try f.board.promote(taskId: proposed.id)
-        XCTAssertEqual(nowReady, [proposed.id])
+        let promotion = try f.board.promote(taskId: proposed.id)
+        XCTAssertEqual(promotion.newlyReady, [proposed.id])
+        XCTAssertNil(promotion.droppedEpic)
         XCTAssertEqual(try f.tasks.get(proposed.id)?.column, .ready)
+        XCTAssertNil(try f.tasks.get(proposed.id)?.epicId)
 
         XCTAssertThrowsError(try f.board.promote(taskId: proposed.id)) { error in
             XCTAssertEqual(error as? BoardError, .invalidTransition(taskId: proposed.id, from: .ready, to: .backlog))
@@ -117,10 +148,12 @@ final class BoardTests: XCTestCase {
     func testPromoteWithUnmetDepsStaysInBacklog() throws {
         let f = try Fixture.make()
         let blocker = try f.task("blocker")
-        let proposed = try f.board.propose(projectId: f.project.id, title: "later", body: nil, rationale: nil, sessionId: nil)
+        let proposed = try f.board.propose(
+            projectId: f.project.id, title: "later", body: nil, rationale: nil, sessionId: nil, epicId: nil
+        )
         try f.tasks.setDeps(proposed.id, dependsOn: [blocker.id])
-        let nowReady = try f.board.promote(taskId: proposed.id)
-        XCTAssertEqual(nowReady, [blocker.id])
+        let promotion = try f.board.promote(taskId: proposed.id)
+        XCTAssertEqual(promotion.newlyReady, [blocker.id])
         XCTAssertEqual(try f.tasks.get(proposed.id)?.column, .backlog)
     }
 

@@ -178,6 +178,65 @@ final class CapEvaluatorTests: XCTestCase {
         )
     }
 
+    // MARK: - A tool call in flight
+
+    /// `PostToolUse` fires only when a tool returns, so a worker inside a 544s `swift build` had
+    /// made no recorded activity for the whole of it and was reaped mid-command.
+    func testACallStillRunningExcusesTheIdleCap() {
+        let now = start.addingTimeInterval(300)
+        XCTAssertNil(CapEvaluator.evaluate(
+            totals: .zero, startedAt: start, lastActivity: start, toolStartedAt: start,
+            awake: .init(now: now), limits: idleOnly
+        ))
+    }
+
+    func testTheSameSilenceWithNoCallInFlightStillBreaches() {
+        let now = start.addingTimeInterval(300)
+        XCTAssertEqual(
+            CapEvaluator.evaluate(
+                totals: .zero, startedAt: start, lastActivity: start, awake: .init(now: now), limits: idleOnly
+            ),
+            .idle(since: start, limit: 60)
+        )
+    }
+
+    /// The bound: 6× the idle cap, and not a second more.
+    func testACallThatNeverReturnsBreachesAtSixTimesTheIdleCap() {
+        XCTAssertNil(CapEvaluator.evaluate(
+            totals: .zero, startedAt: start, lastActivity: start, toolStartedAt: start,
+            awake: .init(now: start.addingTimeInterval(359)), limits: idleOnly
+        ))
+        XCTAssertEqual(
+            CapEvaluator.evaluate(
+                totals: .zero, startedAt: start, lastActivity: start, toolStartedAt: start,
+                awake: .init(now: start.addingTimeInterval(360)), limits: idleOnly
+            ),
+            .idle(since: start, limit: 60)
+        )
+    }
+
+    /// The grace extends a deadline, it never triggers one, so a `tool_started_at` left behind by a
+    /// `PostToolUse` that never arrived cannot reap a worker that is plainly still working.
+    func testAStaleStartCannotBreachAWorkerThatIsStillActive() {
+        let now = start.addingTimeInterval(10_000)
+        XCTAssertNil(CapEvaluator.evaluate(
+            totals: .zero, startedAt: start, lastActivity: now.addingTimeInterval(-5),
+            toolStartedAt: start, awake: .init(now: now), limits: idleOnly
+        ))
+    }
+
+    /// The elapsed cap is not excused: nobody gets to sit inside one command forever.
+    func testTheElapsedCapStillFiresThroughARunningCall() {
+        let now = start.addingTimeInterval(600)
+        XCTAssertEqual(
+            CapEvaluator.evaluate(
+                totals: .zero, startedAt: start, lastActivity: start, toolStartedAt: start,
+                awake: .init(now: now), limits: limits
+            ),
+            .wallClock(elapsed: 600, limit: 600)
+        )
+    }
+
     func testDefaultsMatchSpec() {
         XCTAssertEqual(CapLimits.default, CapLimits(maxTokens: nil, maxWallClockSeconds: 1800, maxIdleSeconds: 300))
     }

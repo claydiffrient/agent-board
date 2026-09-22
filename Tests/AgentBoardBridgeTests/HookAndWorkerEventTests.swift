@@ -137,9 +137,74 @@ final class HookAndWorkerEventTests: XCTestCase {
 
         XCTAssertFalse(result.isError)
         let events = await f.events.events
-        XCTAssertEqual(events, [.reportQueued(projectId: f.project.id)])
+        XCTAssertEqual(
+            events,
+            [
+                .workerCompleted(projectId: f.project.id, sessionId: "w1"),
+                .reportQueued(projectId: f.project.id),
+            ]
+        )
         XCTAssertEqual(try f.tasks.get(task.id)?.column, .review)
+        XCTAssertTrue(result.text.contains("is now in Review"), result.text)
         XCTAssertEqual(try f.reports.unconsumedCount(projectId: f.project.id), 1)
+    }
+
+    /// Under the project's default archive policy (`afterEpicMerge`), an epic's integration task
+    /// lands in `done` rather than `review` when it completes — the sweep runs in the same
+    /// transaction. The success text has to say `Done` here, not the `Review` every other task gets.
+    func testReportCompleteOnAnIntegrationTaskUnderAfterEpicMergeSaysDone() async throws {
+        let epic = try f.epic("Ship search", state: .integrating)
+        let integration = try f.board.createIntegrationTask(epicId: epic.id)
+        try f.session("w1", taskId: integration.id)
+        let identity = f.workerIdentity(sessionId: "w1", taskId: integration.id)
+        let arguments: JSONValue = .object([
+            "summary": .string("merged everything"),
+            "files_changed": .array([]),
+            "tests_run": .string("swift test"),
+            "caveats": .string(""),
+        ])
+
+        let result = try await f.scoped.call("report_complete", arguments: arguments, identity: identity)
+
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(try f.tasks.get(integration.id)?.column, .done)
+        XCTAssertTrue(result.text.contains("is now in Done"), result.text)
+        XCTAssertFalse(result.text.contains("is now in Review"), result.text)
+    }
+
+    /// The MCP client resends `report_complete` when the answer never arrives, which is the usual
+    /// case: the handler stops the worker before it replies. The resend must find the first report
+    /// and do nothing else — no second row, no second stop, and no undoing of whatever the
+    /// orchestrator did with the first one.
+    func testASecondReportCompleteInsertsNothingAndRerunsNothing() async throws {
+        let task = try f.task("t", column: .running)
+        try f.session("w1", taskId: task.id)
+        let identity = f.workerIdentity(sessionId: "w1", taskId: task.id)
+        let arguments: JSONValue = .object([
+            "summary": .string("did it"),
+            "files_changed": .array([.string("a.swift")]),
+            "tests_run": .string("swift test"),
+            "caveats": .string("none"),
+        ])
+
+        let first = try await f.scoped.call("report_complete", arguments: arguments, identity: identity)
+        _ = try f.board.accept(taskId: task.id)
+        let endedAt = try XCTUnwrap(f.sessions.get("w1")?.endedAt)
+
+        let second = try await f.scoped.call("report_complete", arguments: arguments, identity: identity)
+
+        let completes = try f.reports.unconsumed(projectId: f.project.id).filter { $0.kind == .complete }
+        XCTAssertEqual(completes.count, 1)
+        let reportId = try XCTUnwrap(completes[0].id)
+        XCTAssertTrue(first.text.contains("Report \(reportId) recorded"), first.text)
+        XCTAssertTrue(second.text.contains("Report \(reportId) was already recorded"), second.text)
+        XCTAssertFalse(second.isError)
+        XCTAssertEqual(try f.tasks.get(task.id)?.column, .done, "the resend dragged an accepted task back")
+        XCTAssertEqual(try f.sessions.get("w1")?.endedAt, endedAt)
+
+        let events = await f.events.events
+        XCTAssertEqual(events.filter { $0 == .workerCompleted(projectId: f.project.id, sessionId: "w1") }.count, 1)
+        XCTAssertEqual(events.filter { $0 == .reportQueued(projectId: f.project.id) }.count, 1)
     }
 
     func testReportBlockedQueuesAndRaisesTheAttentionSignal() async throws {

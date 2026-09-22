@@ -15,18 +15,23 @@ enum SupervisorError: LocalizedError {
     case sessionHasNoShortId(String)
     case taskNotAssignable(title: String, column: TaskColumn)
     case capRefused(String)
+    case taskAlreadyHeld(title: String, sessionId: String)
+    case worktreeAlreadyHeld(path: String, sessionId: String)
     case shutdownOrdered
     case noShutdownOrder
     case serverNotRunning
     case spawnFailed(worktree: String, underlying: String)
     case setupInterrupted
     case approvalNotFound(String)
+    case rosterAgentNotUsable(id: String, projectName: String)
     case epicCloseRefused(String)
     case globalShutdownIncomplete([String])
 
     var errorDescription: String? {
         switch self {
         case .approvalNotFound(let id): return "approval \(id) not found"
+        case .rosterAgentNotUsable(let id, let projectName):
+            return "roster agent \(id) is not in \(projectName)'s usable set; enable it for this project first"
         case .epicCloseRefused(let reason): return reason
         case .epicNotFound(let id): return "epic \(id) not found"
         case .notAGitRepository(let path): return "\(path) is not a git repository"
@@ -36,6 +41,10 @@ enum SupervisorError: LocalizedError {
         case .sessionHasNoShortId(let id): return "session \(id) has no claude short id yet; reconcile first"
         case .taskNotAssignable(let title, let column): return "\"\(title)\" is in \(column.rawValue) and cannot be assigned"
         case .capRefused(let reason): return "spawn refused: \(reason)"
+        case .taskAlreadyHeld(let title, let sessionId):
+            return "\"\(title)\" is still held by session \(sessionId); a second agent would share its worktree"
+        case .worktreeAlreadyHeld(let path, let sessionId):
+            return "session \(sessionId) is still working in \(path); a second agent must not share it"
         case .shutdownOrdered: return ShutdownOrder.refusal
         case .noShutdownOrder: return "no shutdown order is outstanding on this project"
         case .serverNotRunning: return "the Agent Board server is not running"
@@ -70,6 +79,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Sampled once per metering tick. Every cap and grace deadline is measured against it so a
     /// suspended machine does not count against a worker.
     @ObservationIgnored private let sleepLedger: SleepLedger
+    /// Nil in tests that do not care; the app always supplies one. SPEC §8.3.
+    @ObservationIgnored private let sleepGuard: SleepGuard?
     @ObservationIgnored private let projects: ProjectStore
     @ObservationIgnored private let tasks: TaskStore
     @ObservationIgnored private let sessions: SessionStore
@@ -80,6 +91,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let deliveries: ShutdownDeliveryStore
     @ObservationIgnored private let epics: EpicStore
     @ObservationIgnored private let notes: NoteStore
+    @ObservationIgnored private let roster: RosterStore
     @ObservationIgnored private let board: Board
     @ObservationIgnored private let archives: ArchiveSweep
     @ObservationIgnored private let fileLocks: FileLockStore
@@ -97,6 +109,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var lastArchiveSweep: Int64 = 0
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
     @ObservationIgnored private var stallNotified: Set<String> = []
+    /// `<project-id>\u{01}<branch>` for each shared branch whose pre-ledger `Agent-Board-Task`
+    /// trailers have already been read back this run.
+    @ObservationIgnored private var trailersBackfilled: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
     @ObservationIgnored private var shellConsoles: [String: ShellConsole] = [:]
     /// Keyed by setup session id, so a test — or a human stopping a worker mid-setup — can wait on
@@ -118,7 +133,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         appSupportDir: URL,
         worktreeBase: URL,
         projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
-        sleepLedger: SleepLedger = .shared
+        sleepLedger: SleepLedger = .shared,
+        sleepGuard: SleepGuard? = nil
     ) {
         self.db = db
         self.runtime = runtime
@@ -127,6 +143,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         self.worktreeBase = worktreeBase
         self.projectsRoot = projectsRoot
         self.sleepLedger = sleepLedger
+        self.sleepGuard = sleepGuard
         projects = ProjectStore(db)
         tasks = TaskStore(db)
         sessions = SessionStore(db)
@@ -137,6 +154,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         deliveries = ShutdownDeliveryStore(db)
         epics = EpicStore(db)
         notes = NoteStore(db)
+        roster = RosterStore(db)
         board = Board(db)
         archives = ArchiveSweep(db)
         fileLocks = FileLockStore(db)
@@ -160,6 +178,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         sweepStaleFileLocks()
         await sweepLeakedAgents()
         await migrateWorktreeRoots()
+        refreshSleepAssertion()
         startMetering()
     }
 
@@ -227,7 +246,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// the background. On a large repository the agent's own start-up outlasts an MCP call, and an
     /// orchestrator that cannot tell a timeout from a failure has to poll to find out what happened.
     @discardableResult
-    private func spawn(taskId: String) async throws -> WorkerSpawn {
+    private func spawn(
+        taskId: String, rosterAgentId: String? = nil, scope: AgentBoardCore.TokenScope = .worker
+    ) async throws -> WorkerSpawn {
         guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
         guard task.column != .running, task.column != .done else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
@@ -240,12 +261,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
         }
+        let agent = try rosterAgentId.map { id -> RosterAgent in
+            guard let agent = try roster.usableAgent(id, forProject: project.id) else {
+                throw SupervisorError.rosterAgentNotUsable(id: id, projectName: project.name)
+            }
+            return agent
+        }
+        // A handed-off task is back in `ready` while its worktree stays on disk, so the column alone no
+        // longer proves nobody is in it. `Board.assign` re-checks this in its transaction; refusing here
+        // as well keeps a doomed spawn from launching a process it would then have to orphan.
+        if let holder = try sessions.activeHolder(taskId: taskId) {
+            throw SupervisorError.taskAlreadyHeld(title: task.title, sessionId: holder.sessionId)
+        }
 
         let attempt = try sessions.forTask(taskId).count + 1
-        let manager = WorktreeManager(
-            repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
-        )
+        let manager = worktreeManager(for: project)
         let epic = try task.epicId.flatMap { try epics.get($0) }
         let placement = WorkerPlacementDecision.decide(
             strategy: project.settings.worktreeStrategy,
@@ -272,14 +302,23 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             warnings: warnings
         )
         let branch = site.branch
+        // A handed-off task keeps its worktree on disk, so a second agent could otherwise be launched
+        // into a checkout someone is still working in. Co-resident agents in a shared checkout are
+        // deliberate and have no worktree path, so this skips them.
+        if let path = site.worktreePath, let holder = try sessions.activeHolder(worktreePath: path) {
+            throw SupervisorError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
+        }
 
         do {
-            let placeholder = try board.assign(
-                taskId: taskId,
-                session: Self.setupRow(
-                    projectId: project.id, taskId: taskId, site: site, attempt: attempt
-                )
+            let row = Self.setupRow(
+                projectId: project.id, taskId: taskId, site: site, attempt: attempt,
+                rosterAgentId: agent?.id
             )
+            // A reviewer holds a task that is already in `review`; `assign` would move it to
+            // `running` and take it out of the queue its own accept_task reads.
+            let placeholder = scope == .reviewer
+                ? try board.assignReviewer(taskId: taskId, session: row)
+                : try board.assign(taskId: taskId, session: row)
             if let epic, epic.state == .planning {
                 try epics.setState(epic.id, .active)
             }
@@ -299,10 +338,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         ),
                         verification: project.settings.verification,
                         placement: site.placement,
-                        workingDirectory: site.cwd.path
+                        workingDirectory: site.cwd.path,
+                        agent: agent?.identity
                     ),
-                    model: task.model ?? project.settings.defaultModel,
-                    attempt: placeholder.attempt
+                    // Most specific override wins: this task, then the agent's standing preference,
+                    // then the project default.
+                    model: task.model ?? agent?.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    scope: scope
                 ),
                 placeholder: placeholder,
                 port: port
@@ -366,7 +410,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     private static func setupRow(
-        projectId: String, taskId: String, site: CheckoutSite, attempt: Int
+        projectId: String, taskId: String, site: CheckoutSite, attempt: Int,
+        rosterAgentId: String? = nil
     ) -> AgentSession {
         AgentSession(
             sessionId: "setup-\(UUID().uuidString)",
@@ -377,7 +422,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             branch: site.branch,
             cwd: site.cwd.path,
             state: .setup,
-            attempt: attempt
+            attempt: attempt,
+            rosterAgentId: rosterAgentId
         )
     }
 
@@ -465,6 +511,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var prompt: String
         var model: String?
         var attempt: Int
+        /// A rostered assignment. Nothing here widens authority: the session still gets
+        /// `--permission-mode auto`, the worker deny list, and at most a worker's token scope.
+        var rosterAgent: RosterAgent? = nil
+        var scope: AgentBoardCore.TokenScope = .worker
     }
 
     /// §3.1 steps 3-8, shared by task workers and the epic integrator, and the whole of what runs
@@ -476,7 +526,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             ?? ClaudeProjectPaths.memoryDir(forPath: project.repoPath, projectsRoot: projectsRoot).path)
         _ = try ClaudeProjectPaths.linkMemory(worktreePath: plan.cwd.path, to: memoryDir, projectsRoot: projectsRoot)
 
-        let grant = try grants.issue(projectId: project.id, scope: .worker, taskId: plan.taskId)
+        let grant = try grants.issue(projectId: project.id, scope: plan.scope, taskId: plan.taskId)
         do {
             let configFiles = try SessionConfigWriter.write(
                 configDir: sessionConfigDir,
@@ -492,6 +542,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 name: plan.name,
                 prompt: plan.prompt,
                 configFiles: configFiles,
+                // A deny-list, layered on: a rostered agent can only ever have less authority than a
+                // plain worker, and an empty list is exactly a plain worker's.
+                disallowedTools: SpawnRequest.defaultDisallowedTools
+                    + (plan.rosterAgent?.disallowedTools ?? []),
                 model: plan.model
             )
             let spawned = try await runtime.spawn(request)
@@ -530,16 +584,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.capRefused(reason)
         }
 
-        let manager = WorktreeManager(
-            repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
-        )
+        let manager = worktreeManager(for: project)
         let worktreeName = "epic-\(epicId)"
         _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(worktreeName))
         let epicBranch = epic.branch
         let worktree = try await offMain {
             try Self.existingWorktree(manager, name: worktreeName)
                 ?? manager.createForBranch(name: worktreeName, branch: epicBranch)
+        }
+        if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
+            throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
         }
 
         let members = try tasks.list(projectId: project.id, epicId: epicId, includeArchived: true)
@@ -552,10 +606,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let branchNames = ordered.map { IntegrationPlan.branchName(taskId: $0.id) }
         let dispatched = Set(ordered.filter { ((try? sessions.forTask($0.id)) ?? []).isEmpty == false }.map(\.id))
         let taskIds = ordered.map(\.id)
+        let shared = ordered.reduce(into: [String: String]()) { map, member in
+            map[member.id] = sharedBranch(of: member)
+        }
+        let projectBase = project.baseBranch
         let facts = try await offMain { () -> [String: TaskBranchFacts] in
             let merged = try manager.mergeStatus(worktree: worktree, branches: branchNames)
             return try Self.branchFacts(
-                manager, taskIds: taskIds, epicBranch: epicBranch, merged: merged, dispatched: dispatched
+                manager, taskIds: taskIds, epicBranch: epicBranch, baseBranch: projectBase,
+                sharedBranches: shared, merged: merged, dispatched: dispatched
             )
         }
         let branches = IntegrationPlan.classify(ordered, facts: facts)
@@ -621,6 +680,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             try board.terminate(sessionId: sessionId, cause: .stoppedByHuman, salvage: salvage)
             try grants.revokeAll(sessionId: sessionId)
             announceReports(projectId: session.projectId)
+            refreshSleepAssertion()
         }
     }
 
@@ -698,86 +758,303 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
             }
             announceReports(projectId: projectId)
+            refreshSleepAssertion()
             if let firstFailure { throw firstFailure }
         }
     }
 
     func accept(taskId: String) async throws {
+        try await accept(taskId: taskId, acceptedBy: .human)
+    }
+
+    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws {
         try await recording {
             guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
             guard let project = try projects.get(task.projectId) else {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
-            try board.accept(taskId: taskId)
+            try board.accept(taskId: taskId, acceptedBy: acceptedBy)
             let taskSessions = try sessions.forTask(taskId)
             for session in taskSessions {
                 try grants.revokeAll(sessionId: session.sessionId)
+                try fileLocks.releaseAll(sessionId: session.sessionId)
             }
             // Teardown runs first so `deleteBranchIfMerged` still sees the task branch as unmerged
             // and keeps it; the integrator reads the surviving branch as its ledger of what is in.
             await tearDownWorktrees(of: taskSessions, task: task, project: project)
-            await mergeIntoEpicBranch(task: task, project: project)
+            await landAcceptedBranch(task: task, project: project)
             announceReports(projectId: task.projectId)
         }
     }
 
-    /// §5.2: the epic branch accumulates each accepted task, so a sibling spawned afterwards branches
-    /// from work that is already in. Deliberately outside the acceptance transaction — the human
-    /// accepted the task, and no git failure may put it back.
-    private func mergeIntoEpicBranch(task: BoardTask, project: Project) async {
-        guard let epicId = task.epicId, let epic = try? epics.get(epicId) else { return }
-        let manager = Self.worktreeManager(for: project)
+    /// §5: an accepted task's branch is merged into the branch meant to carry it — the epic branch
+    /// for a task in an epic, the project's base branch otherwise — and, whatever happens, the
+    /// task's `landing` records where the work ended up. Deliberately outside the acceptance
+    /// transaction: the human accepted the task, and no git failure may put it back. What a git
+    /// failure does instead is leave `landing` at `.unlanded`, which the board shows, so `done`
+    /// cannot quietly mean "done, and the work is nowhere".
+    private func landAcceptedBranch(task: BoardTask, project: Project) async {
+        let epic = task.epicId.flatMap { try? epics.get($0) }
+        // A shared branch holds several tasks' commits on one ref, so it lands as a unit when its
+        // last member is accepted (§8.4) rather than once per task.
+        if let epic, let shared = sharedBranch(of: task) {
+            await mergeSharedBranch(task: task, epic: epic, project: project, branch: shared)
+            return
+        }
+        let manager = worktreeManager(for: project)
         let taskBranch = Self.taskBranchPrefix + task.id
-        let epicBranch = epic.branch
+        let target = epic?.branch ?? project.baseBranch
+        let taskTitle = task.title
+        let targetTitle = epic?.title ?? project.baseBranch
         let projectBase = project.baseBranch
+        let epicBranch = epic?.branch
         let worktreeName = "merge-\(task.id)"
-        let outcome: EpicMerge
+        let outcome: BranchMerge
         do {
             outcome = try await offMain {
-                try manager.ensureBranch(epicBranch, from: projectBase)
-                return try manager.mergeIntoEpic(
-                    taskBranch: taskBranch, epicBranch: epicBranch, worktreeName: worktreeName
+                // Only an epic branch is ever cut here. A missing base branch comes back as
+                // `.noTargetBranch` instead, because creating one would land the work on a ref
+                // nobody pulls and call it done.
+                if let epicBranch { try manager.ensureBranch(epicBranch, from: projectBase) }
+                return try manager.merge(
+                    taskBranch: taskBranch, into: target,
+                    taskTitle: taskTitle, targetTitle: targetTitle,
+                    worktreeName: worktreeName
                 )
             }
         } catch {
-            queueEpicMergeReport(
-                task: task, epic: epic,
-                body: "could not be merged into the epic branch `\(epicBranch)`: \(describe(error))"
-                    + "\nThe epic branch is behind. Dispatch a task to merge `\(taskBranch)` into it by hand."
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(taskBranch)` could not be merged into `\(target)`: \(describe(error))",
+                advice: "Merge `\(taskBranch)` into `\(target)` by hand."
+            )
+            return
+        }
+        switch outcome {
+        case .nothingToMerge:
+            // No branch is two different facts. `tearDownWorktrees` runs first and deletes a task
+            // branch whose work is already in, so "gone" can mean landed; the ledger tip ref, which
+            // outlives the branch, is what tells the two apart. A tip that the target does not
+            // contain is the worst case of all — the work is now reachable from no branch at all.
+            let reaped = (try? await offMain {
+                try manager.refCommit(TaskBranchLedger.tipRef(taskId: task.id)).map {
+                    (tip: $0, merged: try manager.isMerged(commit: $0, into: "refs/heads/\(target)"))
+                }
+            }) ?? nil
+            switch reaped {
+            case .none:
+                recordLanding(task: task, epic: epic, landing: .noBranch, detail: nil, advice: nil)
+            case .some(let reaped) where reaped.merged:
+                recordLanding(
+                    task: task, epic: epic, landing: .landed,
+                    detail: "`\(taskBranch)` was merged into `\(target)` and reaped.", advice: nil
+                )
+            case .some(let reaped):
+                recordLanding(
+                    task: task, epic: epic, landing: .unlanded,
+                    detail: "`\(taskBranch)` is gone and `\(target)` does not contain \(reaped.tip).",
+                    advice: "Recover the commit with `git branch <name> \(reaped.tip)` and merge it into `\(target)`."
+                )
+            }
+        case .alreadyMerged, .fastForwarded, .merged:
+            recordLanding(
+                task: task, epic: epic, landing: .landed,
+                detail: "`\(taskBranch)` is in `\(target)`.", advice: nil
+            )
+        case .noTargetBranch(let missing):
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(taskBranch)` has nowhere to land: `\(missing)` does not exist in \(project.repoPath).",
+                advice: "Create `\(missing)` or correct the project's base branch, then merge `\(taskBranch)` into it."
+            )
+        case .conflicted(let files):
+            let listed = files.isEmpty ? "(git reported no paths)" : files.map { "- `\($0)`" }.joined(separator: "\n")
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(taskBranch)` conflicts with `\(target)`, which is unchanged and now behind.",
+                advice: "Merge `\(taskBranch)` into `\(target)` and resolve these:\n\(listed)"
+            )
+        case .skippedCheckedOut(let path):
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(taskBranch)` was not merged into `\(target)`: that branch is checked out at \(path).",
+                advice: "Whoever holds that checkout must merge `\(taskBranch)` themselves."
+            )
+        }
+    }
+
+    /// The shared branch `task` ran on, or nil when it had a worktree of its own. Read from its
+    /// newest session that carries a branch, so a task retried into a worktree after a shared
+    /// attempt is treated as the worktree task it now is.
+    private func sharedBranch(of task: BoardTask) -> String? {
+        guard let rows = try? sessions.forTask(task.id) else { return nil }
+        guard let newest = rows.last(where: { $0.branch != nil }) else { return nil }
+        guard newest.worktreePath == nil, let branch = newest.branch,
+              branch.hasPrefix(SharedCheckoutGroup.branchPrefix)
+        else { return nil }
+        return branch
+    }
+
+    /// Every task that has run on `branch`, newest session state per task.
+    private func sharedMembers(projectId: String, branch: String) throws -> [SharedBranchMember] {
+        var members: [String: SharedBranchMember] = [:]
+        var order: [String] = []
+        for row in try sessions.all(projectId: projectId)
+        where row.role == .worker && row.worktreePath == nil && row.branch == branch {
+            // A discarded member's task row is gone, so there is nobody left to accept it and it
+            // cannot hold the branch. Its commits still merge with everyone else's.
+            guard let taskId = row.taskId, let task = try tasks.get(taskId) else { continue }
+            if members[taskId] == nil {
+                order.append(taskId)
+                members[taskId] = SharedBranchMember(taskId: taskId, isAccepted: task.column == .done, isLive: false)
+            }
+            if row.state.isActive { members[taskId]?.isLive = true }
+        }
+        return order.compactMap { members[$0] }
+    }
+
+    /// A shared branch merges into the epic branch once, when its last member is accepted. Until
+    /// then the accepted task is recorded as accepted and nothing is merged or reaped: its commits
+    /// are interleaved with its siblings' on one ref, so there is no range that is its work alone.
+    private func mergeSharedBranch(task: BoardTask, epic: Epic, project: Project, branch: String) async {
+        let members = (try? sharedMembers(projectId: project.id, branch: branch)) ?? []
+        guard SharedBranchAcceptance.isReadyToMerge(members) else {
+            let waiting = SharedBranchAcceptance.waitingOn(members)
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(branch)` carries \(members.count) tasks' commits and has not been merged into the "
+                    + "epic branch `\(epic.branch)`."
+                    + "\nA shared branch merges once, when every task on it has been accepted and no worker is "
+                    + "still standing in the checkout: its members' commits are interleaved on one ref, so there "
+                    + "is no range that is one task's work alone and Agent Board does not unpick commits."
+                    + "\n\nStill outstanding on `\(branch)`:\n"
+                    + waiting.map { "- \($0)" }.joined(separator: "\n"),
+                advice: nil
+            )
+            return
+        }
+
+        let manager = worktreeManager(for: project)
+        let epicBranch = epic.branch
+        let epicTitle = epic.title
+        let projectBase = project.baseBranch
+        let memberIds = members.map(\.taskId)
+        let mergeTitle = sharedMergeTitle(memberIds)
+        let worktreeName = "merge-shared-\(epic.id)"
+        let outcome: BranchMerge
+        do {
+            outcome = try await offMain {
+                try manager.ensureBranch(epicBranch, from: projectBase)
+                let base = try manager.mergeBase(branch, epicBranch) ?? projectBase
+                // A branch that predates the ledger has its attribution only in its old trailers,
+                // and this is the last moment anything reads it: reaping deletes the ref.
+                _ = try? manager.backfillFromTrailers(on: branch, since: base)
+                // Written before the merge, because the branch is about to be deleted and the refs
+                // are all that is left to say which commit was whose.
+                try manager.recordSharedLedger(branch: branch, base: base, taskIds: memberIds)
+                return try manager.merge(
+                    taskBranch: branch, into: epicBranch, taskTitle: mergeTitle,
+                    targetTitle: epicTitle, worktreeName: worktreeName
+                )
+            }
+        } catch {
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(branch)`, shared by \(memberIds.count) task\(memberIds.count == 1 ? "" : "s"), "
+                    + "could not be merged into the epic branch `\(epicBranch)`: \(describe(error))",
+                advice: "The epic branch is behind. Dispatch a task to merge `\(branch)` into it by hand."
             )
             return
         }
         switch outcome {
         case .alreadyMerged, .fastForwarded, .merged, .nothingToMerge:
-            return
+            recordSharedLanding(memberIds, epic: epic, landing: .landed)
+            await reapSharedBranch(branch, epic: epic, project: project)
         case .conflicted(let files):
             let listed = files.isEmpty ? "(git reported no paths)" : files.map { "- `\($0)`" }.joined(separator: "\n")
-            queueEpicMergeReport(
-                task: task, epic: epic,
-                body: "conflicts with the epic branch `\(epicBranch)`, which is unchanged and now behind."
-                    + "\n\nConflicting files:\n\(listed)"
-                    + "\n\nDispatch a task to merge `\(taskBranch)` into `\(epicBranch)` and resolve these."
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(branch)`, shared by \(memberIds.count) tasks, conflicts with the epic branch "
+                    + "`\(epicBranch)`, which is unchanged and now behind."
+                    + "\n\nConflicting files:\n\(listed)",
+                advice: "Dispatch a task to merge `\(branch)` into `\(epicBranch)` and resolve these. "
+                    + "That one merge carries every task on the branch."
             )
         case .skippedCheckedOut(let path):
-            queueEpicMergeReport(
-                task: task, epic: epic,
-                body: "was not merged into the epic branch `\(epicBranch)`: that branch is checked out at \(path)."
-                    + "\nWhoever holds it — the integrator, normally — must merge `\(taskBranch)` themselves."
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(branch)`, shared by \(memberIds.count) tasks, was not merged into the epic branch "
+                    + "`\(epicBranch)`: that branch is checked out at \(path).",
+                advice: "Whoever holds it — the integrator, normally — must merge `\(branch)` themselves."
+            )
+        case .noTargetBranch(let missing):
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(branch)`, shared by \(memberIds.count) tasks, has nowhere to land: "
+                    + "`\(missing)` does not exist in \(project.repoPath).",
+                advice: "Create `\(missing)`, then merge `\(branch)` into it."
             )
         }
     }
 
-    private func queueEpicMergeReport(task: BoardTask, epic: Epic, body: String) {
-        let text = "Task \(task.id) (\(task.title)) was accepted into done, but its branch \(body)"
+    /// A shared branch's members all land at the same moment — the one merge carries every one of
+    /// them — so a sibling accepted earlier has its `unlanded` corrected here rather than staying
+    /// flagged for a human who has nothing left to do.
+    private func recordSharedLanding(_ taskIds: [String], epic: Epic, landing: TaskLanding) {
+        for id in taskIds {
+            guard let member = (try? tasks.get(id)) ?? nil else { continue }
+            recordLanding(task: member, epic: epic, landing: landing, detail: nil, advice: nil)
+        }
+    }
+
+    /// What the merge commit calls a branch that belongs to several tasks. Never an id: this subject
+    /// lands in whatever repository the epic's pull request is opened in (SPEC §5.2).
+    private func sharedMergeTitle(_ taskIds: [String]) -> String {
+        let titles = taskIds.compactMap { try? tasks.get($0)?.title }.compactMap { $0 }
+        guard titles.count != 1 else { return titles[0] }
+        return "\(taskIds.count) tasks sharing a checkout"
+    }
+
+    /// The project's own checkout is standing on the shared branch, so it has to step off before
+    /// git will delete the ref. A dirty checkout keeps the branch rather than losing anything.
+    private func reapSharedBranch(_ branch: String, epic: Epic, project: Project) async {
+        let manager = worktreeManager(for: project)
+        let epicBranch = epic.branch
+        let bases = [project.baseBranch, epicBranch]
+        let notices = await offMainNotices {
+            do {
+                try manager.releaseSharedBranch(branch, to: epicBranch)
+            } catch {
+                return ["kept shared branch \(branch): \(error)"]
+            }
+            return Self.deleteBranch(manager, branch, bases: bases)
+        }
+        report(notices)
+    }
+
+    /// Writes the landing and, when the human has something to do about it, queues a `decision`
+    /// report. The write comes first: a report that fails to insert must not also lose the state
+    /// the board renders.
+    private func recordLanding(
+        task: BoardTask, epic: Epic?, landing: TaskLanding, detail: String?, advice: String?
+    ) {
+        do {
+            try tasks.setLanding(task.id, landing, detail: detail)
+        } catch {
+            report(["could not record where \(task.id) landed: \(describe(error))"])
+        }
+        guard landing.needsAttention, let detail else { return }
+        let text = "Task \(task.id) (\(task.title)) was accepted into done, but its branch "
+            + detail + (advice.map { "\n" + $0 } ?? "")
         do {
             try ReportStore(db).insert(
                 projectId: task.projectId, taskId: task.id, sessionId: nil, kind: .decision, body: text
             )
         } catch {
-            report(["could not queue the epic merge report for \(task.id): \(describe(error))"])
+            report(["could not queue the landing report for \(task.id): \(describe(error))"])
             return
         }
-        report(["epic \(epic.id): \(text)"])
+        report([epic.map { "epic \($0.id): " + text } ?? text])
     }
 
     func reopen(taskId: String) async throws {
@@ -869,6 +1146,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if queuedReport { announceReports(projectId: projectId) }
         await recoverStrandedTasks(projectId: projectId)
         await reapOrphanedWorktrees(projectId: projectId, keeping: liveWorktrees)
+        refreshSleepAssertion()
     }
 
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? {
@@ -883,6 +1161,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             case .worktree(let path):
                 return try context.manager.diffstat(worktree: path, against: context.base)
             case .sharedBranch(let branch):
+                context.backfillTrailers(branch: branch)
                 return try context.manager.diffstat(taskId: taskId, on: branch, since: context.base)
             }
         }
@@ -895,6 +1174,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             case .worktree(let path):
                 return try context.manager.diffSummary(worktree: path, against: context.base)
             case .sharedBranch(let branch):
+                context.backfillTrailers(branch: branch)
                 return try context.manager.diffSummary(taskId: taskId, on: branch, since: context.base)
             }
         }
@@ -903,7 +1183,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private enum DiffSite {
         case worktree(URL)
         /// The task's commits are interleaved with its siblings' on one branch, so the diff is
-        /// selected by the attribution trailer rather than by the branch's whole range.
+        /// selected by the `task_commit` ledger rather than by the branch's whole range.
         case sharedBranch(String)
     }
 
@@ -911,6 +1191,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var manager: WorktreeManager
         var site: DiffSite
         var base: String
+        /// Set for the first shared-branch read of a branch this run, which is the one that turns
+        /// pre-ledger `Agent-Board-Task` trailers into rows. Off main, because it runs git.
+        var readTrailers: Bool = false
+
+        func backfillTrailers(branch: String) {
+            guard readTrailers else { return }
+            _ = try? manager.backfillFromTrailers(on: branch, since: base)
+        }
     }
 
     private func diffContext(taskId: String) -> DiffContext? {
@@ -918,16 +1206,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
               let project = try? projects.get(task.projectId),
               let taskSessions = try? sessions.forTask(taskId)
         else { return nil }
-        let manager = WorktreeManager(
-            repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
-        )
+        let manager = worktreeManager(for: project)
         // A session with no worktree of its own ran in the shared checkout; its branch carries other
         // tasks' commits too. Preferred over any worktree row, because a task that was retried into
         // a worktree keeps that row and the shared path still answers for the shared attempt.
         if let shared = taskSessions.last(where: { $0.worktreePath == nil && $0.branch != nil }),
            let branch = shared.branch {
-            return DiffContext(manager: manager, site: .sharedBranch(branch), base: project.baseBranch)
+            return DiffContext(
+                manager: manager, site: .sharedBranch(branch), base: project.baseBranch,
+                readTrailers: trailersBackfilled.insert("\(project.id)\u{01}\(branch)").inserted
+            )
         }
         guard let worktreePath = taskSessions
             .map({ $0.worktreePath ?? $0.cwd })
@@ -944,12 +1232,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         _ manager: WorktreeManager,
         taskIds: [String],
         epicBranch: String,
+        baseBranch: String,
+        sharedBranches: [String: String],
         merged: [String: Bool],
         dispatched: Set<String>
     ) throws -> [String: TaskBranchFacts] {
         let epicRef = "refs/heads/\(epicBranch)"
         var facts: [String: TaskBranchFacts] = [:]
         for taskId in taskIds {
+            if let shared = sharedBranches[taskId] {
+                facts[taskId] = try sharedBranchFacts(
+                    manager, taskId: taskId, branch: shared, epicBranch: epicBranch,
+                    epicRef: epicRef, baseBranch: baseBranch
+                )
+                continue
+            }
             let branch = IntegrationPlan.branchName(taskId: taskId)
             var fact = TaskBranchFacts(
                 branchExists: try manager.branchExists(branch),
@@ -969,6 +1266,34 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             facts[taskId] = fact
         }
         return facts
+    }
+
+    /// A shared branch belongs to no one task, so every count here is selected by the commit ledger
+    /// rather than by the branch's range. Once the branch is reaped, the same selection still works
+    /// against the epic branch, where the commits now live.
+    private nonisolated static func sharedBranchFacts(
+        _ manager: WorktreeManager,
+        taskId: String,
+        branch: String,
+        epicBranch: String,
+        epicRef: String,
+        baseBranch: String
+    ) throws -> TaskBranchFacts {
+        var fact = TaskBranchFacts(branchExists: try manager.branchExists(branch), sharedBranch: branch)
+        fact.recordedBase = try manager.refCommit(TaskBranchLedger.baseRef(taskId: taskId))
+        fact.recordedTip = try manager.refCommit(TaskBranchLedger.tipRef(taskId: taskId))
+        if fact.branchExists {
+            let base = try fact.recordedBase ?? manager.mergeBase(branch, epicBranch) ?? baseBranch
+            let own = try manager.commits(taskId: taskId, on: branch, since: base)
+            fact.ownCommits = own.count
+            fact.recordedTip = fact.recordedTip ?? own.first
+            fact.mergedIntoEpic = try !own.isEmpty && own.allSatisfy { try manager.isMerged(commit: $0, into: epicRef) }
+            return fact
+        }
+        guard let base = fact.recordedBase, let tip = fact.recordedTip else { return fact }
+        fact.tipOnEpicBranch = try manager.isMerged(commit: tip, into: epicRef)
+        fact.ownCommits = try manager.commits(taskId: taskId, on: epicBranch, since: base).count
+        return fact
     }
 
     /// A session death that never reached `terminate` — the row already inactive when the cap or
@@ -993,7 +1318,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard let taskId, let task = try? tasks.get(taskId),
               let project = try? projects.get(task.projectId)
         else { return nil }
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let branch = Self.taskBranchPrefix + taskId
         let fallbackBase = mergeTargets(for: task, project: project).last ?? project.baseBranch
         let worktree = (try? sessions.forTask(taskId).compactMap(\.worktreePath))?
@@ -1029,7 +1354,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let paths = taskSessions.compactMap(\.worktreePath).reduce(into: [String]()) { unique, path in
             if !unique.contains(path) { unique.append(path) }
         }
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let branch = Self.taskBranchPrefix + task.id
         let bases = mergeTargets(for: task, project: project)
         let notices = await offMainNotices {
@@ -1042,7 +1367,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// worktree behind, as do sessions whose task record is already gone.
     private func reapOrphanedWorktrees(projectId: String, keeping live: Set<String>) async {
         guard let project = try? projects.get(projectId) else { return }
-        let manager = Self.worktreeManager(for: project)
+        let manager = worktreeManager(for: project)
         let bases = [project.baseBranch] + ((try? epics.list(projectId: projectId)) ?? []).map(\.branch)
         let notices = await offMainNotices {
             Self.reap(manager: manager, keeping: live, bases: bases)
@@ -1055,10 +1380,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return [project.baseBranch, epic.branch]
     }
 
-    private static func worktreeManager(for project: Project) -> WorktreeManager {
+    /// The only way this type builds a `WorktreeManager`. It is always ledger-backed: a second
+    /// spelling here is what made attribution depend on which call site a caller happened to copy.
+    func worktreeManager(for project: Project) -> WorktreeManager {
         WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot)
+            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot),
+            attribution: .ledger(TaskCommitStore(db))
         )
     }
 
@@ -1248,19 +1576,26 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         do {
             switch approval.kind {
             case .push:
-                let result = try await offMain { try publisher.push(branch: request.branch, remote: request.remote) }
+                let result = try await offMain {
+                    try publisher.push(
+                        branch: request.branch, publishedAs: request.publishedBranch, remote: request.remote
+                    )
+                }
                 try board.recordPublished(approval: approval, summary: "Push approved: \(result.summary).")
             case .pullRequest:
                 let result = try await offMain {
                     try publisher.openPullRequest(
-                        branch: request.branch, base: base, title: request.title ?? request.branch,
-                        body: request.body ?? "", remote: request.remote
+                        branch: request.branch, publishedAs: request.publishedBranch, base: base,
+                        title: request.title ?? request.branch, body: request.body ?? "", remote: request.remote
                     )
                 }
                 let verb = result.alreadyOpen ? "Pull request already open" : "Pull request opened"
+                let from = request.head == request.branch
+                    ? request.branch
+                    : "\(request.head) (local \(request.branch))"
                 try board.recordPublished(
                     approval: approval,
-                    summary: "\(verb) from \(request.branch) into \(base).",
+                    summary: "\(verb) from \(from) into \(base).",
                     url: result.url
                 )
             case .spawn, .integration:
@@ -1324,7 +1659,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
             let opener = PullRequestOpener(repoPath: URL(fileURLWithPath: project.repoPath))
             let base = project.baseBranch
-            let head = epic.branch
+            // The same name the approved path would publish, so the button does not aim the compare
+            // page at a ref the remote does not have under that name.
+            let head = try RemoteBranchResolver(db).publishedName(branch: epic.branch, project: project)
+                ?? epic.branch
             let outcome = try await offMain { try opener.open(baseBranch: base, headBranch: head) }
             if case .openInBrowser(let url, _) = outcome {
                 NSWorkspace.shared.open(url)
@@ -1478,6 +1816,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     func spawnWorker(taskId: String) async throws -> WorkerSpawn {
         try await recording { try await spawn(taskId: taskId) }
+    }
+
+    func assignAgent(
+        taskId: String, rosterAgentId: String, scope: AgentBoardCore.TokenScope
+    ) async throws -> WorkerSpawn {
+        try await recording { try await spawn(taskId: taskId, rosterAgentId: rosterAgentId, scope: scope) }
     }
 
     func stopWorker(sessionId: String) async throws {
@@ -1676,6 +2020,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 await meter(session, limits: limits, stallSeconds: stallSeconds, awake: awake)
             }
         }
+        refreshSleepAssertion(all)
+    }
+
+    /// Driven by the observed `agent_session` rows and nothing else, so a worker that died without
+    /// reporting stops holding the Mac awake the moment `reconcile` or the leaked-agent sweep flips
+    /// its row inactive — there is no spawn-side counter that could be left one too high. SPEC §8.3.
+    func refreshSleepAssertion(_ all: [Project]? = nil) {
+        guard let sleepGuard else { return }
+        let projectList = all ?? ((try? projects.list()) ?? [])
+        sleepGuard.apply(projectList.flatMap { ((try? sessions.all(projectId: $0.id)) ?? []).map(\.state) })
     }
 
     /// A pending approval and a blocked worker each stop work outright and nothing else announces
@@ -1798,8 +2152,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             totals: totals,
             startedAt: current.startedDate,
             lastActivity: lastActivity,
+            toolStartedAt: current.toolStartedDate,
             awake: awake,
-            limits: limits,
+            limits: Self.exempting(limits, rostered: current.isRostered),
             state: current.state
         ) else { return }
         await enforce(breach, on: current, awake: awake)
@@ -1811,6 +2166,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let stalled = session.state == .running && AttentionSelection.isStalled(
             lastActivity: lastActivity,
             startedAt: session.startedDate,
+            toolStartedAt: session.toolStartedDate,
             awake: awake,
             threshold: TimeInterval(stallSeconds)
         )
@@ -1852,6 +2208,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
     }
 
+    /// A rostered agent runs without the elapsed and idle caps: the epic decided no caps apply to
+    /// the roster for now. The token cap survives — it meters spend, not liveness.
+    static func exempting(_ limits: CapLimits, rostered: Bool) -> CapLimits {
+        guard rostered else { return limits }
+        return CapLimits(maxTokens: limits.maxTokens, maxWallClockSeconds: nil, maxIdleSeconds: nil)
+    }
+
     private static func describe(_ breach: CapBreach, awake: AwakeElapsed) -> String {
         switch breach {
         case .tokens(let used, let limit):
@@ -1887,13 +2250,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return object[key] as? String
     }
 
+    /// Returns `expected` rather than the path `git worktree list` prints, which on macOS resolves
+    /// `/var` to `/private/var`. Reusing a worktree would otherwise record a second spelling of one
+    /// directory on the new session row, and `worktree_path` is compared as a string to decide
+    /// whether anyone is already in it.
     private nonisolated static func existingWorktree(_ manager: WorktreeManager, name: String) throws -> URL? {
         let expected = manager.worktreeRoot.appendingPathComponent(name)
         guard FileManager.default.fileExists(atPath: expected.path) else { return nil }
         let expectedPath = expected.standardizedFileURL.resolvingSymlinksInPath().path
-        return try manager.list()
-            .first { $0.path.standardizedFileURL.resolvingSymlinksInPath().path == expectedPath }?
-            .path
+        let listed = try manager.list()
+            .first { $0.path.standardizedFileURL.resolvingSymlinksInPath().path == expectedPath }
+        return listed == nil ? nil : expected
     }
 
     /// The commit step differs by placement: `git commit` is refused in a shared checkout, so a
@@ -1942,11 +2309,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         notes: SpawnNotes = SpawnNotes(),
         verification: VerificationCommands = VerificationCommands(),
         placement: WorkerPlacement = .worktree,
-        workingDirectory: String? = nil
+        workingDirectory: String? = nil,
+        agent: AgentIdentity? = nil
     ) -> String {
         OpeningPrompt.compose(
             task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes,
-            verification: verification, placement: placement, workingDirectory: workingDirectory
+            verification: verification, placement: placement, workingDirectory: workingDirectory,
+            agent: agent
         )
     }
 

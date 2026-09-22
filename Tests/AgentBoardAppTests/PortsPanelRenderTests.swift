@@ -90,7 +90,7 @@ final class PortsPanelLiveTests: XCTestCase {
             .appendingPathComponent("agentboard-portspanel/\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: ledgerDir, withIntermediateDirectories: true)
         UserDefaults.standard.set(true, forKey: PortsPanel.expandedKey)
-        SidebarCollapseState.save([])
+        SidebarCollapseState.standard.save([])
     }
 
     override func tearDown() {

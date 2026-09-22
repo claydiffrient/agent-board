@@ -68,4 +68,116 @@ final class GlobalShutdownSheetRenderTests: XCTestCase {
         )
         XCTAssertEqual(host.frame.size, NSSize(width: 620, height: 520))
     }
+
+    /// The quit path leaves every order standing. A session that never acknowledged is a detached
+    /// `claude --bg` process that outlives the app, and the order still on its project is the only
+    /// thing that hands it the wind-down through `PreToolUse` on the next launch (SPEC §10).
+    func testQuittingLeavesEveryShutdownOrderStanding() throws {
+        let db = try AppDatabase.inMemory()
+        let orders = ShutdownOrderStore(db)
+        var projectIds: [String] = []
+        var raised: [ShutdownOrder] = []
+        for name in ["Alpha", "Beta"] {
+            let project = try ProjectStore(db).register(
+                name: name, repoPath: "/tmp/\(name)-\(UUID().uuidString)", baseBranch: "main",
+                worktreeRoot: "/tmp/\(name)-worktrees", memoryDir: nil
+            )
+            projectIds.append(project.id)
+            raised.append(try orders.request(projectId: project.id, requestedBy: "human"))
+        }
+
+        // No deliveries at all: nothing is left to wait for, which is the decision that quits.
+        let supervisor = RenderStubSupervisor(progress: [:])
+        supervisor.globalOrders = raised
+        let quitter = FakeQuitter()
+        mount(GlobalShutdownSheet(), in: AppEnvironment(db: db, supervisor: supervisor, quitter: quitter))
+
+        XCTAssertEqual(quitter.requests, 1, "the sheet never asked the app to quit")
+        XCTAssertEqual(supervisor.consolesStopped, 1)
+        for projectId in projectIds {
+            XCTAssertNotNil(
+                try orders.outstanding(projectId: projectId),
+                "quitting lifted the order on \(projectId); a detached worker now never hears it"
+            )
+        }
+    }
+}
+
+/// The refusal has to be reported somewhere the human is still looking. By the time an attempt can
+/// fail the sheet that asked for it is gone — AppKit will not terminate while it is up — so the
+/// report lands on At a Glance, and a macOS alert is a sheet on that window.
+@MainActor
+final class QuitRefusalAlertTests: XCTestCase {
+    func testARefusalPutsAnAlertOnAtAGlance() throws {
+        XCTAssertNotNil(
+            try attachedSheet(refusal: "macOS did not quit Agent Board when it was asked to."),
+            "a refused quit reported nothing at all — the silent dead end this replaced"
+        )
+    }
+
+    func testNoAlertWhenNothingWasRefused() throws {
+        XCTAssertNil(try attachedSheet(refusal: nil))
+    }
+
+    /// The refusal arrives after the screen is already up, and it reaches the view through an
+    /// `any AppQuitting` existential — so this is the case that actually decides whether the
+    /// human ever sees it.
+    func testARefusalRaisedAfterTheScreenIsUpStillShows() throws {
+        let db = try AppDatabase.inMemory()
+        let quitter = FakeQuitter()
+        let window = mount(
+            AtAGlanceView(projects: [], workspaces: [], attention: [], select: { _ in }),
+            in: AppEnvironment(db: db, supervisor: RenderStubSupervisor(progress: [:]), quitter: quitter)
+        )
+        XCTAssertNil(window.attachedSheet)
+
+        quitter.refusal = "macOS did not quit Agent Board when it was asked to."
+        settle(window)
+        XCTAssertNotNil(window.attachedSheet, "the refusal never reached the screen")
+    }
+
+    private func attachedSheet(refusal: String?) throws -> NSWindow? {
+        let db = try AppDatabase.inMemory()
+        let quitter = FakeQuitter()
+        quitter.refusal = refusal
+        let window = mount(
+            AtAGlanceView(projects: [], workspaces: [], attention: [], select: { _ in }),
+            in: AppEnvironment(db: db, supervisor: RenderStubSupervisor(progress: [:]), quitter: quitter)
+        )
+        return window.attachedSheet
+    }
+}
+
+@Observable
+@MainActor
+final class FakeQuitter: AppQuitting {
+    var refusal: String?
+    private(set) var requests = 0
+
+    func requestQuit() { requests += 1 }
+    func dismissRefusal() { refusal = nil }
+}
+
+@MainActor
+@discardableResult
+func mount(_ view: some View, in environment: AppEnvironment, turns: Int = 60) -> NSWindow {
+    let host = NSHostingView(rootView: view.environment(environment))
+    NSApplication.shared.setActivationPolicy(.accessory)
+    let window = NSWindow(
+        contentRect: NSRect(x: -20_000, y: -20_000, width: 900, height: 700),
+        styleMask: [.titled], backing: .buffered, defer: false
+    )
+    window.contentView = host
+    window.orderFront(nil)
+    settle(window, turns: turns)
+    return window
+}
+
+@MainActor
+func settle(_ window: NSWindow, turns: Int = 60) {
+    for _ in 0..<turns {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        window.layoutIfNeeded()
+        window.displayIfNeeded()
+    }
 }

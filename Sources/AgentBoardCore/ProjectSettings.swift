@@ -93,6 +93,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var defaultModel: String? = nil
     /// Free text the orchestrator reads when choosing a model per task.
     public var modelGuidance: String? = nil
+    /// How much human acceptance a finished task needs. An epic may override it for its own tasks.
+    public var reviewLevel: ReviewLevel = .task
     /// Shell command that builds this project, e.g. `swift build` or `pnpm build`. Empty leaves the
     /// agent to work it out from the repo.
     public var buildCommand: String? = nil
@@ -107,6 +109,10 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// What this project may interrupt the human for. Banners only — the sidebar badge and the
     /// rest of the attention signal are unaffected by it.
     public var notifications: NotificationPreferences = NotificationPreferences()
+    /// How a branch is named on the remote, e.g. `clay/{slug}`. `{slug}` comes from the epic's or
+    /// task's title and is required; `{id}` is an optional short id. Nil publishes the local
+    /// `agentboard/<id>` name unchanged, which is what every project had before this existed.
+    public var remoteBranchTemplate: String? = nil
 
     public init(
         caps: Caps = Caps(),
@@ -115,12 +121,14 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         extraMcpServers: [String] = [],
         defaultModel: String? = nil,
         modelGuidance: String? = nil,
+        reviewLevel: ReviewLevel = .task,
         buildCommand: String? = nil,
         testCommand: String? = nil,
         archivePolicy: ArchivePolicy = .afterEpicMerge,
         worktreeStrategy: WorktreeStrategy = .worktree,
         sharedCheckoutMaxAgents: Int = 3,
-        notifications: NotificationPreferences = NotificationPreferences()
+        notifications: NotificationPreferences = NotificationPreferences(),
+        remoteBranchTemplate: String? = nil
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -128,12 +136,14 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.extraMcpServers = extraMcpServers
         self.defaultModel = defaultModel
         self.modelGuidance = modelGuidance
+        self.reviewLevel = reviewLevel
         self.buildCommand = buildCommand
         self.testCommand = testCommand
         self.archivePolicy = archivePolicy
         self.worktreeStrategy = worktreeStrategy
         self.sharedCheckoutMaxAgents = sharedCheckoutMaxAgents
         self.notifications = notifications
+        self.remoteBranchTemplate = remoteBranchTemplate
     }
 
     public init(from decoder: Decoder) throws {
@@ -144,6 +154,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         extraMcpServers = try c.decodeIfPresent([String].self, forKey: .extraMcpServers) ?? []
         defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
         modelGuidance = try c.decodeIfPresent(String.self, forKey: .modelGuidance)
+        reviewLevel = try c.decodeIfPresent(ReviewLevel.self, forKey: .reviewLevel) ?? .task
         buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
         archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge
@@ -152,6 +163,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
             ?? ProjectSettings().sharedCheckoutMaxAgents
         notifications = try c.decodeIfPresent(NotificationPreferences.self, forKey: .notifications)
             ?? NotificationPreferences()
+        remoteBranchTemplate = try c.decodeIfPresent(String.self, forKey: .remoteBranchTemplate)
     }
 
     public static func decode(_ json: String) -> ProjectSettings {

@@ -8,19 +8,26 @@ public final class WorkerToolHandler: ToolHandler {
     private let progress: ProgressStore
     private let board: Board
     private let notes: NoteTools
+    private let control: any WorkerControl
     private let projects: ProjectStore
     private let locks: FileLockStore
+    private let taskCommits: TaskCommitStore
     private let scopedCommits: (any ScopedCommitting)?
     private let events: any BoardEventSink
 
-    public init(db: AppDatabase, events: any BoardEventSink, scopedCommits: (any ScopedCommitting)? = nil) {
+    public init(
+        db: AppDatabase, control: any WorkerControl, events: any BoardEventSink,
+        scopedCommits: (any ScopedCommitting)? = nil
+    ) {
         tasks = TaskStore(db)
         sessions = SessionStore(db)
         progress = ProgressStore(db)
         board = Board(db)
         notes = NoteTools(db: db)
+        self.control = control
         projects = ProjectStore(db)
         locks = FileLockStore(db)
+        taskCommits = TaskCommitStore(db)
         self.scopedCommits = scopedCommits
         self.events = events
     }
@@ -57,12 +64,18 @@ public final class WorkerToolHandler: ToolHandler {
         ToolDescriptor(
             name: "propose_task",
             description: "Propose follow-up work you discovered but should not do as part of your task. It lands in the "
-                + "Proposed column for a human to review; it is not assigned to you.",
+                + "Proposed column for a human to review; it is not assigned to you. Name `epic_id` to say which epic "
+                + "it belongs in — your own task's epic is in `get_my_task`\'s `epic_id` — and promoting the proposal "
+                + "puts it there.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "title": ToolSchema.string(),
                     "body": ToolSchema.string("What needs to be done and where."),
                     "rationale": ToolSchema.string("Why this is worth doing."),
+                    "epic_id": ToolSchema.string(
+                        "Epic the proposal should land in when promoted. Any live epic in this project, "
+                            + "your own task\'s included. Omit to leave placement to the human."
+                    ),
                 ],
                 required: ["title"]
             )
@@ -79,6 +92,24 @@ public final class WorkerToolHandler: ToolHandler {
                     "caveats": ToolSchema.string("Anything the reviewer should know: skipped work, risks, open questions."),
                 ],
                 required: ["summary", "files_changed", "tests_run", "caveats"]
+            )
+        ),
+        ToolDescriptor(
+            name: "hand_off",
+            description: "Return the task to the queue after doing only the portion that matches your specialty. Commit "
+                + "on your branch first, exactly as report_complete requires: uncommitted work is still in the worktree "
+                + "for the next agent to see, but it is not attributable to you. The task goes back to ready with your "
+                + "summary attached; the worktree is kept, so whoever picks it up next works this same checkout and sees "
+                + "what you built. This is not a failure. Ends your part of the work; do not continue after calling it.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "summary": ToolSchema.string("What you did, and what the next agent needs to do."),
+                    "next_role": ToolSchema.string(
+                        "The specialty you think should pick this up next. Advisory only: the orchestrator decides."
+                    ),
+                    "files_changed": ToolSchema.stringArray(),
+                ],
+                required: ["summary", "next_role", "files_changed"]
             )
         ),
         ToolDescriptor(
@@ -107,8 +138,8 @@ public final class WorkerToolHandler: ToolHandler {
     public static let commitDescriptor = ToolDescriptor(
         name: "commit_my_work",
         description: "Commit your work in this shared checkout. Agent Board commits exactly the files you have "
-            + "written — it knows them from the per-file locks your writes took — and tags the commit with your "
-            + "task id, so a reviewer sees your changes apart from the other agents' in this same tree. Another "
+            + "written — it knows them from the per-file locks your writes took — and records the commit as "
+            + "yours, so a reviewer sees your changes apart from the other agents' in this same tree. Another "
             + "agent's edits are never swept in. Use this instead of `git commit`, which is refused here. You may "
             + "call it more than once.",
         inputSchema: ToolSchema.object(
@@ -145,20 +176,20 @@ public final class WorkerToolHandler: ToolHandler {
             try progress.append(taskId: task.id, sessionId: identity.sessionId, kind: .note, text: text)
             return ToolResult(text: "Logged.")
         case "propose_task":
-            let title = try ToolArguments.requiredString("title", in: arguments)
-            let proposed = try board.propose(
-                projectId: identity.projectId,
-                title: title,
-                body: arguments["body"]?.stringValue,
-                rationale: arguments["rationale"]?.stringValue,
-                sessionId: identity.sessionId
-            )
-            await events.reportQueued(projectId: identity.projectId)
-            return .json(.object(["id": .string(proposed.id), "column": .string(proposed.column.rawValue)]))
+            return try await proposeTask(arguments, identity: identity)
         case "commit_my_work":
             return try await commitMyWork(task, arguments: arguments, identity: identity)
         case "report_complete":
-            let result = try reportComplete(task, arguments: arguments, identity: identity)
+            let outcome = try reportComplete(task, arguments: arguments, identity: identity)
+            guard !outcome.wasAlreadyComplete else { return Self.completionResult(outcome) }
+            let result = await routeCompletion(task, outcome: outcome)
+            if let sessionId = identity.sessionId {
+                await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
+            }
+            await events.reportQueued(projectId: identity.projectId)
+            return result
+        case "hand_off":
+            let result = try handOff(task, arguments: arguments, identity: identity)
             if let sessionId = identity.sessionId {
                 await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
             }
@@ -218,6 +249,32 @@ public final class WorkerToolHandler: ToolHandler {
         return sessionId
     }
 
+    /// The epic is validated here rather than only at promotion so the worker is told at once,
+    /// while it still has the context to pick another one. `Board.promote` checks again.
+    private func proposeTask(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+        let title = try ToolArguments.requiredString("title", in: arguments)
+        let epicId = ToolArguments.optionalString("epic_id", in: arguments).flatMap { $0.isEmpty ? nil : $0 }
+        let proposed: BoardTask
+        do {
+            proposed = try board.propose(
+                projectId: identity.projectId,
+                title: title,
+                body: arguments["body"]?.stringValue,
+                rationale: arguments["rationale"]?.stringValue,
+                sessionId: identity.sessionId,
+                epicId: epicId
+            )
+        } catch let refusal as ProposalEpicRefusal {
+            throw ToolError(refusal.reason)
+        }
+        await events.reportQueued(projectId: identity.projectId)
+        return .json(.object([
+            "id": .string(proposed.id),
+            "column": .string(proposed.column.rawValue),
+            "epic_id": .optional(proposed.epicId),
+        ]))
+    }
+
     private func getMyTask(_ task: BoardTask, identity: TokenIdentity) throws -> ToolResult {
         let dependencies: [JSONValue] = try tasks.deps(of: task.id).compactMap { depId in
             guard let dep = try tasks.get(depId) else { return nil }
@@ -236,6 +293,7 @@ public final class WorkerToolHandler: ToolHandler {
             "acceptance": .optional(task.acceptance),
             "priority": .optional(task.priority),
             "column": .string(task.column.rawValue),
+            "epic_id": .optional(task.epicId),
             "epic_goal": .null,
             "dependencies": .array(dependencies),
             "attempt": .number(Double(attempt)),
@@ -269,6 +327,27 @@ public final class WorkerToolHandler: ToolHandler {
         return ToolResult(text: "Status recorded: \(text)")
     }
 
+    private func handOff(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let summary = try ToolArguments.requiredString("summary", in: arguments)
+        let files = (arguments["files_changed"]?.arrayValue ?? []).compactMap(\.stringValue)
+        let sessionId = try requiredSession(identity)
+        do {
+            try board.handOff(
+                taskId: task.id,
+                sessionId: sessionId,
+                summary: summary,
+                nextRole: arguments["next_role"]?.stringValue,
+                filesChanged: files
+            )
+        } catch BoardError.sessionNotOnTask {
+            throw ToolError("Session \(sessionId) is not the agent currently working task \(task.id).")
+        }
+        return ToolResult(
+            text: "Handed off. The task is back in ready with your summary and the worktree is kept for the next "
+                + "agent. Stop here; do not start further work."
+        )
+    }
+
     /// The paths come from the lock store, never from the agent: a write tool in a shared checkout
     /// cannot run without first claiming its file, and the claim is held until the session ends, so
     /// the claims are exactly what this session has written.
@@ -293,19 +372,21 @@ public final class WorkerToolHandler: ToolHandler {
                 branch: session.branch ?? SharedCheckoutGroup.branch(epicId: task.epicId),
                 taskId: task.id,
                 paths: paths,
-                message: CommitAttribution.message(message, taskId: task.id)
+                message: message
             )
         )
         switch outcome {
         case .committed(let sha, let committed):
+            // The ledger row is written here rather than swept up later: a crash between the commit
+            // and a later pass would lose the attribution with nothing in the commit to rebuild it from.
+            try taskCommits.record(taskId: task.id, sha: sha)
             let text = "Committed \(String(sha.prefix(8))) on \(session.branch ?? "the shared branch"), "
-                + "tagged \(CommitAttribution.trailer(taskId: task.id)), containing only: "
+                + "recorded as this task's, containing only: "
                 + committed.joined(separator: ", ")
             try progress.append(taskId: task.id, sessionId: sessionId, kind: .status, text: text)
             return .json(.object([
                 "commit": .string(sha),
                 "paths": .array(committed.map { .string($0) }),
-                "trailer": .string(CommitAttribution.trailer(taskId: task.id)),
             ]))
         case .nothingToCommit(let claimed):
             return ToolResult(
@@ -315,7 +396,9 @@ public final class WorkerToolHandler: ToolHandler {
         }
     }
 
-    private func reportComplete(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+    private func reportComplete(
+        _ task: BoardTask, arguments: JSONValue, identity: TokenIdentity
+    ) throws -> Board.CompletionOutcome {
         let summary = try ToolArguments.requiredString("summary", in: arguments)
         let files = arguments["files_changed"]?.arrayValue ?? []
         let body: JSONValue = .object([
@@ -327,7 +410,74 @@ public final class WorkerToolHandler: ToolHandler {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(body)
-        try board.complete(taskId: task.id, sessionId: try requiredSession(identity), summary: String(decoding: data, as: UTF8.self))
-        return ToolResult(text: "Report recorded. The task is now in Review. Stop here; do not start further work.")
+        return try board.complete(
+            taskId: task.id, sessionId: try requiredSession(identity), summary: String(decoding: data, as: UTF8.self)
+        )
+    }
+
+    /// Reached only by a first `report_complete`. A resend is answered before it gets here, because
+    /// none of this may run twice: the acceptance path removes the worktree, and the reviewer spawn
+    /// would put a second agent on a task the first reviewer already holds.
+    private func routeCompletion(_ task: BoardTask, outcome: Board.CompletionOutcome) async -> ToolResult {
+        let recorded = Self.recordedLine(outcome)
+        guard outcome.autoAccept else {
+            if case .agentReview(let agentId, let agentName) = outcome.routing {
+                return await spawnReviewer(task, recorded: recorded, agentId: agentId, agentName: agentName)
+            }
+            return Self.completionResult(outcome)
+        }
+        // Not a second accept path: this is the call the Accept button makes, so the newly-ready
+        // announcement, the grant revocation and the worktree removal all run exactly once, here.
+        do {
+            try await control.accept(taskId: task.id, acceptedBy: .policy(outcome.level))
+        } catch {
+            return ToolResult(
+                text: "\(recorded) This project needs no review, but the task could not be accepted "
+                    + "automatically and is waiting in Review: \(error). Stop here; do not start further work."
+            )
+        }
+        return ToolResult(
+            text: "\(recorded) This project needs no review, so the task went straight to Done and its "
+                + "worktree has been removed. Stop here; do not start further work."
+        )
+    }
+
+    private static func completionResult(_ outcome: Board.CompletionOutcome) -> ToolResult {
+        ToolResult(
+            text: "\(Self.recordedLine(outcome)) The task is now in \(outcome.column.rawValue.capitalized). "
+                + "Stop here; do not start further work."
+        )
+    }
+
+    private static func recordedLine(_ outcome: Board.CompletionOutcome) -> String {
+        let id = outcome.report.id.map(String.init) ?? "—"
+        return outcome.wasAlreadyComplete
+            ? "Report \(id) was already recorded for this task; this call changed nothing."
+            : "Report \(id) recorded."
+    }
+
+    /// The reviewer runs in this worker's own worktree on its own branch: `spawn` keys the checkout
+    /// on the task id, so reviewing the work needs no worktree of its own and no merge to see it.
+    /// A reviewer that cannot be started leaves the task in `review` for a person, which is the same
+    /// place `humanReview` would have parked it, so the worker's own report is never lost to it.
+    private func spawnReviewer(
+        _ task: BoardTask, recorded: String, agentId: String, agentName: String
+    ) async -> ToolResult {
+        do {
+            _ = try await control.assignAgent(taskId: task.id, rosterAgentId: agentId, scope: .reviewer)
+            return ToolResult(
+                text: "\(recorded) The task is now in Review, held by rostered reviewer \(agentName), "
+                    + "which is starting in your worktree on your branch. Stop here; do not start further work."
+            )
+        } catch {
+            try? progress.append(
+                taskId: task.id, sessionId: nil, kind: .error,
+                text: "Agent review: reviewer \(agentName) could not be started (\(error)), so this task needs a person."
+            )
+            return ToolResult(
+                text: "\(recorded) The task is now in Review. Its rostered reviewer could not be started, "
+                    + "so a person will look at it. Stop here; do not start further work."
+            )
+        }
     }
 }

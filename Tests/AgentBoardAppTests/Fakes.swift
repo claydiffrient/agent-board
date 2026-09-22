@@ -118,7 +118,9 @@ struct SupervisorFixture {
 
     /// `gitRepo` lays down a real git repository at `repoPath`, which every test that exercises
     /// spawning, worktrees, or branch teardown needs.
-    static func make(gitRepo: Bool = false, sleepLedger: SleepLedger = SleepLedger()) throws -> SupervisorFixture {
+    static func make(
+        gitRepo: Bool = false, sleepLedger: SleepLedger = SleepLedger(), sleepGuard: SleepGuard? = nil
+    ) throws -> SupervisorFixture {
         let db = try AppDatabase.inMemory()
         let supportDir = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
@@ -139,8 +141,9 @@ struct SupervisorFixture {
             tokens: StoreTokenResolver(db: db),
             hooks: StoreHookSink(db: db, events: sink),
             tools: ScopedToolHandler(
-                worker: WorkerToolHandler(db: db, events: sink),
-                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink)
+                worker: WorkerToolHandler(db: db, control: sink, events: sink),
+                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink),
+                reviewer: ReviewerToolHandler(db: db, control: sink, events: sink)
             )
         )
         let runtime = FakeRuntime()
@@ -153,7 +156,8 @@ struct SupervisorFixture {
             db: db, runtime: runtime, server: server, appSupportDir: supportDir,
             worktreeBase: worktreeBase,
             projectsRoot: supportDir.appendingPathComponent("claude-projects"),
-            sleepLedger: sleepLedger
+            sleepLedger: sleepLedger,
+            sleepGuard: sleepGuard
         )
         sink.target = supervisor
         return SupervisorFixture(
@@ -178,8 +182,9 @@ struct SupervisorFixture {
             tokens: StoreTokenResolver(db: db),
             hooks: StoreHookSink(db: db, events: sink),
             tools: ScopedToolHandler(
-                worker: WorkerToolHandler(db: db, events: sink),
-                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink)
+                worker: WorkerToolHandler(db: db, control: sink, events: sink),
+                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink),
+                reviewer: ReviewerToolHandler(db: db, control: sink, events: sink)
             )
         )
         let supervisor = WorkerSupervisor(
@@ -195,7 +200,8 @@ struct SupervisorFixture {
         WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
             worktreeRoot: URL(fileURLWithPath: project.worktreeRoot),
-            hookSettingsURL: supportDir.appendingPathComponent("no-hooks.json")
+            hookSettingsURL: supportDir.appendingPathComponent("no-hooks.json"),
+            attribution: .ledger(TaskCommitStore(db))
         )
     }
 
@@ -346,7 +352,7 @@ struct SupervisorFixture {
     func workerHandler() -> WorkerToolHandler {
         let sink = LateBoundSink()
         sink.target = supervisor
-        return WorkerToolHandler(db: db, events: sink)
+        return WorkerToolHandler(db: db, control: sink, events: sink)
     }
 
     func identity(token: String) async throws -> TokenIdentity {

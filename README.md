@@ -10,7 +10,7 @@ design and `IDEA.md` for the origin. Status: M0, M1, M2, and M3 complete.
 | `AgentBoardCore` | GRDB store: schema (SPEC §4), records, stores, `Board` lifecycle facade |
 | `AgentBoardRuntime` | `AgentRuntime` protocol + `BackgroundSessionRuntime` (`claude --bg`), config writer, worktrees, memory symlink, transcript meter, pricing, caps |
 | `AgentBoardServer` | Hummingbird localhost server: `/hooks` and `/mcp`, bearer-scoped tools |
-| `AgentBoardBridge` | Store-backed hook sink, token resolver, and the worker and orchestrator MCP tool handlers |
+| `AgentBoardBridge` | Store-backed hook sink, token resolver, and the worker, reviewer, and orchestrator MCP tool handlers |
 | `AgentBoard` | SwiftUI app: Task Board, Status, terminal attach window, supervisor glue |
 | `spike/` | M0 runtime spike, kept as the reference for the proven runtime facts |
 
@@ -22,6 +22,12 @@ swift test
 Scripts/bundle.sh            # wraps the binary in .build/AgentBoard.app (bundle id needed for notifications)
 open .build/AgentBoard.app
 ```
+
+Release notes live in `RELEASES.md` at the repo root, newest first, one
+`## <version>` heading per release with an optional ` — YYYY-MM-DD`.
+`Scripts/bundle.sh` copies it into `Contents/Resources`; the unbundled
+`.build/debug/AgentBoard` has neither an `Info.plist` nor that resource, so it
+reports no release notes rather than an empty list.
 
 Environment overrides: `AGENTBOARD_DB` (sqlite path), `AGENTBOARD_SUPPORT_DIR`
 (session configs, server port file, and worktrees). Default support dir is

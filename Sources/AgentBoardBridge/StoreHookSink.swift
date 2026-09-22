@@ -134,6 +134,33 @@ public final class StoreHookSink: HookSink {
         return SharedCheckoutGroup.isMember(session, of: project)
     }
 
+    /// The reason to refuse a shared worker's git command, or nil when the command is the one
+    /// allowed form: `git restore -- <paths>` where every path is one this session's own writes
+    /// have locked. The lock store is consulted here rather than in the guard, which is in a target
+    /// with no database.
+    private func sharedCheckoutDenial(
+        _ verdict: SharedCheckoutGuard.Verdict, sessionId: String
+    ) -> (command: String, reason: String)? {
+        switch verdict {
+        case .allow:
+            return nil
+        case .deny(let violation):
+            return (violation.gitCommand, violation.reason)
+        case .restoreScoped(let paths):
+            let restore = SharedCheckoutGuard.Violation.restore
+            guard let session = try? sessions.get(sessionId),
+                  let project = try? projects.get(session.projectId)
+            else { return (restore.gitCommand, restore.reason) }
+            let held = Set(CommitScope.paths((try? locks.held(projectId: session.projectId)) ?? [], sessionId: sessionId))
+            let outside = paths.filter { path in
+                guard let key = FileLockPolicy.key(filePath: path, repoPath: project.repoPath) else { return true }
+                return !held.contains(key)
+            }
+            guard !outside.isEmpty else { return nil }
+            return (restore.gitCommand, SharedCheckoutGuard.restoreOutOfScopeReason(outside))
+        }
+    }
+
     private func claim(_ request: LockWait) -> Outcome {
         guard let outcome = try? locks.acquire(
             projectId: request.projectId, path: request.path,
@@ -184,7 +211,12 @@ public final class StoreHookSink: HookSink {
                 try? sessions.setState(wait.sessionId, .running)
             }
             // The waited seconds are not idleness, so they do not carry into the next idle window.
-            try? sessions.recordActivity(wait.sessionId, at: .nowMillis, lastTool: nil)
+            // On success the write itself now starts, which is what `beginToolCall` records.
+            if acquired {
+                try? sessions.beginToolCall(wait.sessionId, at: .nowMillis, tool: nil)
+            } else {
+                try? sessions.recordActivity(wait.sessionId, at: .nowMillis, lastTool: nil)
+            }
             guard !acquired else {
                 if let taskId = wait.taskId {
                     _ = try? progress.append(
@@ -308,6 +340,13 @@ public final class StoreHookSink: HookSink {
         return session
     }
 
+    /// The tool is about to run, so the session is not idle for however long it takes. Only ever
+    /// called on a `PreToolUse` that passed: a denied call never runs and must buy no grace.
+    private func beginToolCall(_ event: HookEvent, identity: TokenIdentity, sessionId: String) {
+        guard let session = projectSession(sessionId, identity: identity) else { return }
+        try? sessions.beginToolCall(session.sessionId, at: .nowMillis, tool: event.toolName)
+    }
+
     private func process(_ event: HookEvent, identity: TokenIdentity) -> Outcome {
         let sessionId = event.sessionId
         _ = try? hookEvents.append(sessionId: sessionId, event: event.name, payload: event.rawJSON)
@@ -329,22 +368,26 @@ public final class StoreHookSink: HookSink {
                 }
                 return .deny(.deny(violation.reason(for: identity.scope)))
             }
-            if SharedCheckoutGuard.deniesCommit(toolName: event.toolName, command: event.toolCommand),
-               isSharedWorker(identity, sessionId: sessionId) {
+            let verdict = SharedCheckoutGuard.inspect(toolName: event.toolName, command: event.toolCommand)
+            if verdict != .allow, isSharedWorker(identity, sessionId: sessionId),
+               let denial = sharedCheckoutDenial(verdict, sessionId: sessionId) {
                 if let taskId = (try? sessions.get(sessionId))?.taskId ?? identity.taskId {
                     _ = try? progress.append(
                         taskId: taskId, sessionId: sessionId, kind: .error,
-                        text: "Blocked `git commit` in the shared checkout: \(event.toolCommand ?? "")"
+                        text: "Blocked `git \(denial.command)` in the shared checkout: \(event.toolCommand ?? "")"
                     )
                 }
-                return .deny(.deny(SharedCheckoutGuard.commitReason))
+                return .deny(.deny(denial.reason))
             }
             if let order = windDownToDeliver(sessionId: sessionId, identity: identity) {
                 return .deny(.deny(ShutdownOrder.windDownOrder(reason: order.reason, via: .hook)))
             }
             if FileLockPolicy.locks(toolName: event.toolName), let request = lockRequest(event, identity: identity, sessionId: sessionId) {
-                return claim(request)
+                let outcome = claim(request)
+                if outcome.lockWait == nil { beginToolCall(event, identity: identity, sessionId: sessionId) }
+                return outcome
             }
+            beginToolCall(event, identity: identity, sessionId: sessionId)
             return .none
         }
 
@@ -377,7 +420,7 @@ public final class StoreHookSink: HookSink {
             }
 
         case "PostToolUse":
-            try? sessions.recordActivity(sessionId, at: .nowMillis, lastTool: event.toolName)
+            try? sessions.endToolCall(sessionId, at: .nowMillis, tool: event.toolName)
             if let taskId {
                 if let task = try? tasks.get(taskId), task.blocked {
                     try? board.unblock(taskId: taskId, sessionId: sessionId)
@@ -425,6 +468,9 @@ public final class StoreHookSink: HookSink {
             }
 
         case "Stop":
+            // The turn is over, so nothing it launched is still running. This is what stops a
+            // `PostToolUse` lost to an interrupt from leaving a grace window open behind it.
+            try? sessions.clearToolCalls(sessionId)
             if session.role == .orchestrator {
                 return .follow([.orchestratorTurnEnded(projectId: session.projectId, sessionId: sessionId)])
             }
@@ -436,6 +482,7 @@ public final class StoreHookSink: HookSink {
             }
 
         case "SessionEnd":
+            try? sessions.clearToolCalls(sessionId)
             if session.state != .completed && session.state != .failed {
                 try? sessions.setState(sessionId, .stopped, endedAt: .nowMillis)
             }

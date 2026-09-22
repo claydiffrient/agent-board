@@ -9,13 +9,34 @@ public struct PublishRequest: Codable, Sendable, Equatable {
     public var title: String?
     public var body: String?
     public var remote: String
+    /// The name `branch` is written under on the remote, when the project's settings define a
+    /// template. Nil means the local name is published as-is, which is what every approval row
+    /// written before remote naming existed decodes to.
+    public var publishedBranch: String?
 
-    public init(branch: String, base: String? = nil, title: String? = nil, body: String? = nil, remote: String = "origin") {
+    public init(
+        branch: String, base: String? = nil, title: String? = nil, body: String? = nil,
+        remote: String = "origin", publishedBranch: String? = nil
+    ) {
         self.branch = branch
         self.base = base
         self.title = title
         self.body = body
         self.remote = remote
+        self.publishedBranch = publishedBranch
+    }
+
+    /// What the remote and the pull request see.
+    public var head: String { publishedBranch ?? branch }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        branch = try c.decode(String.self, forKey: .branch)
+        base = try c.decodeIfPresent(String.self, forKey: .base)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        body = try c.decodeIfPresent(String.self, forKey: .body)
+        remote = try c.decodeIfPresent(String.self, forKey: .remote) ?? "origin"
+        publishedBranch = try c.decodeIfPresent(String.self, forKey: .publishedBranch)
     }
 
     public func encoded() throws -> String {
@@ -59,10 +80,6 @@ public enum PublishPolicyError: Error, CustomStringConvertible, Equatable, Senda
 public enum PublishPolicy {
     public static let ownedPrefix = "agentboard/"
 
-    /// Characters git itself refuses in a ref, plus the ones a `git push` argument would read as
-    /// something other than a branch (`:` splits a refspec, a leading `-` reads as an option).
-    private static let forbidden: Set<Character> = [":", "?", "*", "[", "\\", "^", "~", " ", "\t", "\n"]
-
     @discardableResult
     public static func validate(branch raw: String, baseBranch: String) throws -> String {
         let branch = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -79,11 +96,6 @@ public enum PublishPolicy {
         branch.hasPrefix(ownedPrefix) && branch.count > ownedPrefix.count
     }
 
-    private static func isWellFormed(_ branch: String) -> Bool {
-        guard !branch.hasPrefix("-"), !branch.hasPrefix("/"), !branch.hasSuffix("/"),
-              !branch.hasSuffix("."), !branch.hasSuffix(".lock"), !branch.contains(".."),
-              !branch.contains("//"), !branch.contains("@{"), branch != "@"
-        else { return false }
-        return !branch.contains(where: { forbidden.contains($0) || $0.asciiValue.map { $0 < 0x20 || $0 == 0x7F } == true })
-    }
+    private static func isWellFormed(_ branch: String) -> Bool { GitRefName.isWellFormed(branch) }
 }
+

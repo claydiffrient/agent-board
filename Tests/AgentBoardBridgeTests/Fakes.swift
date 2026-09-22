@@ -11,6 +11,7 @@ actor RecordingEventSink: BoardEventSink {
         case reportQueued(projectId: String)
         case orchestratorCompacted(projectId: String, sessionId: String, manual: Bool)
         case workerAcknowledgedShutdown(projectId: String, sessionId: String)
+        case workerCompleted(projectId: String, sessionId: String)
     }
 
     private(set) var events: [Event] = []
@@ -34,11 +35,26 @@ actor RecordingEventSink: BoardEventSink {
     func workerAcknowledgedShutdown(projectId: String, sessionId: String) async {
         events.append(.workerAcknowledgedShutdown(projectId: projectId, sessionId: sessionId))
     }
+
+    func workerCompleted(projectId: String, sessionId: String) async {
+        events.append(.workerCompleted(projectId: projectId, sessionId: sessionId))
+    }
 }
 
 actor FakeWorkerControl: WorkerControl {
     private(set) var spawned: [String] = []
+    private(set) var assigned: [(taskId: String, rosterAgentId: String, scope: AgentBoardCore.TokenScope)] = []
     private(set) var stopped: [String] = []
+    /// Set to make `assignAgent` throw, which is how the reviewer-spawn failure path is driven.
+    var assignFailure: Error?
+    private(set) var accepted: [(taskId: String, acceptedBy: TaskAcceptance)] = []
+    /// Stands in for the supervisor: the bridge tests assert the board effects, and the supervisor's
+    /// own side effects (grants, worktrees) are asserted in AgentBoardAppTests.
+    private nonisolated let board: Board?
+
+    init(board: Board? = nil) {
+        self.board = board
+    }
 
     func spawnWorker(taskId: String) async throws -> WorkerSpawn {
         spawned.append(taskId)
@@ -49,8 +65,29 @@ actor FakeWorkerControl: WorkerControl {
         )
     }
 
+    func assignAgent(
+        taskId: String, rosterAgentId: String, scope: AgentBoardCore.TokenScope
+    ) async throws -> WorkerSpawn {
+        if let assignFailure { throw assignFailure }
+        assigned.append((taskId, rosterAgentId, scope))
+        return WorkerSpawn(
+            setupSessionId: "setup-for-\(taskId)-\(rosterAgentId)",
+            worktreePath: "/tmp/worktrees/\(taskId)",
+            branch: "agentboard/\(taskId)"
+        )
+    }
+
+    func setAssignFailure(_ error: Error?) {
+        assignFailure = error
+    }
+
     func stopWorker(sessionId: String) async throws {
         stopped.append(sessionId)
+    }
+
+    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws {
+        accepted.append((taskId, acceptedBy))
+        try board?.accept(taskId: taskId, acceptedBy: acceptedBy)
     }
 }
 
@@ -61,6 +98,7 @@ struct BridgeFixture {
     let control: FakeWorkerControl
     let orchestrator: OrchestratorToolHandler
     let worker: WorkerToolHandler
+    let reviewer: ReviewerToolHandler
     let scoped: ScopedToolHandler
     let hooks: StoreHookSink
     var commits: RecordingScopedCommits?
@@ -80,20 +118,23 @@ struct BridgeFixture {
     }
 
     static func make(
-        lockWait: FileLockWaitPolicy = .default, scopedCommits: RecordingScopedCommits? = nil
+        lockWait: FileLockWaitPolicy = .default,
+        scopedCommits: RecordingScopedCommits? = nil,
+        repoPath: String? = nil
     ) throws -> BridgeFixture {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
             name: "Demo",
-            repoPath: "/tmp/demo-\(UUID().uuidString)",
+            repoPath: repoPath ?? "/tmp/demo-\(UUID().uuidString)",
             baseBranch: "main",
             worktreeRoot: "/tmp/demo-worktrees",
             memoryDir: nil
         )
         let events = RecordingEventSink()
-        let control = FakeWorkerControl()
+        let control = FakeWorkerControl(board: Board(db))
         let orchestrator = OrchestratorToolHandler(db: db, control: control, events: events)
-        let worker = WorkerToolHandler(db: db, events: events, scopedCommits: scopedCommits)
+        let worker = WorkerToolHandler(db: db, control: control, events: events, scopedCommits: scopedCommits)
+        let reviewer = ReviewerToolHandler(db: db, control: control, events: events)
         return BridgeFixture(
             db: db,
             project: project,
@@ -101,7 +142,8 @@ struct BridgeFixture {
             control: control,
             orchestrator: orchestrator,
             worker: worker,
-            scoped: ScopedToolHandler(worker: worker, orchestrator: orchestrator),
+            reviewer: reviewer,
+            scoped: ScopedToolHandler(worker: worker, orchestrator: orchestrator, reviewer: reviewer),
             hooks: StoreHookSink(db: db, events: events, lockWait: lockWait),
             commits: scopedCommits
         )
@@ -130,10 +172,10 @@ struct BridgeFixture {
     @discardableResult
     func session(
         _ id: String, role: SessionRole = .worker, state: SessionState = .running, taskId: String? = nil,
-        worktreePath: String? = nil, cwd: String? = nil, branch: String? = nil
+        worktreePath: String? = nil, shortId: String? = nil, cwd: String? = nil, branch: String? = nil
     ) throws -> AgentSession {
         let session = AgentSession(
-            sessionId: id, projectId: project.id, taskId: taskId, role: role,
+            sessionId: id, shortId: shortId, projectId: project.id, taskId: taskId, role: role,
             worktreePath: worktreePath, branch: branch, cwd: cwd ?? worktreePath ?? "/tmp", state: state
         )
         try sessions.insert(session)
@@ -173,6 +215,27 @@ struct BridgeFixture {
         )
         try db.writer.write { db in try epic.insert(db) }
         return epic
+    }
+
+    func reviewerIdentity(sessionId: String, taskId: String?) -> TokenIdentity {
+        TokenIdentity(
+            token: "reviewer-\(sessionId)", scope: .reviewer, projectId: project.id,
+            sessionId: sessionId, taskId: taskId
+        )
+    }
+
+    func setReviewLevel(_ level: ReviewLevel) throws {
+        var settings = project.settings
+        settings.reviewLevel = level
+        try projects.updateSettings(project.id, settings)
+    }
+
+    @discardableResult
+    func rosterReviewer(_ name: String, role: String = "reviewer") throws -> RosterAgent {
+        let roster = RosterStore(db)
+        let agent = try roster.create(name: name, role: role, systemPrompt: "You review.")
+        try roster.enable(agentId: agent.id, forProject: project.id)
+        return agent
     }
 
     func workerIdentity(sessionId: String, taskId: String?) -> TokenIdentity {

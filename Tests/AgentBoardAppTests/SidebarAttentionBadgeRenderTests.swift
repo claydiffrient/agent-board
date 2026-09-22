@@ -121,6 +121,10 @@ final class CollapsedSectionSummaryTests: XCTestCase {
 /// The whole `MainWindow` is mounted in an offscreen borderless window and captured with
 /// `CGWindowListCreateImage`, which is the one route that rasterizes a SwiftUI `List` on a machine
 /// with no display — `cacheDisplay` and `ImageRenderer` both come back blank for list content.
+/// `OffscreenMount` holds the window across mutations and captures only once the picture has
+/// stopped moving and the board has actually drawn its rows; `renderEnvironment` keeps the sidebar
+/// footer from drawing, because it reads the real `~/.claude.json` on a background task and would
+/// otherwise appear mid-capture.
 ///
 /// What these prove: two mounts of the same quiet board are pixel-identical, so any difference is
 /// the change under test and not animation; a pending approval adds a mark a dozen points wide
@@ -132,92 +136,43 @@ final class CollapsedSectionSummaryTests: XCTestCase {
 /// accessibility trees (measured: every `toolTip` is nil and `accessibilityChildren()` is empty).
 @MainActor
 final class SidebarAttentionLiveTests: XCTestCase {
+    private var collapse = IsolatedCollapseState()
+
+    override func setUp() {
+        super.setUp()
+        collapse = IsolatedCollapseState()
+    }
+
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: SidebarCollapseState.key)
+        collapse.remove()
         super.tearDown()
     }
 
-    /// The sidebar at its 220-point ideal, doubled by the backing scale of the capture.
-    private static let sidebarPixels = 460
+    /// The sidebar at its 220-point ideal, plus the inset that frames it — in window points.
+    ///
+    /// This was the pixel constant `0..<460`, 230 points doubled, and the capture scale on a Mac with
+    /// no display is neither 2 nor even stable across a session. Each `Capture` converts these points
+    /// against its own width: see `Capture.columns(_:)`.
+    private static let sidebar = 0..<230
 
-    private struct PixelDiff {
-        var count: Int
-        var width: Int
-        var height: Int
-        var minX: Int
+    /// What each board below must have drawn before a capture of it means anything. Without these a
+    /// baseline can be the sidebar as it looks before its observations have delivered, which differs
+    /// from every later capture across the whole strip rather than by a badge.
+    ///
+    /// `pinnedRows` is the rows `MainWindow` lists outside every `Section` — At a Glance, then
+    /// Roster — so each count below reads as "the pinned rows, plus this board's project rows".
+    private static let pinnedRows = 2
+    private static let oneUngroupedProject = SidebarContent(rows: pinnedRows + 1, headers: 1)
+    private static let twoUngroupedProjects = SidebarContent(rows: pinnedRows + 2, headers: 1)
+    private static let oneCollapsedSection = SidebarContent(rows: pinnedRows, headers: 1)
+    private static let oneExpandedSection = SidebarContent(rows: pinnedRows + 1, headers: 1)
+
+    private func mount(_ db: AppDatabase) -> OffscreenMount {
+        OffscreenMount(MainWindow(collapseState: collapse.state).environment(renderEnvironment(db: db)))
     }
 
-    @MainActor
-    private final class Mount {
-        let window: NSWindow
-        let host: NSView
-
-        init(db: AppDatabase) {
-            host = NSHostingView(
-                rootView: MainWindow().environment(AppEnvironment(db: db, supervisor: StubSupervisor()))
-            )
-            NSApplication.shared.setActivationPolicy(.accessory)
-            // Borderless and far offscreen: AppKit constrains a `.titled` window back onto a
-            // visible screen, and this machine has none.
-            window = NSWindow(
-                contentRect: NSRect(x: -20_000, y: -20_000, width: 1100, height: 700),
-                styleMask: [.borderless], backing: .buffered, defer: false
-            )
-            window.contentView = host
-            window.orderBack(nil)
-        }
-
-        func close() { window.orderOut(nil) }
-
-        func settle(turns: Int = 80) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
-
-        func capture() throws -> NSBitmapImageRep {
-            settle()
-            let image = try XCTUnwrap(
-                CGWindowListCreateImage(
-                    .null, .optionIncludingWindow, CGWindowID(window.windowNumber),
-                    [.boundsIgnoreFraming, .bestResolution]
-                ),
-                "the window server produced no image for the offscreen window"
-            )
-            return NSBitmapImageRep(cgImage: image)
-        }
-
-        /// Rows `List` actually drew, the count `AtAGlanceRowRenderTests` established.
-        var rowCount: Int {
-            var n = 0
-            var queue: [NSView] = [host]
-            while let view = queue.popLast() {
-                if String(describing: type(of: view)) == "ListTableCellView" { n += 1 }
-                queue.append(contentsOf: view.subviews)
-            }
-            return n
-        }
-    }
-
-    private func diff(_ a: NSBitmapImageRep, _ b: NSBitmapImageRep) -> PixelDiff {
-        var count = 0
-        var minX = Int.max, minY = Int.max, maxX = -1, maxY = -1
-        for y in 0..<min(a.pixelsHigh, b.pixelsHigh) {
-            for x in 0..<min(Self.sidebarPixels, a.pixelsWide, b.pixelsWide) {
-                guard let left = a.colorAt(x: x, y: y), let right = b.colorAt(x: x, y: y) else { continue }
-                let apart = abs(left.redComponent - right.redComponent)
-                    + abs(left.greenComponent - right.greenComponent)
-                    + abs(left.blueComponent - right.blueComponent)
-                guard apart > 0.02 else { continue }
-                count += 1
-                minX = min(minX, x); minY = min(minY, y)
-                maxX = max(maxX, x); maxY = max(maxY, y)
-            }
-        }
-        guard count > 0 else { return PixelDiff(count: 0, width: 0, height: 0, minX: 0) }
-        return PixelDiff(count: count, width: maxX - minX + 1, height: maxY - minY + 1, minX: minX)
+    private func diff(_ a: Capture, _ b: Capture) -> PixelDiff {
+        a.diff(b, columns: a.columns(Self.sidebar))
     }
 
     private func register(_ db: AppDatabase, _ name: String) throws -> Project {
@@ -232,13 +187,16 @@ final class SidebarAttentionLiveTests: XCTestCase {
     func testTwoMountsOfTheSameQuietBoardAreIdentical() throws {
         let db = try AppDatabase.inMemory()
         _ = try register(db, "Alpha")
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
-        let first = Mount(db: db)
-        let second = Mount(db: db)
+        let first = mount(db)
+        let second = mount(db)
         defer { first.close(); second.close() }
         XCTAssertEqual(
-            diff(try first.capture(), try second.capture()).count, 0,
+            diff(
+                try first.capture(points: Self.sidebar, showing: Self.oneUngroupedProject),
+                try second.capture(points: Self.sidebar, showing: Self.oneUngroupedProject)
+            ).count, 0,
             "the sidebar must render deterministically"
         )
     }
@@ -247,17 +205,19 @@ final class SidebarAttentionLiveTests: XCTestCase {
         let db = try AppDatabase.inMemory()
         let alpha = try register(db, "Alpha")
         _ = try register(db, "Beta")
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
-        let mount = Mount(db: db)
-        defer { mount.close() }
-        let quiet = try mount.capture()
+        let board = mount(db)
+        defer { board.close() }
+        let quiet = try board.capture(points: Self.sidebar, showing: Self.twoUngroupedProjects)
 
         let approval = try ApprovalStore(db).create(
             projectId: alpha.id, kind: .spawn, taskId: nil, epicId: nil,
             requestedBy: "orchestrator", reason: "spawn a worker"
         )
-        let badged = try mount.capture()
+        let badged = try board.capture(points: Self.sidebar, showing: Self.twoUngroupedProjects) {
+            self.diff(quiet, $0).count > 0
+        }
         let appeared = diff(quiet, badged)
         XCTAssertGreaterThan(appeared.count, 0, "the pending approval must show in the sidebar")
         XCTAssertLessThan(
@@ -266,13 +226,16 @@ final class SidebarAttentionLiveTests: XCTestCase {
         )
         XCTAssertLessThan(appeared.height, 40, "the badge must stay inside its own row")
         XCTAssertGreaterThan(
-            appeared.minX, Self.sidebarPixels / 2,
+            appeared.minX, quiet.columns(Self.sidebar).upperBound / 2,
             "the badge belongs on the trailing side of the row, beside the gear"
         )
 
         try ApprovalStore(db).resolve(approval.id, .denied)
+        let restored = try board.capture(points: Self.sidebar, showing: Self.twoUngroupedProjects) {
+            self.diff(quiet, $0).count == 0
+        }
         XCTAssertEqual(
-            diff(quiet, try mount.capture()).count, 0,
+            diff(quiet, restored).count, 0,
             "resolving the approval must restore the quiet sidebar exactly"
         )
     }
@@ -296,20 +259,25 @@ final class SidebarAttentionLiveTests: XCTestCase {
         }
 
         let (quietDb, workspaceId) = try board(withApproval: false)
-        // Read by `SidebarCollapseState.load()` when `MainWindow`'s state initializes, so it has to
-        // be in place before the mount.
-        SidebarCollapseState.save([workspaceId])
-        let quietMount = Mount(db: quietDb)
+        // Read when `MainWindow`'s state initializes, so it has to be in place before the mount.
+        collapse.state.save([workspaceId])
+        let quietMount = mount(quietDb)
         defer { quietMount.close() }
-        let quiet = try quietMount.capture()
-        XCTAssertEqual(quietMount.rowCount, 1, "only the pinned At a Glance row may be drawn")
+        let quiet = try quietMount.capture(points: Self.sidebar, showing: Self.oneCollapsedSection)
+        XCTAssertEqual(
+            quietMount.viewCount(ofClassNamed: "ListTableCellView"), Self.pinnedRows,
+            "only the pinned rows may be drawn"
+        )
 
         let (waitingDb, waitingWorkspaceId) = try board(withApproval: true)
-        SidebarCollapseState.save([waitingWorkspaceId])
-        let waitingMount = Mount(db: waitingDb)
+        collapse.state.save([waitingWorkspaceId])
+        let waitingMount = mount(waitingDb)
         defer { waitingMount.close() }
-        let waiting = try waitingMount.capture()
-        XCTAssertEqual(waitingMount.rowCount, 1, "the waiting project's own row is still hidden")
+        let waiting = try waitingMount.capture(points: Self.sidebar, showing: Self.oneCollapsedSection)
+        XCTAssertEqual(
+            waitingMount.viewCount(ofClassNamed: "ListTableCellView"), Self.pinnedRows,
+            "the waiting project's own row is still hidden"
+        )
 
         let marked = diff(quiet, waiting)
         XCTAssertGreaterThan(marked.count, 0, "a collapsed section must still say something is inside")
@@ -323,16 +291,21 @@ final class SidebarAttentionLiveTests: XCTestCase {
         let alpha = try workspaces.create(name: "Alpha")
         let shown = try register(db, "Shown")
         try workspaces.assign(projectId: shown.id, workspaceId: alpha.id)
-        SidebarCollapseState.save([])
+        collapse.state.save([])
 
-        let mount = Mount(db: db)
-        defer { mount.close() }
-        let quiet = try mount.capture()
+        let board = mount(db)
+        defer { board.close() }
+        let quiet = try board.capture(points: Self.sidebar, showing: Self.oneExpandedSection)
         _ = try ApprovalStore(db).create(
             projectId: shown.id, kind: .spawn, taskId: nil, epicId: nil,
             requestedBy: "orchestrator", reason: nil
         )
-        let badged = diff(quiet, try mount.capture())
+        let badged = diff(
+            quiet,
+            try board.capture(points: Self.sidebar, showing: Self.oneExpandedSection) {
+                self.diff(quiet, $0).count > 0
+            }
+        )
         XCTAssertGreaterThan(badged.count, 0)
         XCTAssertLessThan(
             badged.height, 40,

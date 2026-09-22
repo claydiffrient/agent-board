@@ -4,6 +4,7 @@ import SwiftUI
 
 struct MainWindow: View {
     @Environment(AppEnvironment.self) private var env
+    @Environment(\.openWindow) private var openWindow
     @State private var projects = Observed<[Project]>([])
     @State private var workspaces = Observed<[Workspace]>([])
     @State private var attention = Observed<[ProjectAttention]>([])
@@ -11,21 +12,33 @@ struct MainWindow: View {
     @State private var settingsProject: Project?
     @State private var workspaceEdit: WorkspaceEdit?
     @State private var workspaceToDelete: Workspace?
-    @State private var collapsed = SidebarCollapseState.load()
+    @State private var collapsed: Set<String>
     @State private var errorMessage: String?
+
+    private let collapseState: SidebarCollapseState
+
+    init(collapseState: SidebarCollapseState = .standard) {
+        self.collapseState = collapseState
+        _collapsed = State(initialValue: collapseState.load())
+    }
 
     var body: some View {
         NavigationSplitView {
             sidebar
         } detail: {
-            if let project = projects.value.first(where: { $0.id == selection.projectId }) {
-                ProjectDetailView(project: project)
-                    .id(project.id)
-            } else {
-                AtAGlanceView(
-                    projects: projects.value, workspaces: workspaces.value,
-                    attention: attention.value, select: select
-                )
+            switch selection {
+            case .roster:
+                RosterView(activity: LiveRosterActivity(db: env.db))
+            case .atAGlance, .project:
+                if let project = projects.value.first(where: { $0.id == selection.projectId }) {
+                    ProjectDetailView(project: project)
+                        .id(project.id)
+                } else {
+                    AtAGlanceView(
+                        projects: projects.value, workspaces: workspaces.value,
+                        attention: attention.value, select: select
+                    )
+                }
             }
         }
         .task {
@@ -37,6 +50,7 @@ struct MainWindow: View {
         .task {
             await attention.run(ProjectAttentionStore(env.db).observeAll(), in: env.db.reader)
         }
+        .task { await announceReleaseNotes() }
         .sheet(item: $settingsProject) { project in
             ProjectSettingsSheet(project: project, workspaces: workspaces.value) {
                 if selection == .project(project.id) { select(.atAGlance) }
@@ -58,6 +72,16 @@ struct MainWindow: View {
         }
         .errorAlert($errorMessage)
         .onChange(of: env.router.sequence) { openRoutedProject() }
+    }
+
+    /// Last in the launch sequence, after `supervisor.start()` returns — the server bind, the
+    /// stale-lock sweep and the worktree-root migration all write to the board a human is about to
+    /// be shown, and a window over the middle of that hides work still settling. It does not stand
+    /// aside for a board that already needs attention; SPEC §10 has the argument.
+    private func announceReleaseNotes() async {
+        await env.startup?.value
+        guard env.releaseNotes.announceOnLaunch() else { return }
+        openWindow(id: ReleaseNotesScene.id)
     }
 
     /// A banner click selects its project through `select`, the same funnel the sidebar uses, so
@@ -95,6 +119,8 @@ struct MainWindow: View {
         List(selection: sidebarSelection) {
             Label("At a Glance", systemImage: "square.grid.2x2")
                 .tag(SidebarSelection.atAGlance)
+            Label("Roster", systemImage: "person.2")
+                .tag(SidebarSelection.roster)
             ForEach(sections) { section in
                 sectionView(section)
             }
@@ -114,7 +140,7 @@ struct MainWindow: View {
                 }
                 .padding(8)
                 NotificationsOffNotice()
-                AccountUsageFooter()
+                AccountUsageFooter(model: env.accountUsage)
             }
         }
         .overlay {
@@ -208,7 +234,7 @@ struct MainWindow: View {
                 } else {
                     collapsed.insert(sectionId)
                 }
-                SidebarCollapseState.save(collapsed)
+                collapseState.save(collapsed)
             }
         )
     }
@@ -244,7 +270,7 @@ struct MainWindow: View {
         do {
             try WorkspaceStore(env.db).delete(workspace.id)
             collapsed.remove(workspace.id)
-            SidebarCollapseState.save(collapsed)
+            collapseState.save(collapsed)
         } catch {
             errorMessage = errorText(error)
         }

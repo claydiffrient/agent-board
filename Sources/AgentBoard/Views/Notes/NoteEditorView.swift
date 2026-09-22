@@ -21,6 +21,7 @@ struct NoteEditorView: View {
     @State private var newHeading = ""
     @State private var newBody = ""
     @State private var confirmingDelete = false
+    @State private var copiedHeading: String?
     @State private var errorMessage: String?
 
     private struct Draft: Identifiable, Equatable {
@@ -70,6 +71,11 @@ struct NoteEditorView: View {
             } else if new.note.version != baseVersion {
                 conflict = "Another writer changed this note (it is now at version \(new.note.version); you are editing version \(baseVersion)). Your unsaved text is untouched — copy anything you need, then reload."
             }
+        }
+        .task(id: copiedHeading) {
+            guard copiedHeading != nil else { return }
+            try? await _Concurrency.Task.sleep(for: .seconds(1.5))
+            copiedHeading = nil
         }
         .errorAlert($errorMessage)
     }
@@ -281,6 +287,13 @@ struct NoteEditorView: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
+                Button {
+                    NoteSectionClipboard.copy(heading: draft.wrappedValue.heading, body: draft.wrappedValue.body)
+                    copiedHeading = draft.wrappedValue.heading
+                } label: {
+                    Image(systemName: copiedHeading == draft.wrappedValue.heading ? "checkmark" : "doc.on.doc")
+                }
+                .help("Copy this section's heading and text to the clipboard")
                 Button("Save") { save(draft.wrappedValue) }
                     .disabled(!draft.wrappedValue.isDirty)
                 Button("Revert") { revert(draft.wrappedValue.heading) }

@@ -38,8 +38,12 @@ public enum SessionConfigWriter {
         "UserPromptSubmit", "PostToolUse", "Notification", "Stop", "SubagentStop",
         "PreCompact", "SessionEnd",
     ]
-    /// `PreToolUse` is the app-side half of the push/PR block (§8), and of the `git commit` block a
-    /// shared checkout adds. Matched to `Bash` so the round trip is not paid on every tool call.
+    /// `PreToolUse` is the app-side half of the push/PR block (§8), of the `git commit` block a
+    /// shared checkout adds, and of the in-flight marker that keeps the idle cap off a worker
+    /// inside a long command (§8). Still matched to `Bash`: every multi-minute call measured on
+    /// this project is a `Bash` call, a long subagent is covered by `SubagentStop` instead, and one
+    /// round trip measures 4.1ms p50 / 14.8ms p95 over loopback including the session write, which
+    /// is not worth paying on every `Read` and `Grep` to mark a call that returns in milliseconds.
     public static let guardedPreToolUseMatcher = "Bash"
 
     public static func settingsURL(configDir: URL, configId: String) -> URL {

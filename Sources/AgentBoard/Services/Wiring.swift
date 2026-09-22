@@ -16,14 +16,15 @@ enum Wiring {
 
     static var worktreeBase: URL { SupportPaths.worktreeBase() }
 
-    static func makeSupervisor(db: AppDatabase) -> WorkerSupervisor {
+    static func makeSupervisor(db: AppDatabase, sleepGuard: SleepGuard? = nil) -> WorkerSupervisor {
         let sink = LateBoundSink()
         let server = BoardServer(
             tokens: StoreTokenResolver(db: db),
             hooks: StoreHookSink(db: db, events: sink),
             tools: ScopedToolHandler(
-                worker: WorkerToolHandler(db: db, events: sink, scopedCommits: ScopedCommitRunner()),
-                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink)
+                worker: WorkerToolHandler(db: db, control: sink, events: sink, scopedCommits: ScopedCommitRunner()),
+                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink),
+                reviewer: ReviewerToolHandler(db: db, control: sink, events: sink)
             ),
             resources: CompositeResourceHandler([
                 (NoteResourceURI.scheme, NoteResourceHandler(db: db)),
@@ -36,7 +37,8 @@ enum Wiring {
             runtime: BackgroundSessionRuntime(),
             server: server,
             appSupportDir: appSupportDir,
-            worktreeBase: worktreeBase
+            worktreeBase: worktreeBase,
+            sleepGuard: sleepGuard
         )
         sink.target = supervisor
         return supervisor
@@ -86,8 +88,20 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         return try await target.spawnWorker(taskId: taskId)
     }
 
+    func assignAgent(
+        taskId: String, rosterAgentId: String, scope: AgentBoardCore.TokenScope
+    ) async throws -> WorkerSpawn {
+        guard let target else { throw SupervisorError.serverNotRunning }
+        return try await target.assignAgent(taskId: taskId, rosterAgentId: rosterAgentId, scope: scope)
+    }
+
     func stopWorker(sessionId: String) async throws {
         guard let target else { throw SupervisorError.serverNotRunning }
         try await target.stopWorker(sessionId: sessionId)
+    }
+
+    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws {
+        guard let target else { throw SupervisorError.serverNotRunning }
+        try await target.accept(taskId: taskId, acceptedBy: acceptedBy)
     }
 }

@@ -14,6 +14,7 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let approvals: ApprovalStore
     private let epics: EpicStore
     private let board: Board
+    private let roster: RosterStore
     private let notes: NoteTools
     private let control: any WorkerControl
     private let events: any BoardEventSink
@@ -29,6 +30,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         approvals = ApprovalStore(db)
         epics = EpicStore(db)
         board = Board(db)
+        roster = RosterStore(db)
         notes = NoteTools(db: db)
         self.control = control
         self.events = events
@@ -164,6 +166,29 @@ public final class OrchestratorToolHandler: ToolHandler {
             inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
         ),
         ToolDescriptor(
+            name: "list_roster_agents",
+            description: "The rostered agents this project may be given work on: the cross-project roster filtered to "
+                + "the ones the project has enabled, in the project's own preference order. Each has a durable "
+                + "identity — a role and a system prompt — that outlives any single task. Use it to pick the right "
+                + "specialist before calling assign_to_agent.",
+            inputSchema: ToolSchema.object(properties: [:], required: [])
+        ),
+        ToolDescriptor(
+            name: "assign_to_agent",
+            description: "Assign a `ready` task to a named rostered agent. Same gates as spawn_worker — concurrency "
+                + "caps, the autonomy setting and its approval path — and the agent gets at most a worker's "
+                + "authority: it can do the work and report, but it cannot spawn or reassign, and its own deny list "
+                + "can only take tools away. The agent's identity is put ahead of the task in its opening prompt. "
+                + "Only agents from list_roster_agents are accepted.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "task_id": ToolSchema.string(),
+                    "roster_agent_id": ToolSchema.string("Agent id as shown in list_roster_agents."),
+                ],
+                required: ["task_id", "roster_agent_id"]
+            )
+        ),
+        ToolDescriptor(
             name: "stop_worker",
             description: "Stop a worker session. The task keeps its state and the session can be resumed by a human "
                 + "later; nothing is lost.",
@@ -206,7 +231,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             name: "promote_proposal",
             description: "Move a worker-proposed task from `proposed` into the board (`backlog`, or `ready` if it has no "
                 + "unmet dependencies). Allowed only while the project's autonomy setting is on; otherwise the human "
-                + "promotes proposals from the board.",
+                + "promotes proposals from the board. A proposal that named an epic lands in it; if that epic "
+                + "closed while the proposal waited, the task lands in no epic and the answer says so.",
             inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
         ),
         ToolDescriptor(
@@ -283,7 +309,8 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "branch that is neither `agentboard/<something>` nor the project's base branch. A push is "
                 + "outward-facing and cannot be taken back, so this always waits on human approval regardless of the "
                 + "autonomy setting: the call returns a pending approval, not a finished push. You will learn the "
-                + "decision through list_reports.",
+                + "decision through list_reports. If this project names its remote branches, the branch is published "
+                + "under a name built from the epic's or task's title; the local branch is unchanged.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "branch": ToolSchema.string("Branch to push, e.g. `agentboard/epic-<id>`."),
@@ -301,7 +328,8 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "of the autonomy setting: the call returns a pending approval, not a finished pull request. On "
                 + "approval the pull request's URL is recorded against the epic or task and reaches you through "
                 + "list_reports. An epic whose tasks are not all `done` is allowed — the approval says so, and the "
-                + "human decides whether early review is what you meant.",
+                + "human decides whether early review is what you meant. If this project names its remote branches, "
+                + "the pull request's head is the published name, not the local `agentboard/…` one.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "epic_id": ToolSchema.string("Epic whose integration branch to open the pull request from."),
@@ -376,6 +404,8 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "unarchive_task": return try unarchiveTask(arguments, identity: identity)
         case "log_progress": return try logProgress(arguments, identity: identity)
         case "spawn_worker": return try await spawnWorker(arguments, identity: identity)
+        case "list_roster_agents": return try listRosterAgents(identity: identity)
+        case "assign_to_agent": return try await assignToAgent(arguments, identity: identity)
         case "stop_worker": return try await stopWorker(arguments, identity: identity)
         case "list_agents": return try listAgents(arguments, identity: identity)
         case "list_reports": return try listReports(identity: identity)
@@ -435,6 +465,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "column": .string(task.column.rawValue),
             "model": .optional(task.model),
             "epic_id": .optional(task.epicId),
+            "roster_agent": try renderRosterAgent(task.rosterAgentId),
             "origin": .string(task.origin.rawValue),
             "blocked": .bool(task.blocked),
             "blocked_reason": .optional(task.blockedReason),
@@ -625,6 +656,65 @@ public final class OrchestratorToolHandler: ToolHandler {
         }
     }
 
+    private func listRosterAgents(identity: TokenIdentity) throws -> ToolResult {
+        .json(.array(try roster.usableAgents(forProject: identity.projectId).map { agent in
+            .object([
+                "id": .string(agent.id),
+                "name": .string(agent.name),
+                "role": .string(agent.role),
+                "system_prompt": .string(agent.systemPrompt),
+                "model": .optional(agent.model),
+            ])
+        }))
+    }
+
+    private func assignToAgent(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+        let task = try projectTask(try ToolArguments.requiredString("task_id", in: arguments), identity: identity)
+        let agentId = try ToolArguments.requiredString("roster_agent_id", in: arguments)
+        guard let agent = try roster.usableAgent(agentId, forProject: identity.projectId) else {
+            throw ToolError(try refusalForUnusable(agentId))
+        }
+        let requestedBy = identity.sessionId ?? "orchestrator"
+        switch try board.requestSpawn(taskId: task.id, requestedBy: requestedBy) {
+        case .proceed:
+            let spawn = try await control.assignAgent(
+                taskId: task.id, rosterAgentId: agent.id, scope: .worker
+            )
+            let warnings = spawn.warnings.isEmpty ? "" : "\n\n" + spawn.warnings.joined(separator: "\n")
+            let site = spawn.sharesCheckout
+                ? "It runs in the project's own checkout at \(spawn.worktreePath)"
+                : "Its worktree is ready at \(spawn.worktreePath)"
+            return ToolResult(text: """
+            \(agent.name) was assigned \(task.id); the task is now running. \(site) on branch \
+            \(spawn.branch), but setup is still running, so the agent cannot do anything yet and \
+            has no session id.
+
+            Nothing to do but wait, exactly as after spawn_worker. Do not call assign_to_agent for \
+            this task again.
+            """ + warnings)
+        case .approvalPending(let approval):
+            return ToolResult(text: "approval \(approval.id) pending; the human must approve. You will be told via list_reports.")
+        case .refused(let reason):
+            throw ToolError(reason)
+        }
+    }
+
+    /// Names which of the three refusals it is, so the orchestrator does not retry an agent the
+    /// project has simply not enabled.
+    private func refusalForUnusable(_ agentId: String) throws -> String {
+        guard let agent = try roster.get(agentId) else {
+            return "no roster agent with id \(agentId) exists. Call list_roster_agents for the ones you may use."
+        }
+        let why = agent.enabled ? "this project has not enabled it" : "it is disabled on the roster"
+        return "roster agent \(agent.name) (\(agentId)) is not in this project's usable set: \(why). "
+            + "Call list_roster_agents for the ones you may use."
+    }
+
+    private func renderRosterAgent(_ id: String?) throws -> JSONValue {
+        guard let id, let agent = try roster.get(id) else { return .null }
+        return .object(["id": .string(agent.id), "name": .string(agent.name), "role": .string(agent.role)])
+    }
+
     private func stopWorker(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
         let sessionId = try ToolArguments.requiredString("session_id", in: arguments)
         guard let session = try sessions.get(sessionId), session.projectId == identity.projectId else {
@@ -640,12 +730,13 @@ public final class OrchestratorToolHandler: ToolHandler {
     private func listAgents(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
         let includeEnded = ToolArguments.optionalBool("include_ended", in: arguments) ?? false
         let all = try sessions.all(projectId: identity.projectId)
-        let roster = SessionVisibility.roster(all, now: Date(), includeEnded: includeEnded)
-        return .json(.array(roster.visible.map { session in
+        let visibility = SessionVisibility.roster(all, now: Date(), includeEnded: includeEnded)
+        return .json(.array(try visibility.visible.map { session in
             .object([
                 "session_id": .string(session.sessionId),
                 "short_id": .optional(session.shortId),
                 "role": .string(session.role.rawValue),
+                "roster_agent": try self.renderRosterAgent(session.rosterAgentId),
                 "task_id": .optional(session.taskId),
                 "state": .string(session.state.rawValue),
                 "counted_tokens": .number(Double(session.countedTokens)),
@@ -689,9 +780,14 @@ public final class OrchestratorToolHandler: ToolHandler {
         guard task.column == .proposed else {
             throw ToolError("Task \(task.id) is in \(task.column.rawValue), not proposed.")
         }
-        try board.promote(taskId: task.id)
-        let final = try tasks.get(task.id)?.column ?? .backlog
-        return ToolResult(text: "Task \(task.id) promoted to \(final.rawValue).")
+        let promotion = try board.promote(taskId: task.id)
+        var text = "Task \(task.id) promoted to \(promotion.landedIn.rawValue)."
+        if let dropped = promotion.droppedEpic, let named = task.epicId {
+            text += " It was proposed into epic \(named) but promoted into no epic: \(dropped.reason)"
+        } else if let epicId = try tasks.get(task.id)?.epicId {
+            text += " It is in epic \(epicId), where it was proposed."
+        }
+        return ToolResult(text: text)
     }
 
     // MARK: Peer projects
@@ -874,17 +970,22 @@ public final class OrchestratorToolHandler: ToolHandler {
         let project = try requireProject(identity)
         let branch = try ownedBranch(try ToolArguments.requiredString("branch", in: arguments), project: project)
         let target = try publishTarget(branch: branch, identity: identity)
+        let published = try publishedName(for: branch, project: project)
+        let head = published ?? branch
         let approval = try board.requestPublish(
             projectId: project.id,
             kind: .push,
-            request: PublishRequest(branch: branch),
+            request: PublishRequest(branch: branch, publishedBranch: published),
             taskId: target.taskId,
             epicId: target.epicId,
             requestedBy: identity.sessionId ?? "orchestrator",
-            reason: "Push \(branch) to the project's git remote."
+            reason: published == nil
+                ? "Push \(branch) to the project's git remote."
+                : "Push \(branch) to the project's git remote as \(head)."
         )
-        return ToolResult(text: "push approval \(approval.id) pending; the human must approve before \(branch) "
-            + "reaches the remote. You will be told via list_reports.")
+        let destination = published == nil ? "reaches the remote" : "reaches the remote as \(head)"
+        return ToolResult(text: "push approval \(approval.id) pending; the human must approve before "
+            + "\(branch) \(destination). You will be told via list_reports.")
     }
 
     private func openPullRequest(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
@@ -905,7 +1006,12 @@ public final class OrchestratorToolHandler: ToolHandler {
         let body = ToolArguments.optionalString("body", in: arguments) ?? ""
         let target = try publishTarget(branch: branch, identity: identity)
 
-        var reason = "Open a pull request from \(branch) into \(base): \(title)"
+        let published = try publishedName(for: branch, project: project)
+        let head = published ?? branch
+        var reason = "Open a pull request from \(head) into \(base): \(title)"
+        if let published, published != branch {
+            reason += "\n\(branch) is published as \(published); the local branch is not renamed."
+        }
         if let epic, !(try board.epicReadyForIntegration(epicId: epic.id)) {
             let counts = try taskCounts(epic)
             reason += counts.total == 0
@@ -916,7 +1022,9 @@ public final class OrchestratorToolHandler: ToolHandler {
         let approval = try board.requestPublish(
             projectId: project.id,
             kind: .pullRequest,
-            request: PublishRequest(branch: branch, base: base, title: title, body: body),
+            request: PublishRequest(
+                branch: branch, base: base, title: title, body: body, publishedBranch: published
+            ),
             taskId: target.taskId,
             epicId: epic?.id ?? target.epicId,
             requestedBy: identity.sessionId ?? "orchestrator",
@@ -924,6 +1032,16 @@ public final class OrchestratorToolHandler: ToolHandler {
         )
         return ToolResult(text: "pull request approval \(approval.id) pending; nothing is pushed and no pull request "
             + "exists until the human approves. The URL reaches you via list_reports.")
+    }
+
+    private func publishedName(for branch: String, project: Project) throws -> String? {
+        do {
+            return try RemoteBranchResolver(db).publishedName(branch: branch, project: project)
+        } catch let error as RemoteNamingError {
+            throw ToolError(error.description)
+        } catch let error as RemoteRefPolicyError {
+            throw ToolError(error.description)
+        }
     }
 
     private func ownedBranch(_ raw: String, project: Project) throws -> String {
@@ -1015,6 +1133,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "archived": .bool(task.isArchived),
             "archived_at": .millis(task.archivedAt),
             "epic_id": .optional(task.epicId),
+            "roster_agent": try renderRosterAgent(task.rosterAgentId),
             "deps": .array(try tasks.deps(of: task.id).map(JSONValue.string)),
             "active_session": try activeSession(for: task.id),
         ])

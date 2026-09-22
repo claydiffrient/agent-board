@@ -273,11 +273,20 @@ public struct Board: Sendable {
         }
     }
 
+    /// The only path that creates a worker session row. The two guards run inside the write
+    /// transaction, so a handed-off task cannot be assigned twice concurrently: one caller wins and
+    /// the other throws rather than launching a second agent into the same checkout.
     @discardableResult
     public func assign(taskId: String, session: AgentSession) throws -> AgentSession {
         try db.writer.write { db in
             guard let task = try Task.fetchOne(db, key: taskId) else {
                 throw BoardError.taskNotFound(taskId)
+            }
+            if let holder = try SessionStore.activeHolder(db, taskId: taskId) {
+                throw BoardError.taskAlreadyHeld(taskId: taskId, sessionId: holder.sessionId)
+            }
+            if let path = session.worktreePath, let holder = try SessionStore.activeHolder(db, worktreePath: path) {
+                throw BoardError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
             }
             let previousAttempts = try Int.fetchOne(
                 db,
@@ -293,6 +302,9 @@ public struct Board: Sendable {
             session.state = .setup
             session.attempt = previousAttempts + 1
             try session.insert(db)
+            // A rostered assignment is readable from the task as well as the session, so the board,
+            // Status and the next agent in a handoff can all see who is on it.
+            try TaskStore.setRosterAgent(db, taskId, session.rosterAgentId)
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             try TaskStore.setFailed(db, taskId, false, reason: nil)
             try TaskStore.move(db, taskId, to: .running, before: nil)
@@ -300,10 +312,76 @@ public struct Board: Sendable {
         }
     }
 
+    /// The reviewer's counterpart to `assign`. A review holds a task that is already in `review` and
+    /// must stay there: moving it to `running` would take it out of the review queue and make the
+    /// reviewer's own `accept_task` guard refuse. Nothing is written to the task at all.
     @discardableResult
-    public func complete(taskId: String, sessionId: String, summary: String) throws -> Report {
+    public func assignReviewer(taskId: String, session: AgentSession) throws -> AgentSession {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
+            guard task.column == .review else {
+                throw BoardError.taskNotInReview(taskId: taskId, column: task.column)
+            }
+            if let holder = try SessionStore.activeHolder(db, taskId: taskId) {
+                throw BoardError.taskAlreadyHeld(taskId: taskId, sessionId: holder.sessionId)
+            }
+            let previousAttempts = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM agent_session WHERE task_id = ?",
+                arguments: [taskId]
+            ) ?? 0
+            var session = session
+            session.taskId = taskId
+            session.projectId = task.projectId
+            session.role = .worker
+            session.state = .setup
+            session.attempt = previousAttempts + 1
+            try session.insert(db)
+            return session
+        }
+    }
+
+    /// A finished task and where the project's review level sends it. `autoAccept` is the caller's
+    /// cue to run `accept` — the same call a human Accept makes — rather than a second accept path.
+    ///
+    /// `report_complete` reaches the server more than once for one tool call: the handler stops the
+    /// worker before answering it, the answer is lost with the process, and the MCP client resends.
+    /// A resent call finds the first report and re-runs nothing, so `wasAlreadyComplete` is what
+    /// tells the caller to route none of it again — no acceptance, no reviewer, no events. SPEC §5.
+    public struct CompletionOutcome: Sendable {
+        public var report: Report
+        public var level: ReviewLevel
+        public var routing: ReviewRouting
+        /// Where the task actually sits: `review`, `done` under `afterEpicMerge`, or, on a resend,
+        /// wherever it has been moved to since the first call.
+        public var column: TaskColumn
+        public var wasAlreadyComplete: Bool
+
+        /// Never true on a resend: the first call already ran the acceptance path.
+        public var autoAccept: Bool { routing == .autoAccept && !wasAlreadyComplete }
+    }
+
+    /// Records the report and parks the task where §5's review level says. Under `.none` (and `.epic`
+    /// for a task inside an epic) the task stays in `review` for the length of this transaction only:
+    /// `autoAccept` tells the caller to run the ordinary acceptance path, which is where the
+    /// newly-ready announcement, grant revocation and worktree removal live.
+    ///
+    /// A second call from the same session returns the first report with `wasAlreadyComplete` set and
+    /// writes nothing — the guard reads inside this write transaction, so two concurrent resends
+    /// cannot both pass it, and the review routing below never runs twice.
+    @discardableResult
+    public func complete(taskId: String, sessionId: String, summary: String) throws -> CompletionOutcome {
+        try db.writer.write { db in
+            let task = try Self.requireTask(db, taskId)
+            if let existing = try ReportStore.completion(db, taskId: taskId, sessionId: sessionId) {
+                return CompletionOutcome(
+                    report: existing,
+                    level: try ReviewPolicy.level(db, task: task),
+                    routing: try ReviewPolicy.routing(db, task: task),
+                    column: task.column,
+                    wasAlreadyComplete: true
+                )
+            }
             let report = try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .complete, body: summary
             )
@@ -315,7 +393,8 @@ public struct Board: Sendable {
             // reaching `done` in this same transaction is its acceptance, and a task the sweep is about
             // to archive has no business sitting in the review queue. Every other policy leaves it in
             // `review` for a human, exactly as before.
-            try TaskStore.move(db, taskId, to: sweepsOnMerge ? .done : .review, before: nil)
+            let column: TaskColumn = sweepsOnMerge ? .done : .review
+            try TaskStore.move(db, taskId, to: column, before: nil)
             try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
             try FileLockStore.releaseAll(db, sessionId: sessionId)
             if let mergedEpicId {
@@ -324,6 +403,70 @@ public struct Board: Sendable {
                     _ = try ArchiveSweep.archiveEpic(db, epicId: mergedEpicId, at: .nowMillis)
                 }
             }
+            let level = try ReviewPolicy.level(db, task: task)
+            let routing = try ReviewPolicy.routing(db, task: task)
+            switch routing {
+            case .autoAccept:
+                break
+            case .agentReview(let agentId, let agentName):
+                try TaskStore.setReviewer(db, taskId, agentId)
+                _ = try ProgressStore.append(
+                    db, taskId: taskId, sessionId: nil, kind: .status,
+                    text: "Handed to rostered reviewer \(agentName) for agent review."
+                )
+            case .humanReview(let reason):
+                try TaskStore.setReviewer(db, taskId, nil)
+                if let reason {
+                    _ = try ProgressStore.append(
+                        db, taskId: taskId, sessionId: nil, kind: .status, text: reason
+                    )
+                }
+            }
+            return CompletionOutcome(
+                report: report, level: level, routing: routing, column: column, wasAlreadyComplete: false
+            )
+        }
+    }
+
+    /// A rostered agent finishing its portion: the task goes back to `ready` with a progress row and a
+    /// report, the session's hold is released so nothing believes it is still working, and the worktree
+    /// is left in place for whoever picks the task up next. This is not a failure and never flags one.
+    @discardableResult
+    public func handOff(
+        taskId: String, sessionId: String, summary: String, nextRole: String?, filesChanged: [String]
+    ) throws -> Report {
+        try db.writer.write { db in
+            let task = try Self.requireTask(db, taskId)
+            guard let session = try AgentSession.fetchOne(db, key: sessionId),
+                  session.taskId == taskId, session.state.isActive
+            else {
+                throw BoardError.sessionNotOnTask(sessionId: sessionId, taskId: taskId)
+            }
+            let agent = session.shortId ?? sessionId
+            let suggested = nextRole.flatMap { $0.isEmpty ? nil : $0 }
+
+            var lines = [
+                "Handed off by \(agent) (attempt \(session.attempt)) after doing its portion.",
+                summary,
+            ]
+            if !filesChanged.isEmpty {
+                lines.append("Files changed: " + filesChanged.joined(separator: ", "))
+            }
+            lines.append(suggested.map { "Suggested next role: \($0) (advisory; you decide who gets it)." }
+                ?? "No next role suggested.")
+            lines.append("Task \(taskId) (\(task.title)) is back in ready. Its worktree is retained, so the "
+                + "next agent works the same checkout; nothing else may be dispatched into it meanwhile.")
+            let body = lines.joined(separator: "\n\n")
+
+            let report = try ReportStore.insert(
+                db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .handoff, body: body
+            )
+            _ = try ProgressStore.append(db, taskId: taskId, sessionId: sessionId, kind: .note, text: body)
+            try TaskStore.setBlocked(db, taskId, false, reason: nil)
+            try TaskStore.setFailed(db, taskId, false, reason: nil)
+            try TaskStore.move(db, taskId, to: .ready, before: nil)
+            try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
+            try SessionStore.setStopReason(db, sessionId, suggested.map { "handed off to \($0)" } ?? "handed off")
             return report
         }
     }
@@ -393,24 +536,74 @@ public struct Board: Sendable {
     }
 
     /// Accepts into `done` and queues a `decision` report; the newly-ready ids are the orchestrator's
-    /// only signal that the dependency graph moved.
+    /// only signal that the dependency graph moved. Every review level lands here — `acceptedBy` only
+    /// changes who the report names, never what happens.
     @discardableResult
-    public func accept(taskId: String) throws -> [String] {
+    public func accept(taskId: String, acceptedBy: TaskAcceptance = .human) throws -> [String] {
+        try db.writer.write { db in
+            try Self.accept(db, taskId: taskId, acceptedBy: acceptedBy)
+        }
+    }
+
+    static func accept(_ db: Database, taskId: String, acceptedBy: TaskAcceptance) throws -> [String] {
+        let task = try requireTask(db, taskId)
+        try TaskStore.setBlocked(db, taskId, false, reason: nil)
+        try TaskStore.setFailed(db, taskId, false, reason: nil)
+        try TaskStore.move(db, taskId, to: .done, before: nil)
+        if let epicId = task.epicId, try Epic.fetchOne(db, key: epicId)?.state == .planning {
+            try EpicStore.setState(db, epicId, .active)
+        }
+        let ready = try newlyReady(db, projectId: task.projectId)
+        var body = "Task \(taskId) (\(task.title)) was accepted into done by \(acceptedBy.describedActor)."
+        if case .reviewer(_, let verdict) = acceptedBy, !verdict.isEmpty {
+            body += "\n\n" + verdict
+        }
+        body += "\n\n" + (try describeNewlyReady(db, ready))
+        _ = try ReportStore.insert(
+            db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision, body: body
+        )
+        return ready
+    }
+
+    /// Puts a rostered reviewer's approval on the task before the acceptance itself runs, so a person
+    /// reading a task that reached `done` without them can see who approved it and why. The accept that
+    /// follows is the ordinary one — this deliberately does not move the task.
+    public func recordReviewVerdict(
+        taskId: String, sessionId: String?, reviewerName: String, verdict: String
+    ) throws {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
+            guard task.column == .review else {
+                throw BoardError.invalidTransition(taskId: taskId, from: task.column, to: .done)
+            }
+            _ = try ProgressStore.append(
+                db, taskId: taskId, sessionId: sessionId, kind: .note,
+                text: "Agent review passed. Reviewer \(reviewerName) accepted this task into done.\n\n\(verdict)"
+            )
+        }
+    }
+
+    /// A rostered reviewer rejecting its task: back to `ready` with its findings on the task, so the
+    /// next agent picks the work up knowing what was wrong.
+    @discardableResult
+    public func reviewReopen(
+        taskId: String, sessionId: String?, reviewerName: String, findings: String
+    ) throws -> Report {
+        try db.writer.write { db in
+            let task = try Self.requireTask(db, taskId)
+            guard task.column == .review else {
+                throw BoardError.invalidTransition(taskId: taskId, from: task.column, to: .ready)
+            }
+            let body = "Agent review failed. Reviewer \(reviewerName) sent task \(taskId) (\(task.title)) "
+                + "back to ready.\n\n\(findings)"
+            _ = try ProgressStore.append(db, taskId: taskId, sessionId: sessionId, kind: .note, text: body)
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             try TaskStore.setFailed(db, taskId, false, reason: nil)
-            try TaskStore.move(db, taskId, to: .done, before: nil)
-            if let epicId = task.epicId, try Epic.fetchOne(db, key: epicId)?.state == .planning {
-                try EpicStore.setState(db, epicId, .active)
-            }
-            let ready = try Self.newlyReady(db, projectId: task.projectId)
-            var body = "Task \(taskId) (\(task.title)) was accepted into done by a human."
-            body += "\n\n" + (try Self.describeNewlyReady(db, ready))
-            _ = try ReportStore.insert(
-                db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision, body: body
+            try TaskStore.setReviewer(db, taskId, nil)
+            try TaskStore.move(db, taskId, to: .ready, before: nil)
+            return try ReportStore.insert(
+                db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .decision, body: body
             )
-            return ready
         }
     }
 
@@ -578,13 +771,20 @@ public struct Board: Sendable {
     }
 
     @discardableResult
-    public func propose(projectId: String, title: String, body: String?, rationale: String?, sessionId: String?) throws -> Task {
+    public func propose(
+        projectId: String, title: String, body: String?, rationale: String?, sessionId: String?,
+        epicId: String?
+    ) throws -> Task {
         try db.writer.write { db in
+            if let epicId {
+                _ = try Self.proposalEpic(db, epicId: epicId, projectId: projectId)
+            }
             let task = try TaskStore.insert(
                 db, projectId: projectId, title: title, body: body, acceptance: nil, priority: nil,
-                column: .proposed, origin: .workerProposal, epicId: nil
+                column: .proposed, origin: .workerProposal, epicId: epicId
             )
             var lines = ["Proposed task: \(title)", "Task id: \(task.id)"]
+            if let epicId { lines.append("Proposed into epic: \(epicId)") }
             if let body, !body.isEmpty { lines.append(body) }
             if let rationale, !rationale.isEmpty { lines.append("Rationale: \(rationale)") }
             _ = try ReportStore.insert(
@@ -595,23 +795,52 @@ public struct Board: Sendable {
         }
     }
 
+    /// The epic a proposal names must still be a destination when the proposal is promoted, which
+    /// can be much later — so this re-checks and, when the epic has stopped being one, promotes the
+    /// task into no epic and says so on the decision report rather than refusing the promotion or
+    /// dropping an unfinished task into a finished epic. SPEC §5.
     @discardableResult
-    public func promote(taskId: String) throws -> [String] {
+    public func promote(taskId: String) throws -> Promotion {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
             guard task.column == .proposed else {
                 throw BoardError.invalidTransition(taskId: taskId, from: task.column, to: .backlog)
             }
+            var dropped: ProposalEpicRefusal?
+            if let epicId = task.epicId {
+                do {
+                    _ = try Self.proposalEpic(db, epicId: epicId, projectId: task.projectId)
+                } catch let refusal as ProposalEpicRefusal {
+                    dropped = refusal
+                    try TaskStore.setEpic(db, taskId, epicId: nil)
+                }
+            }
             try TaskStore.move(db, taskId, to: .backlog, before: nil)
             let ready = try Self.newlyReady(db, projectId: task.projectId)
             let landed = try Task.fetchOne(db, key: taskId)?.column ?? .backlog
             var body = "Proposal \(taskId) (\(task.title)) was promoted to \(landed.rawValue)."
+            if let dropped, let named = task.epicId {
+                body += "\n\nIt was proposed into epic \(named) but promoted into no epic: \(dropped.reason)"
+            }
             body += "\n\n" + (try Self.describeNewlyReady(db, ready))
             _ = try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision, body: body
             )
-            return ready
+            return Promotion(newlyReady: ready, landedIn: landed, droppedEpic: dropped)
         }
+    }
+
+    static func proposalEpic(_ db: Database, epicId: String, projectId: String) throws -> Epic {
+        guard let epic = try Epic.fetchOne(db, key: epicId) else {
+            throw ProposalEpicRefusal.notFound(epicId)
+        }
+        guard epic.projectId == projectId else {
+            throw ProposalEpicRefusal.otherProject(epicId: epicId)
+        }
+        guard !epic.state.isTerminal else {
+            throw ProposalEpicRefusal.closed(epicId: epicId, state: epic.state)
+        }
+        return epic
     }
 
     /// Creates the epic and every task in `tasks` in one transaction, wiring `task_dep` rows from

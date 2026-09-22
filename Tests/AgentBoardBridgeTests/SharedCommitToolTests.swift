@@ -37,15 +37,32 @@ final class SharedCommitToolTests: XCTestCase {
         XCTAssertFalse(request.paths.contains("Sources/Theirs.swift"))
         XCTAssertEqual(request.taskId, mine.id)
         XCTAssertEqual(request.repoPath, f.project.repoPath)
-        XCTAssertEqual(result["trailer"]?.stringValue, "Agent-Board-Task: \(mine.id)")
+        XCTAssertNil(result["trailer"])
     }
 
-    func testTheMessageCarriesTheTaskTrailer() async throws {
+    /// The commit object carries nothing: a task-id trailer would be permanent and public in
+    /// whatever repository the pull request lands in. The ledger row is what attributes it.
+    func testTheMessageIsCommittedVerbatimAndTheLedgerRecordsTheCommit() async throws {
         _ = await f.preToolUseWrite(f.repoFile("Sources/Mine.swift"), sessionId: "mine", identity: me)
-        _ = try await f.call("commit_my_work", ["message": .string("Add my work")], as: me)
+        let body = "Add my work\n\nA second paragraph."
+        let result = try await f.callJSON("commit_my_work", ["message": .string(body)], as: me)
 
         let request = try XCTUnwrap(commits.requests.first)
-        XCTAssertEqual(request.message, "Add my work\n\nAgent-Board-Task: \(mine.id)")
+        XCTAssertEqual(request.message, body)
+        XCTAssertFalse(request.message.contains("Agent-Board-Task"), request.message)
+        XCTAssertFalse(request.message.contains(mine.id), request.message)
+
+        let sha = try XCTUnwrap(result["commit"]?.stringValue)
+        XCTAssertEqual(try TaskCommitStore(f.db).taskIds(forShas: [sha]), [sha: mine.id])
+    }
+
+    /// The row lands only for the commit that happened; a refused or empty commit records nothing.
+    func testNothingIsRecordedWhenThereWasNothingToCommit() async throws {
+        _ = await f.preToolUseWrite(f.repoFile("Sources/Mine.swift"), sessionId: "mine", identity: me)
+        commits.outcome = .nothingToCommit(paths: ["Sources/Mine.swift"])
+        _ = try await f.call("commit_my_work", ["message": .string("Add my work")], as: me)
+
+        XCTAssertEqual(try TaskCommitStore(f.db).shas(taskId: mine.id), [])
     }
 
     func testASessionThatHasWrittenNothingIsRefusedRatherThanCommittingTheTree() async throws {
@@ -81,7 +98,7 @@ final class SharedCommitToolTests: XCTestCase {
         _ = try await f.call("commit_my_work", ["message": .string("Add my work")], as: me)
 
         let rows = try f.progress.list(taskId: mine.id, limit: 50).map(\.text)
-        XCTAssertTrue(rows.contains { $0.contains("Sources/Mine.swift") && $0.contains("Agent-Board-Task") }, "\(rows)")
+        XCTAssertTrue(rows.contains { $0.contains("Sources/Mine.swift") && $0.contains("Committed") }, "\(rows)")
     }
 }
 

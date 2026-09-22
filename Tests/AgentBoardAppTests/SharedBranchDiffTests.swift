@@ -52,14 +52,32 @@ final class SharedBranchDiffTests: XCTestCase {
         try contents.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// What `commit_my_work` does: commit the body verbatim, then record the sha against the task.
     private func commit(_ task: BoardTask, paths: [String], message: String) async throws {
         let outcome = try await ScopedCommitRunner().commit(
             ScopedCommitRequest(
                 repoPath: fixture.repo.path, branch: branch, taskId: task.id, paths: paths,
-                message: CommitAttribution.message(message, taskId: task.id)
+                message: message
             )
         )
-        guard case .committed = outcome else { return XCTFail("\(task.title) did not commit: \(outcome)") }
+        guard case .committed(let sha, _) = outcome else {
+            return XCTFail("\(task.title) did not commit: \(outcome)")
+        }
+        try TaskCommitStore(fixture.db).record(taskId: task.id, sha: sha)
+    }
+
+    /// Every `WorktreeManager` the supervisor hands out has to be able to attribute a commit —
+    /// there is one factory, and it is the one every caller uses. This fails the moment that factory
+    /// stops wiring the ledger, whatever the caller then does with the manager.
+    func testTheSupervisorsOnlyWorktreeManagerCanAttribute() async throws {
+        try write("alpha.txt", "a\n")
+        try await commit(alpha, paths: ["alpha.txt"], message: "Add alpha")
+
+        let manager = fixture.supervisor.worktreeManager(for: fixture.project)
+        XCTAssertEqual(
+            try manager.commits(taskId: alpha.id, on: branch, since: "main").count, 1,
+            "the supervisor's factory built a manager that cannot attribute commits"
+        )
     }
 
     func testEachTasksDiffHoldsOnlyItsOwnFiles() async throws {
@@ -99,7 +117,7 @@ final class SharedBranchDiffTests: XCTestCase {
     }
 
     /// A commit made outside Agent Board — the human's own, or a merge — belongs to no task.
-    func testAnUntaggedCommitOnTheSharedBranchIsNobodysWork() async throws {
+    func testAnUnrecordedCommitOnTheSharedBranchIsNobodysWork() async throws {
         try write("human.txt", "by hand\n")
         try SupervisorFixture.git(["add", "human.txt"], cwd: fixture.repo)
         try SupervisorFixture.git(["commit", "-q", "-m", "A hand-made commit"], cwd: fixture.repo)
@@ -115,7 +133,8 @@ final class SharedBranchDiffTests: XCTestCase {
     func testAWorktreeTaskStillDiffsItsWholeBranch() async throws {
         let isolated = try makeTask("Isolated")
         let manager = WorktreeManager(
-            repoPath: fixture.repo, worktreeRoot: fixture.supportDir.appendingPathComponent("worktrees")
+            repoPath: fixture.repo, worktreeRoot: fixture.supportDir.appendingPathComponent("worktrees"),
+            attribution: .unattributable
         )
         let path = try manager.create(name: isolated.id, branch: "agentboard/\(isolated.id)", base: "main")
         try "x\n".write(to: path.appendingPathComponent("isolated.txt"), atomically: true, encoding: .utf8)

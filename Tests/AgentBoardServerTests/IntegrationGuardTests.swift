@@ -39,6 +39,49 @@ final class IntegrationGuardTests: XCTestCase {
         XCTAssertNil(violation("echo push"))
     }
 
+    func testAnAbsolutePathIsMatchedLikeTheBareSpelling() {
+        XCTAssertEqual(violation("/usr/bin/git push"), .push)
+        XCTAssertEqual(violation("/opt/homebrew/bin/git push"), .push)
+        XCTAssertEqual(violation("./git push -u origin HEAD"), .push)
+        XCTAssertEqual(violation("~/bin/git push"), .push)
+        XCTAssertEqual(violation("cd /repo && /usr/bin/git -C /repo push origin main"), .push)
+        XCTAssertEqual(violation("/usr/bin/gh pr create --draft"), .pullRequestCreate)
+        XCTAssertEqual(violation("/opt/homebrew/bin/gh pr create"), .pullRequestCreate)
+        XCTAssertEqual(violation("/opt/homebrew/bin/gh pr merge 42 --squash"), .pullRequestMerge)
+    }
+
+    /// The same rule reaches `invokesGit`, which is what `SharedCheckoutGuard` denies commits with.
+    func testAnAbsolutePathIsSeenByTheSubcommandScanToo() {
+        XCTAssertTrue(IntegrationGuard.invokesGit("commit", toolName: "Bash", command: "/usr/bin/git commit -m x"))
+        XCTAssertTrue(IntegrationGuard.invokesGit("commit", toolName: "Bash", command: "git commit -m x"))
+        XCTAssertTrue(IntegrationGuard.invokesGit("stash", toolName: "Bash", command: "/opt/homebrew/bin/git stash"))
+        XCTAssertFalse(IntegrationGuard.invokesGit("commit", toolName: "Bash", command: "/usr/bin/mygit commit"))
+    }
+
+    func testATokenThatMerelyContainsGitOrGhIsNotMatched() {
+        XCTAssertNil(violation("mygit push"))
+        XCTAssertNil(violation("git-crypt push"))
+        XCTAssertNil(violation("legit push"))
+        XCTAssertNil(violation("/usr/bin/mygit push"))
+        XCTAssertNil(violation("/usr/local/bin/git-crypt push"))
+        XCTAssertNil(violation("gitk"))
+        XCTAssertNil(violation("/usr/bin/ghq push"))
+        XCTAssertNil(violation("ghost pr create"))
+    }
+
+    /// The scan is a heuristic and these get past it. Pinned so a later change that closes one is
+    /// a visible edit here rather than a silent claim that the guard is sound.
+    func testSpellingsTheScanIsKnownToMiss() {
+        XCTAssertNil(violation("G=/usr/bin/git; $G push"))
+        XCTAssertNil(violation("git $SUBCOMMAND"))
+        XCTAssertNil(violation("/usr/bin/GIT push"))
+        XCTAssertNil(violation("g''it push"))
+        XCTAssertNil(violation("eval \"$(echo Z2l0IHB1c2g= | base64 -d)\""))
+        XCTAssertNil(violation("./my-push-wrapper.sh"))
+        // Over-matched in the other direction: the word is only ever mentioned, never run.
+        XCTAssertEqual(violation("echo git push"), .push)
+    }
+
     func testOnlyAppliesToBash() {
         XCTAssertNil(IntegrationGuard.violation(toolName: "Write", command: "git push"))
         XCTAssertNil(IntegrationGuard.violation(toolName: nil, command: "git push"))
