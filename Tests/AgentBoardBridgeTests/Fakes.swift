@@ -248,8 +248,13 @@ struct BridgeFixture {
         try projects.updateSettings(project.id, settings)
     }
 
+    /// Stands in for `BoardServer`: the handler answers first, and work it deferred — stopping the
+    /// session that is waiting on the answer — runs only afterwards. A test that wants to see the
+    /// gap between the two calls `scoped` directly.
     func call(_ name: String, _ arguments: [String: JSONValue] = [:], as identity: TokenIdentity? = nil) async throws -> ToolResult {
-        try await scoped.call(name, arguments: .object(arguments), identity: identity ?? orchestratorIdentity)
+        let result = try await scoped.call(name, arguments: .object(arguments), identity: identity ?? orchestratorIdentity)
+        await result.afterResponse?()
+        return result
     }
 
     func callJSON(_ name: String, _ arguments: [String: JSONValue] = [:], as identity: TokenIdentity? = nil) async throws -> JSONValue {

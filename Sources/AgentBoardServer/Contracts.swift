@@ -171,13 +171,18 @@ public struct ToolDescriptor: Sendable, Equatable {
     }
 }
 
-public struct ToolResult: Sendable, Equatable {
+public struct ToolResult: Sendable {
     public var text: String
     public var isError: Bool
+    /// Work that must not run until this answer is on the wire. A tool that ends the caller's own
+    /// session — `report_complete` and its siblings — kills the HTTP client waiting on the
+    /// response, and the client then resends. `BoardServer` runs this once the body is written.
+    public var afterResponse: (@Sendable () async -> Void)?
 
-    public init(text: String, isError: Bool = false) {
+    public init(text: String, isError: Bool = false, afterResponse: (@Sendable () async -> Void)? = nil) {
         self.text = text
         self.isError = isError
+        self.afterResponse = afterResponse
     }
 
     /// Keys are sorted so the same value always encodes to the same bytes; a resource body and the
@@ -187,6 +192,13 @@ public struct ToolResult: Sendable, Equatable {
         encoder.outputFormatting = [.sortedKeys]
         let data = (try? encoder.encode(value)) ?? Data("null".utf8)
         return ToolResult(text: String(decoding: data, as: UTF8.self))
+    }
+}
+
+extension ToolResult: Equatable {
+    /// Deferred work is not part of the answer the client sees, so it is not part of equality.
+    public static func == (lhs: ToolResult, rhs: ToolResult) -> Bool {
+        lhs.text == rhs.text && lhs.isError == rhs.isError
     }
 }
 

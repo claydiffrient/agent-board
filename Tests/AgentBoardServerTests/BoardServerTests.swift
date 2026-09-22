@@ -338,6 +338,42 @@ final class BoardServerTests: XCTestCase {
         XCTAssertEqual(error?["message"] as? String, "database exploded")
     }
 
+    /// `report_complete` stops the session waiting on its own answer. The stop is handed back on
+    /// the result and run only once the body has been written, so the gate below cannot be reached
+    /// before the client has the reply: a handler that awaited it inline would hold the response
+    /// open and this request would time out instead of returning 200.
+    func testDeferredToolWorkRunsOnlyAfterTheResponseIsWritten() async throws {
+        let gate = DeferredWorkGate()
+        await tools.setDeferredGate(gate)
+        // `server.stop()` waits on the app, which waits on any request still in flight, so a gate
+        // left shut would hang tear-down rather than fail the test.
+        addTeardownBlock { await gate.open() }
+
+        let answered = expectation(description: "tools/call answered")
+        let call = Task { () -> (Int, Any) in
+            let out = try await self.mcpWithTimeout(
+                self.rpc("tools/call", id: 7, params: ["name": "deferred"]), token: Self.workerToken, seconds: 10
+            )
+            answered.fulfill()
+            return out
+        }
+        // Not just a guard against a wedged test: a handler that awaited the deferred work inline
+        // would never write the body, so the deadline is what turns that regression into a failure
+        // rather than a hang.
+        await fulfillment(of: [answered], timeout: 20)
+        call.cancel()
+        let (status, json) = try await call.value
+
+        XCTAssertEqual(status, 200)
+        let result = (json as? [String: Any])?["result"] as? [String: Any]
+        XCTAssertEqual((result?["content"] as? [[String: Any]])?[0]["text"] as? String, "answered")
+        let ranBeforeItWasLetGo = await gate.ran
+        XCTAssertFalse(ranBeforeItWasLetGo, "the deferred work finished before the client had its answer")
+
+        await gate.waitUntilEntered()
+        await gate.open()
+    }
+
     func testToolsCallWithoutNameIsInvalidParams() async throws {
         let (_, json) = try await mcp(rpc("tools/call", id: 5, params: ["arguments": [:]]), token: Self.workerToken)
         let error = (json as? [String: Any])?["error"] as? [String: Any]
@@ -402,6 +438,17 @@ final class BoardServerTests: XCTestCase {
 
     private func mcpData(_ body: Any, token: String) async throws -> (Int, Data) {
         try await postRaw("/mcp", headers: ["Authorization": "Bearer \(token)"], body: JSONSerialization.data(withJSONObject: body))
+    }
+
+    private func mcpWithTimeout(_ body: Any, token: String, seconds: TimeInterval) async throws -> (Int, Any) {
+        var request = URLRequest(url: url("/mcp"))
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = seconds
+        let (data, response) = try await URLSession.shared.data(for: request)
+        return ((response as! HTTPURLResponse).statusCode, try JSONSerialization.jsonObject(with: data))
     }
 
     private func mcpWithHeaders(_ body: Any, token: String) async throws -> (Int, Any, [String: String]) {
