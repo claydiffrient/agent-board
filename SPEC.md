@@ -2053,6 +2053,24 @@ workspaces plus **None**) or by dragging its row onto a section header. Which
 sections the viewer has collapsed is a per-viewer convenience and lives in
 `UserDefaults`, not the database.
 
+**Project settings** — a sheet from the sidebar row's gear, in six tabs:
+**General** (Repository, Workspace, Archive), **Agents** (Models, Review,
+Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Isolation,
+Publishing), **Notifications**, and **Advanced** (the `autoMode` classifier JSON,
+Extra MCP servers). Tabs group by what a setting governs, not by how often it is
+touched. Every section is in exactly one tab; a section in none would be a stored
+setting with no UI. **Delete Project…** sits outside the tabs, at the left of the
+Cancel/Save row, so it is reachable from every tab. The sheet is at least 780pt
+wide: that is where the grouped form stops widening its rows (~665pt), so the
+classifier editor holds 77 monospaced columns and a wider sheet adds only margin.
+Both multi-line editors span the full row: model guidance sits under its label
+(at least 100pt tall), and the classifier is a plain-text editor at least 280pt
+tall, enough for the shipped default without scrolling, with smart quotes, smart
+dashes and text replacement off so typed JSON parses. Every section's help text
+is the last row of that section, in every tab. Limits keeps a tab of its own: its
+six caps fit one page, while Agents and Workflow already scroll at the sheet's
+minimum height.
+
 **What's New in Agent Board** — the release notes, opened from the Help menu and
 once on their own after an update installs. A `Window` scene rather than a
 `WindowGroup`, so choosing the menu item again — or a second launch that decides

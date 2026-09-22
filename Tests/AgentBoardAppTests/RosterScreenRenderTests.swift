@@ -114,7 +114,7 @@ final class RosterScreenRenderTests: XCTestCase {
 
     private func sheetSwitches(_ db: AppDatabase, _ project: Project) -> [NSControl.StateValue] {
         let mounted = mount(
-            ProjectSettingsSheet(project: project, workspaces: [], onDeleted: {})
+            ProjectSettingsSheet(project: project, workspaces: [], initialTab: .agents, onDeleted: {})
                 .environment(environment(db))
         )
         mounted.settle()
