@@ -343,22 +343,45 @@ public struct Board: Sendable {
 
     /// A finished task and where the project's review level sends it. `autoAccept` is the caller's
     /// cue to run `accept` — the same call a human Accept makes — rather than a second accept path.
+    ///
+    /// `report_complete` reaches the server more than once for one tool call: the handler stops the
+    /// worker before answering it, the answer is lost with the process, and the MCP client resends.
+    /// A resent call finds the first report and re-runs nothing, so `wasAlreadyComplete` is what
+    /// tells the caller to route none of it again — no acceptance, no reviewer, no events. SPEC §5.
     public struct CompletionOutcome: Sendable {
         public var report: Report
         public var level: ReviewLevel
         public var routing: ReviewRouting
+        /// Where the task actually sits: `review`, `done` under `afterEpicMerge`, or, on a resend,
+        /// wherever it has been moved to since the first call.
+        public var column: TaskColumn
+        public var wasAlreadyComplete: Bool
 
-        public var autoAccept: Bool { routing == .autoAccept }
+        /// Never true on a resend: the first call already ran the acceptance path.
+        public var autoAccept: Bool { routing == .autoAccept && !wasAlreadyComplete }
     }
 
     /// Records the report and parks the task where §5's review level says. Under `.none` (and `.epic`
     /// for a task inside an epic) the task stays in `review` for the length of this transaction only:
     /// `autoAccept` tells the caller to run the ordinary acceptance path, which is where the
     /// newly-ready announcement, grant revocation and worktree removal live.
+    ///
+    /// A second call from the same session returns the first report with `wasAlreadyComplete` set and
+    /// writes nothing — the guard reads inside this write transaction, so two concurrent resends
+    /// cannot both pass it, and the review routing below never runs twice.
     @discardableResult
     public func complete(taskId: String, sessionId: String, summary: String) throws -> CompletionOutcome {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
+            if let existing = try ReportStore.completion(db, taskId: taskId, sessionId: sessionId) {
+                return CompletionOutcome(
+                    report: existing,
+                    level: try ReviewPolicy.level(db, task: task),
+                    routing: try ReviewPolicy.routing(db, task: task),
+                    column: task.column,
+                    wasAlreadyComplete: true
+                )
+            }
             let report = try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .complete, body: summary
             )
@@ -370,7 +393,8 @@ public struct Board: Sendable {
             // reaching `done` in this same transaction is its acceptance, and a task the sweep is about
             // to archive has no business sitting in the review queue. Every other policy leaves it in
             // `review` for a human, exactly as before.
-            try TaskStore.move(db, taskId, to: sweepsOnMerge ? .done : .review, before: nil)
+            let column: TaskColumn = sweepsOnMerge ? .done : .review
+            try TaskStore.move(db, taskId, to: column, before: nil)
             try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
             try FileLockStore.releaseAll(db, sessionId: sessionId)
             if let mergedEpicId {
@@ -398,7 +422,9 @@ public struct Board: Sendable {
                     )
                 }
             }
-            return CompletionOutcome(report: report, level: level, routing: routing)
+            return CompletionOutcome(
+                report: report, level: level, routing: routing, column: column, wasAlreadyComplete: false
+            )
         }
     }
 

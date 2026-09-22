@@ -963,6 +963,15 @@ its own `accept_task` has nothing to decide. A reviewer that cannot be started
 leaves the task in `review` for a person and says so in a `progress` row, which
 is where `task` review would have parked it anyway.
 
+None of that runs twice. `report_complete` is idempotent per `(session_id,
+task_id)`: the handler stops the worker before it answers, so the answer is
+routinely lost and the MCP client resends the call. `Board.complete` reads the
+session's existing `complete` report inside its own write transaction and returns
+it untouched — before the routing, the reviewer write, the acceptance and the
+spawn are reached — so a resend inserts no second row, moves no task, sets no
+reviewer, starts no second reviewer and fires no second event. The answer names
+the first report's id and the column the task actually sits in.
+
 A rostered reviewer under `agent` review gets its own token scope (§6), narrower
 than a worker's: `get_my_task`, `log_progress`, `accept_task(verdict)` and
 `reopen_task(findings)` over the one task its token names, and nothing else — no
@@ -1121,7 +1130,7 @@ is reached by neither.
 | `replace_section(note_id, heading, body, if_version)` | Section-scoped write |
 | `create_note(title, sections)` | New note, unpinned |
 | `propose_task(title, body, rationale, epic_id)` | Inserts into `proposed`, carrying `epic_id` onto the row so promotion lands it there |
-| `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review`, or to `done` where the review level (§5) says so |
+| `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review`, or to `done` where the review level (§5) or `afterEpicMerge` (§5.2) says so — the answer names the column it landed in. Idempotent per `(session_id, task_id)`: the MCP client resends the call when the answer is lost, and it is routinely lost because the handler stops the worker before replying, so a second call returns the first report's id and re-runs nothing — no second row, no second move, no second stop, no reviewer assigned and no second auto-acceptance |
 | `hand_off(summary, next_role, files_changed)` | Inserts a `handoff` `report` and a `progress` row; moves task to `ready`, keeps the worktree, stops the session |
 | `report_blocked(reason)` | Inserts a `report`; sets `blocked` |
 | `acknowledge_shutdown(note)` | Answers a wind-down order (§8). Records `note` against the delivery and the task, then Agent Board stops the session. The task goes back to `ready`, never `review` (§5) — this is not `report_complete` |

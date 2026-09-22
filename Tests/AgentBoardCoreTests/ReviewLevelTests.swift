@@ -103,6 +103,32 @@ final class ReviewLevelTests: XCTestCase {
         XCTAssertTrue(rows.contains { $0.contains("Rowan") }, "\(rows)")
     }
 
+    /// The resend arrives after the first call already routed the task, so the routing must not run
+    /// again inside the guard: a second `setReviewer` would overwrite whoever holds it now, and a
+    /// second progress row would claim the hand-off happened twice.
+    func testAResentCompleteUnderAgentReviewRoutesNothingASecondTime() throws {
+        try setProjectLevel(.agent)
+        try reviewer("Rowan")
+        let task = try f.task("write the parser", column: .ready)
+
+        let first = try complete(task)
+        XCTAssertFalse(first.wasAlreadyComplete)
+        let rowsAfterFirst = try f.progress.list(taskId: task.id).map(\.text)
+        // Clearing it is what makes a re-run visible: the guard's absence writes the reviewer back.
+        try f.tasks.setReviewer(task.id, nil)
+
+        let again = try f.board.complete(taskId: task.id, sessionId: "w1", summary: "done")
+
+        XCTAssertTrue(again.wasAlreadyComplete)
+        XCTAssertEqual(again.report.id, first.report.id)
+        XCTAssertNil(try f.tasks.get(task.id)?.reviewerAgentId, "the resend assigned the reviewer again")
+        XCTAssertEqual(
+            try f.progress.list(taskId: task.id).map(\.text), rowsAfterFirst,
+            "the resend appended the agent-review progress row a second time"
+        )
+        XCTAssertEqual(try f.reports.unconsumed(projectId: f.project.id).filter { $0.kind == .complete }.count, 1)
+    }
+
     func testAgentReviewWithNoRosteredReviewerFallsBackToAHumanAndRecordsWhy() throws {
         try setProjectLevel(.agent)
         try reviewer("Dana", role: "frontend")

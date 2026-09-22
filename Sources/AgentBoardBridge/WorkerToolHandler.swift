@@ -180,7 +180,9 @@ public final class WorkerToolHandler: ToolHandler {
         case "commit_my_work":
             return try await commitMyWork(task, arguments: arguments, identity: identity)
         case "report_complete":
-            let result = try await reportComplete(task, arguments: arguments, identity: identity)
+            let outcome = try reportComplete(task, arguments: arguments, identity: identity)
+            guard !outcome.wasAlreadyComplete else { return Self.completionResult(outcome) }
+            let result = await routeCompletion(task, outcome: outcome)
             if let sessionId = identity.sessionId {
                 await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
             }
@@ -396,7 +398,7 @@ public final class WorkerToolHandler: ToolHandler {
 
     private func reportComplete(
         _ task: BoardTask, arguments: JSONValue, identity: TokenIdentity
-    ) async throws -> ToolResult {
+    ) throws -> Board.CompletionOutcome {
         let summary = try ToolArguments.requiredString("summary", in: arguments)
         let files = arguments["files_changed"]?.arrayValue ?? []
         let body: JSONValue = .object([
@@ -408,14 +410,21 @@ public final class WorkerToolHandler: ToolHandler {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(body)
-        let outcome = try board.complete(
+        return try board.complete(
             taskId: task.id, sessionId: try requiredSession(identity), summary: String(decoding: data, as: UTF8.self)
         )
+    }
+
+    /// Reached only by a first `report_complete`. A resend is answered before it gets here, because
+    /// none of this may run twice: the acceptance path removes the worktree, and the reviewer spawn
+    /// would put a second agent on a task the first reviewer already holds.
+    private func routeCompletion(_ task: BoardTask, outcome: Board.CompletionOutcome) async -> ToolResult {
+        let recorded = Self.recordedLine(outcome)
         guard outcome.autoAccept else {
             if case .agentReview(let agentId, let agentName) = outcome.routing {
-                return await spawnReviewer(task, agentId: agentId, agentName: agentName)
+                return await spawnReviewer(task, recorded: recorded, agentId: agentId, agentName: agentName)
             }
-            return ToolResult(text: "Report recorded. The task is now in Review. Stop here; do not start further work.")
+            return Self.completionResult(outcome)
         }
         // Not a second accept path: this is the call the Accept button makes, so the newly-ready
         // announcement, the grant revocation and the worktree removal all run exactly once, here.
@@ -423,25 +432,41 @@ public final class WorkerToolHandler: ToolHandler {
             try await control.accept(taskId: task.id, acceptedBy: .policy(outcome.level))
         } catch {
             return ToolResult(
-                text: "Report recorded. This project needs no review, but the task could not be accepted "
+                text: "\(recorded) This project needs no review, but the task could not be accepted "
                     + "automatically and is waiting in Review: \(error). Stop here; do not start further work."
             )
         }
         return ToolResult(
-            text: "Report recorded. This project needs no review, so the task went straight to Done and its "
+            text: "\(recorded) This project needs no review, so the task went straight to Done and its "
                 + "worktree has been removed. Stop here; do not start further work."
         )
+    }
+
+    private static func completionResult(_ outcome: Board.CompletionOutcome) -> ToolResult {
+        ToolResult(
+            text: "\(Self.recordedLine(outcome)) The task is now in \(outcome.column.rawValue.capitalized). "
+                + "Stop here; do not start further work."
+        )
+    }
+
+    private static func recordedLine(_ outcome: Board.CompletionOutcome) -> String {
+        let id = outcome.report.id.map(String.init) ?? "—"
+        return outcome.wasAlreadyComplete
+            ? "Report \(id) was already recorded for this task; this call changed nothing."
+            : "Report \(id) recorded."
     }
 
     /// The reviewer runs in this worker's own worktree on its own branch: `spawn` keys the checkout
     /// on the task id, so reviewing the work needs no worktree of its own and no merge to see it.
     /// A reviewer that cannot be started leaves the task in `review` for a person, which is the same
     /// place `humanReview` would have parked it, so the worker's own report is never lost to it.
-    private func spawnReviewer(_ task: BoardTask, agentId: String, agentName: String) async -> ToolResult {
+    private func spawnReviewer(
+        _ task: BoardTask, recorded: String, agentId: String, agentName: String
+    ) async -> ToolResult {
         do {
             _ = try await control.assignAgent(taskId: task.id, rosterAgentId: agentId, scope: .reviewer)
             return ToolResult(
-                text: "Report recorded. The task is now in Review, held by rostered reviewer \(agentName), "
+                text: "\(recorded) The task is now in Review, held by rostered reviewer \(agentName), "
                     + "which is starting in your worktree on your branch. Stop here; do not start further work."
             )
         } catch {
@@ -450,7 +475,7 @@ public final class WorkerToolHandler: ToolHandler {
                 text: "Agent review: reviewer \(agentName) could not be started (\(error)), so this task needs a person."
             )
             return ToolResult(
-                text: "Report recorded. The task is now in Review. Its rostered reviewer could not be started, "
+                text: "\(recorded) The task is now in Review. Its rostered reviewer could not be started, "
                     + "so a person will look at it. Stop here; do not start further work."
             )
         }

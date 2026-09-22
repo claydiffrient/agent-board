@@ -35,6 +35,34 @@ final class BoardTests: XCTestCase {
         XCTAssertEqual(try f.tasks.get(downstream.id)?.column, .ready)
     }
 
+    /// The guard is keyed on the session, not the task: a retried call from the same worker is a
+    /// no-op, but the next attempt's worker files a report of its own.
+    func testCompleteIsIdempotentPerSessionAndNotPerTask() throws {
+        let f = try Fixture.make()
+        let t = try f.task("build it", column: .ready)
+        try f.board.assign(taskId: t.id, session: f.session("s1", state: .running))
+
+        let first = try f.board.complete(taskId: t.id, sessionId: "s1", summary: "shipped")
+        try f.tasks.move(t.id, to: .done)
+        let again = try f.board.complete(taskId: t.id, sessionId: "s1", summary: "shipped")
+
+        XCTAssertFalse(first.wasAlreadyComplete)
+        XCTAssertEqual(first.column, .review)
+        XCTAssertTrue(again.wasAlreadyComplete)
+        XCTAssertEqual(again.report.id, first.report.id)
+        XCTAssertEqual(again.column, .done, "the retry moved a task it should not have touched")
+        XCTAssertEqual(try f.tasks.get(t.id)?.column, .done)
+
+        try f.board.reopen(taskId: t.id)
+        try f.board.assign(taskId: t.id, session: f.session("s2", state: .running))
+        let retry = try f.board.complete(taskId: t.id, sessionId: "s2", summary: "shipped again")
+        XCTAssertFalse(retry.wasAlreadyComplete)
+        XCTAssertNotEqual(retry.report.id, first.report.id)
+
+        let completes = try f.reports.unconsumed(projectId: f.project.id).filter { $0.kind == .complete }
+        XCTAssertEqual(completes.count, 2)
+    }
+
     func testAttemptCounterIncrementsPerTask() throws {
         let f = try Fixture.make()
         let t = try f.task("retry me", column: .ready)

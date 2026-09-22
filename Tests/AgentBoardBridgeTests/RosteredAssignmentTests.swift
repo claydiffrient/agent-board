@@ -156,6 +156,35 @@ final class AgentReviewSpawnTests: XCTestCase {
         XCTAssertTrue(result.text.contains("Rae"), result.text)
     }
 
+    /// The transport resends `report_complete` when the answer is lost, which is routine here. Under
+    /// agent review a resend that got through the guard would put a second reviewer into the same
+    /// worktree on the same branch, so the answer must come back before any of the routing runs.
+    func testAResentReportCompleteStartsNoSecondReviewer() async throws {
+        let rae = try f.rosterReviewer("Rae")
+
+        let first = try await reportComplete()
+        let rowsAfterFirst = try f.progress.list(taskId: task.id).map(\.text)
+        try f.tasks.setReviewer(task.id, nil)
+
+        let second = try await reportComplete()
+
+        let assigned = await f.control.assigned
+        XCTAssertEqual(assigned.count, 1, "the resend spawned a second reviewer")
+        XCTAssertEqual(assigned.first?.rosterAgentId, rae.id)
+        XCTAssertNil(try f.tasks.get(task.id)?.reviewerAgentId, "the resend assigned the reviewer again")
+        XCTAssertEqual(
+            try f.progress.list(taskId: task.id).map(\.text), rowsAfterFirst,
+            "the resend appended the agent-review progress row a second time"
+        )
+        XCTAssertEqual(try f.reports.unconsumed(projectId: f.project.id).filter { $0.kind == .complete }.count, 1)
+        XCTAssertTrue(first.text.contains("Rae"), first.text)
+        XCTAssertTrue(second.text.contains("was already recorded"), second.text)
+
+        let events = await f.events.events
+        XCTAssertEqual(events.filter { $0 == .workerCompleted(projectId: f.project.id, sessionId: "s1") }.count, 1)
+        XCTAssertEqual(events.filter { $0 == .reportQueued(projectId: f.project.id) }.count, 1)
+    }
+
     func testAReviewerThatCannotBeStartedLeavesTheTaskInReviewForAPerson() async throws {
         try f.rosterReviewer("Rae")
         await f.control.setAssignFailure(BoardError.projectNotFound("gone"))
