@@ -199,8 +199,9 @@ final class GlobalShutdownSupervisorTests: XCTestCase {
                 tokens: StoreTokenResolver(db: fixture.db),
                 hooks: StoreHookSink(db: fixture.db, events: sink),
                 tools: ScopedToolHandler(
-                    worker: WorkerToolHandler(db: fixture.db, events: sink),
-                    orchestrator: OrchestratorToolHandler(db: fixture.db, control: sink, events: sink)
+                    worker: WorkerToolHandler(db: fixture.db, control: sink, events: sink),
+                    orchestrator: OrchestratorToolHandler(db: fixture.db, control: sink, events: sink),
+                    reviewer: ReviewerToolHandler(db: fixture.db, control: sink, events: sink)
                 )
             ),
             appSupportDir: fixture.supportDir,

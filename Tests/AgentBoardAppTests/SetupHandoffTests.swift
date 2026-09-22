@@ -163,8 +163,9 @@ final class SetupHandoffTests: XCTestCase {
                 tokens: StoreTokenResolver(db: fixture.db),
                 hooks: StoreHookSink(db: fixture.db, events: LateBoundSink()),
                 tools: ScopedToolHandler(
-                    worker: WorkerToolHandler(db: fixture.db, events: LateBoundSink()),
-                    orchestrator: OrchestratorToolHandler(db: fixture.db, control: LateBoundSink(), events: LateBoundSink())
+                    worker: WorkerToolHandler(db: fixture.db, control: LateBoundSink(), events: LateBoundSink()),
+                    orchestrator: OrchestratorToolHandler(db: fixture.db, control: LateBoundSink(), events: LateBoundSink()),
+                    reviewer: ReviewerToolHandler(db: fixture.db, control: LateBoundSink(), events: LateBoundSink())
                 )
             ),
             appSupportDir: fixture.supportDir,

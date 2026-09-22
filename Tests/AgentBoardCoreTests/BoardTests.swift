@@ -19,7 +19,7 @@ final class BoardTests: XCTestCase {
         XCTAssertEqual(try f.tasks.get(t.id)?.column, .running)
         XCTAssertEqual(try f.sessions.get("s1"), inserted)
 
-        let report = try f.board.complete(taskId: t.id, sessionId: "s1", summary: "shipped")
+        let report = try f.board.complete(taskId: t.id, sessionId: "s1", summary: "shipped").report
         XCTAssertEqual(report.kind, .complete)
         XCTAssertEqual(report.body, "shipped")
         XCTAssertNotNil(report.id)

@@ -34,6 +34,7 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D17 | Swift + SwiftUI | Literal reading of "native Mac app" | Tauri |
 | D18 | Runtime spike → board → orchestrator → epics → notes | The riskiest assumption is provable in 200 lines | Build everything |
 | D19 | The Terminal screen and worktree shells (§10) run with the human's own authority: `IntegrationGuard` and `--disallowedTools` deliberately do not gate them, and no Agent Board grant token may reach the shell's environment | A human typing `git push` is entitled to push — those mechanisms bound what an unattended agent may do under `--permission-mode auto`, and there is no agent here; a shell holding a grant token would let anything running in it act with that session's authority over the board | Route the shell through a worker-scoped grant |
+| D20 | A cross-project roster of specialized agents (§4), assigned a task with `assign_to_agent` and returned to the queue with `hand_off` (§6) | A rostered identity outlives any single task, and mediating handoff through the board queue keeps D6's worktree-per-task model instead of building a second coordination path | Hive's model: every agent works on `main`, and a privileged orchestrator arbitrates conflicts between them |
 
 **D6 amended.** As first written, D6 said every task gets its own worktree and
 its own branch bound to the task id. That now holds only under
@@ -294,6 +295,15 @@ each session's token are written into that session's generated `--mcp-config`
 and `--settings` files, so nothing is discoverable by a process that wasn't
 spawned by Agent Board.
 
+A rostered agent (§4) is not a third kind of process: it is one of the same
+`Workers (N, capped)` boxes, spawned through the same `AgentRuntime`, just
+carrying a `RosterAgent` identity that names it in the opening prompt and
+narrows its `--disallowedTools` (§3.1). A rostered reviewer under `agent`
+review (§5) is the same worker box again, holding a `reviewer`-scoped token
+instead of `worker`, spawned into the same task's worktree rather than a new
+one. Neither gets a dedicated column in the diagram above; `role` in
+`agent_session` is still only `orchestrator` or `worker` for both.
+
 ### 3.1 Spawn procedure
 
 For a task `T` in project `P`:
@@ -364,6 +374,21 @@ For a task `T` in project `P`:
    shared placement, since there is no per-task worktree to record. The token
    grant is bound to the session at this point, not before spawn.
 
+`assign_to_agent` (§6) runs this same procedure with a `RosterAgent` resolved
+up front against `RosterStore.usableAgent` (refused if the agent is not
+enabled and selected for this project) and threaded through three of the
+steps above rather than a fourth path of its own: step 6's prompt gains an
+identity section before the task body (`OpeningPrompt.renderIdentity` — name,
+role, and the agent's own system prompt, "this identity is yours across every
+task you are given"); step 6's `--model` becomes `task.model ?? agent.model ??
+project default`, most specific override wins; and step 7's
+`--disallowedTools` gains the agent's own `disallowed_tools` patterns appended
+after the fixed push/PR block. `assign_to_agent` under `reviewer` scope (used
+only to start a rostered reviewer, §5.1) skips the `running` transition step 8
+would otherwise make — the task stays in `review` — and lands the reviewer in
+the *worker's own* worktree rather than cutting one, since it is keyed on the
+same task id.
+
 Steps 1-2 are synchronous; `spawn_worker` answers between step 2 and step 3,
 with a row in `agent_session` under a placeholder id and state `setup`, and the
 task already in `running`. Steps 3-8 finish in the background, because on a
@@ -404,8 +429,8 @@ CREATE TABLE project (
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
-                                   -- buildCommand, testCommand, archivePolicy, worktreeStrategy,
-                                   -- sharedCheckoutMaxAgents
+                                   -- reviewLevel, buildCommand, testCommand, archivePolicy,
+                                   -- worktreeStrategy, sharedCheckoutMaxAgents, rosterAgentIds
   created_at      INTEGER NOT NULL,
   workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
 );
@@ -417,7 +442,8 @@ CREATE TABLE epic (
   goal           TEXT,
   branch         TEXT NOT NULL,    -- agentboard/epic-<id>
   state          TEXT NOT NULL,    -- planning | active | integrating | done | abandoned
-  created_at     INTEGER NOT NULL
+  created_at     INTEGER NOT NULL,
+  review_level   TEXT              -- none|agent|task|epic for this epic's tasks; NULL inherits the project's
 );
 
 CREATE TABLE task (
@@ -438,6 +464,8 @@ CREATE TABLE task (
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
+  reviewer_agent_id TEXT REFERENCES roster_agent(id),  -- the rostered reviewer holding it in `review`
+  roster_agent_id TEXT REFERENCES roster_agent(id),    -- the rostered agent that last worked it
   archived_at    INTEGER,          -- non-null = archived: hidden from the board, never deleted
   done_at        INTEGER,          -- entered done; cleared on leaving. The afterDays clock
   unarchived_at  INTEGER           -- a human pulled it back; no automatic policy touches it again
@@ -477,7 +505,8 @@ CREATE TABLE agent_session (
   stop_reason    TEXT,
   tool_started_at INTEGER,           -- oldest tool call not yet seen to return
   tools_in_flight INTEGER NOT NULL DEFAULT 0,
-  blocked_on_path TEXT                -- §8.4: the shared-checkout file lock this session is waiting on
+  blocked_on_path TEXT,               -- §8.4: the shared-checkout file lock this session is waiting on
+  roster_agent_id TEXT REFERENCES roster_agent(id)  -- §10: the rostered identity this session runs as
 );
 
 CREATE TABLE token_grant (
@@ -595,6 +624,28 @@ CREATE TABLE hook_event (
   payload     TEXT NOT NULL,
   at          INTEGER NOT NULL
 );
+
+-- The roster is cross-project: no project_id. Projects opt in below.
+CREATE TABLE roster_agent (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  role          TEXT NOT NULL,          -- free-text specialty: frontend | reviewer | ...
+  system_prompt TEXT NOT NULL,          -- identity and specialty, injected at spawn
+  model         TEXT,                   -- overrides project settings.defaultModel
+  disallowed_tools TEXT NOT NULL DEFAULT '[]',  -- JSON array of extra --disallowedTools patterns;
+                                                -- a deny-list, so empty = a full worker's authority
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+
+CREATE TABLE project_roster_agent (
+  project_id      TEXT NOT NULL REFERENCES project(id),
+  roster_agent_id TEXT NOT NULL REFERENCES roster_agent(id),
+  ordering        REAL NOT NULL,        -- the project's preference order for the orchestrator
+  PRIMARY KEY (project_id, roster_agent_id)
+);
+CREATE INDEX project_roster_agent_order ON project_roster_agent(project_id, ordering);
 ```
 
 Every `epic.state` value is written by exactly one place, and nothing writes one
@@ -622,6 +673,36 @@ never a billed amount.
 Notes are sectioned rather than a single body specifically so three concurrent
 workers appending to one note do not silently lose each other's writes. Whole-
 document replace is not offered.
+
+`roster_agent.disallowed_tools` is a **deny-list**, not an allow-list: its
+patterns are appended to the worker default `--disallowedTools` at spawn, so a
+rostered agent can only ever have *less* authority than a plain worker and can
+never grant itself anything. That is why `NOT NULL DEFAULT '[]'` is the right
+default — an empty list is exactly a full worker's authority, which is the status
+quo for an unrostered one.
+
+`roster_agent.role` is a plain string, not an enum: the roster is user-defined,
+so adding a specialty must not need a migration. A project's *usable* set is
+`project_roster_agent` joined to `roster_agent` where `enabled = 1` — disabling
+an agent roster-wide takes it out of every project's rotation without removing
+anyone's selection. Deleting a rostered agent clears its `project_roster_agent`
+rows and nothing else: the tasks it worked, its sessions, and the `progress`
+rows naming it all survive it.
+
+There is no `is_reviewer` flag. `RosterAgent.isReviewer` reads
+`role.lowercased().contains("review")` — a "reviewer", "Reviewer", or "code
+reviewer" role all qualify, because the roster is user-defined text and a
+second field would just be a second way to say the same thing. Under `agent`
+review (§5), `ReviewPolicy.routing` takes the project's usable, enabled
+reviewers and picks `reviewers.first` — the first in `project_roster_agent`'s
+own `ordering`, not by task type, workload, or rotation. One project with two
+reviewer-role agents always routes to whichever sorts first; there is no way
+to route different tasks to different reviewers today.
+
+`settings_json.reviewLevel` is one of `none`, `agent`, `task` or `epic` and
+defaults to **`task`**, so a project that predates the setting behaves exactly as
+it did. `epic.review_level` overrides it for that epic's tasks; NULL inherits.
+Nothing else reads either value — the level is resolved once, on completion (§5).
 
 `archived_at` is a flag on a task, not a seventh column — D7 fixes the six, and
 `blocked`/`failed` are the precedent. Only a task in `done` may be archived;
@@ -690,9 +771,29 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
                           ┌──────────────────────────────────────┤
                           ▼                                      ▼
                        review ──accept──> done              failed (flag)
-                          │                                      │
+                          │                  ▲                   │
+                          │                  │                   │
+                          │      no review / epic review:        │
+                          │      complete goes straight here     │
                           └──────────── reopen ──────────────────┘
 ```
+
+Which of those two edges a completed task takes is the **review level** (§4), a
+project setting an epic may override for its own tasks:
+
+| Level | A completed task | Who decides |
+|---|---|---|
+| `none` | goes straight to `done` | nobody looks |
+| `agent` | waits in `review`, assigned to a rostered reviewer | that agent |
+| `task` | waits in `review` | you (**the default**) |
+| `epic` | inside an epic, goes straight to `done`; standalone, waits in `review` | you, at the epic's integration gate |
+
+The level is resolved on completion: the task's epic's `review_level` if it has
+one, otherwise the project's. Two rules override it unconditionally. An epic's
+integration task (`origin = integration`) always waits for a person, at every
+level — §5.2's gate is not weakened by this setting. And `agent` with no usable
+rostered reviewer falls back to `task` and says so in a `progress` row, rather
+than accepting work nobody reviewed.
 
 - `proposed` — created by a worker via `propose_task`. Neither the orchestrator
   nor a worker may promote a worker proposal without human approval when
@@ -721,14 +822,28 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
   worker stopped and what remains"), not a `failed` report. A worker that
   vanishes or is cap-killed still gets the old `failed` shape; only an
   acknowledged wind-down gets this one.
+- **Handed off** — a rostered agent that did only the portion matching its
+  specialty calls `hand_off` (§6) instead of `report_complete`. Like a
+  wind-down, the task goes back to `ready`, **never to `review`**, and
+  `failed` is never set; unlike a wind-down, nothing asked it to stop — it
+  decided its part was done. The worktree and branch are kept, so the next
+  agent assigned works the same checkout (D6), and `Board.assign` refuses a
+  second session into a task or worktree an active one still holds. This is
+  the fourth termination shape alongside a cap kill, a human stop, and an
+  acknowledged wind-down; each is distinguishable by report kind
+  (`handoff`, `failed`, none, `decision`) and by the session's `stop_reason`.
 - `blocked` — a flag, not a column. Set by the `Notification` hook, cleared on
   the next `PostToolUse`. The card keeps its position and shows why.
-- `review` — worker has committed and called `report_complete`. Under
-  `worktree` that means a commit on `agentboard/<task-id>`, and the worktree is
-  retained; under `shared` it means an attributed commit — via `commit_my_work`,
-  never `git commit` (§8.4) — on the branch the task shared with its
-  co-resident siblings, and there is no per-task worktree to retain.
-- `done` — you accept it. Every attempt's worktree is removed (firing the
+- `review` — worker has committed and called `report_complete`, and the review
+  level (§5) says someone must look. Under `worktree` that means a commit on
+  `agentboard/<task-id>`, and the worktree is retained; under `shared` it means
+  an attributed commit — via `commit_my_work`, never `git commit` (§8.4) — on
+  the branch the task shared with its co-resident siblings, and there is no
+  per-task worktree to retain. Under the `agent` review level the task carries
+  `reviewer_agent_id`, the rostered reviewer holding it; under `task` it waits
+  on you.
+- `done` — you accept it, or, under `none`/`epic`/`agent`, the review level or a
+  rostered reviewer does. Every attempt's worktree is removed (firing the
   existing `WorktreeRemove` hook, which reclaims Bazel `output_base` on
   Derivita), and `agentboard/<task-id>` is deleted once it is merged into the
   base or epic branch. An unmerged branch, or a worktree with uncommitted
@@ -830,6 +945,32 @@ A worker's closing instructions, injected at spawn, worded per placement
    (`--disallowedTools` and the `PreToolUse` hook, §8); the instruction exists
    so the agent does not waste a turn discovering that.
 3. Call `report_complete(summary, files_changed, tests_run, caveats)`.
+
+`report_complete` records the report and then resolves the review level. Where
+the level accepts the task, it runs **the same acceptance a human Accept runs** —
+the newly-ready announcement, the grant revocation and the worktree removal are
+one code path (`WorkerControl.accept`), not a second one that has to be kept in
+step. The worker's return text tells it which happened.
+
+Under `agent` review the reviewer is **started**, not merely recorded:
+`report_complete` resolves the routing, writes `reviewer_agent_id`, and then
+spawns the reviewer through `WorkerControl.assignAgent(taskId:rosterAgentId:
+scope:)` with `reviewer` scope. The spawn is keyed on the task id, so the
+reviewer lands in the worker's own worktree on the worker's branch — the work is
+there to read with no merge and no checkout of its own — and it is the one spawn
+that does **not** move the task to `running`: a review must stay in `review` or
+its own `accept_task` has nothing to decide. A reviewer that cannot be started
+leaves the task in `review` for a person and says so in a `progress` row, which
+is where `task` review would have parked it anyway.
+
+A rostered reviewer under `agent` review gets its own token scope (§6), narrower
+than a worker's: `get_my_task`, `log_progress`, `accept_task(verdict)` and
+`reopen_task(findings)` over the one task its token names, and nothing else — no
+spawn, no reassign, no other task. `accept_task` writes the verdict to `progress`
+and then takes that same acceptance path; `reopen_task` puts the findings on the
+task and returns it to `ready` without flagging a failure. The verdict on the
+task is the point: a person reading a task that reached `done` without them can
+see who approved it and why.
 
 ### 5.2 Epic integration
 
@@ -980,12 +1121,49 @@ is reached by neither.
 | `replace_section(note_id, heading, body, if_version)` | Section-scoped write |
 | `create_note(title, sections)` | New note, unpinned |
 | `propose_task(title, body, rationale, epic_id)` | Inserts into `proposed`, carrying `epic_id` onto the row so promotion lands it there |
-| `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review` |
+| `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review`, or to `done` where the review level (§5) says so |
+| `hand_off(summary, next_role, files_changed)` | Inserts a `handoff` `report` and a `progress` row; moves task to `ready`, keeps the worktree, stops the session |
 | `report_blocked(reason)` | Inserts a `report`; sets `blocked` |
 | `acknowledge_shutdown(note)` | Answers a wind-down order (§8). Records `note` against the delivery and the task, then Agent Board stops the session. The task goes back to `ready`, never `review` (§5) — this is not `report_complete` |
 
 A worker may not read other tasks, reassign, create a non-proposal task, or
 spawn anything.
+
+`hand_off` is for a rostered agent that does only the portion matching its
+specialty. It never sets the `failed` flag, and it releases the session's hold
+on the task so nothing believes that agent is still working it. The worktree is
+retained: the next agent assigned to the task works the same checkout, which is
+what D6 buys. `next_role` is advisory — the orchestrator decides who gets it.
+Two live sessions must never hold one worktree, so `Board.assign` refuses, in
+its write transaction, any session for a task an active worker still holds or
+for a worktree path an active session is already in.
+
+The hand-off ends the session then and there: it raises `workerCompleted`, the
+same signal `report_complete` raises, on which the supervisor stops the agent.
+The task is back in `ready` and may be dispatched into that same worktree
+immediately, so leaving the previous agent resident would put two `claude`
+processes in one checkout, and waiting for the periodic sweep to reap it would
+hold its memory meanwhile. `workerCompleted` says only that a session is
+finished; a hand-off stays distinguishable from a completion by its `handoff`
+report kind, by the task sitting in `ready` rather than `review`, and by the
+session's `handed off` stop reason.
+
+### Reviewer scope
+
+Held by a rostered reviewer under `agent` review (§5). Deliberately not a subset
+of orchestrator scope: it is the authority to move one named task out of
+`review`, and nothing besides.
+
+| Tool | Effect |
+|---|---|
+| `get_my_task()` | The task under review and its `progress` rows |
+| `log_progress(text)` | Appends to `progress` |
+| `accept_task(verdict)` | Writes the verdict to `progress`, then runs the ordinary acceptance (§5.1) |
+| `reopen_task(findings)` | Writes the findings to `progress`; moves the task to `ready` without flagging failure |
+
+Every call reads the task id off the token, never off the arguments, so a
+reviewer cannot reach a task it was not given. It cannot spawn, reassign, stop a
+session, query the board, propose, or report on its own behalf.
 
 ### Orchestrator scope
 
@@ -1006,6 +1184,8 @@ Everything in worker scope over any task in the project, plus:
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
 | `pin_note(note_id, pinned)` | Every future agent sees it in its note index and can fetch it |
 | `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting |
+| `list_roster_agents()` | The rostered agents this project has enabled, in its own preference order |
+| `assign_to_agent(task_id, roster_agent_id)` | `spawn_worker` carrying a rostered identity: the same caps, shutdown and autonomy gates, worker scope, and the agent's own deny list layered on. An agent outside the project's usable set is refused |
 | `stop_worker(session_id)` | `claude stop` |
 | `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
@@ -1170,6 +1350,19 @@ Per project, overridable:
 | Idle (no tool use, no output), sleep excluded | 5 min (6× while a tool call is running) | Agent stopped, task flagged |
 | Project session ceiling | configurable | Spawn refused |
 
+- **A rostered session (`agent_session.roster_agent_id` set — a worker spawned
+  by `assign_to_agent`, or a reviewer spawned under `agent` review) is exempt
+  from the elapsed and idle caps.** `WorkerSupervisor.exempting` overrides both
+  to `nil` before `CapEvaluator.evaluate` runs, so a rostered agent can neither
+  stall out nor run long and be stopped for it. **This is deliberate, not an
+  oversight** — the epic that built the roster decided no caps apply to it for
+  now, on the reasoning that a durable, human-curated identity is not the same
+  liability as an unattended one-off worker — and it is meant to be revisited,
+  not treated as the final shape. The token cap is unchanged for a rostered
+  session: it meters spend, not liveness, so it still applies when a project
+  sets one. The concurrent-workers and session-ceiling caps are unaffected
+  too, since both count on `role = 'worker'` in `agent_session`, which a
+  rostered session still is.
 - A stopped agent's task returns to `ready` with its `failure_reason` set, and a
   `failed` report goes to the orchestrator (§9.1). Leaving it in `running` with
   no session strands it: nothing can be spawned from `running`.
@@ -1801,6 +1994,23 @@ as dead rather than phantom-running. Per agent: task, state, elapsed, spend
 against cap, last tool used. A blocked agent's row opens its terminal, which is
 how permission prompts get answered (D15).
 
+**Roster** — the cross-project register of specialists (§4), and the one screen
+not scoped to a project: a `Roster` row in the sidebar beside `At a Glance` and
+above the workspace sections, so it does not join Task Board and Status inside a
+project. Per agent: name, role, model, an enabled switch, and the task it is
+mid-way through. Add, edit and delete; the editor covers name, role, system
+prompt, model and enabled. Deleting an agent that is working is **refused**, and
+the confirmation names the task holding it, because deleting would leave a live
+session with no identity behind it. Which agents a project uses is chosen in
+that project's settings sheet, one toggle per rostered agent, writing
+`project_roster_agent` immediately rather than on Save — those are join rows,
+not part of the settings blob the Save button rewrites.
+
+Enabled agents sort above disabled ones, then by name case-insensitively, then
+by id so the order is stable. "Working" means a live `agent_session` carrying
+that agent's `roster_agent_id` (`RosterStore.assignments`); a session that has
+ended does not count, or a finished pass would strand its agent undeletable.
+
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
 section. Each section header carries a copy button that puts that section on the
@@ -2180,3 +2390,34 @@ from knowing how the agents actually behave first.
   metering tick, throttled to once per 5 minutes) and there is no indicator of
   when it last ran or how many tasks are currently past their threshold and
   waiting for the next tick — you only see the effect once a card disappears.
+- **Landed late, and what that cost: the Roster screen (§10).** Task
+  `53622b86` ("Add the Roster tab and per-project agent selection") showed
+  `done` like every other task in the Agent roster epic, but its commit
+  `46bd2e6` was never merged into the epic branch, by that task or by any task
+  after it. For the length of the epic the roster's data model, spawn path,
+  hand-off and agent-review routing all shipped and were exercised by tests
+  while there was no way — in the app or over MCP — to create a rostered agent
+  or enable one for a project. `46bd2e6` has since been merged rather than
+  rebuilt, and the screen is reachable.
+  Two things survive that gap. A task reading `done` can mean "committed on a
+  branch nobody merged", which only an audit of `git branch --contains` finds,
+  not the board. And `46bd2e6` was written against a `MainWindow` that has
+  since gained workspaces and At a Glance, so the `Projects`/`Roster` segmented
+  switch it specified became a `SidebarSelection.roster` row instead — porting
+  a view that sat unmerged costs a rewrite of its host, not just a merge.
+- **Settled by reasoning, not by measurement: which `roster_agent` schema to
+  keep, and what its deny-list column means.** Two epic tasks independently
+  built incompatible schemas for `roster_agent`/`project_roster_agent` (one
+  with `ordering REAL`, one with an orderless `opted_in` boolean; one
+  documenting `tool_scope` as an allow-list, one treating it as a deny-list in
+  working code) before either was merged. The reconciliation
+  (commit `3df54d5`) picked a side by reading which behavior was already
+  wired — `ReviewPolicy.routing` needs `ordering` to pick a reviewer
+  deterministically, and only the deny-list interpretation has a consumer
+  (`WorkerSupervisor` appending `disallowed_tools` to `--disallowedTools`) —
+  not by running both and observing a difference. No database had ever
+  applied either migration, which is what made the choice cheap rather than a
+  live-data migration; had one been live, "which one matches production" would
+  have been the actual answer, and reasoning about the code would not have
+  been enough. See the "two roster_agent schemas" project note for the full
+  comparison.

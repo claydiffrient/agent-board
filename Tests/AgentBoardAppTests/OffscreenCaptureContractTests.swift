@@ -26,7 +26,9 @@ final class OffscreenCaptureContractTests: XCTestCase {
     }
 
     private static let sidebar = 0..<230
-    private static let loaded = SidebarContent(rows: 3, headers: 1)
+    /// Two projects plus the rows `MainWindow` pins outside every section — At a Glance, then
+    /// Roster. A gate, not a claim about the sidebar: it only has to be what a settled mount shows.
+    private static let loaded = SidebarContent(rows: 2 + 2, headers: 1)
 
     private func board() throws -> AppDatabase {
         let db = try AppDatabase.inMemory()

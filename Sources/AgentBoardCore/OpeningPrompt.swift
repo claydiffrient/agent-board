@@ -1,5 +1,19 @@
 import Foundation
 
+/// Who a rostered agent is, independent of what it has been asked to do. A roster entry is durable
+/// identity; the session carrying it is disposable.
+public struct AgentIdentity: Sendable, Equatable {
+    public var name: String
+    public var role: String
+    public var systemPrompt: String
+
+    public init(name: String, role: String, systemPrompt: String) {
+        self.name = name
+        self.role = role
+        self.systemPrompt = systemPrompt
+    }
+}
+
 /// The prompt a worker is spawned with (§3.1 step 6). Pure, so the note injection it performs
 /// is testable without a runtime.
 public enum OpeningPrompt {
@@ -17,9 +31,12 @@ public enum OpeningPrompt {
         notes: SpawnNotes = SpawnNotes(),
         verification: VerificationCommands = VerificationCommands(),
         placement: WorkerPlacement = .worktree,
-        workingDirectory: String? = nil
+        workingDirectory: String? = nil,
+        agent: AgentIdentity? = nil
     ) -> String {
-        var sections = taskSections(task: task, epicGoal: epicGoal)
+        // Identity comes first: the agent should know what it is before it knows what it is doing.
+        var sections = agent.map { [renderIdentity($0)] } ?? []
+        sections += taskSections(task: task, epicGoal: epicGoal)
         if attempt > 1 {
             sections.append("""
             ## Attempt \(attempt)
@@ -37,6 +54,21 @@ public enum OpeningPrompt {
         sections.append(howToWork(branch: branch, placement: placement, workingDirectory: workingDirectory))
         sections.append(closeout(placement: placement))
         return sections.joined(separator: "\n\n")
+    }
+
+    static func renderIdentity(_ agent: AgentIdentity) -> String {
+        let role = agent.role.trimmingCharacters(in: .whitespacesAndNewlines)
+        var lines = ["# You are \(agent.name)"]
+        lines.append(
+            role.isEmpty
+                ? "You are a rostered Agent Board agent. This identity is yours across every task you are "
+                    + "given; it outlives this session."
+                : "You are a rostered Agent Board agent. Your specialty is \(role). This identity is yours "
+                    + "across every task you are given; it outlives this session."
+        )
+        let prompt = agent.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !prompt.isEmpty { lines.append(prompt) }
+        return lines.joined(separator: "\n\n")
     }
 
     /// The two sections that do not vary with the task. `workingProtocol` is what a session fetches

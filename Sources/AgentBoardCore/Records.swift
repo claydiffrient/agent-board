@@ -92,6 +92,8 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var branch: String
     public var state: EpicState
     public var createdAt: Int64
+    /// Overrides the project's level for this epic's tasks. nil inherits.
+    public var reviewLevel: ReviewLevel?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -101,9 +103,13 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case branch
         case state
         case createdAt = "created_at"
+        case reviewLevel = "review_level"
     }
 
-    public init(id: String, projectId: String, title: String, goal: String?, branch: String, state: EpicState, createdAt: Int64) {
+    public init(
+        id: String, projectId: String, title: String, goal: String?, branch: String,
+        state: EpicState, createdAt: Int64, reviewLevel: ReviewLevel? = nil
+    ) {
         self.id = id
         self.projectId = projectId
         self.title = title
@@ -111,6 +117,7 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         self.branch = branch
         self.state = state
         self.createdAt = createdAt
+        self.reviewLevel = reviewLevel
     }
 
     public static func newId() -> String { BoardId.new() }
@@ -139,6 +146,11 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var updatedAt: Int64
     /// Overrides the project's default model for the worker on this task.
     public var model: String?
+    /// Under agent review, the rostered reviewer this task was handed to when it entered `review`.
+    public var reviewerAgentId: String?
+    /// The rostered agent that last worked this task, if one did rather than an anonymous worker.
+    /// A handoff rewrites it, so it names the most recent agent, not every agent that has touched it.
+    public var rosterAgentId: String?
     /// Non-nil means archived: hidden from the default board query, and when it happened.
     public var archivedAt: Int64?
     /// When the task most recently entered `done`, cleared when it leaves again. The archive
@@ -172,6 +184,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case model
+        case reviewerAgentId = "reviewer_agent_id"
+        case rosterAgentId = "roster_agent_id"
         case archivedAt = "archived_at"
         case doneAt = "done_at"
         case unarchivedAt = "unarchived_at"
@@ -183,13 +197,15 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         id: String, projectId: String, epicId: String?, title: String, body: String?, acceptance: String?,
         priority: String?, column: TaskColumn, blocked: Bool = false, blockedReason: String? = nil,
         failed: Bool = false, failureReason: String? = nil, ordering: Double, origin: TaskOrigin,
-        createdAt: Int64, updatedAt: Int64, model: String? = nil, archivedAt: Int64? = nil,
-        doneAt: Int64? = nil, unarchivedAt: Int64? = nil,
-        landing: TaskLanding? = nil, landingDetail: String? = nil
+        createdAt: Int64, updatedAt: Int64, model: String? = nil, reviewerAgentId: String? = nil,
+        rosterAgentId: String? = nil, archivedAt: Int64? = nil, doneAt: Int64? = nil,
+        unarchivedAt: Int64? = nil, landing: TaskLanding? = nil, landingDetail: String? = nil
     ) {
         self.landing = landing
         self.landingDetail = landingDetail
         self.model = model
+        self.reviewerAgentId = reviewerAgentId
+        self.rosterAgentId = rosterAgentId
         self.archivedAt = archivedAt
         self.doneAt = doneAt
         self.unarchivedAt = unarchivedAt
@@ -271,6 +287,9 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     /// Set when a shared-checkout write gave up waiting for another session's lock. `report_blocked`
     /// reads it to decide that the task belongs back in `ready` rather than held in `running`.
     public var blockedOnPath: String?
+    /// The rostered identity this session is running as. The roster entry is not itself a session;
+    /// this is a back-reference to durable identity, nothing more.
+    public var rosterAgentId: String?
     /// When the oldest tool call this session has not seen return started, nil when none is in
     /// flight. `PostToolUse` fires only on return, so this is the only thing that tells a worker
     /// inside a long command apart from one that has stopped working.
@@ -303,6 +322,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case lastTool = "last_tool"
         case stopReason = "stop_reason"
         case blockedOnPath = "blocked_on_path"
+        case rosterAgentId = "roster_agent_id"
         case toolStartedAt = "tool_started_at"
         case toolsInFlight = "tools_in_flight"
     }
@@ -314,7 +334,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         transcriptPath: String? = nil, tokensIn: Int = 0, tokensOut: Int = 0, cacheRead: Int = 0,
         cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil,
         lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil,
-        toolStartedAt: Int64? = nil, toolsInFlight: Int = 0
+        rosterAgentId: String? = nil, toolStartedAt: Int64? = nil, toolsInFlight: Int = 0
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -339,11 +359,14 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.lastTool = lastTool
         self.stopReason = stopReason
         self.blockedOnPath = blockedOnPath
+        self.rosterAgentId = rosterAgentId
         self.toolStartedAt = toolStartedAt
         self.toolsInFlight = toolsInFlight
     }
 
     public var id: String { sessionId }
+    /// Rostered sessions are exempt from the idle and wall-clock caps; see `WorkerSupervisor.capLimits`.
+    public var isRostered: Bool { rosterAgentId != nil }
     public var startedDate: Date { startedAt.asDate }
     public var endedDate: Date? { endedAt?.asDate }
     public var lastActivityDate: Date? { lastActivity?.asDate }
@@ -681,6 +704,85 @@ public struct HookEventRecord: Codable, FetchableRecord, MutablePersistableRecor
     }
 
     public var date: Date { at.asDate }
+}
+
+/// A specialist that outlives any one task. Not owned by a project — projects opt in
+/// through `project_roster_agent`.
+public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
+    public static let databaseTableName = "roster_agent"
+
+    public var id: String
+    public var name: String
+    /// Free-text specialty the handoff matches against ("frontend", "reviewer"). Deliberately
+    /// not an enum: the roster is user-defined, so a new role must not need a migration.
+    public var role: String
+    /// Injected at spawn as the agent's identity and specialty.
+    public var systemPrompt: String
+    /// Overrides the project's default model for this agent's sessions.
+    public var model: String?
+    /// Extra `--disallowedTools` patterns layered onto the worker default list. A deny-list: it can
+    /// only narrow a rostered session's authority, never widen it, so empty means "a full worker's".
+    public var disallowedTools: [String]
+    public var enabled: Bool
+    public var createdAt: Int64
+    public var updatedAt: Int64
+
+    public enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case role
+        case systemPrompt = "system_prompt"
+        case model
+        case disallowedTools = "disallowed_tools"
+        case enabled
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    public init(
+        id: String, name: String, role: String, systemPrompt: String, model: String? = nil,
+        disallowedTools: [String] = [], enabled: Bool = true, createdAt: Int64, updatedAt: Int64
+    ) {
+        self.id = id
+        self.name = name
+        self.role = role
+        self.systemPrompt = systemPrompt
+        self.model = model
+        self.disallowedTools = disallowedTools
+        self.enabled = enabled
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    public static func newId() -> String { BoardId.new() }
+
+    public var createdDate: Date { createdAt.asDate }
+    public var updatedDate: Date { updatedAt.asDate }
+
+    /// What `OpeningPrompt.compose` renders ahead of the task.
+    public var identity: AgentIdentity {
+        AgentIdentity(name: name, role: role, systemPrompt: systemPrompt)
+    }
+}
+
+public struct ProjectRosterAgent: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
+    public static let databaseTableName = "project_roster_agent"
+
+    public var projectId: String
+    public var rosterAgentId: String
+    public var ordering: Double
+
+    public enum CodingKeys: String, CodingKey {
+        case projectId = "project_id"
+        case rosterAgentId = "roster_agent_id"
+        case ordering
+    }
+
+    public init(projectId: String, rosterAgentId: String, ordering: Double) {
+        self.projectId = projectId
+        self.rosterAgentId = rosterAgentId
+        self.ordering = ordering
+    }
 }
 
 /// A standing order that no new worker may be spawned on the project. Outstanding while

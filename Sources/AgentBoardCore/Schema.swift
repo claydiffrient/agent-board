@@ -160,6 +160,42 @@ enum Schema {
     CREATE INDEX approval_pending ON approval(project_id, resolved_at);
     """
 
+    static let roster = """
+    CREATE TABLE roster_agent (
+      id               TEXT PRIMARY KEY,
+      name             TEXT NOT NULL,
+      role             TEXT NOT NULL,
+      system_prompt    TEXT NOT NULL,
+      model            TEXT,
+      disallowed_tools TEXT NOT NULL DEFAULT '[]',
+      enabled          INTEGER NOT NULL DEFAULT 1,
+      created_at       INTEGER NOT NULL,
+      updated_at       INTEGER NOT NULL
+    );
+
+    CREATE TABLE project_roster_agent (
+      project_id      TEXT NOT NULL REFERENCES project(id),
+      roster_agent_id TEXT NOT NULL REFERENCES roster_agent(id),
+      ordering        REAL NOT NULL,
+      PRIMARY KEY (project_id, roster_agent_id)
+    );
+    CREATE INDEX project_roster_agent_order ON project_roster_agent(project_id, ordering);
+    """
+
+    /// Split from `roster` rather than folded into it: `roster` is already merged, and GRDB skips a
+    /// migration whose identifier is recorded, so rewriting one that has shipped can never re-run.
+    static let rosterAssignment = """
+    ALTER TABLE agent_session ADD COLUMN roster_agent_id TEXT REFERENCES roster_agent(id);
+    ALTER TABLE task ADD COLUMN roster_agent_id TEXT REFERENCES roster_agent(id);
+    """
+
+    /// `epic.review_level` is nullable on purpose: NULL means "inherit the project's level", which is
+    /// what every epic that predates the setting has.
+    static let reviewLevel = """
+    ALTER TABLE epic ADD COLUMN review_level TEXT;
+    ALTER TABLE task ADD COLUMN reviewer_agent_id TEXT REFERENCES roster_agent(id);
+    """
+
     static let approvalPayload = """
     ALTER TABLE approval ADD COLUMN payload TEXT;
     """
@@ -245,5 +281,6 @@ enum Schema {
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
         "approval", "shutdown_order", "shutdown_delivery", "workspace", "file_lock", "message",
         "task_commit",
+        "roster_agent", "project_roster_agent",
     ]
 }

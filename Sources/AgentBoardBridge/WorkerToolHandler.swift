@@ -8,18 +8,23 @@ public final class WorkerToolHandler: ToolHandler {
     private let progress: ProgressStore
     private let board: Board
     private let notes: NoteTools
+    private let control: any WorkerControl
     private let projects: ProjectStore
     private let locks: FileLockStore
     private let taskCommits: TaskCommitStore
     private let scopedCommits: (any ScopedCommitting)?
     private let events: any BoardEventSink
 
-    public init(db: AppDatabase, events: any BoardEventSink, scopedCommits: (any ScopedCommitting)? = nil) {
+    public init(
+        db: AppDatabase, control: any WorkerControl, events: any BoardEventSink,
+        scopedCommits: (any ScopedCommitting)? = nil
+    ) {
         tasks = TaskStore(db)
         sessions = SessionStore(db)
         progress = ProgressStore(db)
         board = Board(db)
         notes = NoteTools(db: db)
+        self.control = control
         projects = ProjectStore(db)
         locks = FileLockStore(db)
         taskCommits = TaskCommitStore(db)
@@ -90,6 +95,24 @@ public final class WorkerToolHandler: ToolHandler {
             )
         ),
         ToolDescriptor(
+            name: "hand_off",
+            description: "Return the task to the queue after doing only the portion that matches your specialty. Commit "
+                + "on your branch first, exactly as report_complete requires: uncommitted work is still in the worktree "
+                + "for the next agent to see, but it is not attributable to you. The task goes back to ready with your "
+                + "summary attached; the worktree is kept, so whoever picks it up next works this same checkout and sees "
+                + "what you built. This is not a failure. Ends your part of the work; do not continue after calling it.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "summary": ToolSchema.string("What you did, and what the next agent needs to do."),
+                    "next_role": ToolSchema.string(
+                        "The specialty you think should pick this up next. Advisory only: the orchestrator decides."
+                    ),
+                    "files_changed": ToolSchema.stringArray(),
+                ],
+                required: ["summary", "next_role", "files_changed"]
+            )
+        ),
+        ToolDescriptor(
             name: "acknowledge_shutdown",
             description: "Answer a wind-down order. Call it only after you have committed what is in your worktree. "
                 + "The note is what the next worker on this task reads, so say where you stopped and what still "
@@ -157,7 +180,14 @@ public final class WorkerToolHandler: ToolHandler {
         case "commit_my_work":
             return try await commitMyWork(task, arguments: arguments, identity: identity)
         case "report_complete":
-            let result = try reportComplete(task, arguments: arguments, identity: identity)
+            let result = try await reportComplete(task, arguments: arguments, identity: identity)
+            if let sessionId = identity.sessionId {
+                await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
+            }
+            await events.reportQueued(projectId: identity.projectId)
+            return result
+        case "hand_off":
+            let result = try handOff(task, arguments: arguments, identity: identity)
             if let sessionId = identity.sessionId {
                 await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
             }
@@ -295,6 +325,27 @@ public final class WorkerToolHandler: ToolHandler {
         return ToolResult(text: "Status recorded: \(text)")
     }
 
+    private func handOff(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let summary = try ToolArguments.requiredString("summary", in: arguments)
+        let files = (arguments["files_changed"]?.arrayValue ?? []).compactMap(\.stringValue)
+        let sessionId = try requiredSession(identity)
+        do {
+            try board.handOff(
+                taskId: task.id,
+                sessionId: sessionId,
+                summary: summary,
+                nextRole: arguments["next_role"]?.stringValue,
+                filesChanged: files
+            )
+        } catch BoardError.sessionNotOnTask {
+            throw ToolError("Session \(sessionId) is not the agent currently working task \(task.id).")
+        }
+        return ToolResult(
+            text: "Handed off. The task is back in ready with your summary and the worktree is kept for the next "
+                + "agent. Stop here; do not start further work."
+        )
+    }
+
     /// The paths come from the lock store, never from the agent: a write tool in a shared checkout
     /// cannot run without first claiming its file, and the claim is held until the session ends, so
     /// the claims are exactly what this session has written.
@@ -343,7 +394,9 @@ public final class WorkerToolHandler: ToolHandler {
         }
     }
 
-    private func reportComplete(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+    private func reportComplete(
+        _ task: BoardTask, arguments: JSONValue, identity: TokenIdentity
+    ) async throws -> ToolResult {
         let summary = try ToolArguments.requiredString("summary", in: arguments)
         let files = arguments["files_changed"]?.arrayValue ?? []
         let body: JSONValue = .object([
@@ -355,7 +408,51 @@ public final class WorkerToolHandler: ToolHandler {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(body)
-        try board.complete(taskId: task.id, sessionId: try requiredSession(identity), summary: String(decoding: data, as: UTF8.self))
-        return ToolResult(text: "Report recorded. The task is now in Review. Stop here; do not start further work.")
+        let outcome = try board.complete(
+            taskId: task.id, sessionId: try requiredSession(identity), summary: String(decoding: data, as: UTF8.self)
+        )
+        guard outcome.autoAccept else {
+            if case .agentReview(let agentId, let agentName) = outcome.routing {
+                return await spawnReviewer(task, agentId: agentId, agentName: agentName)
+            }
+            return ToolResult(text: "Report recorded. The task is now in Review. Stop here; do not start further work.")
+        }
+        // Not a second accept path: this is the call the Accept button makes, so the newly-ready
+        // announcement, the grant revocation and the worktree removal all run exactly once, here.
+        do {
+            try await control.accept(taskId: task.id, acceptedBy: .policy(outcome.level))
+        } catch {
+            return ToolResult(
+                text: "Report recorded. This project needs no review, but the task could not be accepted "
+                    + "automatically and is waiting in Review: \(error). Stop here; do not start further work."
+            )
+        }
+        return ToolResult(
+            text: "Report recorded. This project needs no review, so the task went straight to Done and its "
+                + "worktree has been removed. Stop here; do not start further work."
+        )
+    }
+
+    /// The reviewer runs in this worker's own worktree on its own branch: `spawn` keys the checkout
+    /// on the task id, so reviewing the work needs no worktree of its own and no merge to see it.
+    /// A reviewer that cannot be started leaves the task in `review` for a person, which is the same
+    /// place `humanReview` would have parked it, so the worker's own report is never lost to it.
+    private func spawnReviewer(_ task: BoardTask, agentId: String, agentName: String) async -> ToolResult {
+        do {
+            _ = try await control.assignAgent(taskId: task.id, rosterAgentId: agentId, scope: .reviewer)
+            return ToolResult(
+                text: "Report recorded. The task is now in Review, held by rostered reviewer \(agentName), "
+                    + "which is starting in your worktree on your branch. Stop here; do not start further work."
+            )
+        } catch {
+            try? progress.append(
+                taskId: task.id, sessionId: nil, kind: .error,
+                text: "Agent review: reviewer \(agentName) could not be started (\(error)), so this task needs a person."
+            )
+            return ToolResult(
+                text: "Report recorded. The task is now in Review. Its rostered reviewer could not be started, "
+                    + "so a person will look at it. Stop here; do not start further work."
+            )
+        }
     }
 }

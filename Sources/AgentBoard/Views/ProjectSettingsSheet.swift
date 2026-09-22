@@ -19,6 +19,8 @@ struct ProjectSettingsSheet: View {
     @State private var workspaceId: String?
     @State private var muteChoice: NotificationMuteChoice
     @State private var confirmDelete = false
+    @State private var roster = Observed<[RosterAgent]>([])
+    @State private var selectedAgentIds: Set<String> = []
     @State private var errorMessage: String?
 
     init(project: Project, workspaces: [Workspace], onDeleted: @escaping () -> Void) {
@@ -100,6 +102,17 @@ struct ProjectSettingsSheet: View {
                         .frame(minHeight: 80)
                     }
                     Text("Read by the orchestrator when it picks a model per task, e.g. \"Sonnet 5 for docs and tests, Opus 5 for features.\" A task's own model overrides the default.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Review") {
+                    Picker("Review level", selection: $settings.reviewLevel) {
+                        ForEach(ReviewLevel.allCases, id: \.self) { level in
+                            Text(level.label).tag(level)
+                        }
+                    }
+                    Text(Self.reviewLevelBlurb(settings.reviewLevel))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -196,11 +209,21 @@ struct ProjectSettingsSheet: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Roster") {
+                    rosterSelection
+                }
+
                 Section {
                     Button("Delete Project…", role: .destructive) { confirmDelete = true }
                 }
             }
             .formStyle(.grouped)
+            .task {
+                await roster.run(RosterStore(env.db).observe(), in: env.db.reader)
+            }
+            .task(id: roster.value.map(\.id)) {
+                reloadSelection()
+            }
 
             HStack {
                 Spacer()
@@ -224,6 +247,65 @@ struct ProjectSettingsSheet: View {
             Text("Removes the project, its tasks, and session records from Agent Board. Worktrees and branches on disk are left alone.")
         }
         .errorAlert($errorMessage)
+    }
+
+    /// The whole roster with a toggle each: on writes the project's opt-in, off writes the opt-out.
+    /// Both land immediately rather than on Save, because they are per-project join rows and not
+    /// part of the settings blob the Save button rewrites.
+    @ViewBuilder
+    private var rosterSelection: some View {
+        if roster.value.isEmpty {
+            Text("No rostered agents yet. Add them in the Roster tab.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            let split = RosterListing.partition(roster: roster.value, selectedIds: selectedAgentIds)
+            ForEach(split.selected + split.available) { agent in
+                Toggle(isOn: Binding(
+                    get: { selectedAgentIds.contains(agent.id) },
+                    set: { setSelected(agent, $0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(agent.name)
+                            Text(agent.role)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if !agent.enabled {
+                            Text("Disabled in the roster; this project will not spawn it.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            Text("\(split.selected.count) of \(roster.value.count) selected for \(project.name). Other projects are unaffected.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func reloadSelection() {
+        do {
+            selectedAgentIds = Set(try RosterStore(env.db).agents(forProject: project.id).map(\.id))
+        } catch {
+            errorMessage = errorText(error)
+        }
+    }
+
+    private func setSelected(_ agent: RosterAgent, _ selected: Bool) {
+        let store = RosterStore(env.db)
+        do {
+            if selected {
+                try store.enable(agentId: agent.id, forProject: project.id)
+            } else {
+                try store.disable(agentId: agent.id, forProject: project.id)
+            }
+            reloadSelection()
+        } catch {
+            errorMessage = errorText(error)
+        }
     }
 
     private func save() {
@@ -261,6 +343,22 @@ struct ProjectSettingsSheet: View {
             dismiss()
         } catch {
             errorMessage = errorText(error)
+        }
+    }
+
+    static func reviewLevelBlurb(_ level: ReviewLevel) -> String {
+        switch level {
+        case .none:
+            return "A finished task goes straight to Done. Nobody reviews it."
+        case .agent:
+            return "A rostered agent whose role reads as reviewer picks the task up from Review and "
+                + "either accepts it or sends it back with findings. With no such agent on the roster, "
+                + "the task waits for you instead."
+        case .task:
+            return "You accept every task. The default; leaving it here changes nothing."
+        case .epic:
+            return "A task inside an epic goes straight to Done; you review at the epic's integration "
+                + "gate. A task outside an epic still waits for you."
         }
     }
 }

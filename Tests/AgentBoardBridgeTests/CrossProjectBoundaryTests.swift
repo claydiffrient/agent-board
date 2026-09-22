@@ -16,6 +16,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
     static let scopedByIdentity: Set<String> = [
         "list_tasks", "create_task", "list_agents", "list_reports", "list_approvals",
         "create_epic", "list_epics", "push_branch", "search_notes", "create_note",
+        "list_roster_agents",
     ]
 
     /// Tools that accept an id and must throw a `ToolError` when it belongs to another project.
@@ -24,6 +25,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "spawn_worker", "stop_worker", "archive_task", "unarchive_task", "get_report",
         "promote_proposal", "get_epic", "request_integration", "close_epic", "open_pull_request",
         "read_note", "append_section", "replace_section", "attach_note", "pin_note",
+        "assign_to_agent",
     ]
 
     /// The whole of the permitted crossing: queue text into another project's channel, and learn
@@ -62,7 +64,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
             "a tool was added to the orchestrator surface without a cross-project test in this file"
         )
         XCTAssertEqual(classified.subtracting(surface), [], "this audit names tools that no longer exist")
-        XCTAssertEqual(surface.count, 33)
+        XCTAssertEqual(surface.count, 35)
     }
 
     func testOnlySendMessageAcceptsAnotherProjectsId() async {
@@ -206,6 +208,50 @@ final class CrossProjectBoundaryTests: XCTestCase {
         XCTAssertEqual(try f.sessions.forTask(foreign.id).count, 0)
         XCTAssertEqual(try f.approvals.pending(projectId: other.id).count, 0)
         XCTAssertEqual(try f.approvals.pending(projectId: f.project.id).count, 0)
+    }
+
+    /// The roster is the one cross-project table, so `assign_to_agent` has two foreign ids to
+    /// refuse, not one: the task, and an agent only the other project has enabled.
+    func testAssignToAgentRefusesBothAForeignTaskAndAForeignProjectsAgent() async throws {
+        try f.setAutonomy(true)
+        let roster = RosterStore(f.db)
+        let mine = try f.task("mine", column: .ready)
+        let foreignTask = try f.task("foreign", column: .ready, in: other.id)
+        let ours = try roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
+        try roster.enable(agentId: ours.id, forProject: f.project.id)
+        let theirs = try roster.create(name: "Bee", role: "backend", systemPrompt: "p")
+        try roster.enable(agentId: theirs.id, forProject: other.id)
+
+        await XCTAssertToolError(
+            try await f.call(
+                "assign_to_agent",
+                ["task_id": .string(foreignTask.id), "roster_agent_id": .string(ours.id)]
+            ),
+            containing: "not in this project"
+        )
+        await XCTAssertToolError(
+            try await f.call(
+                "assign_to_agent",
+                ["task_id": .string(mine.id), "roster_agent_id": .string(theirs.id)]
+            ),
+            containing: "usable set"
+        )
+
+        let assigned = await f.control.assigned
+        XCTAssertEqual(assigned.count, 0)
+        XCTAssertEqual(try f.sessions.forTask(foreignTask.id).count, 0)
+        XCTAssertEqual(try f.approvals.pending(projectId: other.id).count, 0)
+    }
+
+    /// The roster spans projects, but the listing does not: a project sees only what it enabled.
+    func testListRosterAgentsNeverShowsAnotherProjectsAgents() async throws {
+        let roster = RosterStore(f.db)
+        let theirs = try roster.create(name: "Bee", role: "backend", systemPrompt: "p")
+        try roster.enable(agentId: theirs.id, forProject: other.id)
+
+        let json = try await f.callJSON("list_roster_agents")
+
+        XCTAssertEqual(json.arrayValue?.count, 0)
     }
 
     func testStoppingAnotherProjectsWorkerIsRefused() async throws {

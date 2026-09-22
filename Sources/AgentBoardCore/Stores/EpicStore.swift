@@ -61,6 +61,17 @@ public struct EpicStore: Sendable {
         try db.execute(sql: "UPDATE epic SET state = ? WHERE id = ?", arguments: [state, id])
     }
 
+    /// nil clears the override, so the epic's tasks go back to inheriting the project's level.
+    public func setReviewLevel(_ id: String, _ level: ReviewLevel?) throws {
+        try db.writer.write { db in
+            guard try Epic.exists(db, key: id) else { throw BoardError.epicNotFound(id) }
+            try db.execute(
+                sql: "UPDATE epic SET review_level = ? WHERE id = ?",
+                arguments: [level, id]
+            )
+        }
+    }
+
     public func observe(projectId: String) -> ValueObservation<ValueReducers.Fetch<[Epic]>> {
         ValueObservation.tracking { db in
             try Self.list(db, projectId: projectId)
