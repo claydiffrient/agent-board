@@ -33,6 +33,9 @@ final class SidebarCollapseIsolationTests: XCTestCase {
 
     private static let sidebar = 0..<230
 
+    /// Rows `MainWindow` lists outside every `Section`: At a Glance, then Roster.
+    private static let pinnedRows = 2
+
     /// One workspace holding one project, so the sidebar draws two rows expanded and one collapsed.
     private func board() throws -> (AppDatabase, String) {
         let db = try AppDatabase.inMemory()
@@ -62,8 +65,8 @@ final class SidebarCollapseIsolationTests: XCTestCase {
         let mounted = try mount(db)
         defer { mounted.close() }
         XCTAssertEqual(
-            mounted.viewCount(ofClassNamed: "ListTableCellView"), 1,
-            "only the pinned At a Glance row may be drawn: the section this test collapsed stayed collapsed"
+            mounted.viewCount(ofClassNamed: "ListTableCellView"), Self.pinnedRows,
+            "only the pinned rows may be drawn: the section this test collapsed stayed collapsed"
         )
     }
 
@@ -76,8 +79,8 @@ final class SidebarCollapseIsolationTests: XCTestCase {
         let mounted = try mount(db)
         defer { mounted.close() }
         XCTAssertEqual(
-            mounted.viewCount(ofClassNamed: "ListTableCellView"), 2,
-            "At a Glance and the project row: the section this test left expanded stayed expanded"
+            mounted.viewCount(ofClassNamed: "ListTableCellView"), Self.pinnedRows + 1,
+            "the pinned rows and the project row: the section this test left expanded stayed expanded"
         )
     }
 }

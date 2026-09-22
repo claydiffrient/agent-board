@@ -4,13 +4,6 @@ import XCTest
 
 extension Fixture {
     var workspaces: WorkspaceStore { WorkspaceStore(db) }
-
-    func otherProject(_ name: String) throws -> Project {
-        try projects.register(
-            name: name, repoPath: "/tmp/\(name)-\(UUID().uuidString)", baseBranch: "main",
-            worktreeRoot: "/tmp/\(name)-worktrees", memoryDir: nil
-        )
-    }
 }
 
 final class WorkspaceStoreTests: XCTestCase {

@@ -21,11 +21,11 @@ public enum IntegrationGuard {
 
         public func reason(for scope: TokenScope) -> String {
             switch (self, scope) {
-            case (.push, .worker):
+            case (.push, .worker), (.push, .reviewer):
                 return "Agent Board blocks pushes from workers. Commit on your branch and call report_complete; a human integrates it."
-            case (.pullRequestCreate, .worker):
+            case (.pullRequestCreate, .worker), (.pullRequestCreate, .reviewer):
                 return "Agent Board blocks opening pull requests from workers. Commit on your branch and call report_complete; opening the pull request is the human's call."
-            case (.pullRequestMerge, .worker):
+            case (.pullRequestMerge, .worker), (.pullRequestMerge, .reviewer):
                 return "Agent Board blocks merging pull requests from workers. Integration always requires human approval in Agent Board."
             case (.push, .orchestrator):
                 return "Agent Board blocks pushing from the shell. Call push_branch(branch); it queues an approval the human grants."

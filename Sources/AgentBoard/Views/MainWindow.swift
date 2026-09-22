@@ -26,14 +26,19 @@ struct MainWindow: View {
         NavigationSplitView {
             sidebar
         } detail: {
-            if let project = projects.value.first(where: { $0.id == selection.projectId }) {
-                ProjectDetailView(project: project)
-                    .id(project.id)
-            } else {
-                AtAGlanceView(
-                    projects: projects.value, workspaces: workspaces.value,
-                    attention: attention.value, select: select
-                )
+            switch selection {
+            case .roster:
+                RosterView(activity: LiveRosterActivity(db: env.db))
+            case .atAGlance, .project:
+                if let project = projects.value.first(where: { $0.id == selection.projectId }) {
+                    ProjectDetailView(project: project)
+                        .id(project.id)
+                } else {
+                    AtAGlanceView(
+                        projects: projects.value, workspaces: workspaces.value,
+                        attention: attention.value, select: select
+                    )
+                }
             }
         }
         .task {
@@ -114,6 +119,8 @@ struct MainWindow: View {
         List(selection: sidebarSelection) {
             Label("At a Glance", systemImage: "square.grid.2x2")
                 .tag(SidebarSelection.atAGlance)
+            Label("Roster", systemImage: "person.2")
+                .tag(SidebarSelection.roster)
             ForEach(sections) { section in
                 sectionView(section)
             }

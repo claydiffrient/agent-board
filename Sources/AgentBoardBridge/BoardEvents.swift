@@ -1,3 +1,4 @@
+import AgentBoardCore
 import Foundation
 
 public protocol BoardEventSink: Sendable {
@@ -16,8 +17,10 @@ public protocol BoardEventSink: Sendable {
     /// The worker has recorded its resume note and is waiting to be stopped. Agent Board owns the
     /// rest: stop the session, terminate the row as an orderly shutdown, put the task back in ready.
     func workerAcknowledgedShutdown(projectId: String, sessionId: String) async
-    /// The worker has filed its report and the task is in review. `Board.complete` cannot reach a
-    /// runtime, so stopping the agent that is now doing nothing is the supervisor's to do.
+    /// The worker's session is over by its own account — `report_complete` or `hand_off`. Neither
+    /// `Board.complete` nor `Board.handOff` can reach a runtime, so stopping the agent that is now
+    /// doing nothing is the supervisor's to do. Which of the two it was is carried by the report
+    /// kind, the task's column and the session's stop reason, never by this signal.
     func workerCompleted(projectId: String, sessionId: String) async
 }
 
@@ -63,7 +66,19 @@ public protocol WorkerControl: Sendable {
     /// The caller has already passed `Board.requestSpawn`. Returns once the worktree exists and the
     /// session row is written, with setup still running.
     func spawnWorker(taskId: String) async throws -> WorkerSpawn
+    /// `spawnWorker` carrying a rostered agent's identity, model and deny-list additions. `scope`
+    /// decides what the session may do once it is up: `.worker` claims the task into `running`,
+    /// `.reviewer` leaves it in `review` and mints a reviewer grant instead. Nothing here widens
+    /// authority — a rostered agent's `disallowedTools` can only narrow what a plain worker gets.
+    /// The caller has already checked the agent is usable by the project.
+    func assignAgent(
+        taskId: String, rosterAgentId: String, scope: AgentBoardCore.TokenScope
+    ) async throws -> WorkerSpawn
     func stopWorker(sessionId: String) async throws
+    /// The single acceptance path, whoever triggered it: the board accept, the newly-ready
+    /// announcement, the grant revocation and the worktree removal. A no-review completion and a
+    /// rostered reviewer's approval both come through here rather than repeating any of it.
+    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws
 }
 
 public struct ClosureBoardEventSink: BoardEventSink {

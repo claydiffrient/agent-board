@@ -93,6 +93,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var defaultModel: String? = nil
     /// Free text the orchestrator reads when choosing a model per task.
     public var modelGuidance: String? = nil
+    /// How much human acceptance a finished task needs. An epic may override it for its own tasks.
+    public var reviewLevel: ReviewLevel = .task
     /// Shell command that builds this project, e.g. `swift build` or `pnpm build`. Empty leaves the
     /// agent to work it out from the repo.
     public var buildCommand: String? = nil
@@ -119,6 +121,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         extraMcpServers: [String] = [],
         defaultModel: String? = nil,
         modelGuidance: String? = nil,
+        reviewLevel: ReviewLevel = .task,
         buildCommand: String? = nil,
         testCommand: String? = nil,
         archivePolicy: ArchivePolicy = .afterEpicMerge,
@@ -133,6 +136,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.extraMcpServers = extraMcpServers
         self.defaultModel = defaultModel
         self.modelGuidance = modelGuidance
+        self.reviewLevel = reviewLevel
         self.buildCommand = buildCommand
         self.testCommand = testCommand
         self.archivePolicy = archivePolicy
@@ -150,6 +154,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         extraMcpServers = try c.decodeIfPresent([String].self, forKey: .extraMcpServers) ?? []
         defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
         modelGuidance = try c.decodeIfPresent(String.self, forKey: .modelGuidance)
+        reviewLevel = try c.decodeIfPresent(ReviewLevel.self, forKey: .reviewLevel) ?? .task
         buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
         archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge

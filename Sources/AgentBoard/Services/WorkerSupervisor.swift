@@ -15,18 +15,23 @@ enum SupervisorError: LocalizedError {
     case sessionHasNoShortId(String)
     case taskNotAssignable(title: String, column: TaskColumn)
     case capRefused(String)
+    case taskAlreadyHeld(title: String, sessionId: String)
+    case worktreeAlreadyHeld(path: String, sessionId: String)
     case shutdownOrdered
     case noShutdownOrder
     case serverNotRunning
     case spawnFailed(worktree: String, underlying: String)
     case setupInterrupted
     case approvalNotFound(String)
+    case rosterAgentNotUsable(id: String, projectName: String)
     case epicCloseRefused(String)
     case globalShutdownIncomplete([String])
 
     var errorDescription: String? {
         switch self {
         case .approvalNotFound(let id): return "approval \(id) not found"
+        case .rosterAgentNotUsable(let id, let projectName):
+            return "roster agent \(id) is not in \(projectName)'s usable set; enable it for this project first"
         case .epicCloseRefused(let reason): return reason
         case .epicNotFound(let id): return "epic \(id) not found"
         case .notAGitRepository(let path): return "\(path) is not a git repository"
@@ -36,6 +41,10 @@ enum SupervisorError: LocalizedError {
         case .sessionHasNoShortId(let id): return "session \(id) has no claude short id yet; reconcile first"
         case .taskNotAssignable(let title, let column): return "\"\(title)\" is in \(column.rawValue) and cannot be assigned"
         case .capRefused(let reason): return "spawn refused: \(reason)"
+        case .taskAlreadyHeld(let title, let sessionId):
+            return "\"\(title)\" is still held by session \(sessionId); a second agent would share its worktree"
+        case .worktreeAlreadyHeld(let path, let sessionId):
+            return "session \(sessionId) is still working in \(path); a second agent must not share it"
         case .shutdownOrdered: return ShutdownOrder.refusal
         case .noShutdownOrder: return "no shutdown order is outstanding on this project"
         case .serverNotRunning: return "the Agent Board server is not running"
@@ -82,6 +91,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let deliveries: ShutdownDeliveryStore
     @ObservationIgnored private let epics: EpicStore
     @ObservationIgnored private let notes: NoteStore
+    @ObservationIgnored private let roster: RosterStore
     @ObservationIgnored private let board: Board
     @ObservationIgnored private let archives: ArchiveSweep
     @ObservationIgnored private let fileLocks: FileLockStore
@@ -144,6 +154,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         deliveries = ShutdownDeliveryStore(db)
         epics = EpicStore(db)
         notes = NoteStore(db)
+        roster = RosterStore(db)
         board = Board(db)
         archives = ArchiveSweep(db)
         fileLocks = FileLockStore(db)
@@ -235,7 +246,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// the background. On a large repository the agent's own start-up outlasts an MCP call, and an
     /// orchestrator that cannot tell a timeout from a failure has to poll to find out what happened.
     @discardableResult
-    private func spawn(taskId: String) async throws -> WorkerSpawn {
+    private func spawn(
+        taskId: String, rosterAgentId: String? = nil, scope: AgentBoardCore.TokenScope = .worker
+    ) async throws -> WorkerSpawn {
         guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
         guard task.column != .running, task.column != .done else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
@@ -247,6 +260,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try requireNoShutdown(projectId: project.id)
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
+        }
+        let agent = try rosterAgentId.map { id -> RosterAgent in
+            guard let agent = try roster.usableAgent(id, forProject: project.id) else {
+                throw SupervisorError.rosterAgentNotUsable(id: id, projectName: project.name)
+            }
+            return agent
+        }
+        // A handed-off task is back in `ready` while its worktree stays on disk, so the column alone no
+        // longer proves nobody is in it. `Board.assign` re-checks this in its transaction; refusing here
+        // as well keeps a doomed spawn from launching a process it would then have to orphan.
+        if let holder = try sessions.activeHolder(taskId: taskId) {
+            throw SupervisorError.taskAlreadyHeld(title: task.title, sessionId: holder.sessionId)
         }
 
         let attempt = try sessions.forTask(taskId).count + 1
@@ -277,14 +302,23 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             warnings: warnings
         )
         let branch = site.branch
+        // A handed-off task keeps its worktree on disk, so a second agent could otherwise be launched
+        // into a checkout someone is still working in. Co-resident agents in a shared checkout are
+        // deliberate and have no worktree path, so this skips them.
+        if let path = site.worktreePath, let holder = try sessions.activeHolder(worktreePath: path) {
+            throw SupervisorError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
+        }
 
         do {
-            let placeholder = try board.assign(
-                taskId: taskId,
-                session: Self.setupRow(
-                    projectId: project.id, taskId: taskId, site: site, attempt: attempt
-                )
+            let row = Self.setupRow(
+                projectId: project.id, taskId: taskId, site: site, attempt: attempt,
+                rosterAgentId: agent?.id
             )
+            // A reviewer holds a task that is already in `review`; `assign` would move it to
+            // `running` and take it out of the queue its own accept_task reads.
+            let placeholder = scope == .reviewer
+                ? try board.assignReviewer(taskId: taskId, session: row)
+                : try board.assign(taskId: taskId, session: row)
             if let epic, epic.state == .planning {
                 try epics.setState(epic.id, .active)
             }
@@ -304,10 +338,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         ),
                         verification: project.settings.verification,
                         placement: site.placement,
-                        workingDirectory: site.cwd.path
+                        workingDirectory: site.cwd.path,
+                        agent: agent?.identity
                     ),
-                    model: task.model ?? project.settings.defaultModel,
-                    attempt: placeholder.attempt
+                    // Most specific override wins: this task, then the agent's standing preference,
+                    // then the project default.
+                    model: task.model ?? agent?.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    scope: scope
                 ),
                 placeholder: placeholder,
                 port: port
@@ -371,7 +410,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     private static func setupRow(
-        projectId: String, taskId: String, site: CheckoutSite, attempt: Int
+        projectId: String, taskId: String, site: CheckoutSite, attempt: Int,
+        rosterAgentId: String? = nil
     ) -> AgentSession {
         AgentSession(
             sessionId: "setup-\(UUID().uuidString)",
@@ -382,7 +422,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             branch: site.branch,
             cwd: site.cwd.path,
             state: .setup,
-            attempt: attempt
+            attempt: attempt,
+            rosterAgentId: rosterAgentId
         )
     }
 
@@ -470,6 +511,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var prompt: String
         var model: String?
         var attempt: Int
+        /// A rostered assignment. Nothing here widens authority: the session still gets
+        /// `--permission-mode auto`, the worker deny list, and at most a worker's token scope.
+        var rosterAgent: RosterAgent? = nil
+        var scope: AgentBoardCore.TokenScope = .worker
     }
 
     /// §3.1 steps 3-8, shared by task workers and the epic integrator, and the whole of what runs
@@ -481,7 +526,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             ?? ClaudeProjectPaths.memoryDir(forPath: project.repoPath, projectsRoot: projectsRoot).path)
         _ = try ClaudeProjectPaths.linkMemory(worktreePath: plan.cwd.path, to: memoryDir, projectsRoot: projectsRoot)
 
-        let grant = try grants.issue(projectId: project.id, scope: .worker, taskId: plan.taskId)
+        let grant = try grants.issue(projectId: project.id, scope: plan.scope, taskId: plan.taskId)
         do {
             let configFiles = try SessionConfigWriter.write(
                 configDir: sessionConfigDir,
@@ -497,6 +542,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 name: plan.name,
                 prompt: plan.prompt,
                 configFiles: configFiles,
+                // A deny-list, layered on: a rostered agent can only ever have less authority than a
+                // plain worker, and an empty list is exactly a plain worker's.
+                disallowedTools: SpawnRequest.defaultDisallowedTools
+                    + (plan.rosterAgent?.disallowedTools ?? []),
                 model: plan.model
             )
             let spawned = try await runtime.spawn(request)
@@ -542,6 +591,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let worktree = try await offMain {
             try Self.existingWorktree(manager, name: worktreeName)
                 ?? manager.createForBranch(name: worktreeName, branch: epicBranch)
+        }
+        if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
+            throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
         }
 
         let members = try tasks.list(projectId: project.id, epicId: epicId, includeArchived: true)
@@ -712,12 +764,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func accept(taskId: String) async throws {
+        try await accept(taskId: taskId, acceptedBy: .human)
+    }
+
+    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws {
         try await recording {
             guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
             guard let project = try projects.get(task.projectId) else {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
-            try board.accept(taskId: taskId)
+            try board.accept(taskId: taskId, acceptedBy: acceptedBy)
             let taskSessions = try sessions.forTask(taskId)
             for session in taskSessions {
                 try grants.revokeAll(sessionId: session.sessionId)
@@ -1755,6 +1811,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording { try await spawn(taskId: taskId) }
     }
 
+    func assignAgent(
+        taskId: String, rosterAgentId: String, scope: AgentBoardCore.TokenScope
+    ) async throws -> WorkerSpawn {
+        try await recording { try await spawn(taskId: taskId, rosterAgentId: rosterAgentId, scope: scope) }
+    }
+
     func stopWorker(sessionId: String) async throws {
         try await stop(sessionId: sessionId)
     }
@@ -2085,7 +2147,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             lastActivity: lastActivity,
             toolStartedAt: current.toolStartedDate,
             awake: awake,
-            limits: limits,
+            limits: Self.exempting(limits, rostered: current.isRostered),
             state: current.state
         ) else { return }
         await enforce(breach, on: current, awake: awake)
@@ -2139,6 +2201,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
     }
 
+    /// A rostered agent runs without the elapsed and idle caps: the epic decided no caps apply to
+    /// the roster for now. The token cap survives — it meters spend, not liveness.
+    static func exempting(_ limits: CapLimits, rostered: Bool) -> CapLimits {
+        guard rostered else { return limits }
+        return CapLimits(maxTokens: limits.maxTokens, maxWallClockSeconds: nil, maxIdleSeconds: nil)
+    }
+
     private static func describe(_ breach: CapBreach, awake: AwakeElapsed) -> String {
         switch breach {
         case .tokens(let used, let limit):
@@ -2174,13 +2243,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return object[key] as? String
     }
 
+    /// Returns `expected` rather than the path `git worktree list` prints, which on macOS resolves
+    /// `/var` to `/private/var`. Reusing a worktree would otherwise record a second spelling of one
+    /// directory on the new session row, and `worktree_path` is compared as a string to decide
+    /// whether anyone is already in it.
     private nonisolated static func existingWorktree(_ manager: WorktreeManager, name: String) throws -> URL? {
         let expected = manager.worktreeRoot.appendingPathComponent(name)
         guard FileManager.default.fileExists(atPath: expected.path) else { return nil }
         let expectedPath = expected.standardizedFileURL.resolvingSymlinksInPath().path
-        return try manager.list()
-            .first { $0.path.standardizedFileURL.resolvingSymlinksInPath().path == expectedPath }?
-            .path
+        let listed = try manager.list()
+            .first { $0.path.standardizedFileURL.resolvingSymlinksInPath().path == expectedPath }
+        return listed == nil ? nil : expected
     }
 
     /// The commit step differs by placement: `git commit` is refused in a shared checkout, so a
@@ -2229,11 +2302,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         notes: SpawnNotes = SpawnNotes(),
         verification: VerificationCommands = VerificationCommands(),
         placement: WorkerPlacement = .worktree,
-        workingDirectory: String? = nil
+        workingDirectory: String? = nil,
+        agent: AgentIdentity? = nil
     ) -> String {
         OpeningPrompt.compose(
             task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes,
-            verification: verification, placement: placement, workingDirectory: workingDirectory
+            verification: verification, placement: placement, workingDirectory: workingDirectory,
+            agent: agent
         )
     }
 
