@@ -28,19 +28,19 @@ final class HandOffStopsTheAgentTests: XCTestCase {
     private func handOff(
         _ worker: (task: BoardTask, sessionId: String, token: String), nextRole: String = "reviewer"
     ) async throws -> ToolResult {
-        try await fixture.workerHandler().call(
+        try await fixture.callWorkerTool(
             "hand_off",
             arguments: .object([
                 "summary": .string("Wrote the query layer; the UI is untouched."),
                 "next_role": .string(nextRole),
                 "files_changed": .array([.string("Sources/Search.swift")]),
             ]),
-            identity: try await fixture.identity(token: worker.token)
+            token: worker.token
         )
     }
 
     private func reportComplete(_ worker: (task: BoardTask, sessionId: String, token: String)) async throws {
-        _ = try await fixture.workerHandler().call(
+        _ = try await fixture.callWorkerTool(
             "report_complete",
             arguments: .object([
                 "summary": .string("did the thing"),
@@ -48,7 +48,7 @@ final class HandOffStopsTheAgentTests: XCTestCase {
                 "tests_run": .string("swift test"),
                 "caveats": .string("none"),
             ]),
-            identity: try await fixture.identity(token: worker.token)
+            token: worker.token
         )
     }
 

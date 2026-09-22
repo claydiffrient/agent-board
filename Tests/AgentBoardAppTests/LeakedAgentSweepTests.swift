@@ -24,7 +24,7 @@ final class CompletionStopsTheAgentTests: XCTestCase {
     }
 
     private func reportComplete(_ worker: (task: BoardTask, sessionId: String, token: String)) async throws {
-        _ = try await fixture.workerHandler().call(
+        _ = try await fixture.callWorkerTool(
             "report_complete",
             arguments: .object([
                 "summary": .string("did the thing"),
@@ -32,7 +32,7 @@ final class CompletionStopsTheAgentTests: XCTestCase {
                 "tests_run": .string("swift test"),
                 "caveats": .string("none"),
             ]),
-            identity: try await fixture.identity(token: worker.token)
+            token: worker.token
         )
     }
 

@@ -181,10 +181,11 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   |---|---|
   | `claude-fable-5-1` | 980000 |
   | `claude-opus-5` | 980000 |
+  | `claude-opus-5-5` | 980000 (measured 2026-09-22 on 2.1.280, `claude -p --debug`) |
   | `claude-sonnet-5` | 980000 |
   | `claude-haiku-4-5` | not measured — the run died on `Error: Refresh token is invalid or has already been claimed by another client` before any turn completed |
 
-  `ModelCatalog.effectiveContextWindow(for:)` carries the three measured values
+  `ModelCatalog.effectiveContextWindow(for:)` carries the four measured values
   and reads anything else, Haiku included, as the same 980,000 rather than
   guessing a smaller one.
 - **A slash command injected into a PTY needs its Enter as a separate write.**
@@ -963,11 +964,21 @@ its own `accept_task` has nothing to decide. A reviewer that cannot be started
 leaves the task in `review` for a person and says so in a `progress` row, which
 is where `task` review would have parked it anyway.
 
-None of that runs twice. `report_complete` is idempotent per `(session_id,
-task_id)`: the handler stops the worker before it answers, so the answer is
-routinely lost and the MCP client resends the call. `Board.complete` reads the
-session's existing `complete` report inside its own write transaction and returns
-it untouched — before the routing, the reviewer write, the acceptance and the
+The stop comes after the answer, not before it. `workerCompleted` runs `claude
+stop` on the session that is waiting on this very call, so awaiting it inline
+killed the MCP client mid-request: measured on the live board 2026-09-21, 64 of
+183 completing sessions never received their answer and every one of them resent
+the call, while the 118 that did receive it resent nothing. The handler now hands
+the stop back on the `ToolResult` (`afterResponse`) and `BoardServer` runs it
+once the response body has been written to the channel. `hand_off` and
+`acknowledge_shutdown`, which end their own session the same way, defer it the
+same way.
+
+None of that runs twice even so. `report_complete` is idempotent per
+`(session_id, task_id)`: a dropped connection or a stopped worker can still cost
+the answer, and the MCP client resends. `Board.complete` reads the session's
+existing `complete` report inside its own write transaction and returns it
+untouched — before the routing, the reviewer write, the acceptance and the
 spawn are reached — so a resend inserts no second row, moves no task, sets no
 reviewer, starts no second reviewer and fires no second event. The answer names
 the first report's id and the column the task actually sits in.
@@ -1130,10 +1141,10 @@ is reached by neither.
 | `replace_section(note_id, heading, body, if_version)` | Section-scoped write |
 | `create_note(title, sections)` | New note, unpinned |
 | `propose_task(title, body, rationale, epic_id)` | Inserts into `proposed`, carrying `epic_id` onto the row so promotion lands it there |
-| `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review`, or to `done` where the review level (§5) or `afterEpicMerge` (§5.2) says so — the answer names the column it landed in. Idempotent per `(session_id, task_id)`: the MCP client resends the call when the answer is lost, and it is routinely lost because the handler stops the worker before replying, so a second call returns the first report's id and re-runs nothing — no second row, no second move, no second stop, no reviewer assigned and no second auto-acceptance |
-| `hand_off(summary, next_role, files_changed)` | Inserts a `handoff` `report` and a `progress` row; moves task to `ready`, keeps the worktree, stops the session |
+| `report_complete(summary, files_changed, tests_run, caveats)` | Inserts a `report`; moves task to `review`, or to `done` where the review level (§5) or `afterEpicMerge` (§5.2) says so — the answer names the column it landed in. Answers first and stops the worker afterwards, off the written response (§5), because stopping it inline kills the client waiting on the reply. Idempotent per `(session_id, task_id)` regardless: the MCP client resends when an answer is lost, and a second call returns the first report's id and re-runs nothing — no second row, no second move, no second stop, no reviewer assigned and no second auto-acceptance |
+| `hand_off(summary, next_role, files_changed)` | Inserts a `handoff` `report` and a `progress` row; moves task to `ready`, keeps the worktree, stops the session after answering (§5) |
 | `report_blocked(reason)` | Inserts a `report`; sets `blocked` |
-| `acknowledge_shutdown(note)` | Answers a wind-down order (§8). Records `note` against the delivery and the task, then Agent Board stops the session. The task goes back to `ready`, never `review` (§5) — this is not `report_complete` |
+| `acknowledge_shutdown(note)` | Answers a wind-down order (§8). Records `note` against the delivery and the task, then Agent Board stops the session — after the answer is written, not before (§5). The task goes back to `ready`, never `review` (§5) — this is not `report_complete` |
 
 A worker may not read other tasks, reassign, create a non-proposal task, or
 spawn anything.
@@ -1147,8 +1158,9 @@ Two live sessions must never hold one worktree, so `Board.assign` refuses, in
 its write transaction, any session for a task an active worker still holds or
 for a worktree path an active session is already in.
 
-The hand-off ends the session then and there: it raises `workerCompleted`, the
-same signal `report_complete` raises, on which the supervisor stops the agent.
+The hand-off ends the session as soon as its answer is out: it raises
+`workerCompleted`, the same signal `report_complete` raises, on which the
+supervisor stops the agent.
 The task is back in `ready` and may be dispatched into that same worktree
 immediately, so leaving the previous agent resident would put two `claude`
 processes in one checkout, and waiting for the periodic sweep to reap it would

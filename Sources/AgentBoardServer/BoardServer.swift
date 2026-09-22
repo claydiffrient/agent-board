@@ -142,21 +142,44 @@ public final class BoardServer: Sendable {
         }
 
         var responses: [[String: Any]] = []
+        var afterResponse: [@Sendable () async -> Void] = []
         for message in messages {
-            if let response = await dispatch(message, identity: identity) {
+            if let response = await dispatch(message, identity: identity, afterResponse: &afterResponse) {
                 responses.append(response)
             }
         }
-        guard !responses.isEmpty else { return Response(status: .accepted) }
+        guard !responses.isEmpty else { return running(afterResponse, after: Response(status: .accepted)) }
 
         var response = jsonResponse(status: .ok, body: isBatch ? responses : responses[0])
         if messages.contains(where: { $0["method"] as? String == "initialize" }) {
             response.headers[Self.sessionIdHeader] = UUID().uuidString
         }
+        return running(afterResponse, after: response)
+    }
+
+    /// A tool that ends the calling session cannot run before its own answer is written, or the
+    /// client it kills never sees the reply and resends. Deferred work is therefore hung off the
+    /// response body, not off the handler, and runs whether the write succeeded or threw — a
+    /// session left unstopped here would sit idle forever.
+    private func running(_ work: [@Sendable () async -> Void], after response: Response) -> Response {
+        guard !work.isEmpty else { return response }
+        var response = response
+        let body = response.body
+        response.body = ResponseBody(contentLength: body.contentLength) { writer in
+            do {
+                try await body.write(writer)
+            } catch {
+                for item in work { await item() }
+                throw error
+            }
+            for item in work { await item() }
+        }
         return response
     }
 
-    private func dispatch(_ message: [String: Any], identity: TokenIdentity) async -> [String: Any]? {
+    private func dispatch(
+        _ message: [String: Any], identity: TokenIdentity, afterResponse: inout [@Sendable () async -> Void]
+    ) async -> [String: Any]? {
         let id = message["id"]
         guard let method = message["method"] as? String else {
             return id.map { rpcError(id: $0, code: -32600, message: "Invalid Request") }
@@ -191,6 +214,7 @@ public final class BoardServer: Sendable {
             let arguments = JSONValue(any: params["arguments"] ?? [String: Any]())
             do {
                 let result = try await tools.call(name, arguments: arguments, identity: identity)
+                if let deferred = result.afterResponse { afterResponse.append(deferred) }
                 return rpcResult(id: id, toolResult(text: result.text, isError: result.isError))
             } catch let error as ToolError {
                 return rpcResult(id: id, toolResult(text: error.message, isError: true))
