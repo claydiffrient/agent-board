@@ -428,17 +428,32 @@ the socket walk and the attribution walk below reuse, so a sweep is linear in
 processes rather than in sockets, and a socket is never dropped because its
 own `proc_pidinfo` lookup failed — it is reported unattributed instead.
 
+**One port is one row.** A descriptor inherited across `fork` stays open in
+every process below the one that bound it: a board's own server socket was
+seen under `AgentBoard`, three `claude` hosts and a shell console — six rows
+for one port. The sweep groups holders by port and gives the row to the holder
+that started first, which is the binder, since nothing can inherit a
+descriptor before the process holding it exists; a pid whose start time could
+not be read sorts last, and the lower pid breaks a tie. The binder's
+attribution names the row, never an inheritor's. Every holder's chain is still
+recorded in the ledger below, so a child that outlives the binder stays
+nameable.
+
 **Attribution** walks the listening pid's parent chain looking for a pid the
 caller recognizes: a worker or orchestrator host's pid from
 `ClaudeCLI.listAgents()` (`agent_session` itself stores no pid), or the
-project shell console's `shellPid`. This is reliable exactly as far as the
+project shell console's `shellPid`. The registry is machine-wide — it lists
+every interactive session the human is sitting in and every other board's
+workers — so `ListeningPortModel` hands the sweep only the hosts whose session
+id `agent_session` records. This is reliable exactly as far as the
 chain is intact, and no further: macOS has no subreaper, so a reparented
 grandchild's `ppid` becomes 1, and the session that spawned it is not
 recoverable from the process table at all, for that socket, permanently. A
 socket whose chain reaches pid 1 or a process the board never launched is
-reported with its pid and command and a nil owner — an **orphan**, and a
-first-class result rather than a dropped row, because that unreachable-any-
-other-way row is the one this whole sweep exists to produce.
+reported with its pid and command and a nil owner. The sweep reports it; the
+panel does not draw it (§10), because a nil owner is no evidence the board
+started the process — every system daemon on the machine looks exactly like
+that.
 
 To still name the orphan's *previous* owner, the sweep persists what it
 learned while the chain was still whole: `sweepResult` returns every pid
@@ -454,8 +469,8 @@ is self-evidently true and the ledger is a claim about the past. **This is
 attribution's stated limit, not an edge case**: an orphan is only ever named
 if some earlier sweep observed its chain intact before it broke. A dev server
 that starts and is orphaned entirely between two hourly sweeps is recorded
-nowhere and surfaces `unattributed` — pid and command, no owner at all — and
-no better chain walk recovers it after the fact.
+nowhere, so it has no owner and draws no row, and no better chain walk
+recovers it after the fact.
 
 `BoardServer`'s own port is dropped inside the sweep itself, before any
 attribution runs, not by a caller — it is the port every worker's MCP
@@ -2089,9 +2104,7 @@ the sidebar.
 An **orphan appears here whenever its ended session still names a project**.
 `agent_session` and `task` outlive the process, so a ledger-sourced row resolves
 a `project_id` and lands on that project's pane — the dev server whose session
-ended an hour ago is exactly the row this is for. A row nothing names at all
-(`unattributed`) carries no project and therefore appears on no project's pane;
-the sidebar panel is where that one is seen. When this project holds no ports the
+ended an hour ago is exactly the row this is for. When this project holds no ports the
 section draws nothing: the sidebar panel keeps its header line when empty because
 that line carries the refresh button, and this section has no button to keep.
 
@@ -2136,18 +2149,23 @@ sections the viewer has collapsed is a per-viewer convenience and lives in
 **Ports** — a panel directly above **Add Project…**, listing every TCP socket
 in `LISTEN` that a process Agent Board started is holding. A row is the port
 number, the command holding it, and who it belongs to: the task title and
-project of the session that opened it, **Terminal** and the project for the
-per-project shell console, or a plain **orphaned** marker with the command name
-when the chain leads nowhere. `BoardServer`'s own port is never a row — it is
-excluded inside the sweep, not by this panel.
+project of the session that opened it, or **Terminal** and the project for the
+per-project shell console. **A port is drawn only when the board can name that
+owner** — a session `agent_session` records, live or ended, or a project's shell
+console. A socket nothing names, or one pinned on a session this board has no
+row for, is not drawn: ControlCenter, Steam, an editor, an interactive `claude`
+session's dev server and a second Agent Board instance's server port all look
+like that, and Agent Board has no evidence it started any of them. The
+consequence is stated rather than hidden: a dev server orphaned between two
+sweeps, or one whose project was deleted, has no row. `BoardServer`'s own port
+is never a row — it is excluded inside the sweep, not by this panel.
 
 Two link targets in a row, going to different places on purpose. The number
 opens `http://localhost:<port>` in the default browser. The owner name opens the
 session, through `NotificationRouter` and `MainWindow.select` — the same funnel a
 clicked notification uses, so a port row starts a project's orchestrator exactly
 as a sidebar click does. A session-owned port routes to Status, a shell-console
-port to Terminal. An orphan has no session to open, so its name is not a link. A
-session that has *ended* still keeps its name and its route: `agent_session` and
+port to Terminal. A session that has *ended* still keeps its name and its route: `agent_session` and
 `task` hold the title after the process is gone, and that row — the dev server
 whose session ended an hour ago — is the one a human otherwise finds only with
 `lsof -i :3000` and guesswork.

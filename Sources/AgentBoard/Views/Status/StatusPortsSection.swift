@@ -11,8 +11,6 @@ import SwiftUI
 /// **An orphan appears here whenever its ended session still names a project.** `agent_session` and
 /// `task` outlive the process, so a ledger-sourced row resolves a `projectId` and lands in the pane
 /// for that project — the dev server whose session ended an hour ago is exactly the row this is for.
-/// A row nothing names at all (`unattributed`) carries no project and therefore cannot appear on any
-/// project's pane; the sidebar panel is where that one is seen.
 ///
 /// Nothing is drawn when this project holds no ports. The sidebar panel keeps its header line even
 /// when empty because that line carries the refresh button; this section carries no button, so an

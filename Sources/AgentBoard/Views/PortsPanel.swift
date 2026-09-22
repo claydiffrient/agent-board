@@ -7,14 +7,10 @@ import SwiftUI
 struct PortOwnerLabel: Equatable {
     let title: String
     let detail: String?
-    /// Nil when nothing names the owner. That row's title is not a link because there is nowhere
-    /// to send a click.
-    let route: NotificationRoute?
-    /// No running session behind it: either the parent chain broke and only the pid ledger named
-    /// the owner — the dev server whose session ended an hour ago — or nothing names it at all.
+    let route: NotificationRoute
+    /// No running session behind it: the parent chain broke and only the pid ledger named the
+    /// owner — the dev server whose session ended an hour ago.
     let ended: Bool
-
-    static let orphanTitle = "orphaned"
 }
 
 /// Who a listening port belongs to, in the words the sidebar uses.
@@ -22,24 +18,19 @@ struct PortOwnerLabel: Equatable {
 /// A ledger-sourced row keeps its owner: the session is over but `agent_session` and `task` still
 /// hold the name, and routing to the project's Status roster is the only way a human reaches it.
 func portOwnerLabel(_ port: AttributedPort) -> PortOwnerLabel {
-    func orphan() -> PortOwnerLabel {
-        PortOwnerLabel(title: PortOwnerLabel.orphanTitle, detail: port.command, route: nil, ended: true)
-    }
     let ended = port.ownership == .orphaned
-
-    if let sessionId = port.sessionId, let projectId = port.projectId {
+    if let sessionId = port.sessionId {
         return PortOwnerLabel(
             title: port.taskTitle ?? "Session \(sessionId.prefix(8))",
             detail: port.projectName,
-            route: NotificationRoute(projectId: projectId, subject: .session(sessionId)),
+            route: NotificationRoute(projectId: port.projectId, subject: .session(sessionId)),
             ended: ended
         )
     }
-    guard port.sessionId == nil, let projectId = port.projectId else { return orphan() }
     return PortOwnerLabel(
         title: "Terminal",
         detail: port.projectName,
-        route: NotificationRoute(projectId: projectId, subject: .terminal),
+        route: NotificationRoute(projectId: port.projectId, subject: .terminal),
         ended: ended
     )
 }
@@ -155,17 +146,11 @@ struct PortRow: View {
     private var ownerLine: some View {
         let label = owner
         HStack(spacing: 4) {
-            if let route = label.route {
-                Button { openRoute(route) } label: {
-                    Text(label.title).lineLimit(1).truncationMode(.tail)
-                }
-                .buttonStyle(.link)
-                .help(helpText(label))
-            } else {
-                Text(label.title)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            Button { openRoute(label.route) } label: {
+                Text(label.title).lineLimit(1).truncationMode(.tail)
             }
+            .buttonStyle(.link)
+            .help(helpText(label))
             if let detail = label.detail {
                 Text(detail)
                     .foregroundStyle(.tertiary)
@@ -184,6 +169,7 @@ struct PortRow: View {
 }
 
 /// The listening ports Agent Board's processes hold, above Add Project in the sidebar (SPEC §10).
+/// Only ports the board can name an owner for: every other socket on the machine is not drawn.
 ///
 /// **Empty state: the header line and nothing else.** The sidebar already holds every project, so a
 /// permanently drawn empty box would cost vertical space for no information. The header still costs

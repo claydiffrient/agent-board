@@ -174,3 +174,95 @@ final class ListeningPortSweepTests: XCTestCase {
         XCTAssertNil(table.owner(of: 7, in: [pid_t(4242): "nobody"]))
     }
 }
+
+/// One listening socket is one row, however many processes hold its descriptor.
+final class ListeningPortOneRowPerSocketTests: XCTestCase {
+    /// The `:51916` row seen six times: a board's server socket, inherited by the `claude` hosts and
+    /// the shell console it spawned. The row goes to the process that bound it, not to whichever
+    /// inheritor a session happens to own, and holding one port on two address families adds nothing.
+    func testASocketHeldAcrossATreeIsOneRowNamedByTheProcessThatStartedFirst() {
+        let table = ProcessTable(entries: [
+            100: .init(ppid: 1, command: "AgentBoard", startedAtMicros: 1_000),
+            201: .init(ppid: 100, command: "2.1.280", startedAtMicros: 2_000),
+            202: .init(ppid: 100, command: "2.1.280", startedAtMicros: 2_100),
+            203: .init(ppid: 100, command: "2.1.280", startedAtMicros: 2_200),
+            300: .init(ppid: 100, command: "zsh", startedAtMicros: 3_000),
+            400: .init(ppid: 300, command: "node", startedAtMicros: 4_000),
+        ])
+        let holders = [203, 300, 201, 100, 202, 100].map { PortHolder(pid: $0, port: 51_916) }
+            + [PortHolder(pid: 400, port: 5_173)]
+        let sessions: [pid_t: String] = [201: "s-a", 202: "s-b", 203: "s-c", 300: "shell:p-1"]
+
+        for order in [holders, holders.reversed()] {
+            let result = ListeningPortSweep.sweepResult(
+                holders: order, table: table, sessionPIDs: sessions, remembered: [:], boardServerPort: nil
+            )
+
+            XCTAssertEqual(result.ports.map(\.port), [5_173, 51_916], "one port must be one row")
+            let server = result.ports.first { $0.port == 51_916 }
+            XCTAssertEqual(server?.pid, 100)
+            XCTAssertEqual(server?.command, "AgentBoard")
+            XCTAssertNil(server?.sessionId, "an inheritor's session named a socket it did not bind")
+            XCTAssertEqual(result.ports.first { $0.port == 5_173 }?.sessionId, "shell:p-1")
+            XCTAssertEqual(
+                result.attributions[PIDIdentity(pid: 202, startedAtMicros: 2_100)], "s-b",
+                "an inheritor's chain was not recorded, so it is unnameable once the binder exits"
+            )
+        }
+    }
+
+    /// The same rule against the real process table: a listener that forks keeps the socket open in
+    /// both processes, and the sweep reports it once, under the parent.
+    func testAForkedListenerIsOneRowUnderTheParent() throws {
+        try XCTSkipUnless(ProcessTreeFixture.isSupported, "no /usr/bin/python3 to hold a socket")
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentboard-portfork/\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("fork.py")
+        try """
+        import os, socket, time
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(5)
+        child = os.fork()
+        if child == 0:
+            time.sleep(600)
+            os._exit(0)
+        print("P %d %d %d" % (os.getpid(), child, s.getsockname()[1]), flush=True)
+        time.sleep(600)
+        """.write(to: script, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [script.path]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+
+        var line = ""
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline, !line.contains("\n") {
+            let chunk = output.fileHandleForReading.availableData
+            if chunk.isEmpty { Thread.sleep(forTimeInterval: 0.05); continue }
+            line += String(decoding: chunk, as: UTF8.self)
+        }
+        let fields = line.split(whereSeparator: \.isWhitespace)
+        let parent = try XCTUnwrap(fields.count == 4 ? pid_t(fields[1]) : nil, "unparsable: \(line)")
+        let child = try XCTUnwrap(pid_t(fields[2]))
+        let port = try XCTUnwrap(Int(fields[3]))
+        defer {
+            kill(child, SIGKILL)
+            kill(parent, SIGKILL)
+            process.terminate()
+        }
+
+        XCTAssertEqual(
+            Set(ListeningPortSweep.holders(of: port)), [parent, child],
+            "both processes must hold the socket, or the single row below proves nothing"
+        )
+        let rows = ListeningPortSweep.sweep(sessionPIDs: [:], boardServerPort: nil).filter { $0.port == port }
+        XCTAssertEqual(rows.map(\.pid), [parent])
+    }
+}

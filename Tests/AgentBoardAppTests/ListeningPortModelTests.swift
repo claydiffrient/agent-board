@@ -11,6 +11,7 @@ import XCTest
 private final class SweepSpy: @unchecked Sendable {
     private let lock = NSLock()
     private var calls = 0
+    private var handed: [[pid_t: String]] = []
     private var responses: [[ListeningPort]]
     private let gate: DispatchSemaphore?
 
@@ -20,14 +21,32 @@ private final class SweepSpy: @unchecked Sendable {
     }
 
     var count: Int { lock.withLock { calls } }
+    var owners: [[pid_t: String]] { lock.withLock { handed } }
 
     func sweep(_ owners: [pid_t: String], _ remembered: [PIDIdentity: String], _ port: Int?) -> PortSweepResult {
         lock.lock()
         calls += 1
+        handed.append(owners)
         let ports = responses.count > 1 ? responses.removeFirst() : (responses.first ?? [])
         lock.unlock()
         gate?.wait()
         return PortSweepResult(ports: ports, attributions: [:], liveIdentities: [])
+    }
+}
+
+private final class StopRecorder: @unchecked Sendable {
+    struct Call: Equatable {
+        let port: Int
+        let pid: pid_t
+    }
+
+    private let lock = NSLock()
+    private var recorded: [Call] = []
+
+    var calls: [Call] { lock.withLock { recorded } }
+
+    func record(port: Int, pid: pid_t) {
+        lock.withLock { recorded.append(Call(port: port, pid: pid)) }
     }
 }
 
@@ -49,17 +68,24 @@ final class ListeningPortModelTests: XCTestCase {
         db: AppDatabase,
         spy: SweepSpy,
         shellPIDs: [String: pid_t] = [:],
-        boardServerPort: Int? = nil
+        agentPIDs: [pid_t: String] = [:],
+        boardServerPort: Int? = nil,
+        stopper: @escaping @Sendable (Int, pid_t, Int?, Set<pid_t>) async throws -> PortStopReport = { _, pid, _, _ in
+            PortStopReport(scope: .processGroup(pid), escalated: false, outcome: .stopped)
+        }
     ) -> ListeningPortModel {
         ListeningPortModel(
             db: db,
             ledger: PIDSessionLedger(url: directory.appendingPathComponent("owners.json")),
             boardServerPort: { boardServerPort },
             shellConsolePIDs: { shellPIDs },
-            agentPIDs: { [:] },
-            sweep: spy.sweep
+            agentPIDs: { agentPIDs },
+            sweep: spy.sweep,
+            stopper: stopper
         )
     }
+
+    private static let shell = PortOwnerKey.shellConsole(projectId: "p-1").encoded
 
     private func port(_ number: Int, pid: pid_t, session: String?, source: PortAttributionSource? = nil) -> ListeningPort {
         ListeningPort(port: number, pid: pid, command: "node", sessionId: session, source: source)
@@ -79,8 +105,8 @@ final class ListeningPortModelTests: XCTestCase {
     func testAManualRefreshSweepsAgainAndPublishesTheChangedList() async throws {
         let db = try AppDatabase.inMemory()
         let spy = SweepSpy(responses: [
-            [port(3000, pid: 100, session: nil)],
-            [port(3000, pid: 100, session: nil), port(5173, pid: 101, session: nil)],
+            [port(3000, pid: 100, session: Self.shell)],
+            [port(3000, pid: 100, session: Self.shell), port(5173, pid: 101, session: Self.shell)],
         ])
         let model = makeModel(db: db, spy: spy)
 
@@ -98,7 +124,7 @@ final class ListeningPortModelTests: XCTestCase {
     func testASecondRefreshWhileOneIsInFlightJoinsItRatherThanSweepingAgain() async throws {
         let db = try AppDatabase.inMemory()
         let gate = DispatchSemaphore(value: 0)
-        let spy = SweepSpy(responses: [[port(3000, pid: 100, session: nil)]], gate: gate)
+        let spy = SweepSpy(responses: [[port(3000, pid: 100, session: Self.shell)]], gate: gate)
         let model = makeModel(db: db, spy: spy)
 
         model.refresh()
@@ -138,10 +164,9 @@ final class ListeningPortModelTests: XCTestCase {
         let filtered = model.ports(inProject: mine.id)
 
         XCTAssertEqual(spy.count, 1, "reading both surfaces swept twice")
-        XCTAssertEqual(global.map(\.port), [3000, 4000, 9999])
+        XCTAssertEqual(global.map(\.port), [3000, 4000], "a port nothing names reached the global list")
         XCTAssertEqual(filtered.map(\.port), [3000])
         XCTAssertEqual(filtered.first?.taskTitle, "Run the dev server")
-        XCTAssertEqual(global.first { $0.port == 9999 }?.ownership, .unattributed)
     }
 
     func testAnOrphanCarriesItsEndedSessionsTaskTitle() async throws {
@@ -165,20 +190,66 @@ final class ListeningPortModelTests: XCTestCase {
         XCTAssertEqual(row.pid, 100, "the stop path needs the pid")
     }
 
-    func testAnOrphanWhoseRowsAreGoneStillRendersWithItsPidAndCommand() async throws {
+    /// The screenshot this rule came from: a board with no projects drew ~35 rows, ControlCenter,
+    /// keybase and steam_osx among them. In one sweep, the system process's port and a foreign
+    /// session's dev server draw nothing, while the ended session's dev server — named only through
+    /// the ledger — keeps its owner, its route and a stop that reaches its pid.
+    func testOnlyAnEndedSessionsPortSurvivesASweepThatAlsoHoldsProcessesTheBoardNeverStarted() async throws {
         let db = try AppDatabase.inMemory()
-        let spy = SweepSpy(responses: [[port(3000, pid: 100, session: "session-purged", source: .ledger)]])
-        let model = makeModel(db: db, spy: spy)
+        let project = try ProjectStore(db).register(
+            name: "Mine", repoPath: "/mine", baseBranch: "main", worktreeRoot: "/w/mine", memoryDir: nil
+        )
+        let ended = try session(
+            db, project: project, id: "session-ended", title: "Ship the dev server", state: .completed
+        )
+        let spy = SweepSpy(responses: [[
+            ListeningPort(port: 3000, pid: 100, command: "node", sessionId: ended, source: .ledger),
+            ListeningPort(port: 7000, pid: 200, command: "ControlCenter", sessionId: nil),
+            ListeningPort(port: 5173, pid: 300, command: "node", sessionId: "session-interactive"),
+            ListeningPort(port: 9229, pid: 400, command: "node", sessionId: "session-foreign", source: .ledger),
+        ]])
+        let stops = StopRecorder()
+        let model = makeModel(db: db, spy: spy, stopper: { port, pid, _, _ in
+            stops.record(port: port, pid: pid)
+            return PortStopReport(scope: .processGroup(pid), escalated: false, outcome: .stopped)
+        })
 
         await model.refreshAndWait()
 
+        XCTAssertEqual(model.ports.map(\.port), [3000], "a port the board never started was published")
         let row = try XCTUnwrap(model.ports.first)
         XCTAssertEqual(row.ownership, .orphaned)
-        XCTAssertEqual(row.sessionId, "session-purged")
-        XCTAssertNil(row.taskTitle)
-        XCTAssertNil(row.projectName)
-        XCTAssertNil(row.projectId)
-        XCTAssertEqual(row.command, "node")
+        let label = portOwnerLabel(row)
+        XCTAssertEqual(label.title, "Ship the dev server")
+        XCTAssertEqual(label.detail, "Mine")
+        XCTAssertEqual(label.route, NotificationRoute(projectId: project.id, subject: .session(ended)))
+        XCTAssertEqual(portStopAction(row), .stopNow)
+
+        await model.stop(row)
+        XCTAssertEqual(stops.calls.map(\.pid), [100], "the orphan's stop did not reach its pid")
+    }
+
+    /// `claude agents` lists every session on the machine, including the ones a human is sitting in
+    /// and another board's workers. Only a host `agent_session` records may own a chain, or a
+    /// foreign session nearer the listener would claim it first.
+    func testOnlyRegistrySessionsTheBoardRecordsAreHandedToTheSweepAsOwners() async throws {
+        let db = try AppDatabase.inMemory()
+        let project = try ProjectStore(db).register(
+            name: "Mine", repoPath: "/mine", baseBranch: "main", worktreeRoot: "/w/mine", memoryDir: nil
+        )
+        let mine = try session(db, project: project, id: "session-mine", title: "Run it")
+        let spy = SweepSpy(responses: [[]])
+        let model = makeModel(
+            db: db, spy: spy, shellPIDs: [project.id: 55],
+            agentPIDs: [600: mine, 700: "session-interactive"]
+        )
+
+        await model.refreshAndWait()
+
+        XCTAssertEqual(
+            spy.owners.first,
+            [600: mine, 55: PortOwnerKey.shellConsole(projectId: project.id).encoded]
+        )
     }
 
     func testAShellConsolesPortIsAttributedToItsProjectWithNoSession() async throws {
@@ -224,7 +295,7 @@ final class ListeningPortModelTests: XCTestCase {
         await model.refreshAndWait()
         await model.refreshAndWait()
 
-        XCTAssertEqual(model.ports.count, 3)
+        XCTAssertEqual(model.ports.map(\.port), [3000])
         XCTAssertEqual(try rowCounts(db), before, "a sweep wrote to the database")
         XCTAssertEqual(try migrationIdentifiers(db), applied)
     }

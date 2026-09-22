@@ -4,8 +4,8 @@ import Foundation
 /// One TCP socket in `LISTEN`, with the Agent Board session it was traced back to.
 ///
 /// `sessionId` is nil for a socket whose parent chain reaches pid 1 or a process the board never
-/// launched. That is a result, not a failure: an orphaned dev server is exactly the row a human
-/// cannot otherwise see.
+/// launched, with no ledger entry to name it. The sweep still reports it; whether a nil owner is
+/// worth drawing is the caller's decision.
 public struct ListeningPort: Sendable, Equatable {
     public let port: Int
     public let pid: pid_t
@@ -33,6 +33,18 @@ public enum PortAttributionSource: String, Sendable, Equatable, Codable {
     case liveChain
     /// The chain led nowhere; a remembered `(pid, start time)` supplied the owner.
     case ledger
+}
+
+/// One process holding a listening TCP socket. A process bound on both IPv4 and IPv6 holds the port
+/// once, not twice.
+public struct PortHolder: Hashable, Sendable {
+    public let pid: pid_t
+    public let port: Int
+
+    public init(pid: pid_t, port: Int) {
+        self.pid = pid
+        self.port = port
+    }
 }
 
 /// A pid paired with the microsecond its process started.
@@ -194,46 +206,82 @@ public enum ListeningPortSweep {
         // One pid list feeds both the parent map and the socket walk, so a socket on a process
         // whose `proc_pidinfo` lookup failed is still reported, just unattributed.
         let pids = LibProc.allPIDs()
-        let table = ProcessTable.current(pids: pids)
-        var ports: [ListeningPort] = []
-        var attributions: [PIDIdentity: String] = [:]
-        var seen: Set<PortKey> = []
+        let holders = pids.flatMap { pid in
+            LibProc.listeningTCPPorts(of: pid).map { PortHolder(pid: pid, port: $0) }
+        }
+        return sweepResult(
+            holders: holders,
+            table: ProcessTable.current(pids: pids),
+            sessionPIDs: sessionPIDs,
+            remembered: remembered,
+            boardServerPort: boardServerPort
+        )
+    }
 
-        for pid in pids {
-            for port in LibProc.listeningTCPPorts(of: pid) {
-                guard port != boardServerPort else { continue }
-                guard seen.insert(PortKey(pid: pid, port: port)).inserted else { continue }
-                let attributed = attribute(pid: pid, table: table, sessionPIDs: sessionPIDs, remembered: remembered)
-                if let attributed {
-                    for walked in attributed.chain {
-                        guard let identity = table.identity(of: walked) else { continue }
-                        attributions[identity] = attributed.owner
-                    }
+    /// The sweep over an already-read snapshot: every `(pid, port)` pair holding a listening
+    /// socket, and the process table those pids were read from.
+    ///
+    /// **One port is one row.** A descriptor inherited across `fork` is held by the whole tree
+    /// below the process that bound it, so one socket shows up under several pids. The row goes to
+    /// the holder that started first, which is the binder: no process can inherit a descriptor
+    /// before the process holding it exists. Every holder's chain is still recorded, so a child
+    /// that outlives the binder stays nameable from the ledger.
+    public static func sweepResult(
+        holders: [PortHolder],
+        table: ProcessTable,
+        sessionPIDs: [pid_t: String],
+        remembered: [PIDIdentity: String],
+        boardServerPort: Int?
+    ) -> PortSweepResult {
+        var attributions: [PIDIdentity: String] = [:]
+        var owners: [Int: (holder: PortHolder, attributed: Attribution?)] = [:]
+
+        for holder in Set(holders) where holder.port != boardServerPort {
+            let attributed = attribute(pid: holder.pid, table: table, sessionPIDs: sessionPIDs, remembered: remembered)
+            if let attributed {
+                for walked in attributed.chain {
+                    guard let identity = table.identity(of: walked) else { continue }
+                    attributions[identity] = attributed.owner
                 }
-                ports.append(
-                    ListeningPort(
-                        port: port,
-                        pid: pid,
-                        command: table.command(of: pid),
-                        sessionId: attributed?.owner,
-                        source: attributed?.source
-                    )
-                )
             }
+            if let current = owners[holder.port], !startedFirst(holder.pid, before: current.holder.pid, in: table) {
+                continue
+            }
+            owners[holder.port] = (holder, attributed)
+        }
+
+        let ports = owners.values.map { owner in
+            ListeningPort(
+                port: owner.holder.port,
+                pid: owner.holder.pid,
+                command: table.command(of: owner.holder.pid),
+                sessionId: owner.attributed?.owner,
+                source: owner.attributed?.source
+            )
         }
         return PortSweepResult(
-            ports: ports.sorted { ($0.port, $0.pid) < ($1.port, $1.pid) },
+            ports: ports.sorted { $0.port < $1.port },
             attributions: attributions,
             liveIdentities: table.liveIdentities
         )
     }
+
+    /// A pid the table could not read sorts after every pid it could, then the lower pid wins, so
+    /// the choice never depends on the order `proc_listpids` returned them in.
+    private static func startedFirst(_ pid: pid_t, before other: pid_t, in table: ProcessTable) -> Bool {
+        let started = table.entries[pid]?.startedAtMicros ?? .max
+        let otherStarted = table.entries[other]?.startedAtMicros ?? .max
+        return (started, pid) < (otherStarted, other)
+    }
+
+    private typealias Attribution = (owner: String, source: PortAttributionSource, chain: [pid_t])
 
     private static func attribute(
         pid: pid_t,
         table: ProcessTable,
         sessionPIDs: [pid_t: String],
         remembered: [PIDIdentity: String]
-    ) -> (owner: String, source: PortAttributionSource, chain: [pid_t])? {
+    ) -> Attribution? {
         if let live = table.firstOwner(of: pid, resolve: { sessionPIDs[$0] }) {
             return (live.value, .liveChain, live.chain)
         }
@@ -245,11 +293,6 @@ public enum ListeningPortSweep {
         return (recalled.value, .ledger, recalled.chain)
     }
 
-    /// A process that binds both an IPv4 and an IPv6 socket to one port is one row, not two.
-    private struct PortKey: Hashable {
-        let pid: pid_t
-        let port: Int
-    }
 }
 
 /// libproc was measured at ~10 ms per sweep against 1,059 processes versus ~152 ms for one

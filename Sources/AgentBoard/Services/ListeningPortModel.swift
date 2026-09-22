@@ -4,7 +4,8 @@ import Darwin
 import Foundation
 import Observation
 
-/// How a listening socket got the name it carries.
+/// How a listening socket got the name it carries. There is no case for a socket nothing names: a
+/// process Agent Board has no record of starting is not drawn at all (SPEC §10).
 enum PortOwnership: String, Sendable, Equatable, CaseIterable {
     /// The parent chain reaches a session running right now.
     case liveSession
@@ -13,8 +14,6 @@ enum PortOwnership: String, Sendable, Equatable, CaseIterable {
     /// The chain is broken and only the pid ledger names the owner. The dev server whose session
     /// ended an hour ago: the row a human currently finds with `lsof -i :3000` and guesswork.
     case orphaned
-    /// Nothing names it. Pid and command are all there is.
-    case unattributed
 }
 
 /// One row the port panel renders without deciding anything.
@@ -24,7 +23,7 @@ struct AttributedPort: Identifiable, Sendable, Equatable {
     let command: String
     let ownership: PortOwnership
     let sessionId: String?
-    let projectId: String?
+    let projectId: String
     let projectName: String?
     let taskTitle: String?
 
@@ -218,7 +217,7 @@ final class ListeningPortModel {
     }
 
     private func perform() async {
-        var owners = await agentPIDs()
+        var owners = boardSessions(await agentPIDs())
         for (projectId, pid) in shellConsolePIDs() where pid > 0 {
             owners[pid] = PortOwnerKey.shellConsole(projectId: projectId).encoded
         }
@@ -236,9 +235,21 @@ final class ListeningPortModel {
         sweptAt = .now
     }
 
+    /// The claude registry is machine-wide: it lists every interactive session the human is sitting
+    /// in and every other board's workers. Only a host `agent_session` records was started by this
+    /// board, and a foreign one left in the map would stop a chain walk before it reached ours.
+    private func boardSessions(_ registered: [pid_t: String]) -> [pid_t: String] {
+        let known = (try? sessions.names(of: Array(registered.values))) ?? [:]
+        return registered.filter { known[$0.value] != nil }
+    }
+
     /// Joins each row against the stores at publish time. The session and project rows are read,
     /// never copied into this type — an ended session's task title comes from `agent_session` and
-    /// `task`, which nothing deletes, so an orphan keeps its title for as long as those rows do.
+    /// `task`, which outlive the process, so an orphan keeps its title for as long as those rows do.
+    ///
+    /// A row survives only when Agent Board can name what it started: a session `agent_session`
+    /// records, or a project's shell console. A socket nothing names, or one a ledger entry pins on a
+    /// session this board has no row for, is dropped rather than drawn as an orphan.
     private func resolve(_ swept: [ListeningPort]) -> [AttributedPort] {
         let keys = swept.compactMap { $0.sessionId.map(PortOwnerKey.init(encoded:)) }
         let sessionIds = keys.compactMap { key -> String? in
@@ -250,25 +261,19 @@ final class ListeningPortModel {
             $0[$1.id] = $1.name
         }
 
-        return swept.map { row in
-            guard let encoded = row.sessionId else {
-                return AttributedPort(
-                    port: row.port, pid: row.pid, command: row.command,
-                    ownership: .unattributed, sessionId: nil,
-                    projectId: nil, projectName: nil, taskTitle: nil
-                )
-            }
+        return swept.compactMap { row in
+            guard let encoded = row.sessionId else { return nil }
             let orphaned = row.source == .ledger
             switch PortOwnerKey(encoded: encoded) {
             case .session(let id):
-                let named = names[id]
+                guard let named = names[id] else { return nil }
                 return AttributedPort(
                     port: row.port, pid: row.pid, command: row.command,
                     ownership: orphaned ? .orphaned : .liveSession,
                     sessionId: id,
-                    projectId: named?.projectId,
-                    projectName: named?.projectName,
-                    taskTitle: named?.taskTitle
+                    projectId: named.projectId,
+                    projectName: named.projectName,
+                    taskTitle: named.taskTitle
                 )
             case .shellConsole(let projectId):
                 return AttributedPort(

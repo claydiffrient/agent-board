@@ -52,6 +52,7 @@ private final class FixedSweep: @unchecked Sendable {
 
 @MainActor
 final class PortStopModelTests: XCTestCase {
+    private static let shell = PortOwnerKey.shellConsole(projectId: "p-1").encoded
     private var directory: URL!
 
     override func setUpWithError() throws {
@@ -85,7 +86,7 @@ final class PortStopModelTests: XCTestCase {
 
     func testAStoppedPortsRowIsGoneWithoutWaitingForTheHourlySweep() async throws {
         let db = try AppDatabase.inMemory()
-        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: nil)])
+        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: Self.shell)])
         let spy = StopperSpy()
         let model = model(db: db, sweep: sweep, stopper: spy)
         await model.refreshAndWait()
@@ -103,7 +104,7 @@ final class PortStopModelTests: XCTestCase {
     /// failure: the human would find the port again with `lsof` an hour later.
     func testARowWhoseProcessSurvivesTheEscalationStaysAndSaysSo() async throws {
         let db = try AppDatabase.inMemory()
-        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: nil)])
+        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: Self.shell)])
         let spy = StopperSpy { _, _ in
             PortStopReport(scope: .processGroup(900), escalated: true, outcome: .stillListening)
         }
@@ -121,7 +122,7 @@ final class PortStopModelTests: XCTestCase {
     /// pruned by the very refresh that proves the port was never released.
     func testAFailureSurvivesTheProcessComingBackUnderANewPid() async throws {
         let db = try AppDatabase.inMemory()
-        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: nil)])
+        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: Self.shell)])
         let spy = StopperSpy { _, _ in
             PortStopReport(scope: .processOnly(900), escalated: true, outcome: .stillListening)
         }
@@ -129,7 +130,7 @@ final class PortStopModelTests: XCTestCase {
         await model.refreshAndWait()
         let row = try XCTUnwrap(model.ports.first)
 
-        sweep.replace(with: [ListeningPort(port: 3000, pid: 901, command: "node", sessionId: nil)])
+        sweep.replace(with: [ListeningPort(port: 3000, pid: 901, command: "node", sessionId: Self.shell)])
         await model.stop(row)
 
         let respawned = try XCTUnwrap(model.ports.first)
@@ -142,7 +143,7 @@ final class PortStopModelTests: XCTestCase {
 
     func testTheFailureClearsOnceTheRowIsGone() async throws {
         let db = try AppDatabase.inMemory()
-        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: nil)])
+        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: Self.shell)])
         let survives = StopperSpy { _, _ in
             PortStopReport(scope: .processGroup(900), escalated: true, outcome: .stillListening)
         }
@@ -162,7 +163,7 @@ final class PortStopModelTests: XCTestCase {
     /// shell. A stop that signalled one of those groups would take agents down with a dev server.
     func testTheStopIsHandedTheBoardsOwnPortAndEveryProtectedPID() async throws {
         let db = try AppDatabase.inMemory()
-        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: nil)])
+        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: Self.shell)])
         let spy = StopperSpy()
         let model = model(
             db: db, sweep: sweep, stopper: spy, boardServerPort: 47_100,
@@ -182,7 +183,7 @@ final class PortStopModelTests: XCTestCase {
 
     func testASecondStopOfTheSameRowWhileOneIsInFlightDoesNotSignalTwice() async throws {
         let db = try AppDatabase.inMemory()
-        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: nil)])
+        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: Self.shell)])
         let spy = StopperSpy()
         let model = model(db: db, sweep: sweep, stopper: spy)
         await model.refreshAndWait()
@@ -199,7 +200,7 @@ final class PortStopModelTests: XCTestCase {
     /// a stop that worked.
     func testARefusalIsShownOnTheRow() async throws {
         let db = try AppDatabase.inMemory()
-        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: nil)])
+        let sweep = FixedSweep([ListeningPort(port: 3000, pid: 900, command: "node", sessionId: Self.shell)])
         let spy = StopperSpy { port, _ in throw PortStopRefusal.boardServerPort(port) }
         let model = model(db: db, sweep: sweep, stopper: spy)
         await model.refreshAndWait()

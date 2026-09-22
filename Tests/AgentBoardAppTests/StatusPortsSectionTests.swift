@@ -158,7 +158,7 @@ final class StatusPortsSectionLiveTests: XCTestCase {
     }
 
     private func model(
-        _ db: AppDatabase, _ rows: [ListeningPort], sweep: CountingSweep? = nil
+        _ db: AppDatabase, _ rows: [ListeningPort], publishes: Int? = nil, sweep: CountingSweep? = nil
     ) throws -> ListeningPortModel {
         let counter = sweep ?? CountingSweep(rows: rows)
         let model = ListeningPortModel(
@@ -177,7 +177,7 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         while Date() < deadline, model.sweptAt == nil {
             RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         }
-        XCTAssertEqual(model.ports.count, rows.count, "the stub sweep never published its rows")
+        XCTAssertEqual(model.ports.count, publishes ?? rows.count, "the stub sweep never published its rows")
         return model
     }
 
@@ -275,8 +275,7 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         )
     }
 
-    /// A row nothing names at all belongs to no project, so it cannot appear on a project's pane —
-    /// the sidebar panel, which is global, is where that one is seen.
+    /// A port nothing names is not drawn anywhere, so it cannot land on a project's pane either.
     func testAPortNothingNamesDrawsNothingOnAnyProjectsPane() throws {
         let db = try AppDatabase.inMemory()
         let mine = try register(db, "Mine")
@@ -285,9 +284,8 @@ final class StatusPortsSectionLiveTests: XCTestCase {
 
         let unnamed = try model(db, mineOnly + [
             ListeningPort(port: 8080, pid: 502, command: "python3", sessionId: nil)
-        ])
-        XCTAssertEqual(unnamed.ports.last?.ownership, .unattributed)
-        XCTAssertNil(unnamed.ports.last?.projectId)
+        ], publishes: 1)
+        XCTAssertEqual(unnamed.ports.map(\.port), [3000])
         XCTAssertEqual(unnamed.ports(inProject: mine.id).map(\.port), [3000])
 
         let base = pane(db, mine, try model(db, mineOnly))
@@ -297,7 +295,7 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         let drift = diff(try settled(base), try settled(withUnnamed))
         XCTAssertEqual(
             drift.count, 0,
-            "an unattributed port drew on a project's Status pane (\(drift.box))"
+            "a port nothing names drew on a project's Status pane (\(drift.box))"
         )
     }
 

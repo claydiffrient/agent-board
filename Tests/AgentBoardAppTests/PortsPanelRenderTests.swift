@@ -11,7 +11,7 @@ import XCTest
 /// `PortsPanelLiveTests.testAnAttributedOwnerNameSelectsItsProject`.
 final class PortOwnerLabelTests: XCTestCase {
     private func port(
-        _ number: Int, ownership: PortOwnership, sessionId: String? = nil, projectId: String? = nil,
+        _ number: Int, ownership: PortOwnership, sessionId: String? = nil, projectId: String = "p-1",
         projectName: String? = nil, taskTitle: String? = nil, command: String = "node"
     ) -> AttributedPort {
         AttributedPort(
@@ -41,13 +41,6 @@ final class PortOwnerLabelTests: XCTestCase {
         XCTAssertEqual(label.title, "Ship the panel")
         XCTAssertEqual(label.route, NotificationRoute(projectId: "p-2", subject: .session("s-2")))
         XCTAssertTrue(label.ended, "a ledger-sourced row must not read as a running session")
-    }
-
-    func testAnOrphanNamesNobodyAndRoutesNowhere() {
-        let label = portOwnerLabel(port(8080, ownership: .unattributed, command: "python3"))
-        XCTAssertEqual(label.title, "orphaned")
-        XCTAssertEqual(label.detail, "python3", "the command is all there is to say")
-        XCTAssertNil(label.route, "there is no session to open, so the name is not a link")
     }
 
     func testAShellConsolePortOpensTheProjectsTerminal() {
@@ -213,7 +206,7 @@ final class PortsPanelLiveTests: XCTestCase {
 
     @discardableResult
     private func session(
-        _ db: AppDatabase, project: Project, id: String, title: String
+        _ db: AppDatabase, project: Project, id: String, title: String, state: SessionState = .running
     ) throws -> String {
         let task = try TaskStore(db).create(
             projectId: project.id, title: title, body: nil, acceptance: nil, priority: nil,
@@ -222,7 +215,8 @@ final class PortsPanelLiveTests: XCTestCase {
         try SessionStore(db).insert(
             AgentSession(
                 sessionId: id, projectId: project.id, taskId: task.id, role: .worker,
-                cwd: "/tmp", state: .running
+                cwd: "/tmp", state: state,
+                endedAt: state.isActive ? nil : Int64.nowMillis - 2 * 60 * 60 * 1000
             )
         )
         return id
@@ -238,6 +232,7 @@ final class PortsPanelLiveTests: XCTestCase {
     private func model(
         _ db: AppDatabase,
         _ rows: [ListeningPort],
+        publishes: Int? = nil,
         stopOutcome: PortStopOutcome = .stopped
     ) throws -> ListeningPortModel {
         let model = ListeningPortModel(
@@ -256,7 +251,7 @@ final class PortsPanelLiveTests: XCTestCase {
         while Date() < deadline, model.sweptAt == nil {
             RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         }
-        XCTAssertEqual(model.ports.count, rows.count, "the stub sweep never published its rows")
+        XCTAssertEqual(model.ports.count, publishes ?? rows.count, "the stub sweep never published its rows")
         return model
     }
 
@@ -272,7 +267,7 @@ final class PortsPanelLiveTests: XCTestCase {
         try session(db, project: alpha, id: "s-live", title: "Wire the thing")
         let rows = [
             ListeningPort(port: 3000, pid: 501, command: "node", sessionId: "s-live"),
-            ListeningPort(port: 8080, pid: 502, command: "python3", sessionId: nil),
+            ListeningPort(port: 8080, pid: 502, command: "python3", sessionId: shellKey(alpha)),
         ]
 
         let first = mount(db, try model(db, rows))
@@ -297,7 +292,7 @@ final class PortsPanelLiveTests: XCTestCase {
         let alpha = try register(db, "Alpha")
         try session(db, project: alpha, id: "s-live", title: "Wire the thing")
         let one = [ListeningPort(port: 3000, pid: 501, command: "node", sessionId: "s-live")]
-        let two = one + [ListeningPort(port: 8080, pid: 502, command: "python3", sessionId: nil)]
+        let two = one + [ListeningPort(port: 8080, pid: 502, command: "python3", sessionId: shellKey(alpha))]
 
         let noPanel = mount(db, nil)
         let emptyMount = mount(db, try model(db, []))
@@ -347,7 +342,7 @@ final class PortsPanelLiveTests: XCTestCase {
             db, try model(db, [ListeningPort(port: 3000, pid: 501, command: "node", sessionId: "s-live")])
         )
         let orphaned = mount(
-            db, try model(db, [ListeningPort(port: 3000, pid: 501, command: "node", sessionId: nil)])
+            db, try model(db, [ListeningPort(port: 3000, pid: 501, command: "node", sessionId: "s-live", source: .ledger)])
         )
         defer { attributed.close(); orphaned.close() }
 
@@ -362,12 +357,12 @@ final class PortsPanelLiveTests: XCTestCase {
     /// would leave nobody to ask about a port that appeared since the last hourly sweep.
     func testAnEmptyPanelCostsOneHeaderLineAndDrawsNoRows() throws {
         let db = try AppDatabase.inMemory()
-        _ = try register(db, "Alpha")
+        let alpha = try register(db, "Alpha")
 
         let withoutPanel = mount(db, nil)
         let emptyPanel = mount(db, try model(db, []))
         let onePort = mount(db, try model(db, [
-            ListeningPort(port: 3000, pid: 501, command: "node", sessionId: nil)
+            ListeningPort(port: 3000, pid: 501, command: "node", sessionId: shellKey(alpha))
         ]))
         defer { withoutPanel.close(); emptyPanel.close(); onePort.close() }
 
@@ -407,7 +402,7 @@ final class PortsPanelLiveTests: XCTestCase {
         XCTAssertEqual(supervisor.focusedProjects, [], "nothing is selected before the click")
 
         let attributed = try XCTUnwrap(ports.ports.first)
-        let route = try XCTUnwrap(portOwnerLabel(attributed).route, "an attributed row is a link")
+        let route = portOwnerLabel(attributed).route
         router.open(route)
         waitForFocus(supervisor, mounted)
 
@@ -422,8 +417,8 @@ final class PortsPanelLiveTests: XCTestCase {
     /// is drawn on it — which is one more line of pixels than the same row without one.
     func testARowWhoseProcessSurvivedTheEscalationDrawsItsFailure() throws {
         let db = try AppDatabase.inMemory()
-        _ = try register(db, "Alpha")
-        let rows = [ListeningPort(port: 3000, pid: 501, command: "node", sessionId: nil)]
+        let alpha = try register(db, "Alpha")
+        let rows = [ListeningPort(port: 3000, pid: 501, command: "node", sessionId: shellKey(alpha))]
 
         let quiet = try model(db, rows)
         let failed = try model(db, rows, stopOutcome: .stillListening)
@@ -452,25 +447,46 @@ final class PortsPanelLiveTests: XCTestCase {
         )
     }
 
-    /// An orphan has no session to open, so its name is not a link and nothing happens.
-    func testAnOrphansNameRoutesNowhere() throws {
+    /// The screenshot this rule came from: ControlCenter, keybase, steam_osx and a sibling board's
+    /// server port, each drawn as an `orphaned` row on a board with no projects. A port no process
+    /// the board started is holding changes no pixel, while the ended session's dev server beside it
+    /// in the same sweep draws its row, names its task, and routes to its session.
+    func testAPortTheBoardNeverStartedDrawsNoRowBesideAnEndedSessionsPort() throws {
         let db = try AppDatabase.inMemory()
-        _ = try register(db, "Alpha")
+        let beta = try register(db, "Beta")
+        try session(db, project: beta, id: "s-ended", title: "Ship the panel", state: .completed)
+        let orphan = ListeningPort(port: 5173, pid: 501, command: "node", sessionId: "s-ended", source: .ledger)
+        let foreign = [
+            ListeningPort(port: 7000, pid: 502, command: "ControlCenter", sessionId: nil),
+            ListeningPort(port: 51916, pid: 503, command: "AgentBoard", sessionId: nil),
+            ListeningPort(port: 9229, pid: 504, command: "node", sessionId: "s-someone-elses"),
+        ]
 
-        let ports = try model(db, [
-            ListeningPort(port: 8080, pid: 502, command: "python3", sessionId: nil)
-        ])
-        let supervisor = StubSupervisor()
-        let mounted = Mount(db: db, supervisor: supervisor, router: NotificationRouter(), ports: ports)
-        defer { mounted.close() }
-        mounted.settle()
+        let orphanOnly = try model(db, [orphan])
+        let mixed = try model(db, [orphan] + foreign, publishes: 1)
+        let row = try XCTUnwrap(mixed.ports.first)
+        XCTAssertEqual(mixed.ports.map(\.port), [5173])
+        XCTAssertEqual(row.ownership, .orphaned)
+        XCTAssertEqual(portOwnerLabel(row).title, "Ship the panel")
+        XCTAssertEqual(
+            portOwnerLabel(row).route, NotificationRoute(projectId: beta.id, subject: .session("s-ended"))
+        )
 
-        let orphan = try XCTUnwrap(ports.ports.first)
-        XCTAssertEqual(orphan.ownership, .unattributed)
-        XCTAssertNil(portOwnerLabel(orphan).route, "an orphan's name must not be a link")
-        XCTAssertEqual(supervisor.focusedProjects, [], "and nothing may be selected on its behalf")
+        let emptyMount = mount(db, try model(db, []))
+        let orphanMount = mount(db, orphanOnly)
+        let mixedMount = mount(db, mixed)
+        defer { emptyMount.close(); orphanMount.close(); mixedMount.close() }
+        let empty = try settled(emptyMount)
+        let drawn = try settled(orphanMount)
+
+        let foreignRows = diff(drawn, try settled(mixedMount))
+        XCTAssertEqual(foreignRows.count, 0, "a port the board never started drew a row (\(foreignRows.box))")
+        XCTAssertGreaterThan(diff(empty, drawn).count, 0, "the ended session's port drew no row")
     }
 
+    private func shellKey(_ project: Project) -> String {
+        PortOwnerKey.shellConsole(projectId: project.id).encoded
+    }
 }
 
 /// What the stop button does when it is pressed.
@@ -482,7 +498,7 @@ final class PortsPanelLiveTests: XCTestCase {
 /// bug rather than as a consequence — so that one names the task before it acts.
 final class PortStopConfirmationTests: XCTestCase {
     private func port(
-        _ number: Int, ownership: PortOwnership, sessionId: String? = nil, projectId: String? = nil,
+        _ number: Int, ownership: PortOwnership, sessionId: String? = nil, projectId: String = "p-1",
         taskTitle: String? = nil
     ) -> AttributedPort {
         AttributedPort(
@@ -525,7 +541,6 @@ final class PortStopConfirmationTests: XCTestCase {
                                 taskTitle: "Ship the panel")),
             .stopNow
         )
-        XCTAssertEqual(portStopAction(port(8080, ownership: .unattributed)), .stopNow)
     }
 
     /// The human typed the command that opened this socket and is looking at the screen that runs
