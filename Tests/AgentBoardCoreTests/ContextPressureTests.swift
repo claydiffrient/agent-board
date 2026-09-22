@@ -56,6 +56,15 @@ final class ContextPressureTests: XCTestCase {
         XCTAssertEqual(ModelCatalog.effectiveContextWindow(for: "claude-sonnet-5"), 980_000)
     }
 
+    /// Opus 5.5's window happens to equal Opus 5's, so the entry is pinned rather than the number.
+    func testOpus55ResolvesToItsOwnEntryNotOpus5s() {
+        XCTAssertEqual(ModelCatalog.option(for: "claude-opus-5-5")?.id, "claude-opus-5-5")
+        XCTAssertEqual(ModelCatalog.option(for: "claude-opus-5-5-20260101")?.id, "claude-opus-5-5")
+        XCTAssertEqual(ModelCatalog.option(for: "claude-opus-5")?.id, "claude-opus-5")
+        XCTAssertEqual(ModelCatalog.option(for: "claude-opus-5-20260101")?.id, "claude-opus-5")
+        XCTAssertEqual(ModelCatalog.effectiveContextWindow(for: "claude-opus-5-5"), 980_000)
+    }
+
     func testADatedModelIdResolvesToItsCatalogEntry() {
         XCTAssertEqual(
             ModelCatalog.effectiveContextWindow(for: "claude-haiku-4-5-20251001"),

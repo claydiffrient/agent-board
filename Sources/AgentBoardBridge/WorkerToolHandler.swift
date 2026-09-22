@@ -183,18 +183,12 @@ public final class WorkerToolHandler: ToolHandler {
             let outcome = try reportComplete(task, arguments: arguments, identity: identity)
             guard !outcome.wasAlreadyComplete else { return Self.completionResult(outcome) }
             let result = await routeCompletion(task, outcome: outcome)
-            if let sessionId = identity.sessionId {
-                await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
-            }
             await events.reportQueued(projectId: identity.projectId)
-            return result
+            return stoppingAfterwards(result, identity: identity)
         case "hand_off":
             let result = try handOff(task, arguments: arguments, identity: identity)
-            if let sessionId = identity.sessionId {
-                await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
-            }
             await events.reportQueued(projectId: identity.projectId)
-            return result
+            return stoppingAfterwards(result, identity: identity)
         case "acknowledge_shutdown":
             let note = try ToolArguments.requiredString("note", in: arguments)
             let sessionId = try requiredSession(identity)
@@ -203,8 +197,9 @@ public final class WorkerToolHandler: ToolHandler {
             } catch BoardError.noShutdownOrder {
                 throw ToolError("No shutdown order is outstanding on this project; keep working on your task.")
             }
-            await events.workerAcknowledgedShutdown(projectId: identity.projectId, sessionId: sessionId)
-            return ToolResult(text: "acknowledged — stop now")
+            return ToolResult(text: "acknowledged — stop now") { [events] in
+                await events.workerAcknowledgedShutdown(projectId: identity.projectId, sessionId: sessionId)
+            }
         case "report_blocked":
             let reason = try ToolArguments.requiredString("reason", in: arguments)
             let sessionId = try requiredSession(identity)
@@ -231,6 +226,19 @@ public final class WorkerToolHandler: ToolHandler {
     }
 
     private static let noteToolNames = Set(NoteTools.workerDescriptors.map(\.name))
+
+    /// `workerCompleted` runs `claude stop` on the very session waiting on this result, so it is
+    /// hung off the response rather than awaited here. Measured on the live board 2026-09-21: of
+    /// 183 completing sessions the 64 that never got their answer all resent `report_complete`,
+    /// and the 118 that got it resent nothing.
+    private func stoppingAfterwards(_ result: ToolResult, identity: TokenIdentity) -> ToolResult {
+        guard let sessionId = identity.sessionId else { return result }
+        var result = result
+        result.afterResponse = { [events] in
+            await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
+        }
+        return result
+    }
 
     private func ownedTask(_ identity: TokenIdentity) throws -> BoardTask {
         guard let taskId = identity.taskId else {
