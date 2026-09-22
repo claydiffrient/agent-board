@@ -33,6 +33,18 @@ final class PricingTests: XCTestCase {
         XCTAssertEqual(custom.rates(forModel: "claude-x-1"), PricingTable.haiku45)
     }
 
+    func testOpus55HasItsOwnRatesNotOpus5s() {
+        let table = PricingTable.default
+        let opus55 = ModelRates(inputPerMTok: 4, outputPerMTok: 20, cacheRead: 0.2, cacheWrite5m: 5, cacheWrite1h: 8)
+        XCTAssertEqual(table.rates(forModel: "claude-opus-5-5"), opus55)
+        XCTAssertEqual(table.rates(forModel: "claude-opus-5-5-20260101"), opus55)
+        XCTAssertNotEqual(table.rates(forModel: "claude-opus-5-5"), PricingTable.opus)
+
+        let opus5 = ModelRates(inputPerMTok: 5, outputPerMTok: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10)
+        XCTAssertEqual(table.rates(forModel: "claude-opus-5"), opus5)
+        XCTAssertEqual(table.rates(forModel: "claude-opus-5-20260101"), opus5)
+    }
+
     func testUnknownAndNilFallBackToOpus() {
         let table = PricingTable.default
         XCTAssertEqual(table.rates(forModel: nil), PricingTable.opus)
