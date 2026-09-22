@@ -145,7 +145,31 @@ final class HookAndWorkerEventTests: XCTestCase {
             ]
         )
         XCTAssertEqual(try f.tasks.get(task.id)?.column, .review)
+        XCTAssertTrue(result.text.contains("is now in Review"), result.text)
         XCTAssertEqual(try f.reports.unconsumedCount(projectId: f.project.id), 1)
+    }
+
+    /// Under the project's default archive policy (`afterEpicMerge`), an epic's integration task
+    /// lands in `done` rather than `review` when it completes — the sweep runs in the same
+    /// transaction. The success text has to say `Done` here, not the `Review` every other task gets.
+    func testReportCompleteOnAnIntegrationTaskUnderAfterEpicMergeSaysDone() async throws {
+        let epic = try f.epic("Ship search", state: .integrating)
+        let integration = try f.board.createIntegrationTask(epicId: epic.id)
+        try f.session("w1", taskId: integration.id)
+        let identity = f.workerIdentity(sessionId: "w1", taskId: integration.id)
+        let arguments: JSONValue = .object([
+            "summary": .string("merged everything"),
+            "files_changed": .array([]),
+            "tests_run": .string("swift test"),
+            "caveats": .string(""),
+        ])
+
+        let result = try await f.scoped.call("report_complete", arguments: arguments, identity: identity)
+
+        XCTAssertFalse(result.isError)
+        XCTAssertEqual(try f.tasks.get(integration.id)?.column, .done)
+        XCTAssertTrue(result.text.contains("is now in Done"), result.text)
+        XCTAssertFalse(result.text.contains("is now in Review"), result.text)
     }
 
     /// The MCP client resends `report_complete` when the answer never arrives, which is the usual
