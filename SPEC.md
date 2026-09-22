@@ -2003,6 +2003,23 @@ as dead rather than phantom-running. Per agent: task, state, elapsed, spend
 against cap, last tool used. A blocked agent's row opens its terminal, which is
 how permission prompts get answered (D15).
 
+Below the roster, the ports **this project** holds — the same rows the sidebar
+panel draws, in the same `PortRow`, filtered to this project rather than swept
+again. The pane starts no sweep and carries no refresh button of its own: the
+panel that owns both is on screen beside it, and a second timer over the same
+process table would double the cost and let the two surfaces disagree between
+ticks. A port belonging to another project is absent here and still present in
+the sidebar.
+
+An **orphan appears here whenever its ended session still names a project**.
+`agent_session` and `task` outlive the process, so a ledger-sourced row resolves
+a `project_id` and lands on that project's pane — the dev server whose session
+ended an hour ago is exactly the row this is for. A row nothing names at all
+(`unattributed`) carries no project and therefore appears on no project's pane;
+the sidebar panel is where that one is seen. When this project holds no ports the
+section draws nothing: the sidebar panel keeps its header line when empty because
+that line carries the refresh button, and this section has no button to keep.
+
 **Roster** — the cross-project register of specialists (§4), and the one screen
 not scoped to a project: a `Roster` row in the sidebar beside `At a Glance` and
 above the workspace sections, so it does not join Task Board and Status inside a
