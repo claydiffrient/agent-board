@@ -197,13 +197,15 @@ struct ProjectSettingsSheet: View {
             TextField("Project session ceiling", value: $settings.caps.sessionCeiling, format: .number, prompt: Text("Unlimited"))
         case .models:
             ModelPicker(label: "Default model", inheritLabel: "Claude Code default", model: $settings.defaultModel)
-            LabeledContent("Model guidance") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Model guidance")
                 TextEditor(text: Binding(
                     get: { settings.modelGuidance ?? "" },
                     set: { settings.modelGuidance = $0.isEmpty ? nil : $0 }
                 ))
                 .font(.body)
-                .frame(minHeight: 80)
+                .frame(minHeight: 100)
+                .accessibilityLabel("Model guidance")
             }
             Text("Read by the orchestrator when it picks a model per task, e.g. \"Sonnet 5 for docs and tests, Opus 5 for features.\" A task's own model overrides the default.")
                 .font(.caption)
@@ -280,9 +282,8 @@ struct ProjectSettingsSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .autoMode:
-            TextEditor(text: $autoModeJSON)
-                .font(.body.monospaced())
-                .frame(minHeight: 120)
+            PlainTextEditor(text: $autoModeJSON)
+                .frame(minHeight: 280)
             if !autoModeJSONIsValid {
                 Text("Not valid JSON.")
                     .font(.caption)

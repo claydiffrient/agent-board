@@ -2051,6 +2051,13 @@ setting with no UI. **Delete Project…** sits outside the tabs, at the left of 
 Cancel/Save row, so it is reachable from every tab. The sheet is at least 780pt
 wide: that is where the grouped form stops widening its rows (~665pt), so the
 classifier editor holds 77 monospaced columns and a wider sheet adds only margin.
+Both multi-line editors span the full row: model guidance sits under its label
+(at least 100pt tall), and the classifier is a plain-text editor at least 280pt
+tall, enough for the shipped default without scrolling, with smart quotes, smart
+dashes and text replacement off so typed JSON parses. Every section's help text
+is the last row of that section, in every tab. Limits keeps a tab of its own: its
+six caps fit one page, while Agents and Workflow already scroll at the sheet's
+minimum height.
 
 **What's New in Agent Board** — the release notes, opened from the Help menu and
 once on their own after an update installs. A `Window` scene rather than a
