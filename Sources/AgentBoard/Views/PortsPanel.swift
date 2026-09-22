@@ -44,6 +44,38 @@ func portOwnerLabel(_ port: AttributedPort) -> PortOwnerLabel {
     )
 }
 
+/// What a human must confirm before a port is stopped.
+struct PortStopConfirmation: Equatable {
+    let title: String
+    let message: String
+}
+
+/// What the stop button does when it is pressed (SPEC §10).
+///
+/// **Only a port whose owner is a session running right now asks.** An orphan or an ended session's
+/// dev server costs a restart if the click was an accident, and this is a button beside a row the
+/// human went looking at. A live session is different in kind: the port may be load-bearing for
+/// work in flight, and a worker that starts failing because its dev server vanished reads as a bug
+/// rather than as a consequence. The shell console is deliberately in the no-confirmation group —
+/// the human typed the command that opened the socket.
+///
+/// The button is two lines over this, so a test of this function is a test of its behaviour.
+enum PortStopAction: Equatable {
+    case stopNow
+    case confirm(PortStopConfirmation)
+}
+
+func portStopAction(_ port: AttributedPort) -> PortStopAction {
+    guard port.ownership == .liveSession else { return .stopNow }
+    let owner = port.taskTitle ?? port.sessionId.map { "session \($0.prefix(8))" } ?? "a running session"
+    return .confirm(
+        PortStopConfirmation(
+            title: "Stop :\(port.port)?",
+            message: "\(owner) is running now and may be using this port."
+        )
+    )
+}
+
 /// One listening port: the number, the command holding it, and who it belongs to.
 ///
 /// Two link targets, and they go to different places on purpose — the number opens what the port
@@ -51,6 +83,11 @@ func portOwnerLabel(_ port: AttributedPort) -> PortOwnerLabel {
 struct PortRow: View {
     let port: AttributedPort
     let openRoute: (NotificationRoute) -> Void
+    var isStopping = false
+    var stopFailure: String?
+    var stop: () -> Void = {}
+
+    @State private var confirming: PortStopConfirmation?
 
     private var owner: PortOwnerLabel { portOwnerLabel(port) }
 
@@ -72,11 +109,46 @@ struct PortRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
+                stopButton
             }
             ownerLine
+            if let stopFailure {
+                Text(stopFailure)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            }
         }
         .font(.caption)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .alert(
+            confirming?.title ?? "",
+            isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
+            presenting: confirming
+        ) { _ in
+            Button("Cancel", role: .cancel) { confirming = nil }
+            Button("Stop", role: .destructive) {
+                confirming = nil
+                stop()
+            }
+        } message: { confirmation in
+            Text(confirmation.message)
+        }
+    }
+
+    @ViewBuilder
+    private var stopButton: some View {
+        Button {
+            switch portStopAction(port) {
+            case .stopNow: stop()
+            case .confirm(let confirmation): confirming = confirmation
+            }
+        } label: {
+            Image(systemName: "stop.circle").font(.system(size: 10))
+        }
+        .buttonStyle(.borderless)
+        .disabled(isStopping)
+        .help("Stop whatever is listening on :\(port.port)")
+        .accessibilityLabel("Stop port \(port.port)")
     }
 
     @ViewBuilder
@@ -131,7 +203,13 @@ struct PortsPanel: View {
                 header(model)
                 if expanded {
                     ForEach(model.ports) { port in
-                        PortRow(port: port) { env.router.open($0) }
+                        PortRow(
+                            port: port,
+                            openRoute: { env.router.open($0) },
+                            isStopping: model.isStopping(port),
+                            stopFailure: model.stopFailure(for: port),
+                            stop: { _Concurrency.Task { await model.stop(port) } }
+                        )
                     }
                 }
             }

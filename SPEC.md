@@ -2060,8 +2060,42 @@ session that has *ended* still keeps its name and its route: `agent_session` and
 whose session ended an hour ago — is the one a human otherwise finds only with
 `lsof -i :3000` and guesswork.
 
-The list is swept hourly, on the panel's refresh button, and when the panel is
-opened. When nothing is listening the panel is its header line and nothing else:
+Each row also carries a **stop** button. It signals a process *group*, not the
+listening pid: `kill(-n, …)` addresses the group whose id is `n`, and a measured
+`npm run dev` puts the listening `node` in its parent `npm`'s group without
+leading one, so its own pid names no group at all. The stop reads the listener's
+`pbi_pgid` and signals that group only when the group leader is the listener
+itself or one of its ancestors *and* no member of the group is a process the
+board runs long-term — its own pid and process group, every `claude` session
+host the registry lists, and every shell console's shell. When either condition
+fails it signals the listening pid alone and accepts that a supervisor above it
+may respawn, because the alternative is a stop button beside a dev server that
+kills an agent. SIGHUP first, matching what a closing terminal window sends and
+what `ShellConsole.hangUp()` already does; SIGKILL after a two-second grace as a
+backstop.
+
+`BoardServer`'s own port is refused before anything else happens — before the
+process table is read — even when the stop is handed it directly. The sweep
+already excludes it so no row can exist for it; this is the second wall, because
+a stop path that could ever take that port is a path that kills every agent on
+the machine.
+
+A stop sweeps again on completion, so the row goes rather than waiting for the
+hourly refresh. A port still held after the escalation keeps its row and says
+so: silently dropping a row for a process that is still listening would hide it
+until the human found it again with `lsof`.
+
+Only a port owned by a session running *right now* asks first, and its
+confirmation names the task. An accidental click on an orphan costs a dev server
+the human can restart, and a dialog on the row this panel exists for is friction
+on the common case; a live session's port may be load-bearing for work in
+flight, and a worker that starts failing because its dev server vanished reads
+as a bug rather than as a consequence. The shell console is deliberately in the
+no-confirmation group — the human typed the command that opened the socket.
+
+The list is swept hourly, on the panel's refresh button, after a stop, and when
+the panel is opened. When nothing is listening the panel is its header line and
+nothing else:
 no empty box, because the sidebar already holds every project and the space is
 not free. The header still costs that one line rather than collapsing to zero,
 because it carries the refresh button — the sweep is hourly, and a panel that

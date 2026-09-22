@@ -73,11 +73,16 @@ public struct ProcessTable: Sendable {
         public let ppid: pid_t
         public let command: String
         public let startedAtMicros: Int64
+        /// The process group this pid belongs to, which is only equal to the pid when it leads one.
+        /// `kill(-n, …)` addresses the group whose id is `n`, so a stop has to know this before it
+        /// can signal anything wider than a single process.
+        public let pgid: pid_t
 
-        public init(ppid: pid_t, command: String, startedAtMicros: Int64 = 0) {
+        public init(ppid: pid_t, command: String, startedAtMicros: Int64 = 0, pgid: pid_t = 0) {
             self.ppid = ppid
             self.command = command
             self.startedAtMicros = startedAtMicros
+            self.pgid = pgid
         }
     }
 
@@ -99,7 +104,8 @@ public struct ProcessTable: Sendable {
             entries[pid] = Entry(
                 ppid: pid_t(bitPattern: info.pbi_ppid),
                 command: LibProc.command(info),
-                startedAtMicros: LibProc.startedAtMicros(info)
+                startedAtMicros: LibProc.startedAtMicros(info),
+                pgid: pid_t(bitPattern: info.pbi_pgid)
             )
         }
         return ProcessTable(entries: entries)
@@ -131,6 +137,23 @@ public struct ProcessTable: Sendable {
             current = parent
         }
         return nil
+    }
+
+    /// Whether `candidate` appears strictly above `pid` on the parent chain.
+    public func isAncestor(_ candidate: pid_t, of pid: pid_t) -> Bool {
+        var current = pid
+        var visited: Set<pid_t> = []
+        while current > 1, visited.insert(current).inserted {
+            guard let parent = entries[current]?.ppid else { return false }
+            if parent == candidate { return true }
+            current = parent
+        }
+        return false
+    }
+
+    /// Every pid in the process group `pgid`, including the leader when it is still alive.
+    public func members(ofGroup pgid: pid_t) -> Set<pid_t> {
+        Set(entries.filter { $0.value.pgid == pgid }.keys)
     }
 
     /// The first pid at or above `pid` that `owners` names, or nil when the chain reaches pid 1 or

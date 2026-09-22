@@ -72,6 +72,15 @@ final class ListeningPortModel {
     private(set) var ports: [AttributedPort] = []
     private(set) var sweptAt: Date?
     private(set) var isSweeping = false
+    /// Row ids with a stop in flight.
+    private(set) var stopping: Set<String> = []
+    /// Port number -> what went wrong, for a port whose process outlived the escalation or whose
+    /// stop was refused.
+    ///
+    /// Keyed by the port rather than by the row id, which is `(pid, port)`. A supervisor that
+    /// respawns under a new pid produces a new row id, and a message keyed on the old one would be
+    /// pruned by the refresh — leaving a port that was never released looking like a clean stop.
+    private(set) var stopFailures: [Int: String] = [:]
 
     /// Hourly, on the wall clock. `Task.sleep(for:)` measures on `ContinuousClock`, which keeps
     /// running through a system suspend, so a lid closed for three hours wakes straight into a
@@ -87,6 +96,7 @@ final class ListeningPortModel {
     @ObservationIgnored private let shellConsolePIDs: @MainActor () -> [String: pid_t]
     @ObservationIgnored private let boardServerPort: @MainActor () -> Int?
     @ObservationIgnored private let sweep: @Sendable (_ owners: [pid_t: String], _ remembered: [PIDIdentity: String], _ boardServerPort: Int?) -> PortSweepResult
+    @ObservationIgnored private let stopper: @Sendable (_ port: Int, _ pid: pid_t, _ boardServerPort: Int?, _ protected: Set<pid_t>) async throws -> PortStopReport
     @ObservationIgnored private var inFlight: _Concurrency.Task<Void, Never>?
 
     init(
@@ -97,6 +107,9 @@ final class ListeningPortModel {
         agentPIDs: @escaping @Sendable () async -> [pid_t: String] = ListeningPortModel.claudeAgentPIDs,
         sweep: @escaping @Sendable ([pid_t: String], [PIDIdentity: String], Int?) -> PortSweepResult = {
             ListeningPortSweep.sweepResult(sessionPIDs: $0, remembered: $1, boardServerPort: $2)
+        },
+        stopper: @escaping @Sendable (Int, pid_t, Int?, Set<pid_t>) async throws -> PortStopReport = {
+            try await PortStopper().stop(port: $0, pid: $1, boardServerPort: $2, protected: $3)
         }
     ) {
         sessions = SessionStore(db)
@@ -106,6 +119,7 @@ final class ListeningPortModel {
         self.shellConsolePIDs = shellConsolePIDs
         self.agentPIDs = agentPIDs
         self.sweep = sweep
+        self.stopper = stopper
     }
 
     /// The hourly background refresh. Sweeps once on entry so a launch does not wait an hour.
@@ -130,6 +144,60 @@ final class ListeningPortModel {
 
     func ports(inProject projectId: String) -> [AttributedPort] {
         ports.filter { $0.projectId == projectId }
+    }
+
+    func stopFailure(for port: AttributedPort) -> String? { stopFailures[port.port] }
+
+    func isStopping(_ port: AttributedPort) -> Bool { stopping.contains(port.id) }
+
+    /// Hangs up the process group holding `port`, then sweeps again so the row goes rather than
+    /// lingering until the hourly refresh.
+    ///
+    /// A row whose socket survives the escalation keeps its place and carries the reason: dropping
+    /// it would claim a stop that did not happen, and the human would find the port again with
+    /// `lsof` an hour later.
+    func stop(_ port: AttributedPort) async {
+        guard stopping.insert(port.id).inserted else { return }
+        defer { stopping.remove(port.id) }
+        stopFailures[port.port] = nil
+
+        let board = boardServerPort()
+        let protected = await protectedPIDs()
+        do {
+            let report = try await stopper(port.port, port.pid, board, protected)
+            if report.outcome == .stillListening {
+                stopFailures[port.port] = "Still listening after SIGKILL"
+            }
+        } catch let refusal as PortStopRefusal {
+            stopFailures[port.port] = Self.message(for: refusal)
+        } catch {
+            stopFailures[port.port] = error.localizedDescription
+        }
+        await refreshAndWait()
+    }
+
+    static func message(for refusal: PortStopRefusal) -> String {
+        switch refusal {
+        case .boardServerPort:
+            return "Agent Board's own port — refused"
+        case .notListening:
+            return "Nothing is listening there any more"
+        }
+    }
+
+    /// Every pid whose process group a stop must never signal: the board itself, every `claude`
+    /// session host the registry lists, and every shell console's shell.
+    ///
+    /// Read afresh rather than cached from the last sweep — an hour-old set would protect a pid the
+    /// system has since recycled and leave a session started since then unprotected.
+    private func protectedPIDs() async -> Set<pid_t> {
+        var protected: Set<pid_t> = [
+            ProcessInfo.processInfo.processIdentifier,
+            getpgrp(),
+        ]
+        protected.formUnion(await agentPIDs().keys)
+        protected.formUnion(shellConsolePIDs().values.filter { $0 > 0 })
+        return protected
     }
 
     @discardableResult
@@ -163,6 +231,8 @@ final class ListeningPortModel {
             return result
         }.value
         ports = resolve(result.ports)
+        let present = Set(ports.map(\.port))
+        stopFailures = stopFailures.filter { present.contains($0.key) }
         sweptAt = .now
     }
 

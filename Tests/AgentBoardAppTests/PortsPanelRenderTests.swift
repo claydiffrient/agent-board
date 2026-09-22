@@ -235,14 +235,21 @@ final class PortsPanelLiveTests: XCTestCase {
     /// misbehaved: a routed selection never reached `focusChanged` after 15s of pumping, and two
     /// mounts of an identical board differed by 61,376 pixels. The same tests written synchronously
     /// pass. See the project note on offscreen SwiftUI verification.
-    private func model(_ db: AppDatabase, _ rows: [ListeningPort]) throws -> ListeningPortModel {
+    private func model(
+        _ db: AppDatabase,
+        _ rows: [ListeningPort],
+        stopOutcome: PortStopOutcome = .stopped
+    ) throws -> ListeningPortModel {
         let model = ListeningPortModel(
             db: db,
             ledger: PIDSessionLedger(url: ledgerDir.appendingPathComponent("\(UUID().uuidString).json")),
             boardServerPort: { nil },
             shellConsolePIDs: { [:] },
             agentPIDs: { [:] },
-            sweep: { _, _, _ in PortSweepResult(ports: rows, attributions: [:], liveIdentities: []) }
+            sweep: { _, _, _ in PortSweepResult(ports: rows, attributions: [:], liveIdentities: []) },
+            stopper: { _, pid, _, _ in
+                PortStopReport(scope: .processGroup(pid), escalated: true, outcome: stopOutcome)
+            }
         )
         model.refresh()
         let deadline = Date().addingTimeInterval(10)
@@ -411,6 +418,40 @@ final class PortsPanelLiveTests: XCTestCase {
         XCTAssertEqual(route.screen, .status, "a session's row opens the Status roster")
     }
 
+    /// A stop that did not work must not look like a stop that did. The row stays and the failure
+    /// is drawn on it — which is one more line of pixels than the same row without one.
+    func testARowWhoseProcessSurvivedTheEscalationDrawsItsFailure() throws {
+        let db = try AppDatabase.inMemory()
+        _ = try register(db, "Alpha")
+        let rows = [ListeningPort(port: 3000, pid: 501, command: "node", sessionId: nil)]
+
+        let quiet = try model(db, rows)
+        let failed = try model(db, rows, stopOutcome: .stillListening)
+        let quietMount = mount(db, quiet)
+        let failedMount = mount(db, failed)
+        defer { quietMount.close(); failedMount.close() }
+        let before = try settled(failedMount)
+
+        let row = try XCTUnwrap(failed.ports.first)
+        let stopping = _Concurrency.Task { await failed.stop(row) }
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline, failed.stopFailure(for: row) == nil {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        _ = stopping
+
+        XCTAssertEqual(failed.ports.map(\.port), [3000], "the row was dropped for a process still listening")
+        XCTAssertNotNil(failed.stopFailure(for: row))
+        let after = try settled(failedMount)
+        XCTAssertGreaterThan(
+            diff(before, after).count, 0, "the failure was not drawn on the row"
+        )
+        XCTAssertGreaterThan(
+            diff(try settled(quietMount), after).count, 0,
+            "a failed row must not draw like an untouched one"
+        )
+    }
+
     /// An orphan has no session to open, so its name is not a link and nothing happens.
     func testAnOrphansNameRoutesNowhere() throws {
         let db = try AppDatabase.inMemory()
@@ -430,4 +471,78 @@ final class PortsPanelLiveTests: XCTestCase {
         XCTAssertEqual(supervisor.focusedProjects, [], "and nothing may be selected on its behalf")
     }
 
+}
+
+/// What the stop button does when it is pressed.
+///
+/// The rule: only a port owned by a session running *right now* asks. An accidental click on an
+/// orphan costs a dev server the human can restart, and a dialog on the row this epic exists for is
+/// friction on the common case. A live session is different in kind — the port may be load-bearing
+/// for work in flight, and a worker that starts failing because its dev server vanished reads as a
+/// bug rather than as a consequence — so that one names the task before it acts.
+final class PortStopConfirmationTests: XCTestCase {
+    private func port(
+        _ number: Int, ownership: PortOwnership, sessionId: String? = nil, projectId: String? = nil,
+        taskTitle: String? = nil
+    ) -> AttributedPort {
+        AttributedPort(
+            port: number, pid: 4242, command: "node", ownership: ownership, sessionId: sessionId,
+            projectId: projectId, projectName: "Alpha", taskTitle: taskTitle
+        )
+    }
+
+    func testALiveSessionsPortAsksFirstAndNamesTheTask() {
+        let action = portStopAction(
+            port(3000, ownership: .liveSession, sessionId: "s-1", projectId: "p-1",
+                 taskTitle: "Wire the thing")
+        )
+
+        guard case .confirm(let confirmation) = action else {
+            return XCTFail("a live session's port stopped without asking")
+        }
+        XCTAssertEqual(confirmation.title, "Stop :3000?")
+        XCTAssertTrue(
+            confirmation.message.contains("Wire the thing"),
+            "the confirmation must name the task: \(confirmation.message)"
+        )
+    }
+
+    func testALiveSessionWithNoNamedTaskStillAsksAndNamesItsShortId() {
+        let action = portStopAction(
+            port(3000, ownership: .liveSession, sessionId: "abcdef01-2345", projectId: "p-1")
+        )
+
+        guard case .confirm(let confirmation) = action else {
+            return XCTFail("a live session's port stopped without asking")
+        }
+        XCTAssertTrue(confirmation.message.contains("abcdef01"), confirmation.message)
+    }
+
+    /// The row this epic exists for. It stops on the click.
+    func testAnOrphanStopsWithoutAsking() {
+        XCTAssertEqual(
+            portStopAction(port(5173, ownership: .orphaned, sessionId: "s-2", projectId: "p-2",
+                                taskTitle: "Ship the panel")),
+            .stopNow
+        )
+        XCTAssertEqual(portStopAction(port(8080, ownership: .unattributed)), .stopNow)
+    }
+
+    /// The human typed the command that opened this socket and is looking at the screen that runs
+    /// it, so there is nothing a dialog would tell them.
+    func testAShellConsolesPortStopsWithoutAsking() {
+        XCTAssertEqual(
+            portStopAction(port(4000, ownership: .shellConsole, projectId: "p-3")), .stopNow
+        )
+    }
+
+    func testEveryOwnershipIsCoveredSoANewOneCannotSlipThroughUnconsidered() {
+        let asked = PortOwnership.allCases.filter {
+            if case .confirm = portStopAction(
+                port(3000, ownership: $0, sessionId: "s-1", projectId: "p-1", taskTitle: "T")
+            ) { return true }
+            return false
+        }
+        XCTAssertEqual(asked, [.liveSession])
+    }
 }
