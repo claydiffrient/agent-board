@@ -2,6 +2,62 @@ import AgentBoardCore
 import GRDB
 import SwiftUI
 
+/// The sheet's tabs (SPEC §10, Project settings). Every `ProjectSettingsSection` belongs to exactly
+/// one, which `ProjectSettingsTabTests` pins; a section in no tab is a setting with no UI.
+enum ProjectSettingsTab: String, CaseIterable, Identifiable {
+    case general, agents, limits, workflow, notifications, advanced
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .general: "General"
+        case .agents: "Agents"
+        case .limits: "Limits"
+        case .workflow: "Workflow"
+        case .notifications: "Notifications"
+        case .advanced: "Advanced"
+        }
+    }
+
+    var sections: [ProjectSettingsSection] {
+        switch self {
+        case .general: [.repository, .workspace, .archive]
+        case .agents: [.models, .review, .autonomy, .roster]
+        case .limits: [.caps]
+        case .workflow: [.verification, .isolation, .publishing]
+        case .notifications: [.notifications]
+        case .advanced: [.autoMode, .extraMcpServers]
+        }
+    }
+}
+
+enum ProjectSettingsSection: String, CaseIterable, Identifiable {
+    case repository, workspace, caps, models, review, verification, isolation, publishing
+    case archive, notifications, autonomy, autoMode, extraMcpServers, roster
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .repository: "Repository"
+        case .workspace: "Workspace"
+        case .caps: "Caps"
+        case .models: "Models"
+        case .review: "Review"
+        case .verification: "Verification"
+        case .isolation: "Isolation"
+        case .publishing: "Publishing"
+        case .archive: "Archive"
+        case .notifications: "Notifications"
+        case .autonomy: "Autonomy"
+        case .autoMode: "Permission classifier (autoMode)"
+        case .extraMcpServers: "Extra MCP servers"
+        case .roster: "Roster"
+        }
+    }
+}
+
 struct ProjectSettingsSheet: View {
     let project: Project
     let workspaces: [Workspace]
@@ -18,17 +74,24 @@ struct ProjectSettingsSheet: View {
     @State private var archiveDays: Int
     @State private var workspaceId: String?
     @State private var muteChoice: NotificationMuteChoice
+    @State private var tab: ProjectSettingsTab
     @State private var confirmDelete = false
     @State private var roster = Observed<[RosterAgent]>([])
     @State private var selectedAgentIds: Set<String> = []
     @State private var errorMessage: String?
 
-    init(project: Project, workspaces: [Workspace], onDeleted: @escaping () -> Void) {
+    init(
+        project: Project,
+        workspaces: [Workspace],
+        initialTab: ProjectSettingsTab = .general,
+        onDeleted: @escaping () -> Void
+    ) {
         self.project = project
         self.workspaces = workspaces
         self.onDeleted = onDeleted
         let settings = project.settings
         _settings = State(initialValue: settings)
+        _tab = State(initialValue: initialTab)
         _baseBranch = State(initialValue: project.baseBranch)
         _worktreeRoot = State(initialValue: project.worktreeRoot)
         _autoModeJSON = State(initialValue: settings.autoModeJSON ?? "")
@@ -58,166 +121,19 @@ struct ProjectSettingsSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Form {
-                Section("Repository") {
-                    LabeledContent("Path", value: project.repoPath)
-                    TextField("Base branch", text: $baseBranch)
-                    TextField("Worktree root", text: $worktreeRoot)
-                    if let complaint = worktreeRootComplaint {
-                        Text(complaint)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-                }
-
-                Section("Workspace") {
-                    Picker("Workspace", selection: $workspaceId) {
-                        Text("None").tag(String?.none)
-                        ForEach(workspaces) { workspace in
-                            Text(workspace.name).tag(String?.some(workspace.id))
+            TabView(selection: $tab) {
+                ForEach(ProjectSettingsTab.allCases) { tab in
+                    Form {
+                        ForEach(tab.sections) { section in
+                            Section(section.title) { content(for: section) }
                         }
                     }
-                    Text("Groups this project in the sidebar. Optional \u{2014} an ungrouped project works the same.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Caps") {
-                    TextField("Concurrent workers", value: $settings.caps.maxConcurrentWorkers, format: .number)
-                    TextField("Tokens per agent", value: $settings.caps.maxTokensPerAgent, format: .number, prompt: Text("Unlimited"))
-                    TextField("Wall clock per agent (seconds)", value: $settings.caps.maxWallClockSeconds, format: .number)
-                    TextField("Idle limit (seconds)", value: $settings.caps.maxIdleSeconds, format: .number)
-                    TextField("Stalled after (seconds)", value: $settings.caps.stallSeconds, format: .number)
-                    TextField("Project session ceiling", value: $settings.caps.sessionCeiling, format: .number, prompt: Text("Unlimited"))
-                }
-
-                Section("Models") {
-                    ModelPicker(label: "Default model", inheritLabel: "Claude Code default", model: $settings.defaultModel)
-                    LabeledContent("Model guidance") {
-                        TextEditor(text: Binding(
-                            get: { settings.modelGuidance ?? "" },
-                            set: { settings.modelGuidance = $0.isEmpty ? nil : $0 }
-                        ))
-                        .font(.body)
-                        .frame(minHeight: 80)
-                    }
-                    Text("Read by the orchestrator when it picks a model per task, e.g. \"Sonnet 5 for docs and tests, Opus 5 for features.\" A task's own model overrides the default.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Review") {
-                    Picker("Review level", selection: $settings.reviewLevel) {
-                        ForEach(ReviewLevel.allCases, id: \.self) { level in
-                            Text(level.label).tag(level)
-                        }
-                    }
-                    Text(Self.reviewLevelBlurb(settings.reviewLevel))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Verification") {
-                    TextField("Build command", text: Binding(
-                        get: { settings.buildCommand ?? "" },
-                        set: { settings.buildCommand = $0.isEmpty ? nil : $0 }
-                    ), prompt: Text("e.g. swift build"))
-                    TextField("Test command", text: Binding(
-                        get: { settings.testCommand ?? "" },
-                        set: { settings.testCommand = $0.isEmpty ? nil : $0 }
-                    ), prompt: Text("e.g. swift test"))
-                    Text("How this project builds and tests itself. Handed to every worker and to the integrator; left empty, they work it out from the repo and report what they ran.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Isolation") {
-                    Picker("Worktree strategy", selection: $settings.worktreeStrategy) {
-                        ForEach(WorktreeStrategy.allCases, id: \.self) { strategy in
-                            Text(strategy.title).tag(strategy)
-                        }
-                    }
-                    TextField("Agents in the shared checkout", value: $settings.sharedCheckoutMaxAgents, format: .number)
-                    Text("A worktree per task is the default and always isolates. Shared runs workers in this project's own checkout on one branch, skipping a full repository setup per task; Auto shares only when a compatible group already holds the checkout. A task that cannot join gets a worktree. Co-resident agents take a per-file lock before every write, so a collision is a wait rather than an overwrite.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Publishing") {
-                    TextField("Remote branch name", text: Binding(
-                        get: { settings.remoteBranchTemplate ?? "" },
-                        set: { settings.remoteBranchTemplate = $0.isEmpty ? nil : $0 }
-                    ), prompt: Text("e.g. clay/{slug}"))
-                    Text("The name a branch takes on the remote. \(RemoteBranchTemplate.slugToken) comes from the epic's or task's title; \(RemoteBranchTemplate.idToken) is an optional short id. The local branch stays agentboard/<id> either way. Left empty, the local name is what reaches the remote.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Archive") {
-                    Picker("Archive done tasks", selection: $archiveMode) {
-                        ForEach(ArchivePolicyMode.allCases, id: \.self) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    TextField("Days in done", value: $archiveDays, format: .number)
-                        .disabled(archiveMode != .afterDays)
-                        .foregroundStyle(archiveMode == .afterDays ? .primary : .secondary)
-                    Text("Archived tasks are hidden from the board, never deleted. The Task Board's Archive button works under every mode; turn on Show Archived there to bring them back into view.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Notifications") {
-                    ForEach(NotificationCategory.allCases) { category in
-                        Toggle(category.title, isOn: Binding(
-                            get: { settings.notifications.isEnabled(category) },
-                            set: { settings.notifications.setEnabled(category, $0) }
-                        ))
-                    }
-                    Picker("Mute this project", selection: $muteChoice) {
-                        ForEach(NotificationMuteChoice.allCases) { choice in
-                            Text(choice.title).tag(choice)
-                        }
-                    }
-                    Text("Every category is on by default. Turning one off, or muting the project, stops the banner only — this project keeps its sidebar badge and its place in At a Glance, so you can still find what is waiting.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Autonomy") {
-                    Toggle("Autonomy (spawn without approval)", isOn: $settings.autonomyEnabled)
-                    Text("Off by default. While off, every orchestrator spawn waits for your approval.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Permission classifier (autoMode)") {
-                    TextEditor(text: $autoModeJSON)
-                        .font(.body.monospaced())
-                        .frame(minHeight: 120)
-                    if !autoModeJSONIsValid {
-                        Text("Not valid JSON.")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-                }
-
-                Section("Extra MCP servers") {
-                    TextField("Comma-separated server names", text: $extraServers)
-                    Text("Globally configured servers merged back into workers past --strict-mcp-config.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Roster") {
-                    rosterSelection
-                }
-
-                Section {
-                    Button("Delete Project…", role: .destructive) { confirmDelete = true }
+                    .formStyle(.grouped)
+                    .tabItem { Text(tab.title) }
+                    .tag(tab)
                 }
             }
-            .formStyle(.grouped)
+            .padding([.horizontal, .top])
             .task {
                 await roster.run(RosterStore(env.db).observe(), in: env.db.reader)
             }
@@ -226,6 +142,7 @@ struct ProjectSettingsSheet: View {
             }
 
             HStack {
+                Button("Delete Project…", role: .destructive) { confirmDelete = true }
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -235,7 +152,7 @@ struct ProjectSettingsSheet: View {
             }
             .padding()
         }
-        .frame(minWidth: 520, minHeight: 620)
+        .frame(minWidth: 780, minHeight: 480)
         .navigationTitle("\(project.name) Settings")
         .confirmationDialog(
             "Delete \(project.name)?",
@@ -247,6 +164,138 @@ struct ProjectSettingsSheet: View {
             Text("Removes the project, its tasks, and session records from Agent Board. Worktrees and branches on disk are left alone.")
         }
         .errorAlert($errorMessage)
+    }
+
+    @ViewBuilder
+    private func content(for section: ProjectSettingsSection) -> some View {
+        switch section {
+        case .repository:
+            LabeledContent("Path", value: project.repoPath)
+            TextField("Base branch", text: $baseBranch)
+            TextField("Worktree root", text: $worktreeRoot)
+            if let complaint = worktreeRootComplaint {
+                Text(complaint)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        case .workspace:
+            Picker("Workspace", selection: $workspaceId) {
+                Text("None").tag(String?.none)
+                ForEach(workspaces) { workspace in
+                    Text(workspace.name).tag(String?.some(workspace.id))
+                }
+            }
+            Text("Groups this project in the sidebar. Optional \u{2014} an ungrouped project works the same.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .caps:
+            TextField("Concurrent workers", value: $settings.caps.maxConcurrentWorkers, format: .number)
+            TextField("Tokens per agent", value: $settings.caps.maxTokensPerAgent, format: .number, prompt: Text("Unlimited"))
+            TextField("Wall clock per agent (seconds)", value: $settings.caps.maxWallClockSeconds, format: .number)
+            TextField("Idle limit (seconds)", value: $settings.caps.maxIdleSeconds, format: .number)
+            TextField("Stalled after (seconds)", value: $settings.caps.stallSeconds, format: .number)
+            TextField("Project session ceiling", value: $settings.caps.sessionCeiling, format: .number, prompt: Text("Unlimited"))
+        case .models:
+            ModelPicker(label: "Default model", inheritLabel: "Claude Code default", model: $settings.defaultModel)
+            LabeledContent("Model guidance") {
+                TextEditor(text: Binding(
+                    get: { settings.modelGuidance ?? "" },
+                    set: { settings.modelGuidance = $0.isEmpty ? nil : $0 }
+                ))
+                .font(.body)
+                .frame(minHeight: 80)
+            }
+            Text("Read by the orchestrator when it picks a model per task, e.g. \"Sonnet 5 for docs and tests, Opus 5 for features.\" A task's own model overrides the default.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .review:
+            Picker("Review level", selection: $settings.reviewLevel) {
+                ForEach(ReviewLevel.allCases, id: \.self) { level in
+                    Text(level.label).tag(level)
+                }
+            }
+            Text(Self.reviewLevelBlurb(settings.reviewLevel))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .verification:
+            TextField("Build command", text: Binding(
+                get: { settings.buildCommand ?? "" },
+                set: { settings.buildCommand = $0.isEmpty ? nil : $0 }
+            ), prompt: Text("e.g. swift build"))
+            TextField("Test command", text: Binding(
+                get: { settings.testCommand ?? "" },
+                set: { settings.testCommand = $0.isEmpty ? nil : $0 }
+            ), prompt: Text("e.g. swift test"))
+            Text("How this project builds and tests itself. Handed to every worker and to the integrator; left empty, they work it out from the repo and report what they ran.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .isolation:
+            Picker("Worktree strategy", selection: $settings.worktreeStrategy) {
+                ForEach(WorktreeStrategy.allCases, id: \.self) { strategy in
+                    Text(strategy.title).tag(strategy)
+                }
+            }
+            TextField("Agents in the shared checkout", value: $settings.sharedCheckoutMaxAgents, format: .number)
+            Text("A worktree per task is the default and always isolates. Shared runs workers in this project's own checkout on one branch, skipping a full repository setup per task; Auto shares only when a compatible group already holds the checkout. A task that cannot join gets a worktree. Co-resident agents take a per-file lock before every write, so a collision is a wait rather than an overwrite.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .publishing:
+            TextField("Remote branch name", text: Binding(
+                get: { settings.remoteBranchTemplate ?? "" },
+                set: { settings.remoteBranchTemplate = $0.isEmpty ? nil : $0 }
+            ), prompt: Text("e.g. clay/{slug}"))
+            Text("The name a branch takes on the remote. \(RemoteBranchTemplate.slugToken) comes from the epic's or task's title; \(RemoteBranchTemplate.idToken) is an optional short id. The local branch stays agentboard/<id> either way. Left empty, the local name is what reaches the remote.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .archive:
+            Picker("Archive done tasks", selection: $archiveMode) {
+                ForEach(ArchivePolicyMode.allCases, id: \.self) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            TextField("Days in done", value: $archiveDays, format: .number)
+                .disabled(archiveMode != .afterDays)
+                .foregroundStyle(archiveMode == .afterDays ? .primary : .secondary)
+            Text("Archived tasks are hidden from the board, never deleted. The Task Board's Archive button works under every mode; turn on Show Archived there to bring them back into view.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .notifications:
+            ForEach(NotificationCategory.allCases) { category in
+                Toggle(category.title, isOn: Binding(
+                    get: { settings.notifications.isEnabled(category) },
+                    set: { settings.notifications.setEnabled(category, $0) }
+                ))
+            }
+            Picker("Mute this project", selection: $muteChoice) {
+                ForEach(NotificationMuteChoice.allCases) { choice in
+                    Text(choice.title).tag(choice)
+                }
+            }
+            Text("Every category is on by default. Turning one off, or muting the project, stops the banner only — this project keeps its sidebar badge and its place in At a Glance, so you can still find what is waiting.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .autonomy:
+            Toggle("Autonomy (spawn without approval)", isOn: $settings.autonomyEnabled)
+            Text("Off by default. While off, every orchestrator spawn waits for your approval.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .autoMode:
+            TextEditor(text: $autoModeJSON)
+                .font(.body.monospaced())
+                .frame(minHeight: 120)
+            if !autoModeJSONIsValid {
+                Text("Not valid JSON.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        case .extraMcpServers:
+            TextField("Comma-separated server names", text: $extraServers)
+            Text("Globally configured servers merged back into workers past --strict-mcp-config.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .roster:
+            rosterSelection
+        }
     }
 
     /// The whole roster with a toggle each: on writes the project's opt-in, off writes the opt-out.

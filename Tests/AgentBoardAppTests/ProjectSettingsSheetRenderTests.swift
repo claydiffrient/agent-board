@@ -6,7 +6,7 @@ import XCTest
 
 /// Mounts the project settings sheet offscreen through `NSHostingView`.
 ///
-/// What this proves: the sheet's body evaluates with the isolation section in it, the strategy
+/// What this proves: each tab's body evaluates and mounts only its own pickers, the strategy
 /// picker is a real control in the rendered hierarchy, and the sheet starts on the project's
 /// stored strategy.
 ///
@@ -37,7 +37,7 @@ final class ProjectSettingsSheetRenderTests: XCTestCase {
         }
     }
 
-    private func mount(strategy: WorktreeStrategy) throws -> Mounted {
+    private func mount(strategy: WorktreeStrategy = .worktree, tab: ProjectSettingsTab) throws -> Mounted {
         let db = try AppDatabase.inMemory()
         let projects = ProjectStore(db)
         var project = try projects.register(
@@ -50,12 +50,12 @@ final class ProjectSettingsSheetRenderTests: XCTestCase {
         project = try XCTUnwrap(projects.get(project.id))
 
         let host = NSHostingView(
-            rootView: ProjectSettingsSheet(project: project, workspaces: [], onDeleted: {})
+            rootView: ProjectSettingsSheet(project: project, workspaces: [], initialTab: tab, onDeleted: {})
                 .environment(AppEnvironment(db: db, supervisor: RenderStubSupervisor(progress: [:])))
         )
         NSApplication.shared.setActivationPolicy(.accessory)
         let window = NSWindow(
-            contentRect: NSRect(x: -10_000, y: -10_000, width: 560, height: 700),
+            contentRect: NSRect(x: -10_000, y: -10_000, width: 780, height: 700),
             styleMask: [.borderless], backing: .buffered, defer: false
         )
         window.contentView = host
@@ -68,14 +68,34 @@ final class ProjectSettingsSheetRenderTests: XCTestCase {
     /// readable here.
     func testTheStrategyPickerRendersOnTheProjectsStoredStrategy() throws {
         for strategy in WorktreeStrategy.allCases {
-            let mounted = try mount(strategy: strategy)
+            let mounted = try mount(strategy: strategy, tab: .workflow)
             mounted.settle()
 
             let titles = mounted.popUpButtons.map(\.title)
-            XCTAssertEqual(mounted.popUpButtons.count, 6, "rendered pop-ups: \(titles)")
+            XCTAssertEqual(mounted.popUpButtons.count, 1, "rendered pop-ups: \(titles)")
             XCTAssertTrue(
                 titles.contains(strategy.title),
                 "no pop-up showed \(strategy.title); the sheet rendered \(titles)"
+            )
+        }
+    }
+
+    /// Only the selected tab is mounted, so pickers are counted per tab. The six were all on one
+    /// page before the sheet was tabbed: Workspace, Archive, Default model, Review level, Worktree
+    /// strategy, Mute.
+    func testEachTabMountsOnlyItsOwnPickers() throws {
+        let expected: [ProjectSettingsTab: Int] = [
+            .general: 2, .agents: 2, .limits: 0, .workflow: 1, .notifications: 1, .advanced: 0,
+        ]
+        XCTAssertEqual(Set(expected.keys), Set(ProjectSettingsTab.allCases))
+        XCTAssertEqual(expected.values.reduce(0, +), 6)
+
+        for tab in ProjectSettingsTab.allCases {
+            let mounted = try mount(tab: tab)
+            mounted.settle()
+            XCTAssertEqual(
+                mounted.popUpButtons.count, expected[tab],
+                "\(tab.title) rendered pop-ups \(mounted.popUpButtons.map(\.title))"
             )
         }
     }

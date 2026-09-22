@@ -26,7 +26,7 @@ final class NotificationPreferencesSheetRenderTests: XCTestCase {
 
     private func popUpTitles(_ project: Project, _ db: AppDatabase) -> [String] {
         let host = NSHostingView(
-            rootView: ProjectSettingsSheet(project: project, workspaces: [], onDeleted: {})
+            rootView: ProjectSettingsSheet(project: project, workspaces: [], initialTab: .notifications, onDeleted: {})
                 .environment(AppEnvironment(db: db, supervisor: StubSupervisor()))
         )
         NSApplication.shared.setActivationPolicy(.accessory)
