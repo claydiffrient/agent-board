@@ -14,6 +14,8 @@ struct NotificationRoute: Equatable, Hashable {
         case session(String)
         case reports
         case shutdown
+        /// The project's shell console — a human's own `npm run dev`, not an agent's.
+        case terminal
         /// The banner names no subject beyond its project.
         case project
     }
@@ -42,10 +44,11 @@ struct NotificationRoute: Equatable, Hashable {
     /// Approvals, blocked tasks and the shutdown sheet all live on the Orchestrator screen — the
     /// approvals sidebar carries both the pending queue and the blocked-task section — and the
     /// console is what drains queued reports. A session with no task appears only in the Status
-    /// roster, so that is the one subject that lands elsewhere.
+    /// roster, and the shell console only on Terminal, so those two land elsewhere.
     var screen: ProjectDetailView.Screen {
         switch subject {
         case .session: .status
+        case .terminal: .terminal
         case .approvals, .blockedTask, .reports, .shutdown, .project: .orchestrator
         }
     }
@@ -82,6 +85,7 @@ extension NotificationRoute.Subject {
         case .session: "session"
         case .reports: "reports"
         case .shutdown: "shutdown"
+        case .terminal: "terminal"
         case .project: "project"
         }
     }
@@ -90,7 +94,7 @@ extension NotificationRoute.Subject {
         switch self {
         case .blockedTask(let id): id
         case .session(let id): id
-        case .approvals, .reports, .shutdown, .project: nil
+        case .approvals, .reports, .shutdown, .terminal, .project: nil
         }
     }
 
@@ -101,6 +105,7 @@ extension NotificationRoute.Subject {
         case "session": self = id.map(Self.session) ?? .project
         case "reports": self = .reports
         case "shutdown": self = .shutdown
+        case "terminal": self = .terminal
         default: self = .project
         }
     }

@@ -1433,6 +1433,32 @@ workspaces plus **None**) or by dragging its row onto a section header. Which
 sections the viewer has collapsed is a per-viewer convenience and lives in
 `UserDefaults`, not the database.
 
+**Ports** — a panel directly above **Add Project…**, listing every TCP socket
+in `LISTEN` that a process Agent Board started is holding. A row is the port
+number, the command holding it, and who it belongs to: the task title and
+project of the session that opened it, **Terminal** and the project for the
+per-project shell console, or a plain **orphaned** marker with the command name
+when the chain leads nowhere. `BoardServer`'s own port is never a row — it is
+excluded inside the sweep, not by this panel.
+
+Two link targets in a row, going to different places on purpose. The number
+opens `http://localhost:<port>` in the default browser. The owner name opens the
+session, through `NotificationRouter` and `MainWindow.select` — the same funnel a
+clicked notification uses, so a port row starts a project's orchestrator exactly
+as a sidebar click does. A session-owned port routes to Status, a shell-console
+port to Terminal. An orphan has no session to open, so its name is not a link. A
+session that has *ended* still keeps its name and its route: `agent_session` and
+`task` hold the title after the process is gone, and that row — the dev server
+whose session ended an hour ago — is the one a human otherwise finds only with
+`lsof -i :3000` and guesswork.
+
+The list is swept hourly, on the panel's refresh button, and when the panel is
+opened. When nothing is listening the panel is its header line and nothing else:
+no empty box, because the sidebar already holds every project and the space is
+not free. The header still costs that one line rather than collapsing to zero,
+because it carries the refresh button — the sweep is hourly, and a panel that
+vanished entirely would leave nobody to ask about a port that appeared since.
+
 ---
 
 ## 11. Milestones

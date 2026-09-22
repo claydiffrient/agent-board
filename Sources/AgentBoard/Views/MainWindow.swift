@@ -102,6 +102,7 @@ struct MainWindow: View {
         .navigationSplitViewColumnWidth(min: 180, ideal: 220)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
+                PortsPanel()
                 HStack(spacing: 4) {
                     Button {
                         addProject()
