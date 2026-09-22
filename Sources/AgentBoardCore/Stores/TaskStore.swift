@@ -256,6 +256,32 @@ public struct TaskStore: Sendable {
         )
     }
 
+    /// Under agent review, the rostered reviewer holding the task. Cleared when it leaves `review`.
+    public func setReviewer(_ id: String, _ rosterAgentId: String?) throws {
+        try db.writer.write { db in try Self.setReviewer(db, id, rosterAgentId) }
+    }
+
+    static func setReviewer(_ db: Database, _ id: String, _ rosterAgentId: String?) throws {
+        try db.execute(
+            sql: "UPDATE task SET reviewer_agent_id = ?, updated_at = ? WHERE id = ?",
+            arguments: [rosterAgentId, Int64.nowMillis, id]
+        )
+    }
+
+    public func setRosterAgent(_ id: String, _ rosterAgentId: String?) throws {
+        try db.writer.write { db in try Self.setRosterAgent(db, id, rosterAgentId) }
+    }
+
+    /// Only an assignment to a rostered agent writes this; an anonymous worker leaves whoever was
+    /// last on the task in place, so the card still says who did the previous pass.
+    static func setRosterAgent(_ db: Database, _ id: String, _ rosterAgentId: String?) throws {
+        guard let rosterAgentId else { return }
+        try db.execute(
+            sql: "UPDATE task SET roster_agent_id = ?, updated_at = ? WHERE id = ?",
+            arguments: [rosterAgentId, Int64.nowMillis, id]
+        )
+    }
+
     public func setFailed(_ id: String, _ failed: Bool, reason: String?) throws {
         try db.writer.write { db in
             try Self.setFailed(db, id, failed, reason: reason)
@@ -379,6 +405,16 @@ public enum BoardError: Error, Equatable, Sendable {
     case approvalNotFound(String)
     case approvalAlreadyResolved(String)
     case epicNotFound(String)
+    case rosterAgentNotFound(String)
+    /// A reviewer was to be spawned for a task that is no longer in `review`, so there is nothing
+    /// left for it to decide.
+    case taskNotInReview(taskId: String, column: TaskColumn)
+    /// An active worker session already holds the task; a second one would share its worktree.
+    case taskAlreadyHeld(taskId: String, sessionId: String)
+    /// An active session already holds the worktree the new session was about to be launched into.
+    case worktreeAlreadyHeld(path: String, sessionId: String)
+    /// The session is not the one currently working the task it is acting on.
+    case sessionNotOnTask(sessionId: String, taskId: String)
     case workspaceNotFound(String)
     /// `createEpic` was handed a `dependsOn` index that is out of range or points at the task itself.
     case invalidEpicDependency(taskIndex: Int, dependsOn: Int)

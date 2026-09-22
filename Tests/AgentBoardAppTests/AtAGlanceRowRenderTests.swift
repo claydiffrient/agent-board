@@ -9,8 +9,8 @@ import XCTest
 /// it — and only it — on the list.
 ///
 /// What this proves: with two workspaces holding four projects between them, an all-collapsed
-/// sidebar renders two section headers and exactly one row, and expanding restores all five. The
-/// row therefore cannot be inside a collapsible section.
+/// sidebar renders two section headers and only the pinned rows, and expanding adds exactly the
+/// four project rows back. The pinned rows therefore cannot be inside a collapsible section.
 ///
 /// What it cannot prove: that the row reads "At a Glance", or anything else about the pixels.
 /// SwiftUI draws text into backing layers, and the accessibility elements it publishes offscreen
@@ -33,6 +33,11 @@ final class AtAGlanceRowRenderTests: XCTestCase {
         let rows: Int
         let headers: Int
     }
+
+    /// Rows `MainWindow` lists outside every `Section`: At a Glance, then Roster. Asserted as a
+    /// named count rather than inline, so adding a third is one edit here and not a puzzle about
+    /// which magic number meant what.
+    private let pinnedRows = 2
 
     private func mountSidebar(collapsingEverything: Bool) throws -> Sidebar {
         let db = try AppDatabase.inMemory()
@@ -77,16 +82,28 @@ final class AtAGlanceRowRenderTests: XCTestCase {
         return Sidebar(rows: counts["ListTableCellView"] ?? 0, headers: counts["ListTableHeaderView"] ?? 0)
     }
 
-    func testTheRowSurvivesCollapsingEveryWorkspaceSection() throws {
+    func testThePinnedRowsSurviveCollapsingEveryWorkspaceSection() throws {
         let sidebar = try mountSidebar(collapsingEverything: true)
         XCTAssertEqual(sidebar.headers, 2, "both workspace headers must still be drawn")
-        XCTAssertEqual(sidebar.rows, 1, "only At a Glance may remain when every section is collapsed")
+        XCTAssertEqual(
+            sidebar.rows, pinnedRows,
+            "only the pinned rows may remain when every section is collapsed"
+        )
     }
 
-    func testExpandingTheSectionsBringsBackTheProjectRowsBesideIt() throws {
+    func testExpandingTheSectionsBringsBackTheProjectRowsBesideThem() throws {
         let sidebar = try mountSidebar(collapsingEverything: false)
         XCTAssertEqual(sidebar.headers, 2)
-        XCTAssertEqual(sidebar.rows, 5, "four project rows plus the pinned At a Glance row")
+        XCTAssertEqual(sidebar.rows, pinnedRows + 4, "four project rows beside the pinned ones")
+    }
+
+    /// The invariant the two counts above are each half of, and the one that stays true however
+    /// many pinned rows the sidebar grows: collapsing removes the project rows and nothing else.
+    func testCollapsingRemovesExactlyTheProjectRows() throws {
+        let expanded = try mountSidebar(collapsingEverything: false)
+        let collapsed = try mountSidebar(collapsingEverything: true)
+        XCTAssertEqual(expanded.rows - collapsed.rows, 4)
+        XCTAssertEqual(expanded.headers, collapsed.headers)
     }
 }
 

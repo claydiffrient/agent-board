@@ -37,7 +37,20 @@ struct Fixture {
         )
     }
 
-    func session(_ id: String = BoardId.new(), role: SessionRole = .worker, state: SessionState = .running, taskId: String? = nil) -> AgentSession {
-        AgentSession(sessionId: id, projectId: project.id, taskId: taskId, role: role, cwd: "/tmp", state: state)
+    func session(
+        _ id: String = BoardId.new(), role: SessionRole = .worker, state: SessionState = .running,
+        taskId: String? = nil, worktreePath: String? = nil, shortId: String? = nil
+    ) -> AgentSession {
+        AgentSession(
+            sessionId: id, shortId: shortId, projectId: project.id, taskId: taskId, role: role,
+            worktreePath: worktreePath, cwd: "/tmp", state: state
+        )
+    }
+
+    func otherProject(_ name: String = "Other") throws -> Project {
+        try projects.register(
+            name: name, repoPath: "/tmp/\(name)-\(UUID().uuidString)", baseBranch: "main",
+            worktreeRoot: "/tmp/\(name)-worktrees", memoryDir: nil
+        )
     }
 }

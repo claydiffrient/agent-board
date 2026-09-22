@@ -39,6 +39,10 @@ public struct BriefingResourceHandler: ResourceHandler {
                     + "so it reflects the project's settings as they stand now.",
                 mimeType: Self.mimeType
             )]
+        case .reviewer:
+            // Nothing spawns a rostered reviewer yet, so there is no briefing it was launched with
+            // to hand back. `read` refuses both uris for this scope through its `default` arm.
+            return []
         }
     }
 

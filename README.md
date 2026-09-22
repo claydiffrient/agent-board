@@ -10,7 +10,7 @@ design and `IDEA.md` for the origin. Status: M0, M1, M2, and M3 complete.
 | `AgentBoardCore` | GRDB store: schema (SPEC §4), records, stores, `Board` lifecycle facade |
 | `AgentBoardRuntime` | `AgentRuntime` protocol + `BackgroundSessionRuntime` (`claude --bg`), config writer, worktrees, memory symlink, transcript meter, pricing, caps |
 | `AgentBoardServer` | Hummingbird localhost server: `/hooks` and `/mcp`, bearer-scoped tools |
-| `AgentBoardBridge` | Store-backed hook sink, token resolver, and the worker and orchestrator MCP tool handlers |
+| `AgentBoardBridge` | Store-backed hook sink, token resolver, and the worker, reviewer, and orchestrator MCP tool handlers |
 | `AgentBoard` | SwiftUI app: Task Board, Status, terminal attach window, supervisor glue |
 | `spike/` | M0 runtime spike, kept as the reference for the proven runtime facts |
 

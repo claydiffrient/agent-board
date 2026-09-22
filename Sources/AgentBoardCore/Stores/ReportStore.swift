@@ -41,7 +41,7 @@ public struct ReportStore: Sendable {
 
     /// The `complete` report this session already filed for this task, if any. Read inside
     /// `Board.complete`'s write transaction so a resent `report_complete` cannot insert a second
-    /// one — see `TaskCompletion`.
+    /// one — see `Board.CompletionOutcome`.
     static func completion(_ db: Database, taskId: String, sessionId: String) throws -> Report? {
         try Report.fetchOne(
             db,

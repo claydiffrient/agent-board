@@ -158,10 +158,14 @@ final class SidebarAttentionLiveTests: XCTestCase {
     /// What each board below must have drawn before a capture of it means anything. Without these a
     /// baseline can be the sidebar as it looks before its observations have delivered, which differs
     /// from every later capture across the whole strip rather than by a badge.
-    private static let oneUngroupedProject = SidebarContent(rows: 2, headers: 1)
-    private static let twoUngroupedProjects = SidebarContent(rows: 3, headers: 1)
-    private static let oneCollapsedSection = SidebarContent(rows: 1, headers: 1)
-    private static let oneExpandedSection = SidebarContent(rows: 2, headers: 1)
+    ///
+    /// `pinnedRows` is the rows `MainWindow` lists outside every `Section` — At a Glance, then
+    /// Roster — so each count below reads as "the pinned rows, plus this board's project rows".
+    private static let pinnedRows = 2
+    private static let oneUngroupedProject = SidebarContent(rows: pinnedRows + 1, headers: 1)
+    private static let twoUngroupedProjects = SidebarContent(rows: pinnedRows + 2, headers: 1)
+    private static let oneCollapsedSection = SidebarContent(rows: pinnedRows, headers: 1)
+    private static let oneExpandedSection = SidebarContent(rows: pinnedRows + 1, headers: 1)
 
     private func mount(_ db: AppDatabase) -> OffscreenMount {
         OffscreenMount(MainWindow(collapseState: collapse.state).environment(renderEnvironment(db: db)))
@@ -261,8 +265,8 @@ final class SidebarAttentionLiveTests: XCTestCase {
         defer { quietMount.close() }
         let quiet = try quietMount.capture(points: Self.sidebar, showing: Self.oneCollapsedSection)
         XCTAssertEqual(
-            quietMount.viewCount(ofClassNamed: "ListTableCellView"), 1,
-            "only the pinned At a Glance row may be drawn"
+            quietMount.viewCount(ofClassNamed: "ListTableCellView"), Self.pinnedRows,
+            "only the pinned rows may be drawn"
         )
 
         let (waitingDb, waitingWorkspaceId) = try board(withApproval: true)
@@ -271,7 +275,7 @@ final class SidebarAttentionLiveTests: XCTestCase {
         defer { waitingMount.close() }
         let waiting = try waitingMount.capture(points: Self.sidebar, showing: Self.oneCollapsedSection)
         XCTAssertEqual(
-            waitingMount.viewCount(ofClassNamed: "ListTableCellView"), 1,
+            waitingMount.viewCount(ofClassNamed: "ListTableCellView"), Self.pinnedRows,
             "the waiting project's own row is still hidden"
         )
 

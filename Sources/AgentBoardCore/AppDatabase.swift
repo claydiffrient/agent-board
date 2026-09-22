@@ -85,6 +85,15 @@ public final class AppDatabase: Sendable {
             try db.execute(sql: "ALTER TABLE task ADD COLUMN landing TEXT")
             try db.execute(sql: "ALTER TABLE task ADD COLUMN landing_detail TEXT")
         }
+        migrator.registerMigration("roster") { db in
+            try db.execute(sql: Schema.roster)
+        }
+        migrator.registerMigration("roster_assignment") { db in
+            try db.execute(sql: Schema.rosterAssignment)
+        }
+        migrator.registerMigration("review_level") { db in
+            try db.execute(sql: Schema.reviewLevel)
+        }
         return migrator
     }
 }
