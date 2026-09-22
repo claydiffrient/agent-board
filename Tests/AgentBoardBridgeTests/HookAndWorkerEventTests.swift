@@ -122,7 +122,10 @@ final class HookAndWorkerEventTests: XCTestCase {
         XCTAssertTrue(items.isEmpty)
     }
 
-    func testReportCompleteTriggersReportQueued() async throws {
+    /// `workerCompleted` runs `claude stop` on the session waiting on this very call, so the answer
+    /// has to be built before it is raised, not after. The handler hands the stop back on the result
+    /// instead of awaiting it; `BoardServer` runs it once the body is on the wire.
+    func testReportCompleteDefersTheStopUntilAfterItsAnswer() async throws {
         let task = try f.task("t", column: .running)
         try f.session("w1", taskId: task.id)
         let identity = f.workerIdentity(sessionId: "w1", taskId: task.id)
@@ -136,17 +139,26 @@ final class HookAndWorkerEventTests: XCTestCase {
         let result = try await f.scoped.call("report_complete", arguments: arguments, identity: identity)
 
         XCTAssertFalse(result.isError)
-        let events = await f.events.events
+        let beforeTheAnswerIsOut = await f.events.events
         XCTAssertEqual(
-            events,
-            [
-                .workerCompleted(projectId: f.project.id, sessionId: "w1"),
-                .reportQueued(projectId: f.project.id),
-            ]
+            beforeTheAnswerIsOut, [.reportQueued(projectId: f.project.id)],
+            "the worker was stopped before it could be told its report landed"
         )
         XCTAssertEqual(try f.tasks.get(task.id)?.column, .review)
         XCTAssertTrue(result.text.contains("is now in Review"), result.text)
         XCTAssertEqual(try f.reports.unconsumedCount(projectId: f.project.id), 1)
+
+        let stop = try XCTUnwrap(result.afterResponse)
+        await stop()
+
+        let afterTheAnswerIsOut = await f.events.events
+        XCTAssertEqual(
+            afterTheAnswerIsOut,
+            [
+                .reportQueued(projectId: f.project.id),
+                .workerCompleted(projectId: f.project.id, sessionId: "w1"),
+            ]
+        )
     }
 
     /// Under the project's default archive policy (`afterEpicMerge`), an epic's integration task
@@ -172,10 +184,10 @@ final class HookAndWorkerEventTests: XCTestCase {
         XCTAssertFalse(result.text.contains("is now in Review"), result.text)
     }
 
-    /// The MCP client resends `report_complete` when the answer never arrives, which is the usual
-    /// case: the handler stops the worker before it replies. The resend must find the first report
-    /// and do nothing else — no second row, no second stop, and no undoing of whatever the
-    /// orchestrator did with the first one.
+    /// The MCP client resends `report_complete` when the answer never arrives — before the stop was
+    /// deferred, that was 64 of 183 completing sessions. The resend must find the first report and
+    /// do nothing else — no second row, no second stop, and no undoing of whatever the orchestrator
+    /// did with the first one.
     func testASecondReportCompleteInsertsNothingAndRerunsNothing() async throws {
         let task = try f.task("t", column: .running)
         try f.session("w1", taskId: task.id)
@@ -188,10 +200,12 @@ final class HookAndWorkerEventTests: XCTestCase {
         ])
 
         let first = try await f.scoped.call("report_complete", arguments: arguments, identity: identity)
+        await first.afterResponse?()
         _ = try f.board.accept(taskId: task.id)
         let endedAt = try XCTUnwrap(f.sessions.get("w1")?.endedAt)
 
         let second = try await f.scoped.call("report_complete", arguments: arguments, identity: identity)
+        XCTAssertNil(second.afterResponse, "the resend asked for the worker to be stopped a second time")
 
         let completes = try f.reports.unconsumed(projectId: f.project.id).filter { $0.kind == .complete }
         XCTAssertEqual(completes.count, 1)

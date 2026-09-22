@@ -23,6 +23,39 @@ struct CrashError: Error, CustomStringConvertible {
     var description: String { "database exploded" }
 }
 
+/// Holds the deferred half of a tool result open until a test lets it finish, so "the answer went
+/// out first" can be asserted rather than inferred from timing.
+actor DeferredWorkGate {
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var arrival: CheckedContinuation<Void, Never>?
+    private var entered = false
+    private var opened = false
+    private(set) var ran = false
+
+    func wait() async {
+        entered = true
+        arrival?.resume()
+        arrival = nil
+        if !opened {
+            await withCheckedContinuation { waiter = $0 }
+        }
+        ran = true
+    }
+
+    /// Returns once the deferred work has started and is parked here, so a test can tell "not run
+    /// yet" apart from "never reached".
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { arrival = $0 }
+    }
+
+    func open() {
+        opened = true
+        waiter?.resume()
+        waiter = nil
+    }
+}
+
 actor FakeToolHandler: ToolHandler {
     struct Call: Equatable {
         var name: String
@@ -31,6 +64,11 @@ actor FakeToolHandler: ToolHandler {
     }
 
     private(set) var calls: [Call] = []
+    private var gate: DeferredWorkGate?
+
+    func setDeferredGate(_ gate: DeferredWorkGate) {
+        self.gate = gate
+    }
 
     static let workerTools: [ToolDescriptor] = [
         ToolDescriptor(
@@ -71,6 +109,9 @@ actor FakeToolHandler: ToolHandler {
             return .json(arguments)
         case "soft_error":
             return ToolResult(text: "handled softly", isError: true)
+        case "deferred":
+            let gate = gate
+            return ToolResult(text: "answered") { await gate?.wait() }
         case "fail":
             throw ToolError("task 42 is not assignable")
         case "crash":

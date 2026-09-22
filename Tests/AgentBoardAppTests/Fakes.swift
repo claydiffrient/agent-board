@@ -355,6 +355,17 @@ struct SupervisorFixture {
         return WorkerToolHandler(db: db, control: sink, events: sink)
     }
 
+    /// Stands in for `BoardServer`: the handler answers first, and work it deferred — stopping the
+    /// session that is waiting on that answer — runs only afterwards.
+    @discardableResult
+    func callWorkerTool(_ name: String, arguments: JSONValue, token: String) async throws -> ToolResult {
+        let result = try await workerHandler().call(
+            name, arguments: arguments, identity: try await identity(token: token)
+        )
+        await result.afterResponse?()
+        return result
+    }
+
     func identity(token: String) async throws -> TokenIdentity {
         guard let identity = await resolver.resolve(token: token) else {
             throw FixtureError("token \(token) did not resolve")
