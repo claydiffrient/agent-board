@@ -177,31 +177,70 @@ struct PortRow: View {
 /// last hourly sweep is invisible until someone asks, and a panel that vanished entirely leaves
 /// nobody to ask. An orphaned dev server is the row this epic exists for and it has no other
 /// affordance.
+///
+/// **Height: at most `ceiling`, header included, and otherwise its content.** The panel sits in the
+/// sidebar's bottom `safeAreaInset`, which grows upward, so every point it claims comes out of the
+/// project list. The rows scroll under a fixed header; the scroll area is capped at the rows' own
+/// height, so a two-row panel is two rows tall rather than reserving the ceiling.
 struct PortsPanel: View {
     @Environment(AppEnvironment.self) private var env
-    @AppStorage(PortsPanel.expandedKey) private var expanded = true
+    @AppStorage private var expanded: Bool
+    @State private var headerHeight: CGFloat = 0
+    @State private var rowsHeight: CGFloat = 0
+
+    let ceiling: CGFloat
 
     static let expandedKey = "agentboard.portsPanel.expanded"
+    private static let spacing: CGFloat = 2
+    private static let bottomPadding: CGFloat = 4
+
+    /// An explicit height rather than a `maxHeight` frame: the inset may propose no height at all,
+    /// and a `maxHeight` frame then lets a `ScrollView` child take its full content height.
+    private var rowsCeiling: CGFloat {
+        max(0, ceiling - headerHeight - Self.spacing - Self.bottomPadding)
+    }
+
+    init(ceiling: CGFloat, expandedKey: String = PortsPanel.expandedKey) {
+        self.ceiling = ceiling
+        _expanded = AppStorage(wrappedValue: true, expandedKey)
+    }
+
+    /// Twice the account-usage footer beneath it (SPEC §10). A footer with no reading draws nothing,
+    /// so the ceiling falls back to the full two-window footer's measured height.
+    static func ceiling(footerHeight: CGFloat) -> CGFloat {
+        2 * (footerHeight > 0 ? footerHeight : AccountUsageFooter.fullHeight)
+    }
 
     var body: some View {
         if let model = env.listeningPorts {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: Self.spacing) {
                 header(model)
-                if expanded {
-                    ForEach(model.ports) { port in
-                        PortRow(
-                            port: port,
-                            openRoute: { env.router.open($0) },
-                            isStopping: model.isStopping(port),
-                            stopFailure: model.stopFailure(for: port),
-                            stop: { _Concurrency.Task { await model.stop(port) } }
-                        )
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { headerHeight = $0 }
+                if expanded && !model.ports.isEmpty {
+                    ScrollView(.vertical) {
+                        rows(model)
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { rowsHeight = $0 }
                     }
+                    .frame(height: min(rowsHeight, rowsCeiling))
                 }
             }
             .padding(.horizontal, 8)
-            .padding(.bottom, model.ports.isEmpty || !expanded ? 0 : 4)
+            .padding(.bottom, model.ports.isEmpty || !expanded ? 0 : Self.bottomPadding)
             .task { model.refresh() }
+        }
+    }
+
+    private func rows(_ model: ListeningPortModel) -> some View {
+        VStack(alignment: .leading, spacing: Self.spacing) {
+            ForEach(model.ports) { port in
+                PortRow(
+                    port: port,
+                    openRoute: { env.router.open($0) },
+                    isStopping: model.isStopping(port),
+                    stopFailure: model.stopFailure(for: port),
+                    stop: { _Concurrency.Task { await model.stop(port) } }
+                )
+            }
         }
     }
 

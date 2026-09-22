@@ -14,6 +14,7 @@ struct MainWindow: View {
     @State private var workspaceToDelete: Workspace?
     @State private var collapsed: Set<String>
     @State private var errorMessage: String?
+    @State private var usageFooterHeight: CGFloat = 0
 
     private let collapseState: SidebarCollapseState
 
@@ -128,7 +129,7 @@ struct MainWindow: View {
         .navigationSplitViewColumnWidth(min: 180, ideal: 220)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
-                PortsPanel()
+                PortsPanel(ceiling: PortsPanel.ceiling(footerHeight: usageFooterHeight))
                 HStack(spacing: 4) {
                     Button {
                         addProject()
@@ -141,6 +142,7 @@ struct MainWindow: View {
                 .padding(8)
                 NotificationsOffNotice()
                 AccountUsageFooter(model: env.accountUsage)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { usageFooterHeight = $0 }
             }
         }
         .overlay {

@@ -2160,6 +2160,15 @@ consequence is stated rather than hidden: a dev server orphaned between two
 sweeps, or one whose project was deleted, has no row. `BoardServer`'s own port
 is never a row — it is excluded inside the sweep, not by this panel.
 
+The panel is never taller than twice the account-usage footer beneath it,
+header included: 286 points against the full two-window footer's measured 143.
+The ceiling tracks the footer's live height, and falls back to that 143 when the
+footer has no reading to draw. Below the ceiling the panel is as tall as its
+rows; at it, the rows scroll under a header that stays put, because the header
+carries the only refresh button and the collapse chevron. The sidebar's bottom
+inset grows upward, so every point the panel claims comes out of the project
+list.
+
 Two link targets in a row, going to different places on purpose. The number
 opens `http://localhost:<port>` in the default browser. The owner name opens the
 session, through `NotificationRouter` and `MainWindow.select` — the same funnel a

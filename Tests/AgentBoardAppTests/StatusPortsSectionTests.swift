@@ -323,7 +323,7 @@ final class StatusPortsSectionLiveTests: XCTestCase {
 
         let both = Mount(
             VStack(spacing: 0) {
-                PortsPanel()
+                PortsPanel(ceiling: PortsPanel.ceiling(footerHeight: 0))
                 StatusView(project: mine)
             }.environment(env),
             width: 900, height: 700
