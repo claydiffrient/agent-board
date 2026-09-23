@@ -68,6 +68,12 @@ final class PostCompactionBriefTests: XCTestCase {
         }
     }
 
+    func testTheBriefSaysATurnWithoutAToolCallStopsTheTask() throws {
+        let (_, task, epic) = try seed()
+        let brief = OpeningPrompt.postCompactionBrief(task: task, branch: "agentboard/t1", epicGoal: epic.goal)
+        XCTAssertTrue(brief.contains("a message with no tool call in it ends your turn"), brief)
+    }
+
     func testNotesAreDroppedRatherThanOverflowingTheInjectionCap() throws {
         let (f, task, epic) = try seed()
         let note = try f.notes.create(

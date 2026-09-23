@@ -37,7 +37,7 @@ public struct BriefingPromptHandler: PromptHandler {
         PromptDescriptor(
             name: workerProtocol,
             title: "Worker protocol",
-            description: "The standing How to work and When you are done sections a worker is spawned with — "
+            description: "The standing How to work, When you are done and How your turns end sections a worker is spawned with — "
                 + "worktree rules, when to search notes, and the completion protocol. "
                 + "Fetch it after a resume or a compaction, when the original instructions are no longer in context.",
             arguments: [

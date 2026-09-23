@@ -363,6 +363,10 @@ For a task `T` in project `P`:
    work* and asks for a note before `report_complete` in *When you are done*,
    with the bar stated and `append_section` preferred over a second note on a
    subject that already has one.
+   Each attached note sits between marker lines carrying one random id per
+   note, so a closing marker forged inside a note body does not end the fence.
+   The prompt ends with *How your turns end*: the early stops an unattended
+   worker must not make, and the three stops it should.
 7. `claude "<prompt>" --bg -n <task-slug> --permission-mode auto
    --strict-mcp-config --mcp-config <file> --settings <file>
    [--model <task.model ?? settings.defaultModel>]
@@ -1216,7 +1220,7 @@ version and the session needs it verbatim:
 | Prompt | Arguments | Returns |
 |---|---|---|
 | `wind_down_order` | `via`: `hook` \| `resume` (required); `reason` (optional) | The full wind-down order text (§8.1) |
-| `worker_protocol` | `branch` (required) | The standing *How to work* / *When you are done* sections a worker is spawned with (§3.1 step 6) |
+| `worker_protocol` | `branch` (required) | The standing *How to work* / *When you are done* / *How your turns end* sections a worker is spawned with (§3.1 step 6) |
 
 Both render through the same function the push path already calls —
 `ShutdownOrder.windDownOrder` and `OpeningPrompt.workingProtocol` — so a prompt

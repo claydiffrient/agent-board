@@ -27,11 +27,22 @@ public struct InjectedNote: Sendable, Equatable {
     public let note: Note
     public let sections: [NoteSection]
     public let reasons: [NoteInjectionReason]
+    /// Carried by both of the note's fence lines, so a closing marker written inside the note body
+    /// cannot pass for the real one. Fixed per fetch, so every prompt built from it fences alike.
+    public let fenceId: String
 
-    public init(note: Note, sections: [NoteSection], reasons: [NoteInjectionReason]) {
+    public init(
+        note: Note, sections: [NoteSection], reasons: [NoteInjectionReason],
+        fenceId: String = InjectedNote.newFenceId()
+    ) {
         self.note = note
         self.sections = sections
         self.reasons = reasons
+        self.fenceId = fenceId
+    }
+
+    public static func newFenceId() -> String {
+        String(UUID().uuidString.lowercased().prefix(8))
     }
 }
 
