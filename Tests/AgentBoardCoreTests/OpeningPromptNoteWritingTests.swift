@@ -73,6 +73,20 @@ final class OpeningPromptNoteWritingTests: XCTestCase {
         XCTAssertTrue(text.contains("4. Call `report_complete("))
     }
 
+    func testTheTurnEndingSectionNamesTheEarlyStopsAndTheStopsWanted() throws {
+        let text = try plainPrompt()
+        let section = try index("## How your turns end", in: text)
+        XCTAssertTrue(try index("Call `report_complete(", in: text) < section)
+        XCTAssertTrue(text.hasSuffix(OpeningPrompt.turnEnding))
+        XCTAssertTrue(text.contains("closes by announcing the next step, with no tool call"))
+        XCTAssertTrue(text.contains("put them in the same message as your next tool call"))
+        XCTAssertTrue(text.contains("after `report_blocked` when nothing left in the task can move without a human"))
+        XCTAssertTrue(text.contains("when Agent Board sends you a wind-down order"))
+        XCTAssertTrue(text.contains("This does not override the need for confirmation on risky or destructive actions."))
+        XCTAssertTrue(OpeningPrompt.workingProtocol(branch: "agentboard/x").hasSuffix(OpeningPrompt.turnEnding))
+        XCTAssertFalse(OpeningPrompt.turnEnding.hasPrefix(" "), "the static let's block indented every line")
+    }
+
     func testEverySectionStillAppearsInOrderWithTheNoteInstructionAdded() throws {
         let f = try Fixture.make()
         let epic = Epic(
@@ -105,6 +119,7 @@ final class OpeningPromptNoteWritingTests: XCTestCase {
             "## Project notes",
             "## How to work",
             "## When you are done",
+            "## How your turns end",
         ]
         var cursor = text.startIndex
         for heading in expected {

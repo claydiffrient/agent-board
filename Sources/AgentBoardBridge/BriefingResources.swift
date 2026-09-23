@@ -25,7 +25,7 @@ public struct BriefingResourceHandler: ResourceHandler {
             return [ResourceDescriptor(
                 uri: BriefingResourceURI.worker,
                 name: "Worker protocol",
-                description: "The standing How to work and When you are done sections you were spawned with — "
+                description: "The standing How to work, When you are done and How your turns end sections you were spawned with — "
                     + "where you are working and on which branch, when to search notes, and the completion protocol. "
                     + "Read it after a resume or a compaction, when those instructions are no longer in context.",
                 mimeType: Self.mimeType
