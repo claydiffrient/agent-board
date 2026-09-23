@@ -44,7 +44,7 @@ final class InteractiveSessionCommandTests: XCTestCase {
 
 final class ChildEnvironmentTests: XCTestCase {
     func testStripsClaudeCodeMarkers() {
-        let env = ChildEnvironment.sanitized(["CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDECODE": "1", "CLAUDE_PID": "3", "PATH": "/bin", "HOME": "/h"])
+        let env = ChildEnvironment.sanitized(["CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDECODE": "1", "CLAUDE_PID": "3", "PATH": "/bin", "HOME": "/h"], path: nil)
         XCTAssertEqual(env, ["PATH": "/bin", "HOME": "/h"])
     }
 
@@ -52,7 +52,7 @@ final class ChildEnvironmentTests: XCTestCase {
         let env = ChildEnvironment.sanitized([
             "FORCE_COLOR": "3", "COLORTERM": "truecolor", "CLICOLOR_FORCE": "1",
             "TERM": "xterm-256color", "PATH": "/bin", "NO_COLOR": "1",
-        ])
+        ], path: nil)
         XCTAssertNil(env["FORCE_COLOR"])
         XCTAssertNil(env["COLORTERM"])
         XCTAssertNil(env["CLICOLOR_FORCE"])
@@ -65,5 +65,51 @@ final class ChildEnvironmentTests: XCTestCase {
         XCTAssertTrue(lines.contains("COLORTERM=truecolor"))
         XCTAssertFalse(lines.contains { $0.hasPrefix("FORCE_COLOR=") })
         XCTAssertEqual(lines.filter { $0.hasPrefix("COLORTERM=") }, ["COLORTERM=truecolor"])
+    }
+
+    func testResolvedPathReplacesTheInheritedOne() {
+        let env = ChildEnvironment.sanitized(["PATH": "/usr/bin:/bin", "HOME": "/h"], path: "/opt/homebrew/bin:/usr/bin")
+        XCTAssertEqual(env, ["PATH": "/opt/homebrew/bin:/usr/bin", "HOME": "/h"])
+        XCTAssertTrue(ChildEnvironment.forTerminal(["PATH": "/bin"], path: "/x:/bin").contains("PATH=/x:/bin"))
+    }
+
+    func testUnresolvedPathKeepsTheInheritedOne() {
+        XCTAssertEqual(ChildEnvironment.sanitized(["PATH": "/bin"], path: nil), ["PATH": "/bin"])
+    }
+}
+
+final class LoginShellPathTests: XCTestCase {
+    private func fakeShell(_ body: String) throws -> String {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("fake-shell-\(UUID().uuidString)")
+        try "#!/bin/sh\n\(body)\n".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url.path
+    }
+
+    func testParseTakesTheLastMarkedLineOverProfileNoise() {
+        let output = "Now using node v25\n__AGENTBOARD_PATH__=/decoy\nmotd\n__AGENTBOARD_PATH__=/a:/b\n"
+        XCTAssertEqual(LoginShellPath.parse(output), "/a:/b")
+    }
+
+    func testParseRejectsMissingOrEmptyPath() {
+        XCTAssertNil(LoginShellPath.parse("Now using node v25\n"))
+        XCTAssertNil(LoginShellPath.parse("__AGENTBOARD_PATH__=\n"))
+    }
+
+    func testQueryRunsTheShellCommandAndReadsItsPath() throws {
+        let shell = try fakeShell(#"echo motd; PATH=/from/profile:/usr/bin; shift 3; eval "$1""#)
+        XCTAssertEqual(LoginShellPath.query(shell: shell, base: ["PATH": "/usr/bin:/bin"]), "/from/profile:/usr/bin")
+    }
+
+    func testQueryGivesUpOnAShellThatHangs() throws {
+        let shell = try fakeShell("/bin/sleep 30")
+        let started = Date()
+        XCTAssertNil(LoginShellPath.query(shell: shell, base: [:], timeout: 0.5))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
+    func testQueryReturnsNilForAMissingShell() {
+        XCTAssertNil(LoginShellPath.query(shell: "/nonexistent/shell", base: [:]))
     }
 }

@@ -5,6 +5,7 @@ import Foundation
 @MainActor
 enum AppComposition {
     static func make() -> AppEnvironment {
+        DispatchQueue.global(qos: .userInitiated).async { _ = LoginShellPath.resolved }
         let url = ProcessInfo.processInfo.environment["AGENTBOARD_DB"].map { URL(fileURLWithPath: $0) }
             ?? Wiring.appSupportDir.appendingPathComponent("agentboard.sqlite")
         do {

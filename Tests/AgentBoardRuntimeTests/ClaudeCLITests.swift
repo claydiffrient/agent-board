@@ -151,4 +151,22 @@ final class ClaudeCLITests: XCTestCase {
             XCTAssertEqual(command.arguments.first, "claude")
         }
     }
+
+    func testCandidatePathsPutNativeInstallerFirst() {
+        XCTAssertEqual(ClaudeCLI.candidatePaths(home: "/Users/x"), [
+            "/Users/x/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude",
+        ])
+    }
+
+    func testInvocationUsesFirstExecutableCandidate() {
+        let invocation = ClaudeCLI.invocation(candidates: ["/a/claude", "/b/claude", "/c/claude"]) { $0 != "/a/claude" }
+        XCTAssertEqual(invocation.executable, "/b/claude")
+        XCTAssertEqual(invocation.prefix, [])
+    }
+
+    func testInvocationFallsBackToEnvWhenNoCandidateExists() {
+        let invocation = ClaudeCLI.invocation(candidates: ["/a/claude"]) { _ in false }
+        XCTAssertEqual(invocation.executable, "/usr/bin/env")
+        XCTAssertEqual(invocation.prefix, ["claude"])
+    }
 }

@@ -40,11 +40,18 @@ public struct AgentInfo: Decodable, Sendable, Equatable {
 }
 
 public enum ClaudeCLI {
-    public static let homebrewPath = "/opt/homebrew/bin/claude"
+    /// A Finder or Dock launch inherits launchd's PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), which holds no
+    /// install location, so the native installer's and Homebrew's are checked before falling back to it.
+    public static func candidatePaths(home: String = NSHomeDirectory()) -> [String] {
+        ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
+    }
 
-    public static func invocation() -> (executable: String, prefix: [String]) {
-        if FileManager.default.isExecutableFile(atPath: homebrewPath) {
-            return (homebrewPath, [])
+    public static func invocation(
+        candidates: [String] = candidatePaths(),
+        isExecutable: (String) -> Bool = FileManager.default.isExecutableFile(atPath:)
+    ) -> (executable: String, prefix: [String]) {
+        if let path = candidates.first(where: isExecutable) {
+            return (path, [])
         }
         return ("/usr/bin/env", ["claude"])
     }
