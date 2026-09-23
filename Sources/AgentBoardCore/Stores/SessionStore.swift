@@ -277,4 +277,67 @@ public struct SessionStore: Sendable {
             try Self.all(db, projectId: projectId)
         }
     }
+
+    /// The names a session goes by, for surfaces that hold a bare session id and need to say what it
+    /// was — a listening port's owner, long after the session ended.
+    ///
+    /// Ended sessions answer exactly as live ones do; nothing deletes `agent_session` rows. An id
+    /// with no row is simply absent from the result, which is what a caller renders as "no owner we
+    /// can still name" rather than an error.
+    public func names(of sessionIds: [String]) throws -> [String: SessionNames] {
+        let wanted = Array(Set(sessionIds))
+        guard !wanted.isEmpty else { return [:] }
+        let placeholders = databaseQuestionMarks(count: wanted.count)
+        let sql = """
+            SELECT s.session_id AS session_id,
+                   s.project_id AS project_id,
+                   p.name AS project_name,
+                   s.role AS role,
+                   s.ended_at AS ended_at,
+                   t.title AS task_title
+            FROM agent_session s
+            JOIN project p ON p.id = s.project_id
+            LEFT JOIN task t ON t.id = s.task_id
+            WHERE s.session_id IN (\(placeholders))
+            """
+        return try db.reader.read { db in
+            try Row.fetchAll(db, sql: sql, arguments: StatementArguments(wanted)).reduce(into: [:]) { result, row in
+                let id: String = row["session_id"]
+                let role: String = row["role"]
+                result[id] = SessionNames(
+                    sessionId: id,
+                    projectId: row["project_id"],
+                    projectName: row["project_name"],
+                    taskTitle: row["task_title"],
+                    role: SessionRole(rawValue: role) ?? .worker,
+                    endedAtMillis: row["ended_at"]
+                )
+            }
+        }
+    }
+}
+
+public struct SessionNames: Sendable, Equatable {
+    public let sessionId: String
+    public let projectId: String
+    public let projectName: String
+    public let taskTitle: String?
+    public let role: SessionRole
+    public let endedAtMillis: Int64?
+
+    public init(
+        sessionId: String,
+        projectId: String,
+        projectName: String,
+        taskTitle: String?,
+        role: SessionRole,
+        endedAtMillis: Int64?
+    ) {
+        self.sessionId = sessionId
+        self.projectId = projectId
+        self.projectName = projectName
+        self.taskTitle = taskTitle
+        self.role = role
+        self.endedAtMillis = endedAtMillis
+    }
 }

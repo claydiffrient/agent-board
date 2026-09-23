@@ -28,6 +28,7 @@ struct StatusView: View {
     var body: some View {
         VStack(spacing: 0) {
             table
+            StatusPortsSection(project: project)
             Divider()
             footer
         }

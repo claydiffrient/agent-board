@@ -6,6 +6,10 @@ import SwiftUI
 struct AccountUsageFooter: View {
     @State private var model: AccountUsageModel
 
+    /// Rendered height with both windows, their reset lines and the age line, at the sidebar's width.
+    /// Pinned by `PortsPanelCeilingTests`, which measures it.
+    static let fullHeight: CGFloat = 143
+
     init(model: AccountUsageModel = AccountUsageModel()) {
         _model = State(initialValue: model)
     }

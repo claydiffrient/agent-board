@@ -55,6 +55,13 @@ final class ShellConsole {
         terminal.process.running
     }
 
+    /// The running shell's pid, for anything that has to recognise a process this console started.
+    var shellPID: pid_t? {
+        guard isProcessRunning else { return nil }
+        let pid = terminal.process.shellPid
+        return pid > 0 ? pid : nil
+    }
+
     /// Exactly what `launch()` hands the child, so a test asserting on it is asserting on the shell.
     func childEnvironment() -> [String] {
         ChildEnvironment.forHumanShell(baseEnvironment)

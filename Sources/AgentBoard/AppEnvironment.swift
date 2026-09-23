@@ -21,13 +21,17 @@ final class AppEnvironment {
     /// `supervisor.start()`, so a launch-time screen can wait for the server bind, the stale-lock
     /// sweep and the worktree-root migration to finish. Nil everywhere the supervisor is a stub.
     let startup: _Concurrency.Task<Void, Never>?
+    /// Nil in the previews and in tests that do not wire a supervisor; every port surface treats
+    /// its absence as an empty list rather than an error.
+    let listeningPorts: ListeningPortModel?
 
     init(
         db: AppDatabase, supervisor: any WorkerSupervising, router: NotificationRouter? = nil,
         accountUsage: AccountUsageModel? = nil, sleepGuard: SleepGuard? = nil,
         quitter: (any AppQuitting)? = nil,
         releaseNotes: ReleaseNotesAnnouncer = ReleaseNotesAnnouncer(),
-        startup: _Concurrency.Task<Void, Never>? = nil
+        startup: _Concurrency.Task<Void, Never>? = nil,
+        listeningPorts: ListeningPortModel? = nil
     ) {
         self.db = db
         self.supervisor = supervisor
@@ -37,5 +41,6 @@ final class AppEnvironment {
         self.quitter = quitter ?? AppQuit()
         self.releaseNotes = releaseNotes
         self.startup = startup
+        self.listeningPorts = listeningPorts
     }
 }

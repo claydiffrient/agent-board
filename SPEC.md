@@ -407,6 +407,96 @@ happens to a setup still running when Agent Board quits.
 task systems in its tool list. A per-project allowlist of extra servers to
 merge back in (`mdn`, `caniuse`) is a project setting.
 
+### 3.2 Listening ports
+
+A worker is a detached `claude --bg` session that outlives the app, and its
+children outlive it in turn — a dev server one of them started has no owning
+window, no Dock icon, nothing but a socket. `ListeningPortSweep`
+(`AgentBoardRuntime`) exists to make that socket visible: every TCP port in
+`LISTEN` on the machine, whether opened by a worker session, an orchestrator
+session, or the human typing into a project's shell console. Not "agents" —
+the shell console counts because a human running `npm run dev` there is
+exactly who needs the row.
+
+**Enumeration** is `libproc` (`proc_listpids` + `PROC_PIDLISTFDS` +
+`PROC_PIDFDSOCKETINFO`, reached through `import Darwin` with no bridging
+header), chosen over shelling out to `lsof -i -P -n` by measurement: on this
+machine's 1,059 processes both returned the identical 36 rows, libproc in
+10.0 ms best / 11.5 ms mean against lsof's 152.0 ms / 161.2 ms — neither run
+as root, so this is proven complete for the current user's processes, not for
+the machine. One `proc_listpids` call builds the whole pid→ppid map that both
+the socket walk and the attribution walk below reuse, so a sweep is linear in
+processes rather than in sockets, and a socket is never dropped because its
+own `proc_pidinfo` lookup failed — it is reported unattributed instead.
+
+**One port is one row.** A descriptor inherited across `fork` stays open in
+every process below the one that bound it: a board's own server socket was
+seen under `AgentBoard`, three `claude` hosts and a shell console — six rows
+for one port. The sweep groups holders by port and gives the row to the holder
+that started first, which is the binder, since nothing can inherit a
+descriptor before the process holding it exists; a pid whose start time could
+not be read sorts last, and the lower pid breaks a tie. The binder's
+attribution names the row, never an inheritor's. Every holder's chain is still
+recorded in the ledger below, so a child that outlives the binder stays
+nameable.
+
+**Attribution** walks the listening pid's parent chain looking for a pid the
+caller recognizes: a worker or orchestrator host's pid from
+`ClaudeCLI.listAgents()` (`agent_session` itself stores no pid), or the
+project shell console's `shellPid`. The registry is machine-wide — it lists
+every interactive session the human is sitting in and every other board's
+workers — so `ListeningPortModel` hands the sweep only the hosts whose session
+id `agent_session` records. This is reliable exactly as far as the
+chain is intact, and no further: macOS has no subreaper, so a reparented
+grandchild's `ppid` becomes 1, and the session that spawned it is not
+recoverable from the process table at all, for that socket, permanently. A
+socket whose chain reaches pid 1 or a process the board never launched is
+reported with its pid and command and a nil owner. The sweep reports it; the
+panel does not draw it (§10), because a nil owner is no evidence the board
+started the process — every system daemon on the machine looks exactly like
+that.
+
+To still name the orphan's *previous* owner, the sweep persists what it
+learned while the chain was still whole: `sweepResult` returns every pid
+walked through to reach an attributed session (not just the listener, so a
+shell that outlives the session under it still carries the id), and
+`PIDSessionLedger` — a JSON file in Application Support, not a table, because
+a pid is machine-local and invalid after a reboot, unlike the migrated state
+in `agentboard.sqlite` — records them keyed on `(pid, process start time)`
+read from the same `proc_bsdinfo` struct the sweep already reads for `ppid`,
+so a reused pid does not match a stale entry. A sweep tries the live chain
+first and the ledger only when the chain answers nothing, because the chain
+is self-evidently true and the ledger is a claim about the past. **This is
+attribution's stated limit, not an edge case**: an orphan is only ever named
+if some earlier sweep observed its chain intact before it broke. A dev server
+that starts and is orphaned entirely between two hourly sweeps is recorded
+nowhere, so it has no owner and draws no row, and no better chain walk
+recovers it after the fact.
+
+`BoardServer`'s own port is dropped inside the sweep itself, before any
+attribution runs, not by a caller — it is the port every worker's MCP
+connection and every hook round trip goes through, deliberately held stable
+across relaunches (§3.1's per-session config rewrite on resume depends on
+it), and a row for it would be a row with a stop button that kills every
+agent on the machine. `PortStop` (§10) refuses it a second time regardless,
+for a caller that reaches the stopper directly.
+
+**Refresh** is hourly, on demand (the panel's button, the panel opening, and
+after a stop, §10), and deliberately *not* on the 5-second metering tick
+(§7): the tick is real work already running on the wall clock, and a
+sweep is a full pass over every process on the machine for information that
+moves on the order of minutes, not seconds. The hourly wait is
+`Task.sleep(for:)`, measured on `ContinuousClock`, which keeps running
+through a system suspend — a lid closed for three hours wakes straight into a
+sweep rather than one hours stale. Unlike `AwakeClock` (§8.3), which discounts
+sleep from a worker's idle budget, this clock deliberately counts it: sleeping
+minutes are exactly when processes exit and sockets close, so counting
+through sleep is what keeps the list current rather than what would make it
+stale. One `ListeningPortModel` sweeps for both
+surfaces — the sidebar panel's full list and a project's Status pane, filtered
+from the same array — so mounting both costs one sweep, not two disagreeing
+timers.
+
 ---
 
 ## 4. Data model
@@ -2015,6 +2105,21 @@ as dead rather than phantom-running. Per agent: task, state, elapsed, spend
 against cap, last tool used. A blocked agent's row opens its terminal, which is
 how permission prompts get answered (D15).
 
+Below the roster, the ports **this project** holds — the same rows the sidebar
+panel draws, in the same `PortRow`, filtered to this project rather than swept
+again. The pane starts no sweep and carries no refresh button of its own: the
+panel that owns both is on screen beside it, and a second timer over the same
+process table would double the cost and let the two surfaces disagree between
+ticks. A port belonging to another project is absent here and still present in
+the sidebar.
+
+An **orphan appears here whenever its ended session still names a project**.
+`agent_session` and `task` outlive the process, so a ledger-sourced row resolves
+a `project_id` and lands on that project's pane — the dev server whose session
+ended an hour ago is exactly the row this is for. When this project holds no ports the
+section draws nothing: the sidebar panel keeps its header line when empty because
+that line carries the refresh button, and this section has no button to keep.
+
 **Roster** — the cross-project register of specialists (§4), and the one screen
 not scoped to a project: a `Roster` row in the sidebar beside `At a Glance` and
 above the workspace sections, so it does not join Task Board and Status inside a
@@ -2052,6 +2157,80 @@ ungrouped. A project is assigned from its settings sheet (a picker of the
 workspaces plus **None**) or by dragging its row onto a section header. Which
 sections the viewer has collapsed is a per-viewer convenience and lives in
 `UserDefaults`, not the database.
+
+**Ports** — a panel directly above **Add Project…**, listing every TCP socket
+in `LISTEN` that a process Agent Board started is holding. A row is the port
+number, the command holding it, and who it belongs to: the task title and
+project of the session that opened it, or **Terminal** and the project for the
+per-project shell console. **A port is drawn only when the board can name that
+owner** — a session `agent_session` records, live or ended, or a project's shell
+console. A socket nothing names, or one pinned on a session this board has no
+row for, is not drawn: ControlCenter, Steam, an editor, an interactive `claude`
+session's dev server and a second Agent Board instance's server port all look
+like that, and Agent Board has no evidence it started any of them. The
+consequence is stated rather than hidden: a dev server orphaned between two
+sweeps, or one whose project was deleted, has no row. `BoardServer`'s own port
+is never a row — it is excluded inside the sweep, not by this panel.
+
+The panel is never taller than twice the account-usage footer beneath it,
+header included: 286 points against the full two-window footer's measured 143.
+The ceiling tracks the footer's live height, and falls back to that 143 when the
+footer has no reading to draw. Below the ceiling the panel is as tall as its
+rows; at it, the rows scroll under a header that stays put, because the header
+carries the only refresh button and the collapse chevron. The sidebar's bottom
+inset grows upward, so every point the panel claims comes out of the project
+list.
+
+Two link targets in a row, going to different places on purpose. The number
+opens `http://localhost:<port>` in the default browser. The owner name opens the
+session, through `NotificationRouter` and `MainWindow.select` — the same funnel a
+clicked notification uses, so a port row starts a project's orchestrator exactly
+as a sidebar click does. A session-owned port routes to Status, a shell-console
+port to Terminal. A session that has *ended* still keeps its name and its route: `agent_session` and
+`task` hold the title after the process is gone, and that row — the dev server
+whose session ended an hour ago — is the one a human otherwise finds only with
+`lsof -i :3000` and guesswork.
+
+Each row also carries a **stop** button. It signals a process *group*, not the
+listening pid: `kill(-n, …)` addresses the group whose id is `n`, and a measured
+`npm run dev` puts the listening `node` in its parent `npm`'s group without
+leading one, so its own pid names no group at all. The stop reads the listener's
+`pbi_pgid` and signals that group only when the group leader is the listener
+itself or one of its ancestors *and* no member of the group is a process the
+board runs long-term — its own pid and process group, every `claude` session
+host the registry lists, and every shell console's shell. When either condition
+fails it signals the listening pid alone and accepts that a supervisor above it
+may respawn, because the alternative is a stop button beside a dev server that
+kills an agent. SIGHUP first, matching what a closing terminal window sends and
+what `ShellConsole.hangUp()` already does; SIGKILL after a two-second grace as a
+backstop.
+
+`BoardServer`'s own port is refused before anything else happens — before the
+process table is read — even when the stop is handed it directly. The sweep
+already excludes it so no row can exist for it; this is the second wall, because
+a stop path that could ever take that port is a path that kills every agent on
+the machine.
+
+A stop sweeps again on completion, so the row goes rather than waiting for the
+hourly refresh. A port still held after the escalation keeps its row and says
+so: silently dropping a row for a process that is still listening would hide it
+until the human found it again with `lsof`.
+
+Only a port owned by a session running *right now* asks first, and its
+confirmation names the task. An accidental click on an orphan costs a dev server
+the human can restart, and a dialog on the row this panel exists for is friction
+on the common case; a live session's port may be load-bearing for work in
+flight, and a worker that starts failing because its dev server vanished reads
+as a bug rather than as a consequence. The shell console is deliberately in the
+no-confirmation group — the human typed the command that opened the socket.
+
+The list is swept hourly, on the panel's refresh button, after a stop, and when
+the panel is opened. When nothing is listening the panel is its header line and
+nothing else:
+no empty box, because the sidebar already holds every project and the space is
+not free. The header still costs that one line rather than collapsing to zero,
+because it carries the refresh button — the sweep is hourly, and a panel that
+vanished entirely would leave nobody to ask about a port that appeared since.
 
 **Project settings** — a sheet from the sidebar row's gear, in six tabs:
 **General** (Repository, Workspace, Archive), **Agents** (Models, Review,
