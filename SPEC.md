@@ -430,7 +430,7 @@ CREATE TABLE project (
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
-                                   -- reviewLevel, buildCommand, testCommand, archivePolicy,
+                                   -- reviewLevel, reviewAgent, buildCommand, testCommand, archivePolicy,
                                    -- worktreeStrategy, sharedCheckoutMaxAgents, rosterAgentIds
   created_at      INTEGER NOT NULL,
   workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
@@ -690,15 +690,22 @@ anyone's selection. Deleting a rostered agent clears its `project_roster_agent`
 rows and nothing else: the tasks it worked, its sessions, and the `progress`
 rows naming it all survive it.
 
-There is no `is_reviewer` flag. `RosterAgent.isReviewer` reads
-`role.lowercased().contains("review")` — a "reviewer", "Reviewer", or "code
-reviewer" role all qualify, because the roster is user-defined text and a
-second field would just be a second way to say the same thing. Under `agent`
-review (§5), `ReviewPolicy.routing` takes the project's usable, enabled
-reviewers and picks `reviewers.first` — the first in `project_roster_agent`'s
-own `ordering`, not by task type, workload, or rotation. One project with two
-reviewer-role agents always routes to whichever sorts first; there is no way
-to route different tasks to different reviewers today.
+There is no `is_reviewer` flag. A project names its reviewer outright in
+`settings_json.reviewAgent` — `{"id": …, "name": …}`, the name a snapshot taken
+when it was chosen — and any agent the project uses can be named, whatever its
+role says. Under `agent` review (§5), `ReviewPolicy.routing` hands the task to
+that agent. If it has since been deleted from the roster, disabled, or dropped
+from the project, the task goes to a person with a `progress` row naming the
+agent and what happened to it — **never to another agent**, since a silent
+substitute is what naming one exists to prevent. The key is kept, not cleared,
+when the agent goes away, so the next completion says the same thing.
+
+With no `reviewAgent`, routing falls back to the pick every project had before
+the key existed, so none changes on upgrade: the project's usable reviewers by
+`RosterAgent.isReviewer` (`role.lowercased().contains("review")`, so
+"reviewer", "Reviewer" and "code reviewer" all qualify), and `reviewers.first` —
+the first in `project_roster_agent`'s own `ordering`. There is still no way to
+route different tasks to different reviewers.
 
 `settings_json.reviewLevel` is one of `none`, `agent`, `task` or `epic` and
 defaults to **`task`**, so a project that predates the setting behaves exactly as
@@ -793,8 +800,9 @@ The level is resolved on completion: the task's epic's `review_level` if it has
 one, otherwise the project's. Two rules override it unconditionally. An epic's
 integration task (`origin = integration`) always waits for a person, at every
 level — §5.2's gate is not weakened by this setting. And `agent` with no usable
-rostered reviewer falls back to `task` and says so in a `progress` row, rather
-than accepting work nobody reviewed.
+rostered reviewer — or with a named `reviewAgent` (§4) that is no longer usable —
+falls back to `task` and says so in a `progress` row, rather than accepting work
+nobody reviewed.
 
 - `proposed` — created by a worker via `propose_task`. Neither the orchestrator
   nor a worker may promote a worker proposal without human approval when

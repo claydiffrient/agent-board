@@ -2,8 +2,8 @@ import Foundation
 import GRDB
 
 extension RosterAgent {
-    /// `role` is free text (the roster is user-defined), so a reviewer is anything whose role reads
-    /// as one: "reviewer", "code reviewer", "Reviewer".
+    /// A guess from free-text `role` ("reviewer", "Code Reviewer"), used only when a project names
+    /// no `reviewAgent`. Any rostered agent can review when named, whatever its role says.
     public var isReviewer: Bool {
         role.lowercased().contains("review")
     }
@@ -53,6 +53,9 @@ public enum ReviewPolicy {
             }
             return .autoAccept
         case .agent:
+            if let named = try Project.fetchOne(db, key: task.projectId)?.settings.reviewAgent {
+                return try namedReviewerRouting(db, named: named, projectId: task.projectId)
+            }
             let reviewers = try RosterStore.agents(db, forProject: task.projectId, enabledOnly: true)
                 .filter(\.isReviewer)
             guard let reviewer = reviewers.first else {
@@ -61,6 +64,31 @@ public enum ReviewPolicy {
             }
             return .agentReview(agentId: reviewer.id, agentName: reviewer.name)
         }
+    }
+
+    /// A named reviewer that cannot take the task sends it to a person, never to another agent
+    /// (SPEC §4, §5): the project chose this one, and a silent substitute is what naming it prevents.
+    private static func namedReviewerRouting(
+        _ db: Database, named: ReviewAgentChoice, projectId: String
+    ) throws -> ReviewRouting {
+        guard let agent = try RosterAgent.fetchOne(db, key: named.id) else {
+            return .humanReview(reason: "Agent review names \(named.name) as this project's reviewer, but "
+                + "\(named.name) is no longer on the roster, so it needs a person. Choose another reviewer "
+                + "in Project Settings.")
+        }
+        let optedIn = try RosterStore.agents(db, forProject: projectId, enabledOnly: false)
+            .contains { $0.id == agent.id }
+        guard optedIn else {
+            return .humanReview(reason: "Agent review names \(agent.name) as this project's reviewer, but "
+                + "this project no longer uses \(agent.name), so it needs a person. Turn \(agent.name) back "
+                + "on in the project's roster, or choose another reviewer.")
+        }
+        guard agent.enabled else {
+            return .humanReview(reason: "Agent review names \(agent.name) as this project's reviewer, but "
+                + "\(agent.name) is disabled in the roster, so it needs a person. Enable \(agent.name), or "
+                + "choose another reviewer in Project Settings.")
+        }
+        return .agentReview(agentId: agent.id, agentName: agent.name)
     }
 }
 

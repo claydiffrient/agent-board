@@ -84,6 +84,18 @@ public enum ArchivePolicy: Codable, Sendable, Equatable {
     }
 }
 
+/// The rostered agent a project names as its reviewer. `name` is a snapshot taken when it was
+/// chosen, so a reason can still name the agent after it is deleted from the roster.
+public struct ReviewAgentChoice: Codable, Sendable, Equatable {
+    public var id: String
+    public var name: String
+
+    public init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
 public struct ProjectSettings: Codable, Sendable, Equatable {
     public var caps: Caps = Caps()
     public var autonomyEnabled: Bool = false
@@ -95,6 +107,9 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var modelGuidance: String? = nil
     /// How much human acceptance a finished task needs. An epic may override it for its own tasks.
     public var reviewLevel: ReviewLevel = .task
+    /// Who reviews under `agent` review (SPEC §4). Nil picks by role and roster order, as every
+    /// project did before this existed.
+    public var reviewAgent: ReviewAgentChoice? = nil
     /// Shell command that builds this project, e.g. `swift build` or `pnpm build`. Empty leaves the
     /// agent to work it out from the repo.
     public var buildCommand: String? = nil
@@ -122,6 +137,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         defaultModel: String? = nil,
         modelGuidance: String? = nil,
         reviewLevel: ReviewLevel = .task,
+        reviewAgent: ReviewAgentChoice? = nil,
         buildCommand: String? = nil,
         testCommand: String? = nil,
         archivePolicy: ArchivePolicy = .afterEpicMerge,
@@ -137,6 +153,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.defaultModel = defaultModel
         self.modelGuidance = modelGuidance
         self.reviewLevel = reviewLevel
+        self.reviewAgent = reviewAgent
         self.buildCommand = buildCommand
         self.testCommand = testCommand
         self.archivePolicy = archivePolicy
@@ -155,6 +172,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
         modelGuidance = try c.decodeIfPresent(String.self, forKey: .modelGuidance)
         reviewLevel = try c.decodeIfPresent(ReviewLevel.self, forKey: .reviewLevel) ?? .task
+        reviewAgent = try c.decodeIfPresent(ReviewAgentChoice.self, forKey: .reviewAgent)
         buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
         archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge
