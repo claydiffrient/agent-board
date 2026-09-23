@@ -2119,9 +2119,17 @@ under the same guards; workers get no such tool.
 
 **Status** — the agent roster. Reconciled from `claude agents --json --all`
 joined against `agent_session`, so a session that died outside the app is shown
-as dead rather than phantom-running. Per agent: task, state, elapsed, spend
+as dead rather than phantom-running. Per agent: role, task, state, elapsed, spend
 against cap, last tool used. A blocked agent's row opens its terminal, which is
 how permission prompts get answered (D15).
+
+The role names the roster agent a session runs as: `reviewer · Rita`,
+`worker · Rita`, or plain `worker` with no roster agent. Reviewing is read from
+the scope of the first grant bound to the session — the scope it launched
+under, which a resume does not erase — or, before any grant is bound, from the
+task naming that agent as its reviewer. Under review level `agent`, a line
+above the roster says which agent `ReviewPolicy` sends finished tasks to, or
+the reason it sends them to a person; under any other level there is no line.
 
 Below the roster, the ports **this project** holds — the same rows the sidebar
 panel draws, in the same `PortRow`, filtered to this project rather than swept

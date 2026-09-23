@@ -5,7 +5,7 @@ struct StatusView: View {
     let project: Project
 
     @Environment(AppEnvironment.self) private var env
-    @State private var sessions = Observed<[AgentSession]>([])
+    @State private var status = Observed(StatusSnapshot())
     @State private var tasks = Observed<[BoardTask]>([])
     @State private var serverPort: Int?
     @State private var lastError: String?
@@ -17,8 +17,10 @@ struct StatusView: View {
         Dictionary(uniqueKeysWithValues: tasks.value.map { ($0.id, $0.title) })
     }
 
+    private var sessions: [AgentSession] { status.value.sessions }
+
     private var roster: SessionRoster {
-        SessionVisibility.roster(sessions.value, now: now, includeEnded: showEnded)
+        SessionVisibility.roster(sessions, now: now, includeEnded: showEnded)
     }
 
     private var tokenCap: Int? {
@@ -27,13 +29,17 @@ struct StatusView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if let review = status.value.review {
+                ReviewRoutingBanner(routing: review)
+                Divider()
+            }
             table
             StatusPortsSection(project: project)
             Divider()
             footer
         }
         .task(id: project.id) {
-            await sessions.run(SessionStore(env.db).observe(projectId: project.id), in: env.db.reader)
+            await status.run(SessionStore(env.db).observeStatus(projectId: project.id), in: env.db.reader)
         }
         .task(id: project.id) {
             await tasks.run(TaskStore(env.db).observe(projectId: project.id), in: env.db.reader)
@@ -76,9 +82,11 @@ struct StatusView: View {
             .width(min: 80, ideal: 90)
 
             TableColumn("Role") { session in
-                Text(session.role.rawValue)
+                Text(status.value.roleLabel(session))
+                    .lineLimit(1)
+                    .help(status.value.roleLabel(session))
             }
-            .width(min: 80, ideal: 90)
+            .width(min: 80, ideal: 130)
 
             TableColumn("Task") { session in
                 Text(session.taskId.flatMap { taskTitles[$0] } ?? "—")
@@ -177,7 +185,7 @@ struct StatusView: View {
             Toggle("Show ended", isOn: $showEnded)
                 .toggleStyle(.checkbox)
                 .controlSize(.small)
-            Text("\(sessions.value.filter { $0.state.isActive }.count) active · \(sessions.value.count) total")
+            Text("\(sessions.filter { $0.state.isActive }.count) active · \(sessions.count) total")
         }
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -225,6 +233,35 @@ struct SleepFooterItem: View {
                 .controlSize(.small)
         }
         .help(`guard`.footerHelp)
+    }
+}
+
+/// Under agent review, which rostered agent this project's finished tasks go to, or why they go to a
+/// person instead. SPEC §10.
+struct ReviewRoutingBanner: View {
+    let routing: ReviewRouting
+
+    var body: some View {
+        HStack(spacing: 6) {
+            switch routing {
+            case .agentReview(_, let name):
+                Image(systemName: "checkmark.seal")
+                Text("Agent review: \(name) reviews finished tasks")
+            case .humanReview(let reason):
+                Image(systemName: "person.fill.questionmark")
+                    .foregroundStyle(.orange)
+                Text(reason ?? "Agent review: finished tasks go to a person")
+                    .lineLimit(2)
+                    .help(reason ?? "")
+            case .autoAccept:
+                EmptyView()
+            }
+            Spacer()
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
     }
 }
 
