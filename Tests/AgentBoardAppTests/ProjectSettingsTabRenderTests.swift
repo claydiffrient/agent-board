@@ -44,7 +44,8 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     private func mount(
         tab: ProjectSettingsTab,
         rosterAgents: Int = 0,
-        configure: (inout ProjectSettings) -> Void = { _ in }
+        configure: (inout ProjectSettings) -> Void = { _ in },
+        seed: (AppDatabase, String) throws -> Void = { _, _ in }
     ) throws -> Mounted {
         let db = try AppDatabase.inMemory()
         let projects = ProjectStore(db)
@@ -55,6 +56,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         var settings = project.settings
         configure(&settings)
         try projects.updateSettings(project.id, settings)
+        try seed(db, project.id)
         project = try XCTUnwrap(projects.get(project.id))
         for n in 0..<rosterAgents {
             try RosterStore(db).create(name: "Agent \(n)", role: "frontend", systemPrompt: "p")
@@ -108,6 +110,64 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
             ["Claude Code default", ReviewLevel.epic.label]
         )
         XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off], "autonomy, then the one rostered agent")
+    }
+
+    /// The reviewer picker is a radio group because a pop-up's options are unreadable offscreen; a
+    /// radio's label is too, so each agent is identified by its position and moved selection.
+    private func reviewerRadios(_ mounted: Mounted) -> [NSControl.StateValue] {
+        mounted.collect(NSButton.self).filter { !($0 is NSPopUpButton) }.map(\.state)
+    }
+
+    /// Roster order puts Ada first; the project's own order puts Roscoe first. Elsewhere is on the
+    /// roster but not this project's, so it must not be offered.
+    func testAgentsReviewerPickerOffersThisProjectsAgentsInItsOrderAndShowsTheNamedOne() throws {
+        let cases: [(named: String?, expected: [NSControl.StateValue])] = [
+            (nil, [.on, .off, .off]),
+            ("Roscoe", [.off, .on, .off]),
+            ("Ada", [.off, .off, .on]),
+        ]
+        for (named, expected) in cases {
+            let mounted = try mount(tab: .agents) { db, projectId in
+                let roster = RosterStore(db)
+                let ada = try roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
+                let roscoe = try roster.create(name: "Roscoe", role: "go", systemPrompt: "p")
+                try roster.create(name: "Elsewhere", role: "reviewer", systemPrompt: "p")
+                try roster.enable(agentId: roscoe.id, forProject: projectId)
+                try roster.enable(agentId: ada.id, forProject: projectId)
+                let agent = [ada, roscoe].first { $0.name == named }
+                var settings = try XCTUnwrap(ProjectStore(db).get(projectId)).settings
+                settings.reviewAgent = agent.map { ReviewAgentChoice(id: $0.id, name: $0.name) }
+                try ProjectStore(db).updateSettings(projectId, settings)
+            }
+
+            XCTAssertEqual(reviewerRadios(mounted), expected, "named \(named ?? "nobody")")
+        }
+    }
+
+    func testAReviewerTheProjectNoLongerHasStaysOfferedAndSelectedLast() throws {
+        let mounted = try mount(tab: .agents) { db, projectId in
+            let roster = RosterStore(db)
+            let ada = try roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
+            try roster.enable(agentId: ada.id, forProject: projectId)
+            var settings = try XCTUnwrap(ProjectStore(db).get(projectId)).settings
+            settings.reviewAgent = ReviewAgentChoice(id: "deleted-agent", name: "Roscoe")
+            try ProjectStore(db).updateSettings(projectId, settings)
+        }
+
+        XCTAssertEqual(reviewerRadios(mounted), [.off, .off, .on])
+    }
+
+    func testTheReviewerOptionsNameTheDefaultThenTheProjectsAgentsThenAMissingChoice() {
+        let ada = RosterAgent(id: "a", name: "Ada", role: "frontend", systemPrompt: "p", createdAt: 0, updatedAt: 0)
+        let off = RosterAgent(id: "o", name: "Otto", role: "go", systemPrompt: "p", enabled: false, createdAt: 0, updatedAt: 0)
+        let options = ProjectSettingsSheet.reviewerOptions(
+            projectAgents: [ada, off], current: ReviewAgentChoice(id: "gone", name: "Roscoe")
+        )
+        XCTAssertEqual(options.map(\.agentId), [nil, "a", "o", "gone"])
+        XCTAssertEqual(
+            options.map(\.title),
+            [ProjectSettingsSheet.defaultReviewerTitle, "Ada", "Otto (disabled)", "Roscoe (not available)"]
+        )
     }
 
     func testLimitsHoldsTheSixCapsInOrderAndNothingElse() throws {

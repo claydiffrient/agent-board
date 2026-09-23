@@ -177,6 +177,102 @@ final class ReviewLevelTests: XCTestCase {
         }
     }
 
+    // MARK: A named reviewer
+
+    private func nameReviewer(_ agent: RosterAgent) throws {
+        var settings = try XCTUnwrap(f.projects.get(f.project.id)).settings
+        settings.reviewAgent = ReviewAgentChoice(id: agent.id, name: agent.name)
+        try f.projects.updateSettings(f.project.id, settings)
+    }
+
+    func testANamedReviewerReviewsWhateverItsRoleSays() throws {
+        try setProjectLevel(.agent)
+        let roscoe = try reviewer("Roscoe", role: "frontend")
+        try nameReviewer(roscoe)
+        let task = try f.task("write the parser", column: .ready)
+
+        let outcome = try complete(task)
+
+        XCTAssertFalse(roscoe.isReviewer)
+        XCTAssertEqual(outcome.routing, .agentReview(agentId: roscoe.id, agentName: "Roscoe"))
+        XCTAssertEqual(try f.tasks.get(task.id)?.reviewerAgentId, roscoe.id)
+    }
+
+    func testANamedReviewerBeatsARoleMatchThatSortsFirst() throws {
+        try setProjectLevel(.agent)
+        let rowan = try reviewer("Rowan", role: "reviewer")
+        let roscoe = try reviewer("Roscoe", role: "go")
+        try nameReviewer(roscoe)
+        XCTAssertEqual(try RosterStore(f.db).agents(forProject: f.project.id).map(\.id), [rowan.id, roscoe.id])
+        let task = try f.task("write the parser", column: .ready)
+
+        let outcome = try complete(task)
+
+        XCTAssertEqual(outcome.routing, .agentReview(agentId: roscoe.id, agentName: "Roscoe"))
+        XCTAssertEqual(try f.tasks.get(task.id)?.reviewerAgentId, roscoe.id)
+    }
+
+    /// Rowan is a usable role-matching reviewer throughout, so any fallback to an agent would find him.
+    func testAMissingNamedReviewerGoesToAPersonNamingItAndNeverToAnotherAgent() throws {
+        let removals: [(String, (RosterAgent) throws -> Void)] = [
+            ("deleted", { try RosterStore(self.f.db).delete($0.id) }),
+            ("disabled", { try RosterStore(self.f.db).setEnabled($0.id, false) }),
+            ("opted out", { try RosterStore(self.f.db).disable(agentId: $0.id, forProject: self.f.project.id) }),
+        ]
+        for (label, remove) in removals {
+            f = try Fixture.make()
+            try setProjectLevel(.agent)
+            try reviewer("Rowan", role: "reviewer")
+            let roscoe = try reviewer("Roscoe", role: "reviewer")
+            try nameReviewer(roscoe)
+            try remove(roscoe)
+            let task = try f.task("write the parser", column: .ready)
+
+            let outcome = try complete(task)
+
+            guard case .humanReview(let reason) = outcome.routing else {
+                XCTFail("\(label): expected human review, got \(outcome.routing)")
+                continue
+            }
+            let explained = try XCTUnwrap(reason, label)
+            XCTAssertTrue(explained.contains("Roscoe"), "\(label): \(explained)")
+            XCTAssertFalse(explained.contains("Rowan"), "\(label): \(explained)")
+            XCTAssertEqual(try f.tasks.get(task.id)?.column, .review, label)
+            XCTAssertNil(try f.tasks.get(task.id)?.reviewerAgentId, label)
+            XCTAssertTrue(
+                try f.progress.list(taskId: task.id).contains { $0.text == explained },
+                "\(label): the reason never reached the task card"
+            )
+        }
+    }
+
+    /// Unset keeps the role-and-order pick, so a project stored before the key existed still routes
+    /// to its reviewer on upgrade rather than to a person.
+    func testAProjectThatNamesNoReviewerStillGetsTheFirstRoleMatch() throws {
+        try f.db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE project SET settings_json = ? WHERE id = ?",
+                arguments: [#"{"reviewLevel":"agent"}"#, f.project.id]
+            )
+        }
+        XCTAssertNil(try XCTUnwrap(f.projects.get(f.project.id)).settings.reviewAgent)
+        try reviewer("Dana", role: "frontend")
+        let rowan = try reviewer("Rowan", role: "Code Reviewer")
+        try reviewer("Reese", role: "reviewer")
+        let task = try f.task("write the parser", column: .ready)
+
+        let outcome = try complete(task)
+
+        XCTAssertEqual(outcome.routing, .agentReview(agentId: rowan.id, agentName: "Rowan"))
+    }
+
+    func testTheNamedReviewerSurvivesAnEncodeDecodeRoundTrip() throws {
+        let choice = ReviewAgentChoice(id: "agent-1", name: "Roscoe")
+        let decoded = ProjectSettings.decode(ProjectSettings(reviewAgent: choice).encoded())
+        XCTAssertEqual(decoded.reviewAgent, choice)
+        XCTAssertNil(ProjectSettings.decode("{}").reviewAgent)
+    }
+
     // MARK: Epic override
 
     func testAnEpicOverrideBeatsTheProjectSetting() throws {

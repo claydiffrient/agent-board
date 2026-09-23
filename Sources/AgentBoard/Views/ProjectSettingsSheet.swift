@@ -78,6 +78,7 @@ struct ProjectSettingsSheet: View {
     @State private var confirmDelete = false
     @State private var roster = Observed<[RosterAgent]>([])
     @State private var selectedAgentIds: Set<String> = []
+    @State private var projectAgents: [RosterAgent] = []
     @State private var errorMessage: String?
 
     init(
@@ -216,6 +217,15 @@ struct ProjectSettingsSheet: View {
                     Text(level.label).tag(level)
                 }
             }
+            Picker("Reviewer", selection: Binding(
+                get: { settings.reviewAgent?.id },
+                set: { id in settings.reviewAgent = Self.reviewAgentChoice(id, from: projectAgents, current: settings.reviewAgent) }
+            )) {
+                ForEach(Self.reviewerOptions(projectAgents: projectAgents, current: settings.reviewAgent)) { option in
+                    Text(option.title).tag(option.agentId)
+                }
+            }
+            .pickerStyle(.radioGroup)
             Text(Self.reviewLevelBlurb(settings.reviewLevel))
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -338,7 +348,8 @@ struct ProjectSettingsSheet: View {
 
     private func reloadSelection() {
         do {
-            selectedAgentIds = Set(try RosterStore(env.db).agents(forProject: project.id).map(\.id))
+            projectAgents = try RosterStore(env.db).agents(forProject: project.id)
+            selectedAgentIds = Set(projectAgents.map(\.id))
         } catch {
             errorMessage = errorText(error)
         }
@@ -396,14 +407,47 @@ struct ProjectSettingsSheet: View {
         }
     }
 
+    struct ReviewerOption: Identifiable, Equatable {
+        let agentId: String?
+        let title: String
+
+        var id: String { agentId ?? "" }
+    }
+
+    static let defaultReviewerTitle = "First agent with a reviewer role"
+
+    /// The project's own agents in its roster order. A named reviewer the project no longer has stays
+    /// listed, marked, so the picker shows what routing will act on rather than a blank.
+    static func reviewerOptions(projectAgents: [RosterAgent], current: ReviewAgentChoice?) -> [ReviewerOption] {
+        var options = [ReviewerOption(agentId: nil, title: defaultReviewerTitle)]
+        options += projectAgents.map {
+            ReviewerOption(agentId: $0.id, title: $0.enabled ? $0.name : "\($0.name) (disabled)")
+        }
+        if let current, !projectAgents.contains(where: { $0.id == current.id }) {
+            options.append(ReviewerOption(agentId: current.id, title: "\(current.name) (not available)"))
+        }
+        return options
+    }
+
+    static func reviewAgentChoice(
+        _ id: String?, from projectAgents: [RosterAgent], current: ReviewAgentChoice?
+    ) -> ReviewAgentChoice? {
+        guard let id else { return nil }
+        if let agent = projectAgents.first(where: { $0.id == id }) {
+            return ReviewAgentChoice(id: agent.id, name: agent.name)
+        }
+        return current?.id == id ? current : nil
+    }
+
     static func reviewLevelBlurb(_ level: ReviewLevel) -> String {
         switch level {
         case .none:
             return "A finished task goes straight to Done. Nobody reviews it."
         case .agent:
-            return "A rostered agent whose role reads as reviewer picks the task up from Review and "
-                + "either accepts it or sends it back with findings. With no such agent on the roster, "
-                + "the task waits for you instead."
+            return "The reviewer picks the task up from Review and either accepts it or sends it back "
+                + "with findings. Any agent this project uses can be named, whatever its role; left on "
+                + "the default, it is the first whose role reads as reviewer. If the reviewer is missing, "
+                + "disabled or turned off here, the task waits for you and its card says why."
         case .task:
             return "You accept every task. The default; leaving it here changes nothing."
         case .epic:
