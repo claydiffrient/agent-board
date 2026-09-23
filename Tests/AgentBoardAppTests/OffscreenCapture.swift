@@ -289,14 +289,15 @@ final class OffscreenMount {
 @MainActor
 func renderEnvironment(
     db: AppDatabase, supervisor: (any WorkerSupervising)? = nil,
-    router: NotificationRouter? = nil
+    router: NotificationRouter? = nil, listeningPorts: ListeningPortModel? = nil
 ) -> AppEnvironment {
     AppEnvironment(
         db: db, supervisor: supervisor ?? StubSupervisor(), router: router,
         accountUsage: AccountUsageModel(
             configURL: URL(fileURLWithPath: "/nonexistent/agent-board-render-tests.json"),
             refresher: AccountUsageRefresher { _ in false }
-        )
+        ),
+        listeningPorts: listeningPorts
     )
 }
 

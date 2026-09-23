@@ -93,8 +93,9 @@ final class PortsPanelLiveTests: XCTestCase {
         super.tearDown()
     }
 
-    /// The sidebar at its 220-point ideal, doubled by the backing scale of the capture.
-    private static let sidebarPixels = 460
+    /// The sidebar at its 220-point ideal, plus a margin. In points, because a capture's scale is
+    /// not the same on every machine.
+    private static let sidebarPoints: CGFloat = 230
 
     private struct PixelDiff {
         var count: Int
@@ -111,15 +112,17 @@ final class PortsPanelLiveTests: XCTestCase {
         let window: NSWindow
         let host: NSView
 
+        static let windowSize = CGSize(width: 1100, height: 700)
+
         init(db: AppDatabase, supervisor: StubSupervisor, router: NotificationRouter, ports: ListeningPortModel?) {
             host = NSHostingView(
                 rootView: MainWindow().environment(
-                    AppEnvironment(db: db, supervisor: supervisor, router: router, listeningPorts: ports)
+                    renderEnvironment(db: db, supervisor: supervisor, router: router, listeningPorts: ports)
                 )
             )
             NSApplication.shared.setActivationPolicy(.accessory)
             window = NSWindow(
-                contentRect: NSRect(x: -20_000, y: -20_000, width: 1100, height: 700),
+                contentRect: NSRect(origin: CGPoint(x: -20_000, y: -20_000), size: Self.windowSize),
                 styleMask: [.borderless], backing: .buffered, defer: false
             )
             window.contentView = host
@@ -152,8 +155,9 @@ final class PortsPanelLiveTests: XCTestCase {
     private func diff(_ a: NSBitmapImageRep, _ b: NSBitmapImageRep) -> PixelDiff {
         var count = 0
         var minX = Int.max, maxX = -1, minY = Int.max, maxY = -1
+        let sidebarPixels = Int(Self.sidebarPoints * CGFloat(a.pixelsWide) / Mount.windowSize.width)
         for y in 0..<min(a.pixelsHigh, b.pixelsHigh) {
-            for x in 0..<min(Self.sidebarPixels, a.pixelsWide, b.pixelsWide) {
+            for x in 0..<min(sidebarPixels, a.pixelsWide, b.pixelsWide) {
                 guard let left = a.colorAt(x: x, y: y), let right = b.colorAt(x: x, y: y) else { continue }
                 let apart = abs(left.redComponent - right.redComponent)
                     + abs(left.greenComponent - right.greenComponent)
@@ -300,9 +304,10 @@ final class PortsPanelLiveTests: XCTestCase {
         let twoMount = mount(db, try model(db, two))
         defer { noPanel.close(); emptyMount.close(); oneMount.close(); twoMount.close() }
 
+        let bare = try settled(noPanel)
         let empty = try settled(emptyMount)
         let one_ = try settled(oneMount)
-        let headerBand = diff(try settled(noPanel), empty)
+        let headerBand = diff(bare, empty)
         let firstRow = diff(empty, one_)
         let secondRow = diff(one_, try settled(twoMount))
 
@@ -310,11 +315,11 @@ final class PortsPanelLiveTests: XCTestCase {
         XCTAssertGreaterThan(firstRow.count, 0, "one listening port must draw a row")
         XCTAssertGreaterThan(secondRow.count, 0, "a second listening port must draw a second row")
 
-        // There is real footer below the panel — Add Project's padded row is ~38 points on its own.
-        let belowPanel = empty.pixelsHigh - headerBand.maxY
-        XCTAssertGreaterThan(
-            belowPanel, Self.footerBelowPanelPixels,
-            "the panel must not be the bottom of the sidebar (\(belowPanel) pixels below it)"
+        let addProject = try XCTUnwrap(lowestInkedBand(bare), "the sidebar without a panel drew nothing")
+        XCTAssertLessThan(
+            headerBand.maxY, addProject.lowerBound,
+            "the panel must sit above Add Project, the lowest thing the sidebar draws without it "
+                + "(header \(headerBand.box), Add Project y=\(addProject))"
         )
         XCTAssertLessThanOrEqual(
             firstRow.maxY, headerBand.maxY,
@@ -328,10 +333,26 @@ final class PortsPanelLiveTests: XCTestCase {
         )
     }
 
-    /// A floor, not a measurement: Add Project's padded row alone is about 38 points, and the
-    /// notifications notice and usage footer sit below it. The assertion only needs to know that
-    /// something substantial is drawn beneath the panel.
-    private static let footerBelowPanelPixels = 50
+    /// The rows of the lowest run of text or glyphs in the sidebar: rows whose pixels across its
+    /// interior are not all one colour. A bezel's straight edge or the card's rounded bottom is one
+    /// colour across that span, so only a label counts.
+    private func lowestInkedBand(_ rep: NSBitmapImageRep) -> ClosedRange<Int>? {
+        let scale = CGFloat(rep.pixelsWide) / Mount.windowSize.width
+        let columns = Int(24 * scale)..<Int(168 * scale)
+        func inked(_ y: Int) -> Bool {
+            guard let first = rep.colorAt(x: columns.lowerBound, y: y) else { return false }
+            return columns.contains { x in
+                guard let pixel = rep.colorAt(x: x, y: y) else { return false }
+                return abs(pixel.redComponent - first.redComponent)
+                    + abs(pixel.greenComponent - first.greenComponent)
+                    + abs(pixel.blueComponent - first.blueComponent) > 0.02
+            }
+        }
+        guard let bottom = (0..<rep.pixelsHigh).reversed().first(where: inked) else { return nil }
+        var top = bottom
+        while top > 0, inked(top - 1) { top -= 1 }
+        return top...bottom
+    }
 
     func testAnAttributedRowDoesNotRenderLikeAnOrphanedOne() throws {
         let db = try AppDatabase.inMemory()
