@@ -103,6 +103,8 @@ public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, Data
     /// Text another project's orchestrator sent here. Delivered through the report queue so the
     /// orchestrator pulls it, and framed as untrusted: see `CrossProjectMessage`.
     case message
+    /// The human commented on a task; the body quotes it. An agent's comment queues nothing (SPEC §9.1).
+    case comment
 }
 
 public enum ApprovalKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {

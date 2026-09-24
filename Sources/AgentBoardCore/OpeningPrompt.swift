@@ -34,11 +34,12 @@ public enum OpeningPrompt {
         placement: WorkerPlacement = .worktree,
         workingDirectory: String? = nil,
         agent: AgentIdentity? = nil,
-        reviewFindings: String? = nil
+        reviewFindings: String? = nil,
+        comments: [TaskComment] = []
     ) -> String {
         // Identity comes first: the agent should know what it is before it knows what it is doing.
         var sections = agent.map { [renderIdentity($0)] } ?? []
-        sections += taskSections(task: task, epicGoal: epicGoal)
+        sections += taskSections(task: task, epicGoal: epicGoal, comments: comments)
         if let reviewFindings {
             sections.append(reviewFindingsSection(reviewFindings))
         }
@@ -151,9 +152,12 @@ public enum OpeningPrompt {
     on risky or destructive actions.
     """
 
-    /// The task material a worker is handed: what the task is, what counts as done, and the epic it
-    /// sits in. Shared with `postCompactionBrief` so a re-brief cannot drift from the spawn prompt.
-    public static func taskSections(task: BoardTask, epicGoal: String? = nil) -> [String] {
+    /// The task material a worker is handed: what the task is, what counts as done, the epic it
+    /// sits in, and its comment thread. Shared with `postCompactionBrief` and `ReviewPrompt` so a
+    /// re-brief or a review cannot drift from the spawn prompt.
+    public static func taskSections(
+        task: BoardTask, epicGoal: String? = nil, comments: [TaskComment] = []
+    ) -> [String] {
         var sections: [String] = []
         sections.append("# Task: \(task.title)")
         sections.append(task.body?.isEmpty == false ? task.body! : "(No further description was given.)")
@@ -168,6 +172,9 @@ public enum OpeningPrompt {
 
             Stay inside your own task; the goal is context for the choices you make, not extra scope.
             """)
+        }
+        if let thread = CommentPrompt.section(comments) {
+            sections.append(thread)
         }
         return sections
     }
@@ -196,6 +203,7 @@ public enum OpeningPrompt {
         epicGoal: String? = nil,
         notes: SpawnNotes = SpawnNotes(),
         reviewFindings: String? = nil,
+        comments: [TaskComment] = [],
         budget: Int = briefCharacterBudget
     ) -> String {
         var sections = [
@@ -206,7 +214,7 @@ public enum OpeningPrompt {
             no tool call in it ends your turn, and nothing starts the next one.
             """,
         ]
-        sections.append(contentsOf: taskSections(task: task, epicGoal: epicGoal))
+        sections.append(contentsOf: taskSections(task: task, epicGoal: epicGoal, comments: comments))
         if let reviewFindings {
             sections.append(reviewFindingsSection(reviewFindings))
         }

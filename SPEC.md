@@ -372,6 +372,16 @@ For a task `T` in project `P`:
    subject that already has one.
    Each attached note sits between marker lines carrying one random id per
    note, so a closing marker forged inside a note body does not end the fence.
+   The task's comment thread follows the epic goal under *Comments*, oldest
+   first, fenced the same way, each opening marker naming the author and the
+   time. A comment from the human is labelled as the human speaking; an
+   agent's is labelled as information written by an agent, not instructions.
+   The thread keeps the newest comments within 4,000 characters, since Claude
+   Code cuts any one hook's injected text at 10,000 and the post-compaction
+   brief rides a hook; it cuts an oversize newest comment short rather than
+   drop it, and says how many older ones it left out and
+   that `get_my_task` has them all. The post-compaction brief and the
+   reviewer's prompt (§5.1) carry the same section.
    The prompt ends with *How your turns end*: the early stops an unattended
    worker must not make, and the three stops it should.
 7. `claude "<prompt>" --bg -n <task-slug> --permission-mode auto
@@ -1137,7 +1147,8 @@ see who approved it and why.
 
 A reviewer is review-only: it reads `git diff <base>...HEAD`, may build and run
 tests, and changes nothing — a defect goes back through `reopen_task`, never
-into a commit of its own. Its opening prompt says so (`ReviewPrompt`, served
+into a commit of its own. Its opening prompt, which carries the task's comment
+thread (§3.1 step 6), says so (`ReviewPrompt`, served
 again as `briefing://reviewer` and as its post-compaction brief), and its
 `--disallowedTools` denies edits and branch-changing git commands (§3.1). Both
 verdict tools then check the checkout through `WorkerControl.reviewCheckoutChange`:
@@ -1857,6 +1868,7 @@ became ready.
 | Human discards a task | `decision` | Deleted task id (the task row is gone) |
 | Human promotes a proposal | `decision` | Proposal, and the ids that became `ready` |
 | Human approves or denies an approval | `decision` | Approval, outcome, reason |
+| Human comments on a task | `comment` | Task id and title, the comment quoted; the human speaking. An agent's comment queues nothing |
 | Cap or idle kill | `failed` | Task, session, `failure_reason` |
 | Human stops a worker, or Pause All | `failed` | Task, session, that a human stopped it |
 | `reconcile` finds a session gone | `failed` | Task, session, that Agent Board did not stop it |

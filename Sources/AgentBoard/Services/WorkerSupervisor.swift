@@ -339,7 +339,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             task: task, branch: branch, base: base,
                             verification: project.settings.verification,
                             workingDirectory: site.cwd.path,
-                            agent: agent?.identity
+                            agent: agent?.identity,
+                            comments: try CommentStore(db).list(taskId: taskId)
                         )
                         : Self.openingPrompt(
                             task: task, branch: branch, attempt: placeholder.attempt, epicGoal: epic?.goal,
@@ -350,7 +351,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             placement: site.placement,
                             workingDirectory: site.cwd.path,
                             agent: agent?.identity,
-                            reviewFindings: try ProgressStore(db).openReviewFindings(taskId: taskId)
+                            reviewFindings: try ProgressStore(db).openReviewFindings(taskId: taskId),
+                            comments: try CommentStore(db).list(taskId: taskId)
                         ),
                     // Most specific override wins: this task, then the agent's standing preference,
                     // then the project default.
@@ -2375,12 +2377,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         placement: WorkerPlacement = .worktree,
         workingDirectory: String? = nil,
         agent: AgentIdentity? = nil,
-        reviewFindings: String? = nil
+        reviewFindings: String? = nil,
+        comments: [TaskComment] = []
     ) -> String {
         OpeningPrompt.compose(
             task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes,
             verification: verification, placement: placement, workingDirectory: workingDirectory,
-            agent: agent, reviewFindings: reviewFindings
+            agent: agent, reviewFindings: reviewFindings, comments: comments
         )
     }
 

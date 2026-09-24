@@ -290,7 +290,8 @@ public final class StoreHookSink: HookSink {
             branch: session.branch ?? TaskStore.branchName(for: taskId),
             epicGoal: epic?.goal,
             notes: injected,
-            reviewFindings: (try? progress.openReviewFindings(taskId: taskId)) ?? nil
+            reviewFindings: (try? progress.openReviewFindings(taskId: taskId)) ?? nil,
+            comments: (try? CommentStore(db).list(taskId: taskId)) ?? []
         )
     }
 

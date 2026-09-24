@@ -35,7 +35,22 @@ public struct CommentStore: Sendable {
             taskId: task.id, projectId: task.projectId, author: author, body: body, createdAt: .nowMillis
         )
         try comment.insert(db)
+        if author.kind == .human {
+            try ReportStore.insert(
+                db, projectId: task.projectId, taskId: task.id, sessionId: nil, kind: .comment,
+                body: reportBody(task: task, comment: body)
+            )
+        }
         return comment
+    }
+
+    static func reportBody(task: Task, comment: String) -> String {
+        """
+        The human commented on task \(task.id) "\(task.title)":
+        --- comment begins ---
+        \(comment)
+        --- comment ends ---
+        """
     }
 
     /// Oldest first.

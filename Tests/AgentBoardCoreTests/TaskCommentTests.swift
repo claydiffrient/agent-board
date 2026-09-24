@@ -60,6 +60,7 @@ final class TaskCommentTests: XCTestCase {
 
         try f.db.writer.write { db in
             try db.execute(sql: "DELETE FROM agent_session WHERE task_id = ?", arguments: [task.id])
+            try db.execute(sql: "UPDATE report SET task_id = NULL WHERE task_id = ?", arguments: [task.id])
             try db.execute(sql: "DELETE FROM task WHERE id = ?", arguments: [task.id])
         }
         XCTAssertEqual(try f.comments.list(taskId: task.id), [])
