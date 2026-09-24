@@ -62,10 +62,16 @@ struct SearchField: View {
 struct SearchNoun: Equatable {
     let one: String
     let many: String
+    /// "Search <many>" unless the screen searches more than the rows it counts.
+    let prompt: String
+
+    init(one: String, many: String, prompt: String? = nil) {
+        self.one = one
+        self.many = many
+        self.prompt = prompt ?? "Search \(many)"
+    }
 
     static let tasks = SearchNoun(one: "task", many: "tasks")
-
-    var prompt: String { "Search \(many)" }
 
     func counted(_ count: Int) -> String { count == 1 ? one : many }
 }

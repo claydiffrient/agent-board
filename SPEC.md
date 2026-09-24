@@ -2175,6 +2175,24 @@ ended an hour ago is exactly the row this is for. When this project holds no por
 section draws nothing: the sidebar panel keeps its header line when empty because
 that line carries the refresh button, and this section has no button to keep.
 
+**Searching the Status pane** — the same `SearchField` as the board, heading
+the pane, narrows the roster and the ports section together: `:3000` finds a
+port, `idle cap` finds a session's task and the port that session holds. Terms
+match as on the board, every one somewhere in a single row. A session row
+matches on its short id, task title, role label (so the rostered agent's name),
+state as drawn and as stored (`setting up`, `setup`), and model id or display
+name; not on its last tool, which changes under the query while the session
+works, nor its full session id. A port row matches on `:<port>`, its command,
+and its owner's title — the task, `Session …`, or `Terminal`; not on the project
+name, which every port on one project's pane shares. As an epic lane does on
+the board, a ports section with no match disappears, header and divider
+included. The roster table keeps its column headers with no rows, and its
+"No Sessions" placeholder still describes the unsearched roster. Search does
+not reach past **Show ended**, the way the board's does not reach past Show
+Archived: the summary counts ended matches instead — "No sessions match “idle”
+· 1 ended match hidden · 1 of 2 ports". Filtering reads the rows the sidebar
+panel's sweep already holds, so a query starts no sweep.
+
 **Roster** — the cross-project register of specialists (§4), and the one screen
 not scoped to a project: a `Roster` row in the sidebar beside `At a Glance` and
 above the workspace sections, so it does not join Task Board and Status inside a

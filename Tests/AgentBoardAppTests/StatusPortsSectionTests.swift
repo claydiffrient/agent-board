@@ -350,4 +350,65 @@ final class StatusPortsSectionLiveTests: XCTestCase {
             "the counter does not count sweeps, so nothing above was measured"
         )
     }
+
+    /// A query narrows the rows the pane already reads and starts no sweep of its own: typed into the
+    /// pane alone it sweeps zero times, and beside the sidebar panel the pair still costs exactly the
+    /// panel's one mount refresh, however many keystrokes follow.
+    func testAQueryInTheStatusPaneStartsNoSweep() throws {
+        let db = try AppDatabase.inMemory()
+        let mine = try register(db, "Mine")
+        try endedSession(db, project: mine, id: "s-mine", title: "Run the dev server")
+        let rows = [ListeningPort(port: 3000, pid: 501, command: "node", sessionId: "s-mine", source: .ledger)]
+
+        let counter = CountingSweep(rows: rows)
+        let ports = try model(db, rows, sweep: counter)
+        XCTAssertEqual(counter.count, 1, "the model's own first refresh")
+
+        let env = AppEnvironment(
+            db: db, supervisor: StubSupervisor(), router: NotificationRouter(), listeningPorts: ports
+        )
+
+        let paneOnly = Mount(StatusView(project: mine).environment(env), width: 900, height: 500)
+        defer { paneOnly.close() }
+        let unsearched = try paneOnly.capture()
+        type("nothing matches", into: paneOnly)
+        XCTAssertGreaterThan(diff(unsearched, try paneOnly.capture()).count, 0,
+                             "the query must have hidden the port row, or the count below measured nothing")
+        XCTAssertEqual(counter.count, 1, "a query in the Status pane swept the process table")
+
+        let both = Mount(
+            VStack(spacing: 0) {
+                PortsPanel(ceiling: PortsPanel.ceiling(footerHeight: 0))
+                StatusView(project: mine)
+            }.environment(env),
+            width: 900, height: 700
+        )
+        defer { both.close() }
+        both.window.layoutIfNeeded()
+        type(":3000", into: both)
+        both.settle()
+        for text in [":30", "node", "dev server", ""] {
+            type(text, into: both)
+            both.settle(turns: 10)
+        }
+
+        XCTAssertEqual(
+            counter.count, 2,
+            "with a query active, two surfaces must still cost the sidebar panel's one mount refresh"
+        )
+    }
+
+    private func type(_ text: String, into mount: Mount) {
+        var queue: [NSView] = mount.window.contentView.map { [$0] } ?? []
+        var fields: [NSTextField] = []
+        while let view = queue.popLast() {
+            if let field = view as? NSTextField, field.isEditable { fields.append(field) }
+            queue.append(contentsOf: view.subviews)
+        }
+        guard fields.count == 1, let field = fields.first else {
+            return XCTFail("expected the Status pane's search field alone, found \(fields.count) editable fields")
+        }
+        field.stringValue = text
+        field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
+    }
 }
