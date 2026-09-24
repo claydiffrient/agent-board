@@ -578,10 +578,13 @@ public struct Board: Sendable {
             }
             _ = try ProgressStore.append(
                 db, taskId: taskId, sessionId: sessionId, kind: .note,
-                text: "Agent review passed. Reviewer \(reviewerName) accepted this task into done.\n\n\(verdict)"
+                text: "\(Self.reviewPassedLead) Reviewer \(reviewerName) accepted this task into done.\n\n\(verdict)"
             )
         }
     }
+
+    public static let reviewPassedLead = "Agent review passed."
+    public static let reviewFailedLead = "Agent review failed."
 
     /// A rostered reviewer rejecting its task: back to `ready` with its findings on the task, so the
     /// next agent picks the work up knowing what was wrong.
@@ -594,7 +597,7 @@ public struct Board: Sendable {
             guard task.column == .review else {
                 throw BoardError.invalidTransition(taskId: taskId, from: task.column, to: .ready)
             }
-            let body = "Agent review failed. Reviewer \(reviewerName) sent task \(taskId) (\(task.title)) "
+            let body = "\(Self.reviewFailedLead) Reviewer \(reviewerName) sent task \(taskId) (\(task.title)) "
                 + "back to ready.\n\n\(findings)"
             _ = try ProgressStore.append(db, taskId: taskId, sessionId: sessionId, kind: .note, text: body)
             try TaskStore.setBlocked(db, taskId, false, reason: nil)

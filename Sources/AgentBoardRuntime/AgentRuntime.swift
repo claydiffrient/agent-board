@@ -12,6 +12,17 @@ public struct SpawnRequest: Sendable {
 
     public static let defaultDisallowedTools = ["Bash(git push*)", "Bash(gh pr create*)", "Bash(gh pr merge*)"]
 
+    /// Layered onto the default for a rostered reviewer, which reviews and changes nothing (SPEC §5.1).
+    /// Build output is not a checkout change, so builds and tests stay allowed.
+    public static let reviewerDisallowedTools = [
+        "Edit", "MultiEdit", "Write", "NotebookEdit",
+        "Bash(git commit*)", "Bash(git checkout*)", "Bash(git switch*)", "Bash(git reset*)",
+        "Bash(git rebase*)", "Bash(git merge*)", "Bash(git stash*)", "Bash(git add*)", "Bash(git rm*)",
+        "Bash(git restore*)", "Bash(git clean*)", "Bash(git cherry-pick*)", "Bash(git revert*)",
+        "Bash(git pull*)", "Bash(git am*)", "Bash(git apply*)",
+        "Bash(rm *)", "Bash(mv *)",
+    ]
+
     public init(
         cwd: URL,
         name: String,

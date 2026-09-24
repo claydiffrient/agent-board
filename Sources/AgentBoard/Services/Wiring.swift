@@ -104,4 +104,9 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         guard let target else { throw SupervisorError.serverNotRunning }
         try await target.accept(taskId: taskId, acceptedBy: acceptedBy)
     }
+
+    func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String? {
+        guard let target else { throw SupervisorError.serverNotRunning }
+        return try await target.reviewCheckoutChange(taskId: taskId, sessionId: sessionId)
+    }
 }

@@ -398,7 +398,10 @@ after the fixed push/PR block. `assign_to_agent` under `reviewer` scope (used
 only to start a rostered reviewer, §5.1) skips the `running` transition step 8
 would otherwise make — the task stays in `review` — and lands the reviewer in
 the *worker's own* worktree rather than cutting one, since it is keyed on the
-same task id.
+same task id. It records the branch HEAD in `agent_session.review_head`, opens
+with `ReviewPrompt.compose` in place of the worker prompt, and step 7 adds
+`SpawnRequest.reviewerDisallowedTools` (file edits and every git command that
+changes a branch or the index, plus `rm` and `mv`) after the push/PR block.
 
 Steps 1-2 are synchronous; `spawn_worker` answers between step 2 and step 3,
 with a row in `agent_session` under a placeholder id and state `setup`, and the
@@ -607,7 +610,8 @@ CREATE TABLE agent_session (
   tool_started_at INTEGER,           -- oldest tool call not yet seen to return
   tools_in_flight INTEGER NOT NULL DEFAULT 0,
   blocked_on_path TEXT,               -- §8.4: the shared-checkout file lock this session is waiting on
-  roster_agent_id TEXT REFERENCES roster_agent(id)  -- §10: the rostered identity this session runs as
+  roster_agent_id TEXT REFERENCES roster_agent(id),  -- §10: the rostered identity this session runs as
+  review_head    TEXT                -- §5.1: branch HEAD a rostered reviewer was spawned on
 );
 
 CREATE TABLE token_grant (
@@ -1100,6 +1104,18 @@ task and returns it to `ready` without flagging a failure. The verdict on the
 task is the point: a person reading a task that reached `done` without them can
 see who approved it and why.
 
+A reviewer is review-only: it reads `git diff <base>...HEAD`, may build and run
+tests, and changes nothing — a defect goes back through `reopen_task`, never
+into a commit of its own. Its opening prompt says so (`ReviewPrompt`, served
+again as `briefing://reviewer` and as its post-compaction brief), and its
+`--disallowedTools` denies edits and branch-changing git commands (§3.1). Both
+verdict tools then check the checkout through `WorkerControl.reviewCheckoutChange`:
+if HEAD has moved from `review_head`, a tracked file differs from it, or no
+`review_head` was recorded, the verdict is refused, an `error` row names why, and
+the task stays in `review` for a person. The next worker spawned on a reopened
+task gets the reviewer's `progress` note verbatim in its opening prompt, and in
+its post-compaction brief, until a later review passes.
+
 ### 5.2 Epic integration
 
 Integration is gated on your approval regardless of the autonomy setting, and
@@ -1287,8 +1303,8 @@ of orchestrator scope: it is the authority to move one named task out of
 |---|---|
 | `get_my_task()` | The task under review and its `progress` rows |
 | `log_progress(text)` | Appends to `progress` |
-| `accept_task(verdict)` | Writes the verdict to `progress`, then runs the ordinary acceptance (§5.1) |
-| `reopen_task(findings)` | Writes the findings to `progress`; moves the task to `ready` without flagging failure |
+| `accept_task(verdict)` | Writes the verdict to `progress`, then runs the ordinary acceptance (§5.1). Refused, with the task left in `review`, if the reviewer changed its checkout |
+| `reopen_task(findings)` | Writes the findings to `progress`; moves the task to `ready` without flagging failure. Refused on the same checkout check |
 
 Every call reads the task id off the token, never off the arguments, so a
 reviewer cannot reach a task it was not given. It cannot spawn, reassign, stop a

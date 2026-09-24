@@ -52,9 +52,9 @@ public final class ReviewerToolHandler: ToolHandler {
         ),
         ToolDescriptor(
             name: "reopen_task",
-            description: "Send the task back to Ready with your findings. Use it when the work does not meet its "
-                + "acceptance criteria. Your findings are recorded on the task and are what the next agent works "
-                + "from, so be specific about what is wrong and where. Ends your review.",
+            description: "Send the task back to Ready with your findings. Use it when anything must change; do "
+                + "not fix it yourself. Your findings are recorded on the task and reach the next worker's opening "
+                + "prompt verbatim, so be specific about what is wrong and where. Ends your review.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "findings": ToolSchema.string("What is wrong, where, and what would make it acceptable."),
@@ -80,6 +80,7 @@ public final class ReviewerToolHandler: ToolHandler {
         case "accept_task":
             let verdict = try ToolArguments.requiredString("verdict", in: arguments)
             try requireUnderReview(task)
+            try await requireUntouchedCheckout(task, identity: identity, then: "Stop here; do not start further work.")
             let name = try reviewerName(task, identity: identity)
             try board.recordReviewVerdict(
                 taskId: task.id, sessionId: identity.sessionId, reviewerName: name, verdict: verdict
@@ -92,6 +93,10 @@ public final class ReviewerToolHandler: ToolHandler {
         case "reopen_task":
             let findings = try ToolArguments.requiredString("findings", in: arguments)
             try requireUnderReview(task)
+            try await requireUntouchedCheckout(
+                task, identity: identity,
+                then: "Record your findings with log_progress so the person sees them, then stop."
+            )
             try board.reviewReopen(
                 taskId: task.id, sessionId: identity.sessionId,
                 reviewerName: try reviewerName(task, identity: identity), findings: findings
@@ -120,6 +125,26 @@ public final class ReviewerToolHandler: ToolHandler {
         guard task.column == .review else {
             throw ToolError("Task \(task.id) is in \(task.column.rawValue), not review; there is nothing to decide.")
         }
+    }
+
+    /// SPEC §5.1: a reviewer changes nothing. A refused verdict leaves the task in `review` for a
+    /// person, with the reason on its card.
+    private func requireUntouchedCheckout(_ task: BoardTask, identity: TokenIdentity, then next: String) async throws {
+        let change: String?
+        do {
+            change = try await control.reviewCheckoutChange(taskId: task.id, sessionId: identity.sessionId)
+        } catch {
+            change = "The checkout could not be read: \(error)"
+        }
+        guard let change else { return }
+        let reason = "Agent review refused: \(change)\nA reviewer changes nothing, so this verdict was not "
+            + "recorded and the task stays in Review for a person."
+        _ = try? progress.append(taskId: task.id, sessionId: identity.sessionId, kind: .error, text: reason)
+        await events.notify(
+            projectId: identity.projectId, sessionId: identity.sessionId,
+            title: "Agent review refused", body: "\(task.title): \(change)"
+        )
+        throw ToolError("\(reason) \(next)")
     }
 
     private func reviewerName(_ task: BoardTask, identity: TokenIdentity) throws -> String {

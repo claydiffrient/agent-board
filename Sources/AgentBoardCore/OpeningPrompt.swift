@@ -33,11 +33,15 @@ public enum OpeningPrompt {
         verification: VerificationCommands = VerificationCommands(),
         placement: WorkerPlacement = .worktree,
         workingDirectory: String? = nil,
-        agent: AgentIdentity? = nil
+        agent: AgentIdentity? = nil,
+        reviewFindings: String? = nil
     ) -> String {
         // Identity comes first: the agent should know what it is before it knows what it is doing.
         var sections = agent.map { [renderIdentity($0)] } ?? []
         sections += taskSections(task: task, epicGoal: epicGoal)
+        if let reviewFindings {
+            sections.append(reviewFindingsSection(reviewFindings))
+        }
         if attempt > 1 {
             sections.append("""
             ## Attempt \(attempt)
@@ -168,6 +172,17 @@ public enum OpeningPrompt {
         return sections
     }
 
+    /// A rostered reviewer's note sent this task back; the next worker gets it verbatim (SPEC §5.1).
+    public static func reviewFindingsSection(_ findings: String) -> String {
+        """
+        ## Review findings
+        A rostered reviewer sent this task back to be fixed. Its note is reproduced verbatim below. \
+        Address every finding in it, and say in your report how each one was resolved.
+
+        \(findings)
+        """
+    }
+
     /// Claude Code caps any one hook's injected string at 10,000 characters and spills the rest to a
     /// file, so the brief drops whole sections from the end — the notes first — rather than overflow.
     public static let briefCharacterBudget = 10_000
@@ -180,6 +195,7 @@ public enum OpeningPrompt {
         branch: String,
         epicGoal: String? = nil,
         notes: SpawnNotes = SpawnNotes(),
+        reviewFindings: String? = nil,
         budget: Int = briefCharacterBudget
     ) -> String {
         var sections = [
@@ -191,6 +207,9 @@ public enum OpeningPrompt {
             """,
         ]
         sections.append(contentsOf: taskSections(task: task, epicGoal: epicGoal))
+        if let reviewFindings {
+            sections.append(reviewFindingsSection(reviewFindings))
+        }
         if let notesSection = renderNotes(notes) {
             sections.append(notesSection)
         }

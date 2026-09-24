@@ -16,4 +16,7 @@ public enum BriefingResourceURI {
 
     /// The orchestrator's launch briefing, composed from the project's current settings.
     public static let orchestrator = "\(scheme)://orchestrator"
+
+    /// A rostered reviewer's spawn prompt, rebuilt from its recorded session.
+    public static let reviewer = "\(scheme)://reviewer"
 }

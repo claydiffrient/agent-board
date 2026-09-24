@@ -310,9 +310,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
 
         do {
+            let reviewHead = scope == .reviewer
+                ? try await offMain { try ReviewCheckout.head(in: site.cwd) }
+                : nil
             let row = Self.setupRow(
                 projectId: project.id, taskId: taskId, site: site, attempt: attempt,
-                rosterAgentId: agent?.id
+                rosterAgentId: agent?.id, reviewHead: reviewHead
             )
             // A reviewer holds a task that is already in `review`; `assign` would move it to
             // `running` and take it out of the queue its own accept_task reads.
@@ -331,16 +334,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     branch: branch,
                     configId: Self.configId(taskId: taskId, attempt: placeholder.attempt),
                     name: Self.sessionName(for: task),
-                    prompt: Self.openingPrompt(
-                        task: task, branch: branch, attempt: placeholder.attempt, epicGoal: epic?.goal,
-                        notes: try notes.notesForSpawn(
-                            projectId: project.id, taskId: taskId, epicId: task.epicId
+                    prompt: scope == .reviewer
+                        ? ReviewPrompt.compose(
+                            task: task, branch: branch, base: base,
+                            verification: project.settings.verification,
+                            workingDirectory: site.cwd.path,
+                            agent: agent?.identity
+                        )
+                        : Self.openingPrompt(
+                            task: task, branch: branch, attempt: placeholder.attempt, epicGoal: epic?.goal,
+                            notes: try notes.notesForSpawn(
+                                projectId: project.id, taskId: taskId, epicId: task.epicId
+                            ),
+                            verification: project.settings.verification,
+                            placement: site.placement,
+                            workingDirectory: site.cwd.path,
+                            agent: agent?.identity,
+                            reviewFindings: try ProgressStore(db).openReviewFindings(taskId: taskId)
                         ),
-                        verification: project.settings.verification,
-                        placement: site.placement,
-                        workingDirectory: site.cwd.path,
-                        agent: agent?.identity
-                    ),
                     // Most specific override wins: this task, then the agent's standing preference,
                     // then the project default.
                     model: task.model ?? agent?.model ?? project.settings.defaultModel,
@@ -358,6 +369,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             throw SupervisorError.spawnFailed(worktree: site.cwd.path, underlying: describe(error))
         }
+    }
+
+    /// SPEC §5.1: the reviewer's checkout must be as `spawn` recorded it. A session with no recorded
+    /// HEAD cannot be vouched for, so its verdict is refused too.
+    func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String? {
+        let session = try sessionId.flatMap { try sessions.get($0) }
+            ?? sessions.forTask(taskId).first { $0.reviewHead != nil && $0.state.isActive }
+        guard let session, session.taskId == taskId, let head = session.reviewHead else {
+            return "Agent Board has no record of the HEAD this review started from."
+        }
+        let cwd = URL(fileURLWithPath: session.cwd)
+        return try await offMain { try ReviewCheckout.change(since: head, in: cwd) }
     }
 
     /// Where a worker will run, once the strategy, the group holding the checkout and git have all
@@ -411,7 +434,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private static func setupRow(
         projectId: String, taskId: String, site: CheckoutSite, attempt: Int,
-        rosterAgentId: String? = nil
+        rosterAgentId: String? = nil, reviewHead: String? = nil
     ) -> AgentSession {
         AgentSession(
             sessionId: "setup-\(UUID().uuidString)",
@@ -423,7 +446,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             cwd: site.cwd.path,
             state: .setup,
             attempt: attempt,
-            rosterAgentId: rosterAgentId
+            rosterAgentId: rosterAgentId,
+            reviewHead: reviewHead
         )
     }
 
@@ -545,6 +569,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 // A deny-list, layered on: a rostered agent can only ever have less authority than a
                 // plain worker, and an empty list is exactly a plain worker's.
                 disallowedTools: SpawnRequest.defaultDisallowedTools
+                    + (plan.scope == .reviewer ? SpawnRequest.reviewerDisallowedTools : [])
                     + (plan.rosterAgent?.disallowedTools ?? []),
                 model: plan.model
             )
@@ -2310,12 +2335,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         verification: VerificationCommands = VerificationCommands(),
         placement: WorkerPlacement = .worktree,
         workingDirectory: String? = nil,
-        agent: AgentIdentity? = nil
+        agent: AgentIdentity? = nil,
+        reviewFindings: String? = nil
     ) -> String {
         OpeningPrompt.compose(
             task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes,
             verification: verification, placement: placement, workingDirectory: workingDirectory,
-            agent: agent
+            agent: agent, reviewFindings: reviewFindings
         )
     }
 

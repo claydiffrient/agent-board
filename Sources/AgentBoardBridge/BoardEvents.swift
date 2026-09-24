@@ -79,6 +79,9 @@ public protocol WorkerControl: Sendable {
     /// announcement, the grant revocation and the worktree removal. A no-review completion and a
     /// rostered reviewer's approval both come through here rather than repeating any of it.
     func accept(taskId: String, acceptedBy: TaskAcceptance) async throws
+    /// Why a rostered reviewer's verdict must be refused: its checkout changed since it was spawned,
+    /// or nothing recorded where it started. Nil when the checkout is as the reviewer found it.
+    func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String?
 }
 
 public struct ClosureBoardEventSink: BoardEventSink {
