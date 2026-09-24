@@ -4,7 +4,8 @@ import Foundation
 public enum PullRequestState: Sendable, Equatable {
     case open
     case closed
-    case merged(commit: String?)
+    /// `head` is the pull request's head commit as merged: what the pull request actually carried.
+    case merged(commit: String?, head: String?)
 }
 
 public struct PullRequestCheckFailure: Error, CustomStringConvertible, Equatable, Sendable {
@@ -44,7 +45,7 @@ public struct PullRequestStateReader: Sendable {
     }
 
     public static func arguments(url: String) -> [String] {
-        ["pr", "view", url, "--json", "state,mergedAt,mergeCommit"]
+        ["pr", "view", url, "--json", "state,mergedAt,mergeCommit,headRefOid"]
     }
 
     public func state(of url: String, cwd: URL) throws -> PullRequestState {
@@ -67,7 +68,11 @@ public struct PullRequestStateReader: Sendable {
               let state = object["state"] as? String
         else { return nil }
         switch state.uppercased() {
-        case "MERGED": return .merged(commit: (object["mergeCommit"] as? [String: Any])?["oid"] as? String)
+        case "MERGED":
+            return .merged(
+                commit: (object["mergeCommit"] as? [String: Any])?["oid"] as? String,
+                head: object["headRefOid"] as? String
+            )
         case "CLOSED": return .closed
         case "OPEN": return .open
         default: return nil

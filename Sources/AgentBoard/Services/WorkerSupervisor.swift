@@ -1020,7 +1020,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let epic = current.epicId.flatMap { try? epics.get($0) }
             let branch = Self.taskBranchPrefix + current.id
             switch state {
-            case .success(.merged(let commit)):
+            case .success(.merged(let commit, _)):
                 recordLanding(
                     task: current, epic: epic, landing: .landed,
                     detail: PullRequestLanding.mergedDetail(pr, commit: commit), advice: nil
@@ -1057,10 +1057,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let url = check.pullRequest.url
             do {
                 switch try await offMain({ try reader.state(of: url, cwd: repo) }) {
-                case .merged(let commit):
-                    let landed = await tasksCarried(by: check.epic, project: project)
+                case .merged(let commit, let head):
+                    let carried = await tasksCarried(by: check.epic, head: head, project: project)
                     if try board.landEpicPullRequest(
-                        epicId: check.epic.id, pullRequest: check.pullRequest, commit: commit, landedTaskIds: landed
+                        epicId: check.epic.id, pullRequest: check.pullRequest, commit: commit,
+                        landedTaskIds: carried.landed, lateTaskIds: carried.late
                     ) {
                         touched.insert(project.id)
                     }
@@ -1078,25 +1079,34 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return touched
     }
 
-    /// The epic's `done` tasks whose work is on its branch: landed there on accept, or carried by a
-    /// branch (or its reaped tip) the epic branch contains. A conflicted merge the integrator never
-    /// finished is left `unlanded`.
-    private func tasksCarried(by epic: Epic, project: Project) async -> [String] {
+    /// Splits the epic's `done` tasks by their tip (branch, or reaped tip): `landed` when the merged
+    /// pull request's `head` contains it, `late` when only the local epic branch does. A task in
+    /// neither, such as a conflicted merge the integrator never finished, is in neither list.
+    private func tasksCarried(
+        by epic: Epic, head: String?, project: Project
+    ) async -> (landed: [String], late: [String]) {
         let members = ((try? tasks.list(projectId: project.id, epicId: epic.id, includeArchived: true)) ?? [])
             .filter { $0.column == .done && $0.landing != .noBranch }
+            .map(\.id)
         let manager = worktreeManager(for: project)
         let epicBranch = epic.branch
-        let pending = members.filter { $0.landing != .landed }.map(\.id)
-        let contained = (try? await offMain { () -> Set<String> in
-            var inBranch: Set<String> = []
-            for id in pending {
-                let tip = try manager.refCommit("refs/heads/" + Self.taskBranchPrefix + id)
+        let split = try? await offMain { () -> (landed: [String], late: [String]) in
+            let mergedHead = try head.flatMap { try manager.commitExists($0) ? $0 : nil }
+            var landed: [String] = []
+            var late: [String] = []
+            for id in members {
+                guard let tip = try manager.refCommit("refs/heads/" + Self.taskBranchPrefix + id)
                     ?? manager.refCommit(TaskBranchLedger.tipRef(taskId: id))
-                if let tip, try manager.isMerged(commit: tip, into: epicBranch) { inBranch.insert(id) }
+                else { continue }
+                if let mergedHead, try manager.isMerged(commit: tip, into: mergedHead) {
+                    landed.append(id)
+                } else if try manager.isMerged(commit: tip, into: epicBranch) {
+                    late.append(id)
+                }
             }
-            return inBranch
-        }) ?? []
-        return members.filter { $0.landing == .landed || contained.contains($0.id) }.map(\.id)
+            return (landed, late)
+        }
+        return split ?? ([], [])
     }
 
     private func keepOpenLanding(_ task: BoardTask, detail: String) {

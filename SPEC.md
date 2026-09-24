@@ -1066,7 +1066,7 @@ nobody reviewed.
   session id until its grant is bound. When that URL is recorded against a
   `done` task that has not landed, the task moves to `pull_request_open`. The
   merge check then asks
-  `gh pr view <url> --json state,mergedAt,mergeCommit`, off the main actor, on
+  `gh pr view <url> --json state,mergedAt,mergeCommit,headRefOid`, off the main actor, on
   the first metering tick after launch, every 10 minutes after that, and when
   the inspector opens the task: `MERGED` makes it `landed` with the merge commit
   in `landing_detail` — ancestry cannot settle this, since a squash merge puts a
@@ -1282,8 +1282,11 @@ than one that is finished; they merge nothing and are not part of this sequence.
    `pull_request_open` epic's newest recorded pull request with `gh pr view`,
    on launch, every 10 minutes, and never for a task-branch pull request inside
    the epic. `MERGED` makes the epic `done`, marks `landed` with the merge
-   commit every `done` task whose commits the epic branch contains (landed
-   there on accept, or its branch or reaped tip an ancestor of it), archives
+   commit every `done` task whose branch or reaped tip is an ancestor of the
+   pull request's merged head (`headRefOid`), not of the local epic branch; a
+   task only the epic branch carries, accepted after the last push, is marked
+   `unlanded` and named in the report with "push the epic branch and open a
+   follow-up PR". It archives
    under `afterEpicMerge`, and queues a `decision` report naming any task that
    was not done. `CLOSED` returns the epic to `active` and queues a `decision`
    report with the reason. A `gh` failure changes nothing.

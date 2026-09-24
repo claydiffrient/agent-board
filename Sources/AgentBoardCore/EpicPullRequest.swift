@@ -27,11 +27,13 @@ extension Board {
     }
 
     /// The epic's pull request merged: the epic is `done`, each of `landedTaskIds` is landed with the
-    /// merge commit, and a `decision` report says so. False, writing nothing, when the epic has left
+    /// merge commit, each of `lateTaskIds` (on the epic branch, not in the merged head) is unlanded,
+    /// and a `decision` report says so. False, writing nothing, when the epic has left
     /// `pullRequestOpen` or recorded a newer pull request since the check read it.
     @discardableResult
     public func landEpicPullRequest(
-        epicId: String, pullRequest: PullRequestReference, commit: String?, landedTaskIds: [String]
+        epicId: String, pullRequest: PullRequestReference, commit: String?, landedTaskIds: [String],
+        lateTaskIds: [String]
     ) throws -> Bool {
         try db.writer.write { db in
             guard let epic = try Self.stillAwaiting(db, epicId: epicId, pullRequest: pullRequest) else { return false }
@@ -39,6 +41,13 @@ extension Board {
             let detail = PullRequestLanding.mergedDetail(pullRequest, commit: commit)
             for taskId in landedTaskIds {
                 try TaskStore.setLanding(db, taskId, .landed, detail: detail)
+            }
+            let lateAdvice = "accepted after the PR's last push; push the epic branch and open a follow-up PR"
+            for taskId in lateTaskIds {
+                try TaskStore.setLanding(
+                    db, taskId, .unlanded,
+                    detail: "Not in pull request #\(pullRequest.number) as merged (\(pullRequest.url)): \(lateAdvice)."
+                )
             }
             if try Self.settings(db, projectId: epic.projectId).archivePolicy == .afterEpicMerge {
                 _ = try ArchiveSweep.archiveEpic(db, epicId: epicId, at: .nowMillis)
@@ -51,6 +60,9 @@ extension Board {
             if !unfinished.isEmpty {
                 text += " \(unfinished.count) task(s) in it were not done and did not ride that pull request: "
                     + unfinished.map { "\($0.id) (\($0.column.rawValue))" }.joined(separator: ", ") + "."
+            }
+            if !lateTaskIds.isEmpty {
+                text += " Not landed: " + lateTaskIds.joined(separator: ", ") + " — \(lateAdvice)."
             }
             try Self.recordOnEpic(db, epic: epic, text: text, kind: .status)
             return true

@@ -111,9 +111,10 @@ final class FakeGh: GhRunning, @unchecked Sendable {
 
     var calls: [[String]] { lock.withLock { recorded } }
 
-    func answer(_ url: String, state: String, mergeCommit: String? = nil) {
+    func answer(_ url: String, state: String, mergeCommit: String? = nil, head: String? = nil) {
         let commit = mergeCommit.map { #"{"oid":"\#($0)"}"# } ?? "null"
-        let json = #"{"mergeCommit":\#(commit),"mergedAt":null,"state":"\#(state)"}"#
+        let headRefOid = head.map { #""\#($0)""# } ?? "null"
+        let json = #"{"headRefOid":\#(headRefOid),"mergeCommit":\#(commit),"mergedAt":null,"state":"\#(state)"}"#
         lock.withLock { answers[url] = CommandResult(status: 0, stdout: json, stderr: "") }
     }
 

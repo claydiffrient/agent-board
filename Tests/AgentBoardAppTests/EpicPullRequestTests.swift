@@ -51,7 +51,7 @@ final class EpicPullRequestTests: XCTestCase {
         try await fixture.supervisor.approve(approvalId: push.id)
         XCTAssertEqual(try remoteHeads(), [published: try head(epic.branch)], "the push did not update the PR's branch")
 
-        fixture.gh.answer(url, state: "MERGED", mergeCommit: "5eed1e55")
+        fixture.gh.answer(url, state: "MERGED", mergeCommit: "5eed1e55", head: try head(epic.branch))
         await fixture.supervisor.refreshPullRequestLandings(projectId: fixture.project.id)
 
         XCTAssertEqual(try reload(epic).state, .done)
@@ -61,6 +61,24 @@ final class EpicPullRequestTests: XCTestCase {
             XCTAssertTrue(try XCTUnwrap(landed.landingDetail).contains("5eed1e55"), landed.landingDetail ?? "")
         }
         XCTAssertTrue(try decisions().contains { $0.contains("pull request #31 merged") })
+    }
+
+    func testATaskAcceptedAfterTheLastPushIsNotLandedWhenThePullRequestMerges() async throws {
+        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Ship search", goal: nil)
+        let pushed = try await landTask("Index titles", in: epic, file: "index.txt")
+        try await openPullRequest(for: epic)
+        let pushedHead = try XCTUnwrap(try remoteHeads()[published])
+        let late = try await landTask("Rank results", in: epic, file: "rank.txt")
+
+        fixture.gh.answer(url, state: "MERGED", mergeCommit: "5eed1e55", head: pushedHead)
+        await fixture.supervisor.refreshPullRequestLandings(projectId: fixture.project.id)
+
+        XCTAssertEqual(try reload(epic).state, .done)
+        XCTAssertEqual(try reload(pushed).landing, .landed)
+        XCTAssertEqual(try reload(late).landing, .unlanded, "a task the merged head lacks was marked landed")
+        XCTAssertTrue(try decisions().contains {
+            $0.contains(late.id) && $0.contains("accepted after the PR's last push; push the epic branch and open a follow-up PR")
+        })
     }
 
     func testAPullRequestClosedUnmergedReturnsTheEpicToActive() async throws {
