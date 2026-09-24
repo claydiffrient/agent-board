@@ -81,6 +81,62 @@ final class EpicPullRequestTests: XCTestCase {
         })
     }
 
+    /// A suggestion applied on GitHub: the merged head is a commit only the remote has.
+    func testAMergedHeadOnlyTheRemoteHasIsFetchedBeforeTasksAreJudged() async throws {
+        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Ship search", goal: nil)
+        let first = try await landTask("Index titles", in: epic, file: "index.txt")
+        let second = try await landTask("Rank results", in: epic, file: "rank.txt")
+        try await openPullRequest(for: epic)
+        let clone = fixture.supportDir.appendingPathComponent("second-clone")
+        try SupervisorFixture.git(["clone", "-q", "--branch", published, remote.path, clone.path], cwd: fixture.supportDir)
+        try SupervisorFixture.git(["commit", "-q", "--allow-empty", "-m", "Apply suggestion"], cwd: clone)
+        try SupervisorFixture.git(["push", "-q", "origin", published], cwd: clone)
+        let remoteOnly = try XCTUnwrap(try remoteHeads()[published])
+        XCTAssertThrowsError(try fixture.git(["cat-file", "-e", remoteOnly]), "the local repository already had the head")
+
+        fixture.gh.answer(url, state: "MERGED", mergeCommit: "5eed1e55", head: remoteOnly)
+        await fixture.supervisor.refreshPullRequestLandings(projectId: fixture.project.id)
+
+        XCTAssertEqual(try reload(epic).state, .done)
+        for task in [first, second] {
+            let landed = try reload(task)
+            XCTAssertEqual(landed.landing, .landed, landed.landingDetail ?? "")
+            XCTAssertTrue(try XCTUnwrap(landed.landingDetail).contains("5eed1e55"), landed.landingDetail ?? "")
+        }
+    }
+
+    func testAHeadThatCannotBeReadChangesNoLandingAndSaysSo() async throws {
+        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Ship search", goal: nil)
+        let task = try await landTask("Index titles", in: epic, file: "index.txt")
+        try await openPullRequest(for: epic)
+        let before = try reload(task)
+
+        fixture.gh.answer(url, state: "MERGED", mergeCommit: "5eed1e55", head: String(repeating: "0", count: 40))
+        await fixture.supervisor.refreshPullRequestLandings(projectId: fixture.project.id)
+
+        XCTAssertEqual(try reload(epic).state, .done)
+        let after = try reload(task)
+        XCTAssertEqual(after.landing, .landed, after.landingDetail ?? "")
+        XCTAssertEqual(after.landingDetail, before.landingDetail)
+        XCTAssertTrue(try decisions().contains { $0.contains("could not be verified") })
+    }
+
+    func testALandedTaskWithNoTipLeftIsReportedUnverifiable() async throws {
+        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Ship search", goal: nil)
+        let task = try await landTask("Index titles", in: epic, file: "index.txt")
+        try await openPullRequest(for: epic)
+        for ref in ["refs/heads/agentboard/\(task.id)", TaskBranchLedger.tipRef(taskId: task.id)] {
+            _ = try? fixture.git(["update-ref", "-d", ref])
+        }
+        XCTAssertEqual(try reload(task).landing, .landed)
+
+        fixture.gh.answer(url, state: "MERGED", mergeCommit: "5eed1e55", head: try XCTUnwrap(try remoteHeads()[published]))
+        await fixture.supervisor.refreshPullRequestLandings(projectId: fixture.project.id)
+
+        XCTAssertEqual(try reload(task).landing, .pending, "a task nothing can verify kept its landed")
+        XCTAssertTrue(try decisions().contains { $0.contains("Could not verify whether it carried \(task.id)") })
+    }
+
     func testAPullRequestClosedUnmergedReturnsTheEpicToActive() async throws {
         let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Ship search", goal: nil)
         _ = try await landTask("Index titles", in: epic, file: "index.txt")

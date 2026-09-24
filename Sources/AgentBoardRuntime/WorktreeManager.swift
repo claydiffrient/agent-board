@@ -359,6 +359,15 @@ public struct WorktreeManager: Sendable {
         try gitRaw(["rev-parse", "--verify", "--quiet", "\(rev)^{commit}"], cwd: repoPath).status == 0
     }
 
+    /// Whether `commit`, a full object id, is in the repository, fetching it from `remote` first when
+    /// it is not: a pull request's head can hold commits made on GitHub that were never fetched.
+    public func fetchCommitIfMissing(_ commit: String, from remote: String) throws -> Bool {
+        guard commit.wholeMatch(of: #/[0-9a-f]{40}|[0-9a-f]{64}/#) != nil else { return false }
+        if try commitExists(commit) { return true }
+        _ = try gitRaw(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, commit], cwd: repoPath)
+        return try commitExists(commit)
+    }
+
     private func isAncestor(_ ref: String, of other: String, cwd: URL? = nil) throws -> Bool {
         let result = try gitRaw(["merge-base", "--is-ancestor", ref, other], cwd: cwd ?? repoPath)
         switch result.status {

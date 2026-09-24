@@ -1066,19 +1066,20 @@ nobody reviewed.
   session id until its grant is bound. When that URL is recorded against a
   `done` task that has not landed, the task moves to `pull_request_open`. The
   merge check then asks
-  `gh pr view <url> --json state,mergedAt,mergeCommit,headRefOid`, off the main actor, on
-  the first metering tick after launch, every 10 minutes after that, and when
-  the inspector opens the task: `MERGED` makes it `landed` with the merge commit
-  in `landing_detail` — ancestry cannot settle this, since a squash merge puts a
-  new commit on the base branch — and `CLOSED` makes it `unlanded`, naming the
-  pull request, with a `decision` report. A `gh` that is missing, logged out or
-  failing leaves the landing as it was and puts the reason in its detail. The
-  same check adopts a `done`, `unlanded` task whose recorded pull request its
-  detail does not already name, which clears the tasks accepted before this
-  existed; for those, the `published_url` migration recovered the URL from the
-  progress row the publish wrote. A closed pull request's detail names it, so
-  each is checked once: one reopened and merged afterwards is not re-adopted,
-  and the human lands that task by hand or opens a new pull request.
+  `gh pr view <url> --json state,mergedAt,mergeCommit,headRefOid`, off the main
+  actor, on the first metering tick after launch, every 10 minutes after that,
+  and when the inspector opens the task: `MERGED` makes it `landed` with the
+  merge commit in `landing_detail` — ancestry cannot settle this, since a
+  squash merge puts a new commit on the base branch — and `CLOSED` makes it
+  `unlanded`, naming the pull request, with a `decision` report. A `gh` that
+  is missing, logged out or failing leaves the landing as it was and puts the
+  reason in its detail. The same check adopts a `done`, `unlanded` task whose
+  recorded pull request its detail does not already name, which clears the
+  tasks accepted before this existed; for those, the `published_url` migration
+  recovered the URL from the progress row the publish wrote. A closed pull
+  request's detail names it, so each is checked once: one reopened and merged
+  afterwards is not re-adopted, and the human lands that task by hand or opens
+  a new pull request.
 
   `pending`, `unlanded`, `awaiting_pull_request` and `pull_request_open` show as
   a badge on the card and in the inspector. All but `pull_request_open` queue a
@@ -1286,9 +1287,14 @@ than one that is finished; they merge nothing and are not part of this sequence.
    pull request's merged head (`headRefOid`), not of the local epic branch; a
    task only the epic branch carries, accepted after the last push, is marked
    `unlanded` and named in the report with "push the epic branch and open a
-   follow-up PR". It archives
-   under `afterEpicMerge`, and queues a `decision` report naming any task that
-   was not done. `CLOSED` returns the epic to `active` and queues a `decision`
+   follow-up PR". A head the repository lacks, such as a suggestion applied on
+   GitHub, is fetched from `origin` first; if it still cannot be read, no task's
+   landing changes and the report says carriage could not be verified. A task
+   with neither branch nor reaped tip lands if a commit its `landing_detail`
+   names is in the head; one still marked `landed` otherwise becomes `pending`
+   and is named in the report as unverifiable. It archives under
+   `afterEpicMerge`, and queues a `decision` report naming any task that was
+   not done. `CLOSED` returns the epic to `active` and queues a `decision`
    report with the reason. A `gh` failure changes nothing.
 
    The pull request's head is the **published** name (§6.1), not the local
