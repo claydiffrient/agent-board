@@ -67,9 +67,35 @@ final class TaskCommentToolTests: XCTestCase {
         let times = try thread.map { try XCTUnwrap(ISO8601DateFormatter.fractional.date(from: $0["created_at"] as? String ?? "")) }
         XCTAssertEqual(times, times.sorted())
         XCTAssertEqual(try CommentStore(fixture.db).list(taskId: other.id), [])
+        let labelled = try CommentStore(fixture.db).thread(taskId: parser.id)
+        XCTAssertEqual(
+            labelled.comments.map(labelled.authorLabel),
+            ["Orchestrator", "Worker \(try XCTUnwrap(worker.shortId))", "Rita · reviewer"]
+        )
 
         let workerView = try await call("get_my_task", [:], token: otherToken)
         XCTAssertEqual((workerView["comments"] as? [Any])?.count, 0, "another task's thread leaked into this one")
+    }
+
+    func testARosteredWorkersCommentKeepsItsNameAfterTheAgentLeavesTheRoster() async throws {
+        let rita = try RosterStore(fixture.db).create(name: "Rita", role: "builder", systemPrompt: "You build parsers.")
+        try RosterStore(fixture.db).enable(agentId: rita.id, forProject: fixture.project.id)
+        let task = try readyTask("Add the parser")
+        _ = try await fixture.supervisor.assignAgent(taskId: task.id, rosterAgentId: rita.id, scope: .worker)
+        await fixture.supervisor.waitForSetup()
+        let session = try XCTUnwrap(fixture.sessions.forTask(task.id).first { $0.rosterAgentId == rita.id })
+        let token = try XCTUnwrap(fixture.grants.forSession(session.sessionId).first).token
+
+        _ = try await call("add_comment", ["body": "Grammar is LL(1) now."], token: token)
+        var thread = try CommentStore(fixture.db).thread(taskId: task.id)
+        XCTAssertEqual(thread.comments.map(\.authorName), ["Rita"])
+        XCTAssertEqual(thread.comments.map(thread.authorLabel), ["Rita · worker"])
+
+        try fixture.sessions.setState(session.sessionId, .completed)
+        try RosterStore(fixture.db).delete(rita.id)
+        thread = try CommentStore(fixture.db).thread(taskId: task.id)
+        XCTAssertEqual(thread.comments.map(\.authorRosterAgentId), [nil])
+        XCTAssertEqual(thread.comments.map(thread.authorLabel), ["Rita · worker"])
     }
 
     private func readyTask(_ title: String) throws -> BoardTask {

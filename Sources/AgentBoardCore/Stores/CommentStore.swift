@@ -55,6 +55,10 @@ public struct CommentStore: Sendable {
         ValueObservation.tracking { db in try Self.list(db, taskId: taskId) }
     }
 
+    public func thread(taskId: String) throws -> CommentThread {
+        try db.reader.read { db in try Self.thread(db, taskId: taskId) }
+    }
+
     public func observeThread(taskId: String) -> ValueObservation<ValueReducers.Fetch<CommentThread>> {
         ValueObservation.tracking { db in try Self.thread(db, taskId: taskId) }
     }

@@ -12,17 +12,30 @@ enum CommentComposer {
         guard canSubmit(draft) else { return nil }
         return try Board(db).addComment(projectId: task.projectId, taskId: task.id, author: .human, body: draft)
     }
+
+    /// Submits the draft held for `task` itself, and clears it once written.
+    @discardableResult
+    static func submit(from drafts: TaskDraftCache, to task: BoardTask, db: AppDatabase) throws -> TaskComment? {
+        guard let comment = try submit(drafts.comment(for: task.id), to: task, db: db) else { return nil }
+        drafts.setComment("", for: task.id)
+        return comment
+    }
 }
 
 /// The inspector's comment thread and composer. The human's comments sit on an accent tint; agents'
 /// sit on a neutral grey behind an icon for their kind (SPEC §10).
 struct TaskCommentsSection: View {
     let task: BoardTask
+    let drafts: TaskDraftCache
 
     @Environment(AppEnvironment.self) private var env
     @State private var thread = Observed(CommentThread())
-    @State private var draft = ""
     @State private var errorMessage: String?
+
+    private var draft: Binding<String> {
+        let taskId = task.id
+        return Binding(get: { drafts.comment(for: taskId) }, set: { drafts.setComment($0, for: taskId) })
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -46,11 +59,11 @@ struct TaskCommentsSection: View {
 
     private var composer: some View {
         VStack(alignment: .trailing, spacing: 4) {
-            TextEditor(text: $draft)
+            TextEditor(text: draft)
                 .font(.body)
                 .frame(minHeight: 56)
                 .overlay(alignment: .topLeading) {
-                    if draft.isEmpty {
+                    if draft.wrappedValue.isEmpty {
                         Text("Add a comment")
                             .foregroundStyle(.tertiary)
                             .padding(.leading, 5)
@@ -63,14 +76,14 @@ struct TaskCommentsSection: View {
                 )
             Button("Add Comment", action: submit)
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!CommentComposer.canSubmit(draft))
+                .disabled(!CommentComposer.canSubmit(draft.wrappedValue))
                 .help("Add this comment (⌘↩)")
         }
     }
 
     private func submit() {
         do {
-            if try CommentComposer.submit(draft, to: task, db: env.db) != nil { draft = "" }
+            try CommentComposer.submit(from: drafts, to: task, db: env.db)
         } catch {
             errorMessage = errorText(error)
         }
