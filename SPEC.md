@@ -2091,6 +2091,26 @@ columns they actually sit in (always `done`), dimmed to 55% opacity with a
 dashed border and an "archived `<when>`" line; from there a card's context menu
 or the inspector unarchives it.
 
+**Searching the board** — a search field heads the board, filtering in place:
+a matching card stays in its own column and lane, and nothing is regrouped
+into a results list. Every whitespace-separated term must appear, case- and
+diacritic-insensitively, in one of the task's title, body, acceptance criteria,
+epic title, model (id or display name), or the name of the rostered agent that
+last worked or reviewed it; the task id is not searched. While a query is
+active an epic lane with no match vanishes, header and rail entry included,
+and a collapsed lane with a match is drawn open without changing its saved
+state. The lane header's done/total tally and actions still count the whole
+epic. Search does not reach past **Show Archived**: an archived match stays
+hidden, but its lane stays with the per-column "1 archived" notice, and the
+summary beside the field says "1 archived match hidden". The summary reads "3
+of 41 tasks", or "No tasks match “idle cap”" in place of an empty-result
+screen. ⌘F (**Edit ▸ Find…**) focuses the field of whichever screen is showing
+and is disabled on a screen without one; Escape in the field clears it. The same
+field (`SearchField`) is the one Notes and Status use, so that wording and ⌘F
+are decided once. The filter is in memory over rows the board already observes,
+with no index: one pass over the largest real board, 227 tasks and 759 KB of
+text, measured 1.8 ms.
+
 **Ending an epic by hand** — the epic lane header carries a `…` menu with
 **Close as done** and **Abandon**. Integration (§5.2) is how an epic ends when
 it is *finished*; these are how it ends when *you* are finished with it —
