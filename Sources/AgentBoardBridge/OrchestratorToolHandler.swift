@@ -953,7 +953,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         }
         let plan = try board.epicClosurePlan(epicId: epic.id, as: closure)
         if plan.isRefused { throw ToolError(plan.message) }
-        try board.closeEpic(epicId: epic.id, as: closure, by: identity.sessionId ?? "orchestrator")
+        try board.closeEpic(epicId: epic.id, as: closure, by: .orchestrator(sessionId: identity.sessionId))
         var text = "Epic \(epic.id) is \(closure.state.rawValue). Nothing was merged, pushed or deleted; "
             + "\(epic.branch) and every task branch are untouched."
         if !plan.unfinished.isEmpty {

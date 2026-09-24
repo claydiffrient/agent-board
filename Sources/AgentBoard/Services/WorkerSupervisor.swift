@@ -700,10 +700,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func stop(sessionId: String) async throws {
-        try await recording { try await stopSession(sessionId) }
+        try await recording { try await stopSession(sessionId, by: .human) }
     }
 
-    private func stopSession(_ sessionId: String) async throws {
+    private func stopSession(_ sessionId: String, by actor: BoardActor) async throws {
         let session = try requireSession(sessionId)
         if let shortId = session.shortId {
             try await runtime.stop(shortId: shortId)
@@ -714,7 +714,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.sessionHasNoShortId(sessionId)
         }
         let salvage = await branchSalvage(taskId: session.taskId)
-        try board.terminate(sessionId: sessionId, cause: .stoppedByHuman, salvage: salvage)
+        try board.terminate(sessionId: sessionId, cause: .stopped(by: actor), salvage: salvage)
         try grants.revokeAll(sessionId: sessionId)
         announceReports(projectId: session.projectId)
         refreshSleepAssertion()
@@ -788,7 +788,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     } else {
                         throw SupervisorError.sessionHasNoShortId(session.sessionId)
                     }
-                    try board.terminate(sessionId: session.sessionId, cause: .stoppedByHuman)
+                    try board.terminate(sessionId: session.sessionId, cause: .stopped(by: .human))
                 } catch {
                     firstFailure = firstFailure ?? error
                 }
@@ -809,7 +809,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(task.projectId) else {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
-            try await stopLiveSessions(onTask: taskId, sparing: acceptedBy.acceptingSessionId)
+            try await stopLiveSessions(onTask: taskId, sparing: acceptedBy.acceptingSessionId, by: acceptedBy.actor)
             try board.accept(taskId: taskId, acceptedBy: acceptedBy)
             let taskSessions = try sessions.forTask(taskId)
             for session in taskSessions {
@@ -827,11 +827,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// SPEC §5: a rostered reviewer runs in the worker's own worktree, so a decision taken over its
     /// head must end it before anything removes that checkout. Only an agent `claude agents` still
     /// lists as live can abort the decision; a row whose process is gone is ended as vanished.
-    private func stopLiveSessions(onTask taskId: String, sparing: String? = nil) async throws {
+    private func stopLiveSessions(onTask taskId: String, sparing: String? = nil, by actor: BoardActor) async throws {
         var listing: [AgentInfo]?
         for session in try sessions.forTask(taskId) where session.state.isActive && session.sessionId != sparing {
             do {
-                try await stopSession(session.sessionId)
+                try await stopSession(session.sessionId, by: actor)
             } catch {
                 if listing == nil {
                     guard let listed = try? await runtime.listSessions() else { throw error }
@@ -847,7 +847,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
                 guard session.shortId == nil, let shortId = info.id else { throw error }
                 try sessions.setShortId(session.sessionId, shortId)
-                try await stopSession(session.sessionId)
+                try await stopSession(session.sessionId, by: actor)
             }
         }
     }
@@ -1223,7 +1223,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     func reopen(taskId: String) async throws {
         try await recording {
-            try await stopLiveSessions(onTask: taskId)
+            try await stopLiveSessions(onTask: taskId, by: .human)
             let report = try board.reopen(taskId: taskId)
             announceReports(projectId: report.projectId)
         }
@@ -1809,7 +1809,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording {
             let plan = try board.epicClosurePlan(epicId: epicId, as: closure)
             if plan.isRefused { throw SupervisorError.epicCloseRefused(plan.message) }
-            let report = try board.closeEpic(epicId: epicId, as: closure, by: "human")
+            let report = try board.closeEpic(epicId: epicId, as: closure, by: .human)
             announceReports(projectId: report.projectId)
         }
     }
@@ -1989,8 +1989,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording { try await spawn(taskId: taskId, rosterAgentId: rosterAgentId, scope: scope) }
     }
 
+    /// Only the orchestrator's `stop_worker` reaches this; a human's Stop calls `stop(sessionId:)`.
     func stopWorker(sessionId: String) async throws {
-        try await stop(sessionId: sessionId)
+        try await recording { try await stopSession(sessionId, by: .orchestrator(sessionId: nil)) }
     }
 
     // MARK: - BoardEventSink
@@ -2086,8 +2087,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
-    /// The orderly end of a worker's life, and until now the only one that left its process running:
-    /// the agent is told to take no further turns, so the session sits `idle` holding its whole
+    /// The orderly end of a worker's life, after `report_complete` or a reviewer's verdict, and until
+    /// now the only one that left its process running: the agent is told to take no further turns, so the session sits `idle` holding its whole
     /// context forever. Stopping it frees ~300 MB and costs nothing — `claude --bg --resume` reads
     /// the transcript, which a stop leaves intact, so the task in `review` can still be reopened
     /// and attached to.

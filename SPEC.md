@@ -1163,9 +1163,25 @@ than a worker's: `get_my_task`, `log_progress`, `accept_task(verdict)` and
 spawn, no reassign, no other task. `accept_task` writes the verdict to `progress`
 and then takes that same acceptance path, which spares that reviewer's own
 session; `reopen_task` puts the findings on the
-task and returns it to `ready` without flagging a failure. The verdict on the
+task and returns it to `ready` without flagging a failure. Either verdict marks
+the reviewer's session `completed` and, like `report_complete`, stops it once the
+answer is written (`afterResponse`). The verdict on the
 task is the point: a person reading a task that reached `done` without them can
 see who approved it and why.
+
+A reviewer whose turn ends (its `Stop` hook) with the task still in `review` gave
+no verdict. Nothing accepts the task: its Pending reviews row reads `<reviewer>
+stopped without a verdict` (§10), and one `blocked` report per reviewer session
+tells the orchestrator. The session is left idle, not stopped, because a turn can
+end while a build the reviewer started in the background still runs; the
+orchestrator can message it or `stop_worker` it.
+
+A session that ends on a task already in `done`, or back in `ready` with a
+reviewer's findings, left nothing unfinished: `Board.terminate` queues a
+`decision` report headed "Session ended after its task was settled: <reason>",
+with no branch-salvage line and no failure flag. A stop's reason names who asked
+for it — a human, the orchestrator's `stop_worker`, or the acceptance that ran
+it — and `close_epic`'s report names its closer the same way.
 
 A reviewer is review-only: it reads `git diff <base>...HEAD`, may build and run
 tests, and changes nothing — a defect goes back through `reopen_task`, never
@@ -2081,8 +2097,8 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
    requests.
 3. **Pending reviews** — tasks in `review`, with branch, worktree and diffstat.
    Each row says who holds the review: `<reviewer> reviewing · <elapsed>` while
-   a rostered reviewer's session is live, `<reviewer> stopped` when that session
-   ended without a verdict, and `Waiting on you` otherwise, with the routing
+   a rostered reviewer's session is working, `<reviewer> stopped without a
+   verdict` when its turn or session ended without one (§5.1), and `Waiting on you` otherwise, with the routing
    reason `Board.complete` wrote to `progress` when there is one. While a
    reviewer is live, Accept and Reopen ask first ("Rita is reviewing this task.
    Accepting now stops Rita's review."), because either one stops the reviewer
