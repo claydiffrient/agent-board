@@ -961,7 +961,15 @@ nobody reviewed.
   `reviewer_agent_id`, the rostered reviewer holding it; under `task` it waits
   on you.
 - `done` — you accept it, or, under `none`/`epic`/`agent`, the review level or a
-  rostered reviewer does. Every attempt's worktree is removed (firing the
+  rostered reviewer does. Every live session on the task is stopped first,
+  through the same path as a human Stop, because a rostered reviewer runs in the
+  worker's own worktree; the one exception is the reviewer whose `accept_task`
+  is doing the accepting. A human reopen stops them the same way. A session
+  whose process is already gone — absent from `claude agents`, or `starting`
+  with no short id and nothing listed under its id — is ended as vanished and
+  does not block the decision; only an agent still listed as live that refuses
+  to stop aborts the accept or reopen before anything is written. Every attempt's
+  worktree is then removed (firing the
   existing `WorktreeRemove` hook, which reclaims Bazel `output_base` on
   Derivita), and `agentboard/<task-id>` is deleted once it is merged into the
   base or epic branch. An unmerged branch, or a worktree with uncommitted
@@ -1104,7 +1112,8 @@ A rostered reviewer under `agent` review gets its own token scope (§6), narrowe
 than a worker's: `get_my_task`, `log_progress`, `accept_task(verdict)` and
 `reopen_task(findings)` over the one task its token names, and nothing else — no
 spawn, no reassign, no other task. `accept_task` writes the verdict to `progress`
-and then takes that same acceptance path; `reopen_task` puts the findings on the
+and then takes that same acceptance path, which spares that reviewer's own
+session; `reopen_task` puts the findings on the
 task and returns it to `ready` without flagging a failure. The verdict on the
 task is the point: a person reading a task that reached `done` without them can
 see who approved it and why.
@@ -2022,6 +2031,13 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
 2. **Pending approvals** — spawns awaiting authorization and integration
    requests.
 3. **Pending reviews** — tasks in `review`, with branch, worktree and diffstat.
+   Each row says who holds the review: `<reviewer> reviewing · <elapsed>` while
+   a rostered reviewer's session is live, `<reviewer> stopped` when that session
+   ended without a verdict, and `Waiting on you` otherwise, with the routing
+   reason `Board.complete` wrote to `progress` when there is one. While a
+   reviewer is live, Accept and Reopen ask first ("Rita is reviewing this task.
+   Accepting now stops Rita's review."), because either one stops the reviewer
+   (§5).
 4. **Proposals** — worker-proposed tasks awaiting promotion.
 
 A blocked worker was previously invisible here: it sat in `running`, burned its

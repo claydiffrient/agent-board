@@ -38,7 +38,7 @@ final class TokenRevocationTests: XCTestCase {
         let secondSessionId = "session-\(UUID().uuidString)"
         try fixture.sessions.insert(AgentSession(
             sessionId: secondSessionId, projectId: fixture.project.id, taskId: first.task.id,
-            role: .worker, cwd: fixture.supportDir.path, state: .running, attempt: 2
+            role: .worker, cwd: fixture.supportDir.path, state: .stopped, endedAt: .nowMillis, attempt: 2
         ))
         let retry = try fixture.grants.issue(projectId: fixture.project.id, scope: .worker, taskId: first.task.id)
         try fixture.grants.bind(token: retry.token, sessionId: secondSessionId)

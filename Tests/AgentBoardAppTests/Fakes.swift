@@ -75,7 +75,22 @@ actor FakeRuntime: AgentRuntime {
     func setListed(_ agents: [AgentInfo]) { listed = agents }
     func failListing(_ error: Error) { listFailure = error }
 
-    func stop(shortId: String) async throws { stopped.append(shortId) }
+    /// Whether `watchedPath` was on disk at each `stop`, so a test can order a stop against a teardown.
+    private(set) var watchedPathExistedAtStop: [Bool] = []
+    private var watchedPath: String?
+
+    func watch(_ path: String) { watchedPath = path }
+
+    private var stopFailures: [String: Error] = [:]
+
+    /// `claude stop` on this short id fails the way it does for a job that is no longer running.
+    func failStop(shortId: String, _ error: Error) { stopFailures[shortId] = error }
+
+    func stop(shortId: String) async throws {
+        if let failure = stopFailures[shortId] { throw failure }
+        stopped.append(shortId)
+        if let watchedPath { watchedPathExistedAtStop.append(FileManager.default.fileExists(atPath: watchedPath)) }
+    }
     func remove(shortId: String) async throws { removed.append(shortId) }
 
     func listSessions() async throws -> [AgentInfo] {

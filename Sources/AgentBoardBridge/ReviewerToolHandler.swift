@@ -85,7 +85,10 @@ public final class ReviewerToolHandler: ToolHandler {
             try board.recordReviewVerdict(
                 taskId: task.id, sessionId: identity.sessionId, reviewerName: name, verdict: verdict
             )
-            try await control.accept(taskId: task.id, acceptedBy: .reviewer(name: name, verdict: verdict))
+            try await control.accept(
+                taskId: task.id,
+                acceptedBy: .reviewer(name: name, verdict: verdict, sessionId: identity.sessionId)
+            )
             await events.reportQueued(projectId: identity.projectId)
             return ToolResult(
                 text: "Accepted into Done. Your verdict is on the task. Stop here; do not start further work."

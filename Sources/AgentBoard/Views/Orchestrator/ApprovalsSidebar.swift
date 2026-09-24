@@ -12,6 +12,7 @@ struct ApprovalsSidebar: View {
     @State private var sessions = Observed<[AgentSession]>([])
     @State private var reports = Observed<[Report]>([])
     @State private var messages = Observed<[MessageEntry]>([])
+    @State private var roster = Observed<[RosterAgent]>([])
     @State private var now = Date.now
     @State private var denying: Approval?
     @State private var denyReason = ""
@@ -77,6 +78,9 @@ struct ApprovalsSidebar: View {
                         ReviewRow(
                             task: task,
                             session: latestSessionByTask[task.id],
+                            sessions: sessions.value,
+                            roster: roster.value,
+                            now: now,
                             accept: { run { try await env.supervisor.accept(taskId: task.id) } },
                             reopen: { run { try await env.supervisor.reopen(taskId: task.id) } }
                         )
@@ -116,6 +120,9 @@ struct ApprovalsSidebar: View {
         }
         .task(id: project.id) {
             await reports.run(ReportStore(env.db).observeUnconsumed(projectId: project.id), in: env.db.reader)
+        }
+        .task {
+            await roster.run(RosterStore(env.db).observe(), in: env.db.reader)
         }
         .task(id: project.id) {
             await messages.run(MessageStore(env.db).observeConversation(projectId: project.id), in: env.db.reader)
@@ -324,18 +331,40 @@ struct ApprovalsSidebar: View {
 private struct ReviewRow: View {
     let task: BoardTask
     let session: AgentSession?
+    let sessions: [AgentSession]
+    let roster: [RosterAgent]
+    let now: Date
     let accept: () -> Void
     let reopen: () -> Void
 
     @Environment(AppEnvironment.self) private var env
     @State private var changes: DiffSummary?
     @State private var summary: String?
+    @State private var progress = Observed<[ProgressEntry]>([])
+    @State private var interrupting: Decision?
+
+    private enum Decision {
+        case accept, reopen
+    }
+
+    private var hold: ReviewHold {
+        ReviewHold.of(task: task, sessions: sessions, roster: roster, progress: progress.value)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(task.title)
                 .fontWeight(.medium)
                 .lineLimit(2)
+            Label(hold.label(now: now), systemImage: "person.crop.circle.badge.checkmark")
+                .font(.caption)
+                .foregroundStyle(hold.endedWithoutVerdict ? .orange : .secondary)
+            if let reason = hold.reason {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
             Label(session?.branch ?? "agentboard/\(task.id)", systemImage: "arrow.triangle.branch")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -351,20 +380,47 @@ private struct ReviewRow: View {
                     .lineLimit(3)
             }
             HStack {
-                Button("Accept", action: accept)
+                Button("Accept") { decide(.accept) }
                     .buttonStyle(.borderedProminent)
-                Button("Reopen", action: reopen)
+                Button("Reopen") { decide(.reopen) }
             }
             .controlSize(.small)
         }
         .padding(.vertical, 4)
         .help(session?.worktreePath ?? "")
+        .confirmationDialog(
+            interruption ?? "",
+            isPresented: Binding(get: { interrupting != nil }, set: { if !$0 { interrupting = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button(interrupting == .reopen ? "Reopen anyway" : "Accept anyway", role: .destructive) {
+                let decision = interrupting
+                interrupting = nil
+                if decision == .reopen { reopen() } else { accept() }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .task(id: task.id) {
+            await progress.run(ProgressStore(env.db).observe(taskId: task.id), in: env.db.reader)
+        }
         .task(id: task.id) {
             summary = (try? ReportStore(env.db).latest(taskId: task.id)?.body)
                 .flatMap { $0 }
                 .map { WorkerReport.summaryText(body: $0) }
             changes = await env.supervisor.worktreeDiffSummary(taskId: task.id)
         }
+    }
+
+    private var interruption: String? {
+        interrupting.flatMap { hold.interruption(accepting: $0 == .accept) }
+    }
+
+    private func decide(_ decision: Decision) {
+        guard hold.interruption(accepting: decision == .accept) != nil else {
+            if decision == .accept { accept() } else { reopen() }
+            return
+        }
+        interrupting = decision
     }
 
     private func changeSize(_ changes: DiffSummary) -> some View {

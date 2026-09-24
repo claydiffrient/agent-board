@@ -104,13 +104,19 @@ public enum TaskAcceptance: Sendable, Equatable {
     case human
     /// Completion under no-review or epic review: nobody looked, and the report says so.
     case policy(ReviewLevel)
-    case reviewer(name: String, verdict: String)
+    /// `sessionId` is the reviewer's own session, which the acceptance must not stop mid-call.
+    case reviewer(name: String, verdict: String, sessionId: String? = nil)
 
     public var describedActor: String {
         switch self {
         case .human: return "a human"
         case .policy(let level): return "the \(level.label.lowercased()) setting, with no review"
-        case .reviewer(let name, _): return "rostered reviewer \(name)"
+        case .reviewer(let name, _, _): return "rostered reviewer \(name)"
         }
+    }
+
+    public var acceptingSessionId: String? {
+        guard case .reviewer(_, _, let sessionId) = self else { return nil }
+        return sessionId
     }
 }

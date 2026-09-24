@@ -192,14 +192,17 @@ final class SharedBranchAcceptTests: XCTestCase {
         XCTAssertNil(try SharedCheckoutGroup.current(db: fixture.db, projectId: fixture.project.id))
     }
 
-    /// A member still running holds the checkout; nothing may be reaped out from under it.
+    /// A member still running holds the checkout; nothing may be reaped out from under it. An accept
+    /// stops every live session on its task but the one doing the accepting, so that is the one left.
     func testALiveMemberKeepsTheSharedBranch() async throws {
         try fixture.sessions.setState("beta-session", .running)
         try write("alpha.txt", "a\n")
         try await commit(alpha, paths: ["alpha.txt"], message: "Add alpha")
 
         try await fixture.supervisor.accept(taskId: alpha.id)
-        try await fixture.supervisor.accept(taskId: beta.id)
+        try await fixture.supervisor.accept(
+            taskId: beta.id, acceptedBy: .reviewer(name: "Rae", verdict: "ok", sessionId: "beta-session")
+        )
 
         XCTAssertTrue(try fixture.manager.branchExists(branch), "a live member's branch was reaped")
     }

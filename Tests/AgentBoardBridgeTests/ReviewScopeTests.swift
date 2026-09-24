@@ -127,8 +127,8 @@ final class ReviewScopeTests: XCTestCase {
         XCTAssertEqual(accepted.count, 1, "acceptance must go through WorkerControl.accept, not a second path")
         XCTAssertEqual(accepted.first?.taskId, task.id)
         XCTAssertEqual(accepted.first?.acceptedBy, .reviewer(
-            name: "Rowan", verdict: "Ran swift test; the empty query case is covered."
-        ))
+            name: "Rowan", verdict: "Ran swift test; the empty query case is covered.", sessionId: "rev-1"
+        ), "the acceptance must name the reviewer's own session so the supervisor does not stop it")
     }
 
     func testTheVerdictIsOnTheTaskSoAHumanCanSeeWhoApprovedItAndWhy() async throws {

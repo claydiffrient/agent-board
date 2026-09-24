@@ -691,22 +691,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func stop(sessionId: String) async throws {
-        try await recording {
-            let session = try requireSession(sessionId)
-            if let shortId = session.shortId {
-                try await runtime.stop(shortId: shortId)
-            } else if session.state == .setup {
-                // No agent to stop yet; `launch` finds the row gone and stops whatever it started.
-                setupTasks[sessionId]?.cancel()
-            } else {
-                throw SupervisorError.sessionHasNoShortId(sessionId)
-            }
-            let salvage = await branchSalvage(taskId: session.taskId)
-            try board.terminate(sessionId: sessionId, cause: .stoppedByHuman, salvage: salvage)
-            try grants.revokeAll(sessionId: sessionId)
-            announceReports(projectId: session.projectId)
-            refreshSleepAssertion()
+        try await recording { try await stopSession(sessionId) }
+    }
+
+    private func stopSession(_ sessionId: String) async throws {
+        let session = try requireSession(sessionId)
+        if let shortId = session.shortId {
+            try await runtime.stop(shortId: shortId)
+        } else if session.state == .setup {
+            // No agent to stop yet; `launch` finds the row gone and stops whatever it started.
+            setupTasks[sessionId]?.cancel()
+        } else {
+            throw SupervisorError.sessionHasNoShortId(sessionId)
         }
+        let salvage = await branchSalvage(taskId: session.taskId)
+        try board.terminate(sessionId: sessionId, cause: .stoppedByHuman, salvage: salvage)
+        try grants.revokeAll(sessionId: sessionId)
+        announceReports(projectId: session.projectId)
+        refreshSleepAssertion()
     }
 
     func resume(sessionId: String) async throws {
@@ -798,6 +800,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(task.projectId) else {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
+            try await stopLiveSessions(onTask: taskId, sparing: acceptedBy.acceptingSessionId)
             try board.accept(taskId: taskId, acceptedBy: acceptedBy)
             let taskSessions = try sessions.forTask(taskId)
             for session in taskSessions {
@@ -809,6 +812,41 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             await tearDownWorktrees(of: taskSessions, task: task, project: project)
             await landAcceptedBranch(task: task, project: project)
             announceReports(projectId: task.projectId)
+        }
+    }
+
+    /// SPEC §5: a rostered reviewer runs in the worker's own worktree, so a decision taken over its
+    /// head must end it before anything removes that checkout. Only an agent `claude agents` still
+    /// lists as live can abort the decision; a row whose process is gone is ended as vanished.
+    private func stopLiveSessions(onTask taskId: String, sparing: String? = nil) async throws {
+        var listing: [AgentInfo]?
+        for session in try sessions.forTask(taskId) where session.state.isActive && session.sessionId != sparing {
+            do {
+                try await stopSession(session.sessionId)
+            } catch {
+                if listing == nil {
+                    guard let listed = try? await runtime.listSessions() else { throw error }
+                    listing = listed
+                }
+                guard let info = Self.liveListing(of: session, in: listing ?? []) else {
+                    let salvage = await branchSalvage(taskId: session.taskId)
+                    try board.terminate(sessionId: session.sessionId, cause: .vanished, salvage: salvage)
+                    try grants.revokeAll(sessionId: session.sessionId)
+                    announceReports(projectId: session.projectId)
+                    refreshSleepAssertion()
+                    continue
+                }
+                guard session.shortId == nil, let shortId = info.id else { throw error }
+                try sessions.setShortId(session.sessionId, shortId)
+                try await stopSession(session.sessionId)
+            }
+        }
+    }
+
+    private static func liveListing(of session: AgentSession, in listing: [AgentInfo]) -> AgentInfo? {
+        listing.first { info in
+            let named = info.sessionId == session.sessionId || (session.shortId != nil && info.id == session.shortId)
+            return named && info.state?.lowercased() != "stopped" && info.status?.lowercased() != "stopped"
         }
     }
 
@@ -1084,6 +1122,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     func reopen(taskId: String) async throws {
         try await recording {
+            try await stopLiveSessions(onTask: taskId)
             let report = try board.reopen(taskId: taskId)
             announceReports(projectId: report.projectId)
         }
