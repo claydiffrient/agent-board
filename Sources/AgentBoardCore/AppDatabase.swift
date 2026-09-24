@@ -101,6 +101,10 @@ public final class AppDatabase: Sendable {
             try db.execute(sql: "ALTER TABLE approval ADD COLUMN published_url TEXT")
             try ApprovalStore.backfillPublishedURLs(db)
         }
+        // Project deletes before this left entries behind that a note reusing the rowid would match.
+        migrator.registerMigration("note_fts_rebuild") { db in
+            try NoteStore.rebuildIndex(db)
+        }
         return migrator
     }
 }
