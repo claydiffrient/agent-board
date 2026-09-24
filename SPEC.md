@@ -381,7 +381,10 @@ For a task `T` in project `P`:
    brief rides a hook; it cuts an oversize newest comment short rather than
    drop it, and says how many older ones it left out and
    that `get_my_task` has them all. The post-compaction brief and the
-   reviewer's prompt (§5.1) carry the same section.
+   reviewer's prompt (§5.1) carry the same section. In the brief the task text
+   leaves the thread at least 2,000 characters, or its whole size if smaller,
+   and the thread shrinks to whatever room the task text left, so a long task
+   never drops the newest comment.
    The prompt ends with *How your turns end*: the early stops an unattended
    worker must not make, and the three stops it should.
 7. `claude "<prompt>" --bg -n <task-slug> --permission-mode auto
@@ -2166,7 +2169,8 @@ shown as `<snapshot> · <kind>`.
 The time is relative, with the absolute date and time on hover; the body is
 selectable and wraps. The human's comments sit on an accent tint; agents' sit on
 neutral grey behind an icon for their kind. A composer under the thread adds a
-`human` comment with **Add Comment** or ⌘↩ and refuses a blank body. Its draft
+`human` comment with **Add Comment** or ⌘↩ and refuses a blank body, then tells
+the orchestrator console of the `comment` report at once (§9.1). Its draft
 belongs to the task it was typed on: selecting another task shows that task's own
 draft, and returning restores the first.
 

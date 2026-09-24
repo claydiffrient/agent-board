@@ -86,6 +86,36 @@ final class TaskCommentReachesAgentsTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(block(in: review, containing: "Use a Pratt parser.")).contains("from the human"))
     }
 
+    /// SPEC §9.1: the inspector's composer is the human's entry point, and its comment's report is
+    /// announced to the orchestrator console at once. `/bin/cat` stands in for the orchestrator PTY
+    /// so the notice gate has a running child to write into.
+    func testAHumanCommentFromTheComposerIsAnnouncedToTheOrchestrator() async throws {
+        let task = try fixture.tasks.create(
+            projectId: fixture.project.id, title: "Add the parser", body: nil, acceptance: nil,
+            priority: nil, column: .ready, origin: .human, epicId: nil
+        )
+        let console = try fixture.supervisor.orchestratorConsole(projectId: fixture.project.id)
+        console.terminal.startProcess(executable: "/bin/cat")
+        defer { console.terminal.terminate() }
+        XCTAssertTrue(console.isProcessRunning)
+        await fixture.supervisor.orchestratorTurnEnded(projectId: fixture.project.id, sessionId: "orch")
+        XCTAssertNil(console.lastNoticeAt, "a notice went out before any report was queued")
+
+        let drafts = TaskDraftCache()
+        drafts.setComment("Use a Pratt parser.", for: task.id)
+        let env = renderEnvironment(db: fixture.db, supervisor: fixture.supervisor)
+        XCTAssertNotNil(try CommentComposer.submit(from: drafts, to: task, env: env))
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while console.lastNoticeAt == nil, ContinuousClock.now < deadline {
+            try await _Concurrency.Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNotNil(console.lastNoticeAt, "the human's comment report was never announced")
+        XCTAssertEqual(
+            try ReportStore(fixture.db).unconsumed(projectId: fixture.project.id).map(\.kind), [.comment]
+        )
+    }
+
     private func lastPrompt() async throws -> String {
         let spawns = await fixture.runtime.spawns
         return try XCTUnwrap(spawns.last).prompt

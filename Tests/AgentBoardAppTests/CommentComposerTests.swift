@@ -42,13 +42,14 @@ final class CommentComposerTests: XCTestCase {
         let a = try makeTask("A")
         let b = try makeTask("B")
         let drafts = TaskDraftCache()
+        let env = renderEnvironment(db: db)
 
         drafts.setComment("stop, the migration is wrong", for: a.id)
-        XCTAssertNil(try CommentComposer.submit(from: drafts, to: b, db: db))
+        XCTAssertNil(try CommentComposer.submit(from: drafts, to: b, env: env))
         XCTAssertEqual(try CommentStore(db).list(taskId: b.id), [])
         XCTAssertEqual(drafts.comment(for: a.id), "stop, the migration is wrong")
 
-        XCTAssertNotNil(try CommentComposer.submit(from: drafts, to: a, db: db))
+        XCTAssertNotNil(try CommentComposer.submit(from: drafts, to: a, env: env))
         XCTAssertEqual(try CommentStore(db).list(taskId: a.id).map(\.body), ["stop, the migration is wrong"])
         XCTAssertEqual(drafts.comment(for: a.id), "")
     }

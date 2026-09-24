@@ -13,11 +13,14 @@ enum CommentComposer {
         return try Board(db).addComment(projectId: task.projectId, taskId: task.id, author: .human, body: draft)
     }
 
-    /// Submits the draft held for `task` itself, and clears it once written.
+    /// Submits the draft held for `task` itself, clears it once written, and announces the
+    /// comment's report to the orchestrator.
     @discardableResult
-    static func submit(from drafts: TaskDraftCache, to task: BoardTask, db: AppDatabase) throws -> TaskComment? {
-        guard let comment = try submit(drafts.comment(for: task.id), to: task, db: db) else { return nil }
+    static func submit(from drafts: TaskDraftCache, to task: BoardTask, env: AppEnvironment) throws -> TaskComment? {
+        guard let comment = try submit(drafts.comment(for: task.id), to: task, db: env.db) else { return nil }
         drafts.setComment("", for: task.id)
+        let supervisor = env.supervisor
+        _Concurrency.Task { await supervisor.reportQueued(projectId: task.projectId) }
         return comment
     }
 }
@@ -83,7 +86,7 @@ struct TaskCommentsSection: View {
 
     private func submit() {
         do {
-            try CommentComposer.submit(from: drafts, to: task, db: env.db)
+            try CommentComposer.submit(from: drafts, to: task, env: env)
         } catch {
             errorMessage = errorText(error)
         }
