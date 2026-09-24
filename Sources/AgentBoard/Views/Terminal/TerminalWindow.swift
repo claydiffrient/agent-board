@@ -13,6 +13,7 @@ struct TerminalWindow: View {
     @State private var command: (executable: String, arguments: [String])?
     @State private var loaded = false
     @State private var exitCode: Int32?
+    @State private var environment: [String] = []
 
     private var title: String {
         let shortId = session?.displayShortId ?? String(sessionId.prefix(8))
@@ -28,7 +29,8 @@ struct TerminalWindow: View {
                     TerminalHostView(
                         executable: command.executable,
                         arguments: command.arguments,
-                        currentDirectory: session.cwd
+                        currentDirectory: session.cwd,
+                        environment: environment
                     ) { code in
                         exitCode = code ?? -1
                     }
@@ -59,6 +61,7 @@ struct TerminalWindow: View {
                 taskTitle = try? TaskStore(env.db).get(taskId)?.title
             }
             command = env.supervisor.attachCommand(sessionId: sessionId)
+            environment = await ChildEnvironment.forTerminal()
             loaded = true
         }
     }
@@ -70,7 +73,7 @@ struct TerminalHostView: NSViewRepresentable {
     let currentDirectory: String
     /// Attach keeps the board variables an agent session is entitled to; a human shell passes
     /// `ChildEnvironment.forHumanShell`, which strips them.
-    var environment: [String] = ChildEnvironment.forTerminal()
+    let environment: [String]
     /// A leading `-` makes the child a login shell. Nil for anything that is not one.
     var execName: String? = nil
     let onExit: @MainActor (Int32?) -> Void
@@ -107,8 +110,8 @@ struct TerminalHostView: NSViewRepresentable {
 
     /// What an agent session's terminal gets. `OrchestratorConsole` launches its own process and
     /// reads this rather than mounting the view.
-    static func childEnvironment() -> [String] {
-        ChildEnvironment.forTerminal()
+    static func childEnvironment() async -> [String] {
+        await ChildEnvironment.forTerminal()
     }
 
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {

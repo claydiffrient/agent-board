@@ -227,7 +227,8 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   No install location of `claude` (`~/.local/bin`, `/opt/homebrew/bin`) is on
   it, nor are `gh`, `node` or `npx`. Agent Board looks `claude` up at its known
   install paths, and gives every agent process the PATH printed by the user's
-  interactive login shell (`$SHELL -i -l -c`), resolved once per launch. A
+  interactive login shell (`$SHELL -i -l -c`), resolved once per launch off the
+  main thread; a terminal awaits it before starting its process. A
   human shell builds its own PATH and keeps the inherited one.
 - **No programmatic read of account-wide remaining subscription quota exists.**
   Every budget in this spec is a self-imposed ceiling over what Agent Board

@@ -60,7 +60,7 @@ final class ChildEnvironmentTests: XCTestCase {
     }
 
     func testTerminalEnvironmentForcesTerm() {
-        let lines = ChildEnvironment.forTerminal(["TERM": "dumb", "FORCE_COLOR": "3"])
+        let lines = ChildEnvironment.forTerminal(["TERM": "dumb", "FORCE_COLOR": "3"], path: nil)
         XCTAssertTrue(lines.contains("TERM=xterm-256color"))
         XCTAssertTrue(lines.contains("COLORTERM=truecolor"))
         XCTAssertFalse(lines.contains { $0.hasPrefix("FORCE_COLOR=") })
@@ -111,5 +111,48 @@ final class LoginShellPathTests: XCTestCase {
 
     func testQueryReturnsNilForAMissingShell() {
         XCTAssertNil(LoginShellPath.query(shell: "/nonexistent/shell", base: [:]))
+    }
+
+    @MainActor
+    func testTerminalEnvironmentOnTheMainThreadDoesNotWaitOutASlowLoginShell() async {
+        let log = EventLog()
+        let release = DispatchSemaphore(value: 0)
+        let lookup = LoginShellPathLookup {
+            _ = release.wait(timeout: .now() + 5)
+            log.append("lookup finished")
+            return "/from/profile:/usr/bin"
+        }
+
+        let built = _Concurrency.Task { @MainActor in
+            await ChildEnvironment.forTerminal(["PATH": "/usr/bin:/bin"], lookup: lookup)
+        }
+        try? await _Concurrency.Task.sleep(for: .milliseconds(100))
+        log.append("main thread free")
+        release.signal()
+        let environment = await built.value
+
+        XCTAssertEqual(log.events, ["main thread free", "lookup finished"])
+        XCTAssertTrue(environment.contains("PATH=/from/profile:/usr/bin"))
+    }
+
+    func testEveryReaderAfterTheLookupGetsItsPath() async {
+        let lookup = LoginShellPathLookup { "/from/profile:/usr/bin" }
+        XCTAssertEqual(lookup.resolved, "/from/profile:/usr/bin")
+        let value = await lookup.value
+        XCTAssertEqual(value, "/from/profile:/usr/bin")
+        XCTAssertEqual(ChildEnvironment.sanitized(["PATH": "/usr/bin"], path: lookup.resolved)["PATH"], "/from/profile:/usr/bin")
+    }
+}
+
+private final class EventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+
+    func append(_ event: String) {
+        lock.withLock { recorded.append(event) }
+    }
+
+    var events: [String] {
+        lock.withLock { recorded }
     }
 }

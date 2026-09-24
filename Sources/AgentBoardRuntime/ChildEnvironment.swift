@@ -41,10 +41,16 @@ public enum ChildEnvironment {
         forTerminal(base.filter { key, _ in !boardAuthorityVariables.contains(key) }, path: nil)
     }
 
+    /// Awaits the login-shell PATH without holding the caller's thread, so a terminal opened on the
+    /// main thread before the lookup finishes does not freeze the UI.
     public static func forTerminal(
         _ base: [String: String] = ProcessInfo.processInfo.environment,
-        path: String? = LoginShellPath.resolved
-    ) -> [String] {
+        lookup: LoginShellPathLookup = LoginShellPath.shared
+    ) async -> [String] {
+        forTerminal(base, path: await lookup.value)
+    }
+
+    public static func forTerminal(_ base: [String: String], path: String?) -> [String] {
         var env = sanitized(base, path: path)
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
@@ -74,8 +80,11 @@ public enum LoginShell {
 public enum LoginShellPath {
     static let marker = "__AGENTBOARD_PATH__="
 
-    /// Resolved once per launch; the first reader blocks for the shell's startup (under a second here).
-    public static let resolved: String? = query(shell: LoginShell.path())
+    /// Started on first access and run once per launch.
+    public static let shared = LoginShellPathLookup { query(shell: LoginShell.path()) }
+
+    /// Blocks until the lookup finishes, up to `query`'s timeout, so it is for off-main callers only.
+    public static var resolved: String? { shared.resolved }
 
     /// `-i` as well as `-l`, because `.zshrc` is where most PATH edits live. stdout goes to a file rather
     /// than a pipe so a background job the profile starts cannot hold the read open past the timeout.
@@ -118,5 +127,33 @@ public enum LoginShellPath {
             .last { $0.hasPrefix(marker) }
             .map { String($0.dropFirst(marker.count)) }
             .flatMap { $0.isEmpty ? nil : $0 }
+    }
+}
+
+/// One run of a login-shell PATH query, started at init on a background queue.
+public final class LoginShellPathLookup: @unchecked Sendable {
+    private let finished = DispatchGroup()
+    /// Written once before `finished` is left, and read only after it has been.
+    private var path: String?
+
+    public init(query: @escaping @Sendable () -> String?) {
+        finished.enter()
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            path = query()
+            finished.leave()
+        }
+    }
+
+    public var resolved: String? {
+        finished.wait()
+        return path
+    }
+
+    public var value: String? {
+        get async {
+            await withCheckedContinuation { continuation in
+                finished.notify(queue: .global(qos: .userInitiated)) { continuation.resume(returning: self.path) }
+            }
+        }
     }
 }
