@@ -780,6 +780,13 @@ CREATE TABLE task_comment (
   created_at             INTEGER NOT NULL
 );
 CREATE INDEX task_comment_task_created ON task_comment(task_id, created_at);
+
+-- Human comments waiting for a live worker's or reviewer's next PostToolUse (§7).
+CREATE TABLE comment_delivery (
+  session_id TEXT NOT NULL REFERENCES agent_session(session_id) ON DELETE CASCADE,
+  comment_id INTEGER NOT NULL REFERENCES task_comment(id) ON DELETE CASCADE,
+  PRIMARY KEY (session_id, comment_id)
+);
 ```
 
 Every `epic.state` value is written by exactly one place, and nothing writes one
@@ -1481,7 +1488,7 @@ Generated into each managed session's `--settings`. All post to
 |---|---|
 | `SessionStart` | Mark `agent_session.state = running`; record transcript path |
 | `PreToolUse` (matcher `Bash`) | Deny `git push`, `gh pr create`, `gh pr merge`; append an `error` progress row (§8) |
-| `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row |
+| `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row; reply with a worker's post-compaction brief or queued human comments as `additionalContext` |
 | `Notification` | Set `blocked` + reason on the task and session; the task appears in the orchestrator's **Blocked** section (§10) and raises the project's attention signal, which posts the banner |
 | `Stop` | Mark session idle. **On the orchestrator, this is the trigger for the report notice** (§9) |
 | `SessionEnd` | Mark stopped/completed; reconcile final spend from the transcript |
@@ -1499,6 +1506,24 @@ installed CLI reads. Every other event replies `{}`.
 
 Spend metering tails the session's JSONL transcript rather than relying on
 hooks, since hooks do not carry `usage`.
+
+**Human comments reach a running session.** A `--bg` session cannot be written
+to, so a human comment is queued in `comment_delivery` for every live worker and
+reviewer session on its task, in the same transaction that writes it. The
+session's next `PostToolUse` replies with the queue as
+`hookSpecificOutput.additionalContext` and no `decision` key: a lead saying the
+human commented on your task, then each comment fenced as in the opening prompt
+(§3.1 step 6), labelled from the human with its UTC time. Comments go oldest
+first and together, within Claude Code's 10,000-character cap on one hook's
+text; whatever does not fit waits for the next tool call, and a single comment
+too long to fit is cut short with a pointer to `get_my_task`. Each is delivered
+once, and a `status` progress row records it. A session queued during setup
+carries its queue to the session id Claude issues. `SessionEnd` drops the
+session's queue; the comment stays on the task for the next spawn's prompt. A
+post-compaction brief already carries the thread, so it drops the queue too.
+Agents' comments are never queued. The queue is a table rather than memory
+because a worker outlives an Agent Board relaunch, so undelivered comments
+survive one.
 
 The blocking `Notification` types are `permission_prompt`, `agent_needs_input`,
 and anything prefixed `elicitation`. Each sets `task.blocked` with the

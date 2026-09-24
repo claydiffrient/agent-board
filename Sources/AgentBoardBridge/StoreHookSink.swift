@@ -12,6 +12,7 @@ public final class StoreHookSink: HookSink {
     private let shutdowns: ShutdownOrderStore
     private let deliveries: ShutdownDeliveryStore
     private let notes: NoteStore
+    private let comments: CommentStore
     private let epics: EpicStore
     private let locks: FileLockStore
     private let waitPolicy: FileLockWaitPolicy
@@ -67,6 +68,7 @@ public final class StoreHookSink: HookSink {
         shutdowns = ShutdownOrderStore(db)
         deliveries = ShutdownDeliveryStore(db)
         notes = NoteStore(db)
+        comments = CommentStore(db)
         epics = EpicStore(db)
         locks = FileLockStore(db)
         waitPolicy = lockWait
@@ -291,7 +293,7 @@ public final class StoreHookSink: HookSink {
             epicGoal: epic?.goal,
             notes: injected,
             reviewFindings: (try? progress.openReviewFindings(taskId: taskId)) ?? nil,
-            comments: (try? CommentStore(db).list(taskId: taskId)) ?? []
+            comments: (try? comments.list(taskId: taskId)) ?? []
         )
     }
 
@@ -441,7 +443,19 @@ public final class StoreHookSink: HookSink {
             }
             if awaitingReBrief.remove(sessionId) != nil,
                let brief = reBrief(session: session, taskId: taskId, scope: identity.scope) {
+                // The brief carries the comment thread, and its budget keeps the newest comments.
+                try? comments.dropDeliveries(sessionId: sessionId)
                 return .respond(.context(brief))
+            }
+            if let delivery = (try? comments.takeDelivery(sessionId: sessionId)) ?? nil {
+                if let taskId {
+                    let what = delivery.count == 1 ? "the human's comment" : "\(delivery.count) of the human's comments"
+                    _ = try? progress.append(
+                        taskId: taskId, sessionId: sessionId, kind: .status,
+                        text: "Delivered \(what) to the running session."
+                    )
+                }
+                return .respond(.context(delivery.text))
             }
 
         case "SubagentStop":
@@ -495,6 +509,7 @@ public final class StoreHookSink: HookSink {
                 try? sessions.setState(sessionId, .stopped, endedAt: .nowMillis)
             }
             try? locks.releaseAll(sessionId: sessionId)
+            try? comments.dropDeliveries(sessionId: sessionId)
 
         default:
             break

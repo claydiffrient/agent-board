@@ -216,8 +216,9 @@ public struct SessionStore: Sendable {
     }
 
     /// Swaps the placeholder id a setup row was written under for the session id Claude actually
-    /// issued, which every hook and transcript is keyed by. Nothing may reference the placeholder
-    /// yet: it is never handed to an agent, and the worker's grant binds after this returns.
+    /// issued, which every hook and transcript is keyed by. Nothing but a queued human comment may
+    /// reference the placeholder yet: it is never handed to an agent, and the worker's grant binds
+    /// after this returns. The prompt was composed before setup, so those comments move with the row.
     /// Throws if the row is gone or has left `setup` — a cap kill or a human stop got there first.
     public func promoteSetupSession(
         _ placeholderId: String, to sessionId: String, shortId: String?, state: SessionState = .starting
@@ -229,12 +230,21 @@ public struct SessionStore: Sendable {
             guard placeholder.state == .setup else {
                 throw BoardError.sessionNotInSetup(placeholderId, placeholder.state)
             }
+            let queued = try Int64.fetchAll(
+                db, sql: "SELECT comment_id FROM comment_delivery WHERE session_id = ?", arguments: [placeholderId]
+            )
             try db.execute(sql: "DELETE FROM agent_session WHERE session_id = ?", arguments: [placeholderId])
             var promoted = placeholder
             promoted.sessionId = sessionId
             promoted.shortId = shortId
             promoted.state = state
             try promoted.insert(db)
+            for commentId in queued {
+                try db.execute(
+                    sql: "INSERT INTO comment_delivery (session_id, comment_id) VALUES (?, ?)",
+                    arguments: [sessionId, commentId]
+                )
+            }
             return promoted
         }
     }

@@ -293,11 +293,21 @@ enum Schema {
     CREATE INDEX task_comment_task_created ON task_comment(task_id, created_at);
     """
 
+    /// Human comments waiting for a live session's next `PostToolUse` (SPEC §7). A row goes when it
+    /// is delivered, when its session ends, or with its session or comment.
+    static let commentDelivery = """
+    CREATE TABLE comment_delivery (
+      session_id TEXT NOT NULL REFERENCES agent_session(session_id) ON DELETE CASCADE,
+      comment_id INTEGER NOT NULL REFERENCES task_comment(id) ON DELETE CASCADE,
+      PRIMARY KEY (session_id, comment_id)
+    );
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
         "approval", "shutdown_order", "shutdown_delivery", "workspace", "file_lock", "message",
         "task_commit",
-        "roster_agent", "project_roster_agent", "task_comment",
+        "roster_agent", "project_roster_agent", "task_comment", "comment_delivery",
     ]
 }

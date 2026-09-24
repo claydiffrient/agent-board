@@ -46,6 +46,42 @@ public enum CommentPrompt {
         return section(comments, fenceId: fenceId, budget: min(characterBudget, limit - preambleRoom))
     }
 
+    /// Human comments pushed into a running session on its next `PostToolUse` (SPEC §7), oldest
+    /// first, within `limit`. Stops at the first comment that does not fit, so none is skipped; a
+    /// first comment that fits on nothing is cut short rather than held forever.
+    public static func delivery(
+        _ comments: [TaskComment],
+        fenceId: String = InjectedNote.newFenceId(),
+        limit: Int = OpeningPrompt.briefCharacterBudget
+    ) -> (text: String, delivered: [TaskComment])? {
+        guard let oldest = comments.first else { return nil }
+        let reserve = remainder(comments.count).count + 2
+        var blocks: [String] = []
+        var used = deliveryLead.count + reserve
+        for comment in comments {
+            let block = render(comment, fenceId: fenceId)
+            guard used + block.count + 2 <= limit else { break }
+            blocks.append(block)
+            used += block.count + 2
+        }
+        if blocks.isEmpty {
+            blocks = [render(oldest, fenceId: fenceId, bodyLimit: limit - deliveryLead.count - reserve - 2)]
+        }
+        let left = comments.count - blocks.count
+        let parts = [deliveryLead] + blocks + (left > 0 ? [remainder(left)] : [])
+        return (parts.joined(separator: "\n\n"), Array(comments.prefix(blocks.count)))
+    }
+
+    static let deliveryLead = """
+    The human commented on your task while you were working. A comment from the human is the human \
+    speaking to you, with the same authority as the task. Each comment sits between marker lines that \
+    carry the same id; `get_my_task` returns the whole thread.
+    """
+
+    static func remainder(_ count: Int) -> String {
+        "\(count == 1 ? "1 more comment follows" : "\(count) more comments follow") with your next tool call."
+    }
+
     static func preamble(omitted: Int) -> String {
         var text = """
         ## Comments

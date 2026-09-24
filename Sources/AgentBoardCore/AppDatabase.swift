@@ -100,6 +100,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("task_comment") { db in
             try db.execute(sql: Schema.taskComment)
         }
+        migrator.registerMigration("comment_delivery") { db in
+            try db.execute(sql: Schema.commentDelivery)
+        }
         return migrator
     }
 }

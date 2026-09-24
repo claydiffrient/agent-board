@@ -40,8 +40,51 @@ public struct CommentStore: Sendable {
                 db, projectId: task.projectId, taskId: task.id, sessionId: nil, kind: .comment,
                 body: reportBody(task: task, comment: body)
             )
+            try queueForLiveSessions(db, comment: comment)
         }
         return comment
+    }
+
+    /// A reviewer's session row is `role = worker` too, so this reaches both.
+    static func queueForLiveSessions(_ db: Database, comment: TaskComment) throws {
+        guard let commentId = comment.id else { return }
+        let live = SessionState.allCases.filter(\.isActive).map(\.rawValue)
+        try db.execute(
+            sql: """
+                INSERT INTO comment_delivery (session_id, comment_id)
+                SELECT session_id, ? FROM agent_session
+                WHERE task_id = ? AND role = ? AND state IN (\(databaseQuestionMarks(count: live.count)))
+                """,
+            arguments: [commentId, comment.taskId, SessionRole.worker.rawValue] + StatementArguments(live)
+        )
+    }
+
+    /// The human comments queued for the session that fit one hook's injected text, oldest first,
+    /// taken off the queue as they are returned. What does not fit stays for the next call.
+    public func takeDelivery(sessionId: String) throws -> (text: String, count: Int)? {
+        try db.writer.write { db in
+            let queued = try TaskComment.fetchAll(
+                db,
+                sql: """
+                    SELECT c.* FROM task_comment c JOIN comment_delivery d ON d.comment_id = c.id
+                    WHERE d.session_id = ? ORDER BY c.created_at, c.id
+                    """,
+                arguments: [sessionId]
+            )
+            guard let delivery = CommentPrompt.delivery(queued) else { return nil }
+            let ids = delivery.delivered.compactMap(\.id)
+            try db.execute(
+                sql: "DELETE FROM comment_delivery WHERE session_id = ? AND comment_id IN (\(databaseQuestionMarks(count: ids.count)))",
+                arguments: [sessionId] + StatementArguments(ids)
+            )
+            return (delivery.text, ids.count)
+        }
+    }
+
+    public func dropDeliveries(sessionId: String) throws {
+        try db.writer.write { db in
+            try db.execute(sql: "DELETE FROM comment_delivery WHERE session_id = ?", arguments: [sessionId])
+        }
     }
 
     static func reportBody(task: Task, comment: String) -> String {
