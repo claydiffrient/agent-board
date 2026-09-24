@@ -4,6 +4,7 @@ import SwiftUI
 struct EpicLaneHeader: View {
     let epic: Epic
     let count: EpicTaskCount
+    var pullRequest: PullRequestReference?
     let integrationPending: Bool
     let isCollapsed: Bool
     let onToggleCollapse: () -> Void
@@ -30,7 +31,7 @@ struct EpicLaneHeader: View {
             .help(isCollapsed ? "Expand this epic's lane" : "Collapse this epic's lane")
             Text(epic.title)
                 .font(.subheadline.weight(.semibold))
-            EpicStateBadge(state: epic.state)
+            EpicStateBadge(state: epic.state, pullRequest: pullRequest)
             Text(epic.branch)
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
@@ -83,14 +84,16 @@ struct EpicLaneHeader: View {
 
 struct EpicStateBadge: View {
     let state: EpicState
+    var pullRequest: PullRequestReference?
 
     var body: some View {
-        Text(state.rawValue)
+        Text(EpicLane.stateLabel(state: state, pullRequest: pullRequest))
             .font(.caption2.weight(.medium))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(Capsule().fill(color.opacity(0.18)))
             .foregroundStyle(color)
+            .help(pullRequest?.url ?? "")
     }
 
     private var color: Color {
@@ -98,6 +101,7 @@ struct EpicStateBadge: View {
         case .planning: .secondary
         case .active: .blue
         case .integrating: .orange
+        case .pullRequestOpen: .purple
         case .done: .green
         case .abandoned: .red
         }

@@ -422,6 +422,19 @@ struct SupervisorFixture {
         return result
     }
 
+    /// An orchestrator tool call under a fresh orchestrator grant, wired to this fixture's supervisor.
+    @discardableResult
+    func callOrchestratorTool(_ name: String, arguments: JSONValue) async throws -> ToolResult {
+        let sink = LateBoundSink()
+        sink.target = supervisor
+        let grant = try grants.issue(projectId: project.id, scope: .orchestrator, taskId: nil)
+        let result = try await OrchestratorToolHandler(db: db, control: sink, events: sink).call(
+            name, arguments: arguments, identity: try await identity(token: grant.token)
+        )
+        await result.afterResponse?()
+        return result
+    }
+
     func identity(token: String) async throws -> TokenIdentity {
         guard let identity = await resolver.resolve(token: token) else {
             throw FixtureError("token \(token) did not resolve")

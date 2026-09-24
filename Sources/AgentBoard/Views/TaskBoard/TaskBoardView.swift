@@ -13,6 +13,7 @@ struct TaskBoardView: View {
     @State private var showNewTask = false
     @State private var showNewEpic = false
     @State private var approvals = Observed<[Approval]>([])
+    @State private var epicPullRequests = Observed<[String: PullRequestReference]>([:])
     @State private var busyMessage: String?
     @State private var errorMessage: String?
     @State private var taskPendingDelete: BoardTask?
@@ -197,6 +198,9 @@ struct TaskBoardView: View {
         .task(id: project.id) {
             await approvals.run(ApprovalStore(env.db).observePending(projectId: project.id), in: env.db.reader)
         }
+        .task(id: project.id) {
+            await epicPullRequests.run(ApprovalStore(env.db).observeEpicPullRequests(projectId: project.id), in: env.db.reader)
+        }
         .task {
             await rosterAgents.run(RosterStore(env.db).observe(), in: env.db.reader)
         }
@@ -336,7 +340,7 @@ struct TaskBoardView: View {
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
                 HStack(spacing: 6) {
-                    EpicStateBadge(state: epic.state)
+                    EpicStateBadge(state: epic.state, pullRequest: epicPullRequests.value[epic.id])
                     Text(lane.count.label)
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -411,6 +415,7 @@ struct TaskBoardView: View {
                 EpicLaneHeader(
                     epic: epic,
                     count: lane.count,
+                    pullRequest: epicPullRequests.value[epic.id],
                     integrationPending: epicsAwaitingIntegrationApproval.contains(epic.id),
                     isCollapsed: collapsed,
                     onToggleCollapse: { toggleCollapse(epic) },

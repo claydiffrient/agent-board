@@ -188,7 +188,7 @@ final class PullRequestLandingTests: XCTestCase {
         XCTAssertEqual(settled.landing, .unlanded)
         XCTAssertEqual(settled.landingDetail, conflicted)
         XCTAssertNil(try fixture.tasks.recordedPullRequest(taskId: task.id))
-        XCTAssertEqual(fixture.gh.calls, [])
+        XCTAssertEqual(fixture.gh.calls, [PullRequestStateReader.arguments(url: epicURL)], "the task-branch PR was checked")
     }
 
     /// With no stored choice, `origin` decides: none means the accept merges into the base branch as

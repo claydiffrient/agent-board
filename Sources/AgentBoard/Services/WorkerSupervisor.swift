@@ -669,7 +669,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 )
             )
             assigned = placeholder
-            try epics.setState(epicId, .integrating)
+            // A PR-open epic stays so: its pull request, not this integrator, decides when it is done.
+            if epic.state != .pullRequestOpen { try epics.setState(epicId, .integrating) }
             beginSetup(
                 LaunchPlan(
                     project: project,
@@ -1037,7 +1038,65 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 keepOpenLanding(current, detail: PullRequestLanding.openDetail(pr, uncheckedBecause: describe(error)))
             }
         }
+        if taskId == nil { touched.formUnion(await refreshEpicPullRequests(projectId: projectId)) }
         for projectId in touched { announceReports(projectId: projectId) }
+    }
+
+    /// SPEC §5.2: settles each PR-open epic against GitHub. Merged makes the epic `done` and lands
+    /// every done task whose commits the epic branch carries; closed returns it to `active` with a
+    /// `decision` report. Returns the projects that gained a report.
+    private func refreshEpicPullRequests(projectId: String?) async -> Set<String> {
+        guard let checks = try? board.epicPullRequestChecks(projectId: projectId) else { return [] }
+        let reader = pullRequestStates
+        var touched: Set<String> = []
+        for check in checks where !landingChecksInFlight.contains(check.epic.id) {
+            guard let project = try? projects.get(check.epic.projectId) else { continue }
+            landingChecksInFlight.insert(check.epic.id)
+            defer { landingChecksInFlight.remove(check.epic.id) }
+            let repo = URL(fileURLWithPath: project.repoPath)
+            let url = check.pullRequest.url
+            do {
+                switch try await offMain({ try reader.state(of: url, cwd: repo) }) {
+                case .merged(let commit):
+                    let landed = await tasksCarried(by: check.epic, project: project)
+                    if try board.landEpicPullRequest(
+                        epicId: check.epic.id, pullRequest: check.pullRequest, commit: commit, landedTaskIds: landed
+                    ) {
+                        touched.insert(project.id)
+                    }
+                case .closed:
+                    if try board.reopenEpicAfterClosedPullRequest(epicId: check.epic.id, pullRequest: check.pullRequest) != nil {
+                        touched.insert(project.id)
+                    }
+                case .open:
+                    break
+                }
+            } catch {
+                report(["could not check pull request #\(check.pullRequest.number) for epic \(check.epic.id): \(describe(error))"])
+            }
+        }
+        return touched
+    }
+
+    /// The epic's `done` tasks whose work is on its branch: landed there on accept, or carried by a
+    /// branch (or its reaped tip) the epic branch contains. A conflicted merge the integrator never
+    /// finished is left `unlanded`.
+    private func tasksCarried(by epic: Epic, project: Project) async -> [String] {
+        let members = ((try? tasks.list(projectId: project.id, epicId: epic.id, includeArchived: true)) ?? [])
+            .filter { $0.column == .done && $0.landing != .noBranch }
+        let manager = worktreeManager(for: project)
+        let epicBranch = epic.branch
+        let pending = members.filter { $0.landing != .landed }.map(\.id)
+        let contained = (try? await offMain { () -> Set<String> in
+            var inBranch: Set<String> = []
+            for id in pending {
+                let tip = try manager.refCommit("refs/heads/" + Self.taskBranchPrefix + id)
+                    ?? manager.refCommit(TaskBranchLedger.tipRef(taskId: id))
+                if let tip, try manager.isMerged(commit: tip, into: epicBranch) { inBranch.insert(id) }
+            }
+            return inBranch
+        }) ?? []
+        return members.filter { $0.landing == .landed || contained.contains($0.id) }.map(\.id)
     }
 
     private func keepOpenLanding(_ task: BoardTask, detail: String) {
