@@ -25,7 +25,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "spawn_worker", "stop_worker", "archive_task", "unarchive_task", "get_report",
         "promote_proposal", "get_epic", "request_integration", "close_epic", "open_pull_request",
         "read_note", "append_section", "replace_section", "attach_note", "pin_note",
-        "assign_to_agent",
+        "assign_to_agent", "add_comment",
     ]
 
     /// The whole of the permitted crossing: queue text into another project's channel, and learn
@@ -64,7 +64,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
             "a tool was added to the orchestrator surface without a cross-project test in this file"
         )
         XCTAssertEqual(classified.subtracting(surface), [], "this audit names tools that no longer exist")
-        XCTAssertEqual(surface.count, 35)
+        XCTAssertEqual(surface.count, 36)
     }
 
     func testOnlySendMessageAcceptsAnotherProjectsId() async {
@@ -100,6 +100,10 @@ final class CrossProjectBoundaryTests: XCTestCase {
             containing: "not in this project"
         )
         await XCTAssertToolError(
+            try await f.call("add_comment", ["task_id": .string(foreign.id), "body": .string("x")]),
+            containing: "not in this project"
+        )
+        await XCTAssertToolError(
             try await f.call("archive_task", ["task_id": .string(foreign.id)]),
             containing: "not in this project"
         )
@@ -132,6 +136,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         XCTAssertFalse(untouched.isArchived)
         XCTAssertEqual(try f.tasks.deps(of: mine.id), [])
         XCTAssertEqual(try f.progress.list(taskId: foreign.id).count, 0)
+        XCTAssertEqual(try CommentStore(f.db).list(taskId: foreign.id), [])
         XCTAssertEqual(try f.tasks.list(projectId: f.project.id).map(\.title).sorted(), ["mine"])
     }
 
