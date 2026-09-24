@@ -198,6 +198,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
             $0.buildCommand = "make"
             $0.worktreeStrategy = .shared
             $0.sharedCheckoutMaxAgents = 5
+            $0.standaloneIntegration = .localMerge
         }
 
         XCTAssertEqual(mounted.fields.map(\.stringValue), ["make", "", "5", ""])
@@ -205,7 +206,10 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
             mounted.fields.map(\.placeholderString),
             ["e.g. swift build", "e.g. swift test", nil, "e.g. clay/{slug}"]
         )
-        XCTAssertEqual(mounted.collect(NSPopUpButton.self).map(\.title), [WorktreeStrategy.shared.title])
+        XCTAssertEqual(
+            mounted.collect(NSPopUpButton.self).map(\.title),
+            [WorktreeStrategy.shared.title, StandaloneIntegration.localMerge.title]
+        )
     }
 
     func testNotificationsHoldsOneSwitchPerCategoryInItsStoredState() throws {

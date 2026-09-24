@@ -1015,7 +1015,8 @@ nobody reviewed.
   The accept then merges the task's branch into the branch meant to carry it:
   `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling
   spawned into the epic branches from work that is already in, and the project's
-  base branch for a task in none. The merge runs after the acceptance
+  base branch for a task in none — unless the project integrates standalone
+  tasks by pull request, below, when a task in none merges nothing. The merge runs after the acceptance
   transaction and off the main actor: nothing it does can hold the task out of
   `done`. When the target branch is an ancestor of the task branch the ref is
   advanced directly; otherwise a temporary worktree on the target branch carries
@@ -1068,10 +1069,58 @@ nobody reviewed.
   - `landed` — the target branch contains the task's commits.
   - `unlanded` — the task has commits and the target branch does not contain
     them. The work is reachable only from `agentboard/<task-id>`.
+  - `awaiting_pull_request` — a task in no epic, accepted in a project that
+    integrates standalone tasks by pull request; nothing was merged and the
+    task branch is kept.
+  - `pull_request_open` — a pull request is recorded for the task and has not
+    merged. `landing_detail` leads with its URL.
 
-  `pending` and `unlanded` show as a badge on the card and in the inspector, and
-  queue a `decision` report naming the task, the branch, the target and the
-  reason, so the orchestrator can dispatch a fix rather than discover the
+  **Integrating standalone tasks by pull request.** Workflow → Publishing's
+  "Integrate standalone tasks by" is *Pull request* or *Local merge*. A project
+  that never chose stores neither, and the accept resolves it by running
+  `git remote get-url origin` off the main actor: a repository with an `origin`
+  integrates by pull request, and one without — or a missing repository or
+  git — by local merge. The picker's first entry is that default, labelled with
+  what it resolved to ("Pull request (default: has origin)"); a stored choice
+  always wins. Only `gh` opens and checks pull requests, so an `origin` on a
+  host other than GitHub still resolves to *Pull request*: its tasks wait at
+  `awaiting_pull_request`, and an approved `open_pull_request` pushes the
+  branch to that `origin` and then fails with `gh`'s "none of the git remotes
+  configured for this repository point to a known GitHub host", so such a
+  project should choose *Local merge*. Under *Pull
+  request* the accept of a task in no epic does no local merge: a task with no
+  branch is still `no_branch`, and one whose branch the base branch already
+  contains is still `landed`; any other is `awaiting_pull_request`, or
+  `pull_request_open` when a pull request was recorded before the accept.
+  Tasks in an epic merge into their epic branch either way, and nothing below
+  ever applies to one: an epic's pull request carries the epic branch, which
+  says nothing about a member whose merge into it conflicted. `push_branch` and
+  `open_pull_request` keep their human approval. A task's pull request is the
+  URL an approved `open_pull_request` naming that task recorded on its
+  `approval` row (`published_url`) — never text read off the card, where a
+  worker's `update_status` detail is a `status` row too, written with no
+  session id until its grant is bound. When that URL is recorded against a
+  `done` task that has not landed, the task moves to `pull_request_open`. The
+  merge check then asks
+  `gh pr view <url> --json state,mergedAt,mergeCommit`, off the main actor, on
+  the first metering tick after launch, every 10 minutes after that, and when
+  the inspector opens the task: `MERGED` makes it `landed` with the merge commit
+  in `landing_detail` — ancestry cannot settle this, since a squash merge puts a
+  new commit on the base branch — and `CLOSED` makes it `unlanded`, naming the
+  pull request, with a `decision` report. A `gh` that is missing, logged out or
+  failing leaves the landing as it was and puts the reason in its detail. The
+  same check adopts a `done`, `unlanded` task whose recorded pull request its
+  detail does not already name, which clears the tasks accepted before this
+  existed; for those, the `published_url` migration recovered the URL from the
+  progress row the publish wrote. A closed pull request's detail names it, so
+  each is checked once: one reopened and merged afterwards is not re-adopted,
+  and the human lands that task by hand or opens a new pull request.
+
+  `pending`, `unlanded`, `awaiting_pull_request` and `pull_request_open` show as
+  a badge on the card and in the inspector. All but `pull_request_open` queue a
+  `decision` report naming the task, the branch, the target and the
+  reason — for `awaiting_pull_request`, that a pull request is owed — so the
+  orchestrator can dispatch a fix rather than discover the
   divergence at integration time. The board can therefore never say `done` while
   silently meaning "done, and the work is nowhere": reaching `done` writes a
   landing, and the default value is the one that asks for attention.
@@ -2181,8 +2230,11 @@ thing naming them there.
 **Task Board** — columns from §5, swimlanes by epic. A card shows title, epic,
 assigned agent, elapsed, spend, its `blocked`/`failed` flag, and a comment count
 when it has comments — one per-project count query for the whole board, not one
-per card. Drag between columns. Cards in `review` show the branch, worktree path,
-and a diffstat.
+per card. A `done` card whose landing (§5) asks for attention shows it as a pill —
+"not landed", "landing unknown", "PR pending", or "PR #N open" once a pull request
+is recorded — with the landing detail, including why a merge check could not run,
+as its tooltip. Drag between columns. Cards in `review` show the branch, worktree
+path, and a diffstat.
 
 The task inspector shows a **Comments** thread above the Progress log, oldest
 first. Each comment names its author in words — `You`, `Orchestrator`,
@@ -2211,6 +2263,30 @@ disappear silently. Turning the toggle on draws archived cards back into the
 columns they actually sit in (always `done`), dimmed to 55% opacity with a
 dashed border and an "archived `<when>`" line; from there a card's context menu
 or the inspector unarchives it.
+
+**Searching the board** — a search field heads the board, filtering in place:
+a matching card stays in its own column and lane, and nothing is regrouped
+into a results list. Every whitespace-separated term must appear, case- and
+diacritic-insensitively, in one of the task's title, body, acceptance criteria,
+epic title, model (id or display name), or the name of the rostered agent that
+last worked or reviewed it; the task id is not searched. While a query is
+active an epic lane with no match vanishes, header and rail entry included,
+and a collapsed lane with a match is drawn open without changing its saved
+state. The lane header's done/total tally and actions still count the whole
+epic. Search does not reach past **Show Archived**: an archived match stays
+hidden, but its lane stays with the per-column "1 archived" notice, and the
+summary beside the field says "1 archived match hidden". The summary reads "3
+of 41 tasks", or "No tasks match “idle cap”" in place of an empty-result
+screen. ⌘F (**Edit ▸ Find…**) focuses the field of whichever screen is showing
+and is disabled on a screen without one; Escape in the field clears it. The same
+field (`SearchField`) is the one Notes and Status use, so that wording and ⌘F
+are decided once. The filter is in memory over rows the board already observes,
+with no FTS table. Each task's searchable text is folded once into an in-memory
+index, rebuilt only when the tasks, epic titles or agent names change; a render
+with no query builds none. Measured on the largest real board, 235 tasks and
+793 KB of text, in a debug build: folding costs 17 ms and matching over folded
+text 2.5 ms, so one board layout costs 0.7–1.0 ms with no query, 3.4–3.7 ms per
+keystroke, and 20–22 ms when a task changes under an active query.
 
 **Ending an epic by hand** — the epic lane header carries a `…` menu with
 **Close as done** and **Abandon**. Integration (§5.2) is how an epic ends when
@@ -2272,6 +2348,24 @@ ended an hour ago is exactly the row this is for. When this project holds no por
 section draws nothing: the sidebar panel keeps its header line when empty because
 that line carries the refresh button, and this section has no button to keep.
 
+**Searching the Status pane** — the same `SearchField` as the board, heading
+the pane, narrows the roster and the ports section together: `:3000` finds a
+port, `idle cap` finds a session's task and the port that session holds. Terms
+match as on the board, every one somewhere in a single row. A session row
+matches on its short id, task title, role label (so the rostered agent's name),
+state as drawn and as stored (`setting up`, `setup`), and model id or display
+name; not on its last tool, which changes under the query while the session
+works, nor its full session id. A port row matches on `:<port>`, its command,
+and its owner's title — the task, `Session …`, or `Terminal`; not on the project
+name, which every port on one project's pane shares. As an epic lane does on
+the board, a ports section with no match disappears, header and divider
+included. The roster table keeps its column headers with no rows, and its
+"No Sessions" placeholder still describes the unsearched roster. Search does
+not reach past **Show ended**, the way the board's does not reach past Show
+Archived: the summary counts ended matches instead — "No sessions match “idle”
+· 1 ended match hidden · 1 of 2 ports". Filtering reads the rows the sidebar
+panel's sweep already holds, so a query starts no sweep.
+
 **Roster** — the cross-project register of specialists (§4), and the one screen
 not scoped to a project: a `Roster` row in the sidebar beside `At a Glance` and
 above the workspace sections, so it does not join Task Board and Status inside a
@@ -2294,6 +2388,24 @@ of tasks/epics each note is attached to. Shows which agent last wrote each
 section. Each section header carries a copy button that puts that section on the
 clipboard as `## heading` followed by the text on screen — unsaved edits
 included, since that is what the human is looking at.
+
+**Searching notes** — the shared `SearchField` (see *Searching the board*)
+heads the Notes screen and filters the list in place through
+`NoteStore.search`, the same FTS5 query `search_notes` runs; there is no
+second search path. A note matches on its title or on any section's heading
+or text, since `note_fts.body` is every section joined. The field's text is
+not FTS5 syntax: each whitespace-separated term becomes a quoted literal
+matched as a token prefix, all terms required (`NoteSearch.ftsQuery`), so
+"idl" already finds "idle", and `cap:`, `AND` or an unbalanced quote are
+searched for rather than parsed — a half-typed query cannot raise a syntax
+error. A term with no letter or digit is dropped, and text with nothing left
+leaves the list unfiltered rather than empty. Matching is by token prefix,
+not substring: "dle" does not find "idle", unlike the Task Board. The list
+keeps its own order (pinned first, then most recently updated) while
+filtered and ignores the bm25 rank, so a note does not jump as the query is
+typed out and is where it was when the query is cleared. An empty result is
+said beside the field ("No notes match “…”"), not in place of the list. A
+selected note stays open in the editor even when the query hides its row.
 
 **Project sidebar** — projects grouped into workspaces. Each workspace is a
 collapsible section in `workspace.ordering` order holding the projects whose

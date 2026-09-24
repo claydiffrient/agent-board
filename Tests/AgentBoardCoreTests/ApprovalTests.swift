@@ -21,7 +21,7 @@ final class ApprovalMigrationTests: XCTestCase {
             let columns = try db.columns(in: "approval")
             XCTAssertEqual(
                 columns.map(\.name),
-                ["id", "project_id", "kind", "task_id", "epic_id", "requested_by", "reason", "created_at", "resolved_at", "resolution", "payload"]
+                ["id", "project_id", "kind", "task_id", "epic_id", "requested_by", "reason", "created_at", "resolved_at", "resolution", "payload", "published_url"]
             )
             XCTAssertTrue(columns.contains { $0.name == "requested_by" && $0.isNotNull })
             XCTAssertEqual(columns.first { $0.name == "resolved_at" }?.isNotNull, false)
@@ -29,7 +29,7 @@ final class ApprovalMigrationTests: XCTestCase {
             XCTAssertTrue(indexes.contains("approval_pending"))
         }
         let applied = try db.writer.read { try AppDatabase.migrator.appliedIdentifiers($0) }
-        XCTAssertEqual(applied, ["v1", "task_model", "approval", "note_section_written_by", "shutdown_order", "shutdown_delivery", "task_archived_at", "task_done_at", "workspace", "approval_payload", "file_lock", "message", "session_tool_in_flight", "task_commit", "task_landing", "roster", "roster_assignment", "review_level", "session_review_head", "task_comment", "comment_delivery"])
+        XCTAssertEqual(applied, ["v1", "task_model", "approval", "note_section_written_by", "shutdown_order", "shutdown_delivery", "task_archived_at", "task_done_at", "workspace", "approval_payload", "file_lock", "message", "session_tool_in_flight", "task_commit", "task_landing", "roster", "roster_assignment", "review_level", "session_review_head", "approval_published_url", "note_fts_rebuild", "task_comment", "comment_delivery"])
     }
 
     func testApprovalRequiresExistingProjectAndTask() throws {

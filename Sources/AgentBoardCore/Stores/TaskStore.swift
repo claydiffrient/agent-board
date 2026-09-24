@@ -318,11 +318,67 @@ public struct TaskStore: Sendable {
                 db,
                 sql: """
                 SELECT * FROM task
-                WHERE project_id = ? AND column_name = 'done' AND landing IN ('pending', 'unlanded')
+                WHERE project_id = ? AND column_name = 'done'
+                  AND landing IN ('pending', 'unlanded', 'awaiting_pull_request', 'pull_request_open')
                 ORDER BY done_at
                 """,
                 arguments: [projectId]
             )
+        }
+    }
+
+    /// The newest pull request an approved `open_pull_request` opened for this task, or nil for a
+    /// task in an epic, which reaches the base branch through its epic's pull request instead.
+    public func recordedPullRequest(taskId: String) throws -> PullRequestReference? {
+        try db.reader.read { db in try Self.recordedPullRequest(db, taskId: taskId) }
+    }
+
+    static func recordedPullRequest(_ db: Database, taskId: String) throws -> PullRequestReference? {
+        guard try Bool.fetchOne(db, sql: "SELECT epic_id IS NULL FROM task WHERE id = ?", arguments: [taskId]) == true
+        else { return nil }
+        return try ApprovalStore.publishedPullRequest(db, taskId: taskId)
+    }
+
+    /// `done` tasks whose recorded pull request has not merged yet: what the merge check visits.
+    public func openPullRequestLandings(projectId: String? = nil, taskId: String? = nil) throws -> [BoardTask] {
+        try db.reader.read { db in
+            try BoardTask.fetchAll(
+                db,
+                sql: """
+                SELECT * FROM task
+                WHERE column_name = 'done' AND landing = 'pull_request_open'
+                  AND (?1 IS NULL OR project_id = ?1) AND (?2 IS NULL OR id = ?2)
+                ORDER BY done_at
+                """,
+                arguments: [projectId, taskId]
+            )
+        }
+    }
+
+    /// Moves a `done`, `unlanded` task in no epic with a recorded pull request to `pullRequestOpen`,
+    /// so the merge check picks it up. Idempotent: a task whose detail already names that pull
+    /// request — the closed-without-merging detail does — was checked and is left alone.
+    @discardableResult
+    public func adoptRecordedPullRequests(projectId: String? = nil, taskId: String? = nil) throws -> Int {
+        try db.writer.write { db in
+            let stranded = try BoardTask.fetchAll(
+                db,
+                sql: """
+                SELECT * FROM task
+                WHERE column_name = 'done' AND landing = 'unlanded' AND epic_id IS NULL
+                  AND (?1 IS NULL OR project_id = ?1) AND (?2 IS NULL OR id = ?2)
+                """,
+                arguments: [projectId, taskId]
+            )
+            var adopted = 0
+            for task in stranded {
+                guard let pr = try Self.recordedPullRequest(db, taskId: task.id),
+                      task.landingDetail?.contains(pr.url) != true
+                else { continue }
+                try Self.setLanding(db, task.id, .pullRequestOpen, detail: PullRequestLanding.openDetail(pr))
+                adopted += 1
+            }
+            return adopted
         }
     }
 

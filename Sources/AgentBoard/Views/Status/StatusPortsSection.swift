@@ -3,26 +3,22 @@ import SwiftUI
 
 /// This project's listening ports, between the roster and the Status footer (SPEC §10).
 ///
-/// Reads `ListeningPortModel.ports(inProject:)` — the sidebar panel's sweep, filtered. It starts no
-/// sweep and owns no refresh affordance: the panel that does is on screen beside this one, and a
-/// second timer over the same process table would double the cost and let the two disagree between
-/// ticks.
+/// Draws the rows `StatusView` hands it: `ListeningPortModel.ports(inProject:)` — the sidebar panel's
+/// sweep, filtered — narrowed by the pane's search. It starts no sweep and owns no refresh
+/// affordance: the panel that does is on screen beside this one, and a second timer over the same
+/// process table would double the cost and let the two disagree between ticks.
 ///
 /// **An orphan appears here whenever its ended session still names a project.** `agent_session` and
 /// `task` outlive the process, so a ledger-sourced row resolves a `projectId` and lands in the pane
 /// for that project — the dev server whose session ended an hour ago is exactly the row this is for.
 ///
-/// Nothing is drawn when this project holds no ports. The sidebar panel keeps its header line even
+/// Nothing is drawn when this project holds no ports, or none match the search. The sidebar panel keeps its header line even
 /// when empty because that line carries the refresh button; this section carries no button, so an
 /// empty one would cost the roster vertical space for no information.
 struct StatusPortsSection: View {
-    let project: Project
+    let ports: [AttributedPort]
 
     @Environment(AppEnvironment.self) private var env
-
-    private var ports: [AttributedPort] {
-        env.listeningPorts.map { $0.ports(inProject: project.id) } ?? []
-    }
 
     var body: some View {
         if let model = env.listeningPorts, !ports.isEmpty {

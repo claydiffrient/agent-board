@@ -22,10 +22,18 @@ public enum TaskLanding: String, Codable, Sendable, CaseIterable, Equatable, Dat
     /// from the task branch until a human lands it.
     case unlanded
 
+    /// A task in no epic, in a project that integrates by pull request: the accept merged nothing
+    /// and the kept task branch waits for a pull request to be opened.
+    case awaitingPullRequest = "awaiting_pull_request"
+
+    /// A pull request is recorded for the task's branch and has not merged. `landingDetail` carries
+    /// its URL, which the pill's number and the merge check both read.
+    case pullRequestOpen = "pull_request_open"
+
     /// Whether the board should call the human's attention to this task after it reached `done`.
     public var needsAttention: Bool {
         switch self {
-        case .pending, .unlanded: return true
+        case .pending, .unlanded, .awaitingPullRequest, .pullRequestOpen: return true
         case .noBranch, .landed: return false
         }
     }
@@ -36,6 +44,40 @@ public enum TaskLanding: String, Codable, Sendable, CaseIterable, Equatable, Dat
         case .noBranch: return "nothing to land"
         case .landed: return "landed"
         case .unlanded: return "not landed"
+        case .awaitingPullRequest: return "PR pending"
+        case .pullRequestOpen: return "PR open"
         }
+    }
+}
+
+/// The landing details a pull request produces. An open or merged detail leads with the URL, so
+/// `PullRequestReference(in:)` reads it back for the pill and the next merge check.
+public enum PullRequestLanding {
+    public static func awaitingDetail(branch: String, base: String) -> String {
+        "`\(branch)` awaits a pull request into `\(base)`: this project integrates standalone tasks by "
+            + "pull request, so the accept merged nothing locally."
+    }
+
+    public static func awaitingAdvice(branch: String) -> String {
+        "Open one with `open_pull_request(branch: \"\(branch)\")`; the task is marked landed once GitHub "
+            + "reports it merged."
+    }
+
+    public static func openDetail(_ pr: PullRequestReference, uncheckedBecause reason: String? = nil) -> String {
+        let open = "\(pr.url) — pull request #\(pr.number) is open."
+        guard let reason else { return open }
+        return open + "\nIts state could not be checked, so this may be stale: \(reason)"
+    }
+
+    public static func mergedDetail(_ pr: PullRequestReference, commit: String?) -> String {
+        "\(pr.url) — pull request #\(pr.number) merged" + (commit.map { " as \($0)." } ?? ".")
+    }
+
+    public static func closedDetail(_ pr: PullRequestReference, branch: String) -> String {
+        "`\(branch)` did not land: pull request #\(pr.number) was closed without merging (\(pr.url))."
+    }
+
+    public static func closedAdvice(branch: String) -> String {
+        "Reopen it, or open a new pull request from `\(branch)`."
     }
 }

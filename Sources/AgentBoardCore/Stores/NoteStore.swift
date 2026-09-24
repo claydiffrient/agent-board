@@ -34,7 +34,7 @@ public struct NoteStore: Sendable {
                 ).insert(db)
                 ordering += 1
             }
-            try index(db, noteId: note.id)
+            try Self.index(db, noteId: note.id)
             return note
         }
     }
@@ -111,7 +111,7 @@ public struct NoteStore: Sendable {
     ) throws -> Note {
         try db.writer.write { db in
             let note = try checkedNote(db, noteId, ifVersion)
-            try unindex(db, noteId: noteId)
+            try Self.unindex(db, noteId: noteId)
             if let existing = try NoteSection.fetchOne(db, key: ["note_id": noteId, "heading": heading]) {
                 try db.execute(
                     sql: "UPDATE note_section SET body = ?, written_by = ? WHERE note_id = ? AND heading = ?",
@@ -138,7 +138,7 @@ public struct NoteStore: Sendable {
     ) throws -> Note {
         try db.writer.write { db in
             let note = try checkedNote(db, noteId, ifVersion)
-            try unindex(db, noteId: noteId)
+            try Self.unindex(db, noteId: noteId)
             if try NoteSection.fetchOne(db, key: ["note_id": noteId, "heading": heading]) != nil {
                 try db.execute(
                     sql: "UPDATE note_section SET body = ?, written_by = ? WHERE note_id = ? AND heading = ?",
@@ -166,7 +166,7 @@ public struct NoteStore: Sendable {
     public func deleteSection(noteId: String, heading: String) throws {
         try db.writer.write { db in
             guard let note = try Note.fetchOne(db, key: noteId) else { throw NoteError.noteNotFound(noteId) }
-            try unindex(db, noteId: noteId)
+            try Self.unindex(db, noteId: noteId)
             try db.execute(
                 sql: "DELETE FROM note_section WHERE note_id = ? AND heading = ?",
                 arguments: [noteId, heading]
@@ -177,7 +177,7 @@ public struct NoteStore: Sendable {
 
     public func delete(_ id: String) throws {
         try db.writer.write { db in
-            try unindex(db, noteId: id)
+            try Self.unindex(db, noteId: id)
             try db.execute(sql: "DELETE FROM note_link WHERE note_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM note_section WHERE note_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM note WHERE id = ?", arguments: [id])
@@ -265,11 +265,11 @@ public struct NoteStore: Sendable {
     public func rename(_ id: String, title: String) throws -> Note {
         try db.writer.write { db in
             guard var note = try Note.fetchOne(db, key: id) else { throw NoteError.noteNotFound(id) }
-            try unindex(db, noteId: id)
+            try Self.unindex(db, noteId: id)
             note.title = title
             note.updatedAt = .nowMillis
             try note.update(db)
-            try index(db, noteId: id)
+            try Self.index(db, noteId: id)
             return note
         }
     }
@@ -352,14 +352,14 @@ extension NoteStore {
         note.version += 1
         note.updatedAt = .nowMillis
         try note.update(db)
-        try index(db, noteId: note.id)
+        try Self.index(db, noteId: note.id)
         return note
     }
 
     /// `note_fts` is `content=''`, so nothing maintains it but us. Every mutation must
     /// `unindex` with the pre-mutation text before writing and `index` after; a delete
     /// issued with values that no longer match the indexed row corrupts the FTS index.
-    private func index(_ db: Database, noteId: String) throws {
+    static func index(_ db: Database, noteId: String) throws {
         guard let row = try indexRow(db, noteId: noteId) else { return }
         try db.execute(
             sql: "INSERT INTO note_fts(rowid, title, body) VALUES (?, ?, ?)",
@@ -367,7 +367,7 @@ extension NoteStore {
         )
     }
 
-    private func unindex(_ db: Database, noteId: String) throws {
+    static func unindex(_ db: Database, noteId: String) throws {
         guard let row = try indexRow(db, noteId: noteId) else { return }
         try db.execute(
             sql: "INSERT INTO note_fts(note_fts, rowid, title, body) VALUES ('delete', ?, ?, ?)",
@@ -375,7 +375,15 @@ extension NoteStore {
         )
     }
 
-    private func indexRow(_ db: Database, noteId: String) throws -> (rowid: Int64, title: String, body: String)? {
+    /// Repairs an index holding entries whose original text is gone, which `'delete'` cannot remove.
+    static func rebuildIndex(_ db: Database) throws {
+        try db.execute(sql: "INSERT INTO note_fts(note_fts) VALUES ('delete-all')")
+        for noteId in try String.fetchAll(db, sql: "SELECT id FROM note") {
+            try index(db, noteId: noteId)
+        }
+    }
+
+    private static func indexRow(_ db: Database, noteId: String) throws -> (rowid: Int64, title: String, body: String)? {
         guard let row = try Row.fetchOne(db, sql: "SELECT rowid, title FROM note WHERE id = ?", arguments: [noteId]) else {
             return nil
         }

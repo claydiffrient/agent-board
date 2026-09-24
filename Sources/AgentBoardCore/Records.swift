@@ -238,6 +238,15 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     /// A `done` task whose work the human still has to place somewhere. False for `noBranch`,
     /// which is a task that legitimately had nothing to land.
     public var needsLanding: Bool { column == .done && landing?.needsAttention == true }
+
+    /// The landing pill's text, which names the pull request's number once one is recorded.
+    public var landingLabel: String {
+        guard let landing else { return TaskLanding.pending.label }
+        if landing == .pullRequestOpen, let pr = landingDetail.flatMap(PullRequestReference.init(in:)) {
+            return "PR #\(pr.number) open"
+        }
+        return landing.label
+    }
 }
 
 public typealias BoardTask = Task

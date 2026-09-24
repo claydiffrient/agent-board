@@ -206,6 +206,24 @@ final class NoteStoreTests: XCTestCase {
         XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "Ephemeral"), [])
     }
 
+    func testRebuildIndexDropsEntriesWhoseNoteRowsWereDeletedUnindexed() throws {
+        let f = try Fixture.make()
+        let old = try f.notes.create(projectId: f.project.id, title: "Idle cap secrets", sections: [("Why", "stale text")])
+        try f.db.writer.write { db in
+            try db.execute(sql: "DELETE FROM note_section WHERE note_id = ?", arguments: [old.id])
+            try db.execute(sql: "DELETE FROM note WHERE id = ?", arguments: [old.id])
+        }
+        let new = try f.notes.create(projectId: f.project.id, title: "Groceries", sections: [("List", "milk")])
+        XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "stale").map(\.id), [new.id])
+
+        try f.db.writer.write { try NoteStore.rebuildIndex($0) }
+
+        XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "stale"), [])
+        XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "milk").map(\.id), [new.id])
+        try f.notes.delete(new.id)
+        XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "milk"), [])
+    }
+
     func testSearchToleratesFtsSyntaxInQuery() throws {
         let f = try Fixture.make()
         let note = try f.notes.create(projectId: f.project.id, title: "N", sections: [("A", "don't panic")])

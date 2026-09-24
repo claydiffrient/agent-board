@@ -72,7 +72,7 @@ final class ProjectSettingsSheetRenderTests: XCTestCase {
             mounted.settle()
 
             let titles = mounted.popUpButtons.map(\.title)
-            XCTAssertEqual(mounted.popUpButtons.count, 1, "rendered pop-ups: \(titles)")
+            XCTAssertEqual(mounted.popUpButtons.count, 2, "rendered pop-ups: \(titles)")
             XCTAssertTrue(
                 titles.contains(strategy.title),
                 "no pop-up showed \(strategy.title); the sheet rendered \(titles)"
@@ -80,15 +80,14 @@ final class ProjectSettingsSheetRenderTests: XCTestCase {
         }
     }
 
-    /// Only the selected tab is mounted, so pickers are counted per tab. The six were all on one
-    /// page before the sheet was tabbed: Workspace, Archive, Default model, Review level, Worktree
-    /// strategy, Mute.
+    /// Only the selected tab is mounted, so pickers are counted per tab: Workspace, Archive, Default
+    /// model, Review level, Worktree strategy, standalone integration, Mute.
     func testEachTabMountsOnlyItsOwnPickers() throws {
         let expected: [ProjectSettingsTab: Int] = [
-            .general: 2, .agents: 2, .limits: 0, .workflow: 1, .notifications: 1, .advanced: 0,
+            .general: 2, .agents: 2, .limits: 0, .workflow: 2, .notifications: 1, .advanced: 0,
         ]
         XCTAssertEqual(Set(expected.keys), Set(ProjectSettingsTab.allCases))
-        XCTAssertEqual(expected.values.reduce(0, +), 6)
+        XCTAssertEqual(expected.values.reduce(0, +), 7)
 
         for tab in ProjectSettingsTab.allCases {
             let mounted = try mount(tab: tab)

@@ -47,6 +47,7 @@ enum MenuProbe {
                 "action": item.action.map(NSStringFromSelector) ?? "",
                 "separator": item.isSeparatorItem,
                 "hasView": item.view != nil,
+                "enabled": item.isEnabled,
             ]
         }
     }

@@ -149,6 +149,15 @@ public struct WorktreeManager: Sendable {
         return result.status == 0
     }
 
+    /// What `merge` settles without writing anything — no task branch, no target, or the work is
+    /// already in — and nil when a merge would have work to do.
+    public func premergeOutcome(taskBranch: String, into target: String) throws -> BranchMerge? {
+        guard try branchExists(taskBranch) else { return .nothingToMerge }
+        guard try branchExists(target) else { return .noTargetBranch(target) }
+        if try isAncestor("refs/heads/\(taskBranch)", of: "refs/heads/\(target)") { return .alreadyMerged }
+        return nil
+    }
+
     /// Merges an accepted task branch into the branch that is meant to carry it (SPEC §5, §5.2),
     /// without needing that branch to be checked out: a fast-forward moves the ref directly, and
     /// anything else borrows a temporary worktree that is removed again — with the branch kept —
@@ -163,11 +172,9 @@ public struct WorktreeManager: Sendable {
         targetTitle: String,
         worktreeName: String
     ) throws -> BranchMerge {
-        guard try branchExists(taskBranch) else { return .nothingToMerge }
-        guard try branchExists(target) else { return .noTargetBranch(target) }
+        if let settled = try premergeOutcome(taskBranch: taskBranch, into: target) { return settled }
         let taskRef = "refs/heads/\(taskBranch)"
         let targetRef = "refs/heads/\(target)"
-        if try isAncestor(taskRef, of: targetRef) { return .alreadyMerged }
         if let holder = try list().first(where: { $0.branch == target }) {
             return .skippedCheckedOut(path: holder.path.path)
         }

@@ -84,6 +84,22 @@ public enum ArchivePolicy: Codable, Sendable, Equatable {
     }
 }
 
+/// How an accepted task in no epic reaches the base branch (SPEC §5). A task in an epic always
+/// merges locally into its epic branch, whichever this is.
+public enum StandaloneIntegration: String, Codable, Sendable, CaseIterable, Equatable {
+    /// The accept merges nothing; the task is landed when its recorded pull request merges.
+    case pullRequest
+    /// The accept merges the task branch into the base branch in the project's repository.
+    case localMerge
+
+    public var title: String {
+        switch self {
+        case .pullRequest: return "Pull request"
+        case .localMerge: return "Local merge"
+        }
+    }
+}
+
 /// The rostered agent a project names as its reviewer. `name` is a snapshot taken when it was
 /// chosen, so a reason can still name the agent after it is deleted from the roster.
 public struct ReviewAgentChoice: Codable, Sendable, Equatable {
@@ -128,6 +144,9 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// task's title and is required; `{id}` is an optional short id. Nil publishes the local
     /// `agentboard/<id>` name unchanged, which is what every project had before this existed.
     public var remoteBranchTemplate: String? = nil
+    /// Nil until the human picks one; accept then uses `.pullRequest` when the repository has an
+    /// `origin` remote and `.localMerge` otherwise (SPEC §5).
+    public var standaloneIntegration: StandaloneIntegration? = nil
 
     public init(
         caps: Caps = Caps(),
@@ -144,7 +163,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         worktreeStrategy: WorktreeStrategy = .worktree,
         sharedCheckoutMaxAgents: Int = 3,
         notifications: NotificationPreferences = NotificationPreferences(),
-        remoteBranchTemplate: String? = nil
+        remoteBranchTemplate: String? = nil,
+        standaloneIntegration: StandaloneIntegration? = nil
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -161,6 +181,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.sharedCheckoutMaxAgents = sharedCheckoutMaxAgents
         self.notifications = notifications
         self.remoteBranchTemplate = remoteBranchTemplate
+        self.standaloneIntegration = standaloneIntegration
     }
 
     public init(from decoder: Decoder) throws {
@@ -182,6 +203,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         notifications = try c.decodeIfPresent(NotificationPreferences.self, forKey: .notifications)
             ?? NotificationPreferences()
         remoteBranchTemplate = try c.decodeIfPresent(String.self, forKey: .remoteBranchTemplate)
+        standaloneIntegration = try c.decodeIfPresent(StandaloneIntegration.self, forKey: .standaloneIntegration)
     }
 
     public static func decode(_ json: String) -> ProjectSettings {

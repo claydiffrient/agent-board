@@ -11,6 +11,7 @@ struct StatusView: View {
     @State private var lastError: String?
     @State private var errorMessage: String?
     @State private var now = Date()
+    @State private var query = ""
     @AppStorage("status.showEndedSessions") private var showEnded = false
 
     private var taskTitles: [String: String] {
@@ -27,14 +28,60 @@ struct StatusView: View {
         project.settings.caps.maxTokensPerAgent.map { max($0, 1) }
     }
 
+    /// Computed once per body. The roster placeholder still reads the unsearched roster, so a query
+    /// that matches nothing leaves an empty table and says so beside the field.
+    private struct Layout {
+        let roster: SessionRoster
+        let rows: [AgentSession]
+        let hiddenMatches: Int
+        let ports: [AttributedPort]
+        let shownPorts: [AttributedPort]
+    }
+
+    /// Reads the ports the sidebar panel's sweep already holds; narrowing them starts no sweep.
+    private var layout: Layout {
+        let roster = roster
+        let ports = env.listeningPorts?.ports(inProject: project.id) ?? []
+        let query = SearchQuery(query)
+        guard !query.isEmpty else {
+            return Layout(roster: roster, rows: roster.visible, hiddenMatches: 0, ports: ports, shownPorts: ports)
+        }
+        let titles = taskTitles
+        let snapshot = status.value
+        func matches(_ session: AgentSession) -> Bool {
+            query.matches(StatusSearch.fields(
+                of: session, taskTitle: session.taskId.flatMap { titles[$0] }, roleLabel: snapshot.roleLabel(session)
+            ))
+        }
+        let visible = Set(roster.visible.map(\.sessionId))
+        return Layout(
+            roster: roster,
+            rows: roster.visible.filter(matches),
+            hiddenMatches: sessions.count { !visible.contains($0.sessionId) && matches($0) },
+            ports: ports,
+            shownPorts: ports.filter { query.matches(StatusSearch.fields(of: $0)) }
+        )
+    }
+
     var body: some View {
+        let layout = layout
         VStack(spacing: 0) {
+            SearchField(
+                noun: .sessions, text: $query, shown: layout.rows.count, total: layout.roster.visible.count,
+                note: StatusSearch.note(
+                    hiddenEndedMatches: layout.hiddenMatches,
+                    shownPorts: layout.shownPorts.count, totalPorts: layout.ports.count
+                )
+            )
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            Divider()
             if let review = status.value.review {
                 ReviewRoutingBanner(routing: review)
                 Divider()
             }
-            table
-            StatusPortsSection(project: project)
+            table(layout)
+            StatusPortsSection(ports: layout.shownPorts)
             Divider()
             footer
         }
@@ -73,8 +120,9 @@ struct StatusView: View {
         .errorAlert($errorMessage)
     }
 
-    private var table: some View {
-        Table(roster.visible) {
+    private func table(_ layout: Layout) -> some View {
+        let roster = layout.roster
+        return Table(layout.rows) {
             TableColumn("ID") { session in
                 Text(session.displayShortId)
                     .monospaced()
