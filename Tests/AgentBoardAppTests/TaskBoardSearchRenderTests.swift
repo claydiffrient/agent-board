@@ -85,7 +85,10 @@ final class TaskBoardSearchRenderTests: XCTestCase {
         let cleared = try mounted.mount.capture()
 
         let onlyTheMatch = try mount([Card(title: "Idle cap watchdog", column: .running)])
-        let typed = Mounted(mount: mounted.mount, capture: searched, searchBarBottom: mounted.searchBarBottom)
+        let typed = Mounted(
+            db: mounted.db, project: mounted.project, mount: mounted.mount, capture: searched,
+            searchBarBottom: mounted.searchBarBottom
+        )
         XCTAssertEqual(belowSearchBar(typed, onlyTheMatch).count, 0,
                        "typing must have removed the other cards, or the restore below proves nothing")
         XCTAssertEqual(unsearched.diff(cleared, columns: 0..<unsearched.width).count, 0,
@@ -116,9 +119,39 @@ final class TaskBoardSearchRenderTests: XCTestCase {
                              "a board with no match at all must differ, or the lane and its notice are not drawn")
     }
 
+    /// Folding every task's text is the expensive half of a search, so a board with no query must
+    /// never do it, and a keystroke over unchanged tasks must reuse the index the last one built.
+    func testTheBoardBuildsASearchIndexOnlyWhileSearchingAndOnlyWhenItsTasksChange() throws {
+        let before = TaskSearch.Index.builds
+        let mounted = try mount([Card(title: "Idle cap watchdog", column: .running), Card(title: "Port sweep", column: .ready)])
+        func addTask(_ title: String) throws {
+            _ = try TaskStore(mounted.db).create(
+                projectId: mounted.project.id, title: title, body: nil, acceptance: nil, priority: nil,
+                column: .backlog, origin: .human, epicId: nil
+            )
+            _ = try mounted.mount.capture()
+        }
+
+        try addTask("Release notes copy")
+        XCTAssertEqual(TaskSearch.Index.builds - before, 0, "a board with no query built a search index")
+
+        type("i", into: mounted.mount)
+        _ = try mounted.mount.capture()
+        XCTAssertEqual(TaskSearch.Index.builds - before, 1, "the first keystroke should build the index once")
+
+        type("id", into: mounted.mount)
+        _ = try mounted.mount.capture()
+        XCTAssertEqual(TaskSearch.Index.builds - before, 1, "a second keystroke over unchanged tasks rebuilt the index")
+
+        try addTask("Idle sweep")
+        XCTAssertEqual(TaskSearch.Index.builds - before, 2, "a new task must reach the index, or search goes stale")
+    }
+
     // MARK: fixtures
 
     private struct Mounted {
+        let db: AppDatabase
+        let project: Project
         let mount: OffscreenMount
         let capture: Capture
         /// The search field's bottom edge in points from the window's top, plus a margin that clears
@@ -158,7 +191,7 @@ final class TaskBoardSearchRenderTests: XCTestCase {
         let field = try searchField(in: mount)
         let frame = field.convert(field.bounds, to: nil)
         return Mounted(
-            mount: mount, capture: try mount.capture(),
+            db: db, project: project, mount: mount, capture: try mount.capture(),
             searchBarBottom: mount.window.frame.height - frame.minY + 12
         )
     }

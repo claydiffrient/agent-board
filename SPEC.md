@@ -2108,8 +2108,12 @@ screen. ⌘F (**Edit ▸ Find…**) focuses the field of whichever screen is sho
 and is disabled on a screen without one; Escape in the field clears it. The same
 field (`SearchField`) is the one Notes and Status use, so that wording and ⌘F
 are decided once. The filter is in memory over rows the board already observes,
-with no index: one pass over the largest real board, 227 tasks and 759 KB of
-text, measured 1.8 ms.
+with no FTS table. Each task's searchable text is folded once into an in-memory
+index, rebuilt only when the tasks, epic titles or agent names change; a render
+with no query builds none. Measured on the largest real board, 235 tasks and
+793 KB of text, in a debug build: folding costs 17 ms and matching over folded
+text 2.5 ms, so one board layout costs 0.7–1.0 ms with no query, 3.4–3.7 ms per
+keystroke, and 20–22 ms when a task changes under an active query.
 
 **Ending an epic by hand** — the epic lane header carries a `…` menu with
 **Close as done** and **Abandon**. Integration (§5.2) is how an epic ends when

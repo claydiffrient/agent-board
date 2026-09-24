@@ -85,6 +85,33 @@ final class TaskSearchTests: XCTestCase {
         XCTAssertEqual(reached.visible.map(\.id), ["old", "live"], "with Show Archived on, search reaches them")
     }
 
+    func testAnEmptyQueryNarrowsWithoutBuildingAnIndex() {
+        let partition = TaskArchive.partition([task("a", title: "Alpha")], showArchived: false)
+        let before = TaskSearch.Index.builds
+        let narrowed = TaskSearch.narrow(partition, query: SearchQuery(" "), epicTitles: [:], agentNames: [:])
+        XCTAssertEqual(narrowed.visible.map(\.id), ["a"])
+        XCTAssertEqual(TaskSearch.Index.builds, before, "an empty query built an index it could not use")
+    }
+
+    func testTheIndexCacheRebuildsOnlyWhenTasksEpicTitlesOrAgentNamesChange() {
+        let cache = TaskSearch.IndexCache()
+        let tasks = [task("a", title: "Alpha", epicId: "e", rosterAgentId: "r")]
+        let before = TaskSearch.Index.builds
+        func builds(_ tasks: [BoardTask], _ epics: [String: String], _ agents: [String: String]) -> Int {
+            _ = cache.index(tasks, epicTitles: epics, agentNames: agents)
+            return TaskSearch.Index.builds - before
+        }
+        XCTAssertEqual(builds(tasks, ["e": "Epic"], ["r": "Fran"]), 1)
+        XCTAssertEqual(builds(tasks, ["e": "Epic"], ["r": "Fran"]), 1, "unchanged inputs rebuilt the index")
+        XCTAssertEqual(builds(tasks + [task("b", title: "Beta")], ["e": "Epic"], ["r": "Fran"]), 2)
+        XCTAssertEqual(builds(tasks, ["e": "Epic"], ["r": "Fran"]), 3)
+        XCTAssertEqual(builds(tasks, ["e": "Renamed"], ["r": "Fran"]), 4)
+        XCTAssertEqual(builds(tasks, ["e": "Renamed"], ["r": "Rita"]), 5)
+
+        let index = cache.index(tasks, epicTitles: ["e": "Renamed"], agentNames: ["r": "Rita"])
+        XCTAssertEqual(TaskSearch.filter(tasks, query: SearchQuery("renamed rita"), index: index).map(\.id), ["a"])
+    }
+
     func testTheHiddenMatchesNote() {
         XCTAssertNil(TaskSearch.hiddenMatchesNote(count: 0))
         XCTAssertEqual(TaskSearch.hiddenMatchesNote(count: 1), "1 archived match hidden")

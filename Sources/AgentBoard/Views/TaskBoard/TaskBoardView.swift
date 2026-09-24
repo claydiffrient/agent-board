@@ -24,6 +24,7 @@ struct TaskBoardView: View {
     @State private var jumpTarget: String?
     @State private var query = ""
     @State private var rosterAgents = Observed<[RosterAgent]>([])
+    @State private var searchIndex = TaskSearch.IndexCache()
 
     private let columnWidth: CGFloat = 250
     private let jumpRailWidth: CGFloat = 190
@@ -90,9 +91,11 @@ struct TaskBoardView: View {
     private var layout: Layout {
         let partition = partition
         let isSearching = !searchQuery.isEmpty
-        let searched = TaskSearch.narrow(
-            partition, query: searchQuery, epicTitles: epicTitles, agentNames: agentNames
-        )
+        let searched = isSearching
+            ? TaskSearch.narrow(partition, query: searchQuery, index: searchIndex.index(
+                tasks.value, epicTitles: epicTitles, agentNames: agentNames
+            ))
+            : partition
         let hidden = searched.hidden.reduce(into: [Key: Int]()) { counts, task in
             counts[Key(epicId: task.epicId, column: task.column), default: 0] += 1
         }
@@ -294,8 +297,7 @@ struct TaskBoardView: View {
 
     private func epicJumpRail(_ layout: Layout) -> some View {
         let lanesById = layout.lanesById
-        return 
-        VStack(alignment: .leading, spacing: 0) {
+        return VStack(alignment: .leading, spacing: 0) {
             Text("Epics")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)

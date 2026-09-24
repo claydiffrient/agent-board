@@ -57,8 +57,8 @@ public struct SearchQuery: Sendable, Equatable {
 }
 
 /// What the Task Board's search reaches on a task (SPEC §10). An in-memory filter over the rows the
-/// board already observes, not an index: one pass over a board the size of the largest real one,
-/// 227 tasks and 759 KB of text, measured 1.8ms in a debug build.
+/// board already observes. Folding the largest real board's text, 235 tasks and 793 KB, costs 17ms
+/// in a debug build, so `IndexCache` does it once per change to its inputs; matching costs 2.5ms.
 public enum TaskSearch {
     /// Title, body, acceptance criteria, the epic's title, the model (id and display name), and the
     /// rostered agents that last worked and reviewed it. Not the task id: a hex id turns short
@@ -82,7 +82,8 @@ public enum TaskSearch {
         _ tasks: [BoardTask], query: SearchQuery,
         epicTitles: [String: String], agentNames: [String: String]
     ) -> [BoardTask] {
-        filter(tasks, query: query, index: Index(tasks, epicTitles: epicTitles, agentNames: agentNames))
+        guard !query.isEmpty else { return tasks }
+        return filter(tasks, query: query, index: Index(tasks, epicTitles: epicTitles, agentNames: agentNames))
     }
 
     public static func filter(_ tasks: [BoardTask], query: SearchQuery, index: Index) -> [BoardTask] {
@@ -90,16 +91,46 @@ public enum TaskSearch {
         return tasks.filter { task in index.haystacks[task.id].map(query.matches(folded:)) ?? false }
     }
 
-    /// Every task's searchable text, folded once. The board rebuilds it only when its inputs change,
-    /// not on each keystroke or each unrelated re-render.
+    /// Every task's searchable text, folded once.
     public struct Index: Sendable, Equatable {
         public let haystacks: [String: String]
+
+        /// How many indexes this process has built, so a test can see a render that builds one.
+        public private(set) static var builds = 0
 
         public init(_ tasks: [BoardTask], epicTitles: [String: String], agentNames: [String: String]) {
             haystacks = Dictionary(
                 tasks.map { ($0.id, SearchQuery.haystack(fields(of: $0, epicTitles: epicTitles, agentNames: agentNames))) },
                 uniquingKeysWith: { first, _ in first }
             )
+            Self.builds += 1
+        }
+    }
+
+    /// The last `Index` built and the inputs it was built from, so the board rebuilds it only when
+    /// its tasks, epic titles or agent names change. A class, so a view can hold it in `@State` and
+    /// refresh it from `body` without invalidating itself.
+    public final class IndexCache {
+        private var inputs: Inputs?
+        private var index: Index?
+
+        private struct Inputs: Equatable {
+            let tasks: [BoardTask]
+            let epicTitles: [String: String]
+            let agentNames: [String: String]
+        }
+
+        public init() {}
+
+        public func index(
+            _ tasks: [BoardTask], epicTitles: [String: String], agentNames: [String: String]
+        ) -> Index {
+            let inputs = Inputs(tasks: tasks, epicTitles: epicTitles, agentNames: agentNames)
+            if let index, inputs == self.inputs { return index }
+            let built = Index(tasks, epicTitles: epicTitles, agentNames: agentNames)
+            self.inputs = inputs
+            index = built
+            return built
         }
     }
 
@@ -109,7 +140,8 @@ public enum TaskSearch {
         _ partition: ArchivePartition, query: SearchQuery,
         epicTitles: [String: String], agentNames: [String: String]
     ) -> ArchivePartition {
-        narrow(partition, query: query, index: Index(
+        guard !query.isEmpty else { return partition }
+        return narrow(partition, query: query, index: Index(
             partition.visible + partition.hidden, epicTitles: epicTitles, agentNames: agentNames
         ))
     }
