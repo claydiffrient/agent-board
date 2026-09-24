@@ -311,7 +311,7 @@ public final class StoreHookSink: HookSink {
     /// `/clear` ends the session and starts a new one under a new id, and the fork payload does not
     /// name its parent. The grant is the only link back, so an unknown session id arriving on a live
     /// grant bound to a known session is the fork signal. The old row keeps its state and its spend —
-    /// the fork writes its own transcript, and metering reads transcripts.
+    /// the fork writes its own transcript, and metering reads transcripts — but its queued comments move.
     private func adoptFork(newSessionId: String, identity: TokenIdentity) {
         guard let priorId = identity.sessionId, priorId != newSessionId,
               (try? sessions.get(newSessionId)) == nil,
@@ -333,7 +333,7 @@ public final class StoreHookSink: HookSink {
             attempt: prior.attempt,
             model: prior.model
         )
-        guard (try? sessions.insert(adopted)) != nil else { return }
+        guard (try? sessions.insertFork(adopted, from: priorId)) != nil else { return }
 
         try? grants.bind(token: identity.token, sessionId: newSessionId)
         if prior.role == .orchestrator {
@@ -509,7 +509,10 @@ public final class StoreHookSink: HookSink {
                 try? sessions.setState(sessionId, .stopped, endedAt: .nowMillis)
             }
             try? locks.releaseAll(sessionId: sessionId)
-            try? comments.dropDeliveries(sessionId: sessionId)
+            // A `/clear` fork arrives next under a new id, and `adoptFork` hands it this queue.
+            if event.sessionEndReason != "clear" {
+                try? comments.dropDeliveries(sessionId: sessionId)
+            }
 
         default:
             break

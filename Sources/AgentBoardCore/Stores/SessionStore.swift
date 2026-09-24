@@ -12,6 +12,18 @@ public struct SessionStore: Sendable {
         try db.writer.write { db in try session.insert(db) }
     }
 
+    /// Inserts the row a `/clear` fork runs under and hands it the human comments still queued for
+    /// the session it forked from, which will never make another tool call (SPEC §7).
+    public func insertFork(_ fork: AgentSession, from priorId: String) throws {
+        try db.writer.write { db in
+            try fork.insert(db)
+            try db.execute(
+                sql: "UPDATE comment_delivery SET session_id = ? WHERE session_id = ?",
+                arguments: [fork.sessionId, priorId]
+            )
+        }
+    }
+
     public func get(_ sessionId: String) throws -> AgentSession? {
         try db.reader.read { db in try AgentSession.fetchOne(db, key: sessionId) }
     }

@@ -98,6 +98,25 @@ final class CommentDeliveryHookTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(delivered?.additionalContext).contains("Said during setup."))
     }
 
+    /// SPEC §2: `/clear` sends `SessionEnd` with `reason: "clear"` for the old id, then the new id's first hook.
+    func testACommentQueuedBeforeAClearReachesTheForkedSession() async throws {
+        let (task, identity) = try runningTask("Clear", sessionId: "s-before")
+        try fixture.board.addComment(projectId: fixture.project.id, taskId: task.id, author: .human, body: "Said before the clear.")
+
+        _ = await fixture.hooks.handle(
+            HookEvent(name: "SessionEnd", sessionId: "s-before", sessionEndReason: "clear", rawJSON: "{\"reason\":\"clear\"}"),
+            identity: identity
+        )
+        _ = await fixture.hooks.handle(
+            HookEvent(name: "SessionStart", sessionId: "s-after", sessionSource: "clear", rawJSON: "{\"source\":\"clear\"}"),
+            identity: identity
+        )
+        let delivered = await postToolUse("s-after", identity)
+
+        XCTAssertTrue(try XCTUnwrap(delivered?.additionalContext, "the forked session got nothing").contains("Said before the clear."))
+        XCTAssertNil(try CommentStore(fixture.db).takeDelivery(sessionId: "s-before"))
+    }
+
     func testASessionThatEndsDropsWhatWasQueuedForIt() async throws {
         let (task, identity) = try runningTask("Ended", sessionId: "s-ended")
         try fixture.board.addComment(projectId: fixture.project.id, taskId: task.id, author: .human, body: "Too late.")

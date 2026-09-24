@@ -118,8 +118,8 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   `PostToolUse`, `Notification`, `Stop` and `SessionEnd`. **`SessionStart`
   silently skips `http` hooks** (foreground and background); a `command` hook
   that pipes stdin to `curl` fires and is the workaround.
-- **`/clear` forks the session under a new id.** The old id gets `SessionEnd`,
-  and ~18s later a new id gets `SessionStart` with `"source": "fork"`. The fork
+- **`/clear` forks the session under a new id.** The old id gets `SessionEnd`
+  with `"reason": "clear"`, and ~18s later a new id gets `SessionStart` with `"source": "fork"`. The fork
   payload does not name its parent — no parent session id anywhere in it — so
   the hook token grant is the only link back. `StoreHookSink` treats an unknown
   payload `session_id` on a live grant bound to a known session as the fork
@@ -1518,9 +1518,11 @@ first and together, within Claude Code's 10,000-character cap on one hook's
 text; whatever does not fit waits for the next tool call, and a single comment
 too long to fit is cut short with a pointer to `get_my_task`. Each is delivered
 once, and a `status` progress row records it. A session queued during setup
-carries its queue to the session id Claude issues. `SessionEnd` drops the
-session's queue; the comment stays on the task for the next spawn's prompt. A
-post-compaction brief already carries the thread, so it drops the queue too.
+carries its queue to the session id Claude issues, and a `/clear` fork carries
+its queue to the new id: a `SessionEnd` with `reason: "clear"` keeps it for the
+fork to adopt (§2). Any other `SessionEnd` drops the session's queue; the
+comment stays on the task for the next spawn's prompt. A post-compaction brief
+already carries the thread, so it drops the queue too.
 Agents' comments are never queued. The queue is a table rather than memory
 because a worker outlives an Agent Board relaunch, so undelivered comments
 survive one.
