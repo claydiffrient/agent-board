@@ -40,17 +40,19 @@ struct Capture {
     /// A channel sum above 5/255 is the same threshold the `colorAt` version used (`> 0.02`
     /// summed over normalized R+G+B); both count a pixel from a byte sum of 6 upward. Measured to
     /// agree on the sidebar badge: 172 pixels in a 14x14 box, either way.
-    func diff(_ other: Capture, columns: Range<Int>) -> PixelDiff {
+    func diff(_ other: Capture, columns: Range<Int>, rows: Range<Int>? = nil) -> PixelDiff {
         var box = PixelDiff()
         guard samplesPerPixel == other.samplesPerPixel, rowBytes == other.rowBytes else { return box }
-        let stop = min(height, other.height)
+        let top = max(0, rows?.lowerBound ?? 0)
+        let stop = min(height, other.height, rows?.upperBound ?? Int.max)
+        guard top < stop else { return box }
         let from = max(0, columns.lowerBound)
         let to = min(columns.upperBound, width, other.width)
         guard from < to else { return box }
         let stride = samplesPerPixel
         bytes.withUnsafeBufferPointer { left in
             other.bytes.withUnsafeBufferPointer { right in
-                for y in 0..<stop {
+                for y in top..<stop {
                     let row = y * rowBytes
                     for x in from..<to {
                         let i = row + x * stride
@@ -79,6 +81,13 @@ struct Capture {
     /// alone, 147 pixels in a 13x14 box; over 460, by 138x193.
     func columns(_ points: Range<Int>) -> Range<Int> {
         Self.columns(points, capturedWidth: width, windowWidth: windowWidth)
+    }
+
+    /// Rows from `points` below the window's top edge to the bottom of this image, at its own scale.
+    func rows(below points: CGFloat) -> Range<Int> {
+        guard windowWidth > 0 else { return 0..<0 }
+        let start = Int((points * CGFloat(width) / windowWidth).rounded(.up))
+        return min(start, height)..<height
     }
 
     /// Split out so both scales can be pinned without a window: see `OffscreenCaptureContractTests`.

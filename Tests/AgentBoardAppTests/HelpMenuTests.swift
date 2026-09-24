@@ -15,6 +15,7 @@ import XCTest
 final class HelpMenuTests: XCTestCase {
     private struct Probe {
         let help: [[String: Any]]
+        let edit: [[String: Any]]
         let windowsAfterOne: [[String: Any]]
         let windowsAfterTwo: [[String: Any]]
 
@@ -72,6 +73,18 @@ final class HelpMenuTests: XCTestCase {
         XCTAssertEqual(probe.windowCount(ReleaseNotesScene.title, after: 1), 1)
     }
 
+    /// ⌘F was unclaimed before this item: the shipped Edit menu had no Find submenu. The launch
+    /// shows At a Glance, which has no search field, so the item is present and disabled.
+    func testTheEditMenuCarriesFindOnCommandFDisabledWhereNothingSearches() throws {
+        let probe = try probeApp()
+        let finds = probe.edit.filter { $0["title"] as? String == FindCommand.title }
+        XCTAssertEqual(finds.count, 1, "\(probe.edit.compactMap { $0["title"] as? String })")
+        XCTAssertEqual(finds.first?["keyEquivalent"] as? String, "f")
+        XCTAssertEqual(finds.first?["enabled"] as? Bool, false)
+        let others = probe.edit.filter { $0["keyEquivalent"] as? String == "f" && $0["title"] as? String != FindCommand.title }
+        XCTAssertTrue(others.isEmpty, "another Edit item also claims ⌘F: \(others)")
+    }
+
     // MARK: driving the app
 
     private func probeApp(invoking item: String? = nil) throws -> Probe {
@@ -108,6 +121,7 @@ final class HelpMenuTests: XCTestCase {
         )
         return Probe(
             help: report["help"] as? [[String: Any]] ?? [],
+            edit: (report["menus"] as? [String: Any])?["Edit"] as? [[String: Any]] ?? [],
             windowsAfterOne: report["windowsAfterOne"] as? [[String: Any]] ?? [],
             windowsAfterTwo: report["windowsAfterTwo"] as? [[String: Any]] ?? []
         )

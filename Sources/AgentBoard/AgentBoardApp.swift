@@ -26,6 +26,9 @@ struct AgentBoardApp: App {
             CommandGroup(after: .help) {
                 ReleaseNotesMenuItem()
             }
+            CommandGroup(after: .textEditing) {
+                FindCommand()
+            }
         }
 
         Window(ReleaseNotesScene.title, id: ReleaseNotesScene.id) {

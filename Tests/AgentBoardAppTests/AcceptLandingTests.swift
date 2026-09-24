@@ -13,6 +13,7 @@ final class AcceptLandingTests: XCTestCase {
 
     override func setUp() async throws {
         fixture = try SupervisorFixture.make(gitRepo: true)
+        try fixture.setStandaloneIntegration(.localMerge)
     }
 
     override func tearDown() async throws {
