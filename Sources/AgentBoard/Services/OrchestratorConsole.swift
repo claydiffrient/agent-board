@@ -100,15 +100,19 @@ final class OrchestratorConsole {
     // MARK: - Lifecycle
 
     func start() {
-        guard !isProcessRunning else { return }
+        guard !isProcessRunning, state != .starting else { return }
         state = .starting
         lastError = nil
-        do {
-            try launch()
-            state = .running
-        } catch {
-            lastError = errorText(error)
-            state = .idle
+        _Concurrency.Task {
+            let environment = await TerminalHostView.childEnvironment()
+            guard state == .starting else { return }
+            do {
+                try launch(environment: environment)
+                state = .running
+            } catch {
+                lastError = errorText(error)
+                state = .idle
+            }
         }
     }
 
@@ -123,6 +127,7 @@ final class OrchestratorConsole {
 
     func stop() {
         restartAfterExit = false
+        if state == .starting { state = .idle }
         guard isProcessRunning else { return }
         terminal.terminate()
         if let sessionId {
@@ -130,7 +135,7 @@ final class OrchestratorConsole {
         }
     }
 
-    private func launch() throws {
+    private func launch(environment: [String]) throws {
         guard let project = try projects.get(projectId) else {
             throw SupervisorError.projectNotFound(projectId)
         }
@@ -184,7 +189,7 @@ final class OrchestratorConsole {
         terminal.startProcess(
             executable: command.executable,
             args: command.arguments(),
-            environment: TerminalHostView.childEnvironment(),
+            environment: environment,
             execName: nil,
             currentDirectory: project.repoPath
         )
