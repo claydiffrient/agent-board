@@ -22,6 +22,9 @@ struct TaskBoardView: View {
     @State private var showArchived = false
     @State private var confirmArchive = false
     @State private var jumpTarget: String?
+    @State private var query = ""
+    @State private var rosterAgents = Observed<[RosterAgent]>([])
+    @State private var searchIndex = TaskSearch.IndexCache()
 
     private let columnWidth: CGFloat = 250
     private let jumpRailWidth: CGFloat = 190
@@ -31,7 +34,10 @@ struct TaskBoardView: View {
         let id: String
         let title: String
         let epic: Epic?
+        /// The cards this lane draws, narrowed by the query.
         let tasks: [BoardTask]
+        /// The whole lane's tally, so a query never changes what the header offers.
+        let count: EpicTaskCount
 
         func tasks(in column: TaskColumn) -> [BoardTask] {
             tasks.filter { $0.column == column }
@@ -42,16 +48,32 @@ struct TaskBoardView: View {
         TaskArchive.partition(tasks.value, showArchived: showArchived)
     }
 
+    /// What the archive toggle lets through, before the query. Selection, the inspector and drops
+    /// work over this, so typing never closes the inspector on the task being edited.
     private var visibleTasks: [BoardTask] {
         partition.visible
     }
 
-    /// Archived tasks the board is not drawing, per lane and column, so a cell can say so rather
-    /// than letting the work disappear silently. Keyed by column too, because unarchiving is allowed
-    /// from anywhere and an archived task can be moved back out of `done`.
-    private var hiddenByEpicAndColumn: [Key: Int] {
-        partition.hidden.reduce(into: [:]) { counts, task in
-            counts[Key(epicId: task.epicId, column: task.column), default: 0] += 1
+    private var searchQuery: SearchQuery { SearchQuery(query) }
+
+    private var agentNames: [String: String] {
+        Dictionary(rosterAgents.value.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Computed once per body and passed down: every lane, rail entry and header reads it, and a
+    /// query re-runs the match over every task each time it is recomputed.
+    private struct Layout {
+        let lanes: [Lane]
+        let searched: ArchivePartition
+        let isSearching: Bool
+
+        /// Archived tasks the board is not drawing, per lane and column, so a cell can say so rather
+        /// than letting the work disappear silently. Keyed by column too, because unarchiving is
+        /// allowed from anywhere and an archived task can be moved back out of `done`.
+        let hiddenByEpicAndColumn: [Key: Int]
+
+        var lanesById: [String: Lane] {
+            Dictionary(uniqueKeysWithValues: lanes.map { ($0.id, $0) })
         }
     }
 
@@ -64,29 +86,36 @@ struct TaskBoardView: View {
         TaskArchive.archivable(tasks.value)
     }
 
-    private var lanes: [Lane] {
-        var byEpic: [String?: [BoardTask]] = [:]
-        for task in visibleTasks {
-            byEpic[task.epicId, default: []].append(task)
+    /// While a query is active a lane with nothing matching vanishes, header and all, unless it is
+    /// hiding an archived match: then it stays so its cell can say where that match is.
+    private var layout: Layout {
+        let partition = partition
+        let isSearching = !searchQuery.isEmpty
+        let searched = isSearching
+            ? TaskSearch.narrow(partition, query: searchQuery, index: searchIndex.index(
+                tasks.value, epicTitles: epicTitles, agentNames: agentNames
+            ))
+            : partition
+        let hidden = searched.hidden.reduce(into: [Key: Int]()) { counts, task in
+            counts[Key(epicId: task.epicId, column: task.column), default: 0] += 1
         }
-        var result = [
+        let all = Dictionary(grouping: partition.visible, by: \.epicId)
+        let shown = Dictionary(grouping: searched.visible, by: \.epicId)
+        let hiding = Set(searched.hidden.map(\.epicId))
+        func lane(id: String, title: String, epic: Epic?) -> Lane {
             Lane(
-                id: EpicLaneOrder.noEpicLaneId,
-                title: EpicJumpRail.noEpicTitle,
-                epic: nil,
-                tasks: byEpic[nil] ?? []
-            ),
-        ]
-        for epic in EpicLaneOrder.sorted(epics.value) {
-            result.append(Lane(id: epic.id, title: epic.title, epic: epic, tasks: byEpic[epic.id] ?? []))
+                id: id, title: title, epic: epic, tasks: shown[epic?.id] ?? [],
+                count: EpicLane.taskCount(columns: (all[epic?.id] ?? []).lazy.map(\.column))
+            )
         }
-        return result
-    }
-
-    private var epicLanes: [Lane] { lanes.filter { $0.epic != nil } }
-
-    private var lanesById: [String: Lane] {
-        Dictionary(uniqueKeysWithValues: lanes.map { ($0.id, $0) })
+        var lanes = [lane(id: EpicLaneOrder.noEpicLaneId, title: EpicJumpRail.noEpicTitle, epic: nil)]
+        for epic in EpicLaneOrder.sorted(epics.value) {
+            lanes.append(lane(id: epic.id, title: epic.title, epic: epic))
+        }
+        if isSearching {
+            lanes.removeAll { $0.tasks.isEmpty && !hiding.contains($0.epic?.id) }
+        }
+        return Layout(lanes: lanes, searched: searched, isSearching: isSearching, hiddenByEpicAndColumn: hidden)
     }
 
     private func isCollapsed(_ epic: Epic) -> Bool {
@@ -120,12 +149,22 @@ struct TaskBoardView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            if !epicLanes.isEmpty {
-                epicJumpRail
-                Divider()
+        let layout = layout
+        VStack(spacing: 0) {
+            SearchField(
+                noun: .tasks, text: $query, shown: layout.searched.visible.count, total: visibleTasks.count,
+                note: showArchived ? nil : TaskSearch.hiddenMatchesNote(count: layout.searched.hidden.count)
+            )
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            Divider()
+            HStack(spacing: 0) {
+                if !epics.value.isEmpty {
+                    epicJumpRail(layout)
+                    Divider()
+                }
+                board(layout)
             }
-            board
         }
         .background {
             Color.clear
@@ -157,6 +196,9 @@ struct TaskBoardView: View {
         }
         .task(id: project.id) {
             await approvals.run(ApprovalStore(env.db).observePending(projectId: project.id), in: env.db.reader)
+        }
+        .task {
+            await rosterAgents.run(RosterStore(env.db).observe(), in: env.db.reader)
         }
         .toolbar {
             ToolbarItem {
@@ -225,18 +267,18 @@ struct TaskBoardView: View {
         .errorAlert($errorMessage)
     }
 
-    private var board: some View {
+    private func board(_ layout: Layout) -> some View {
         ScrollView(.horizontal) {
             VStack(alignment: .leading, spacing: 0) {
-                columnHeaders
+                columnHeaders(layout)
                     .padding(.horizontal)
                     .padding(.top, 12)
                 Divider()
                 ScrollViewReader { proxy in
                     ScrollView(.vertical) {
                         VStack(alignment: .leading, spacing: 16) {
-                            ForEach(lanes) { lane in
-                                laneView(lane)
+                            ForEach(layout.lanes) { lane in
+                                laneView(lane, in: layout)
                             }
                         }
                         .padding()
@@ -253,8 +295,9 @@ struct TaskBoardView: View {
         }
     }
 
-    private var epicJumpRail: some View {
-        VStack(alignment: .leading, spacing: 0) {
+    private func epicJumpRail(_ layout: Layout) -> some View {
+        let lanesById = layout.lanesById
+        return VStack(alignment: .leading, spacing: 0) {
             Text("Epics")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -263,7 +306,7 @@ struct TaskBoardView: View {
             Divider()
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(EpicJumpRail.entries(epics.value)) { entry in
+                    ForEach(EpicJumpRail.entries(epics.value).filter { lanesById[$0.laneId] != nil }) { entry in
                         if let lane = lanesById[entry.laneId], let epic = lane.epic {
                             jumpRailEntry(epic: epic, lane: lane)
                         } else {
@@ -294,7 +337,7 @@ struct TaskBoardView: View {
                     .multilineTextAlignment(.leading)
                 HStack(spacing: 6) {
                     EpicStateBadge(state: epic.state)
-                    Text(EpicLane.taskCount(columns: lane.tasks.lazy.map(\.column)).label)
+                    Text(lane.count.label)
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -315,16 +358,20 @@ struct TaskBoardView: View {
         )
     }
 
-    private var columnHeaders: some View {
+    private func columnHeaders(_ layout: Layout) -> some View {
         HStack(alignment: .top, spacing: 12) {
             ForEach(TaskColumn.allCases, id: \.self) { column in
-                columnHeader(column, count: visibleTasks.filter { $0.column == column }.count)
+                columnHeader(
+                    column,
+                    count: layout.searched.visible.count { $0.column == column },
+                    hidden: layout.searched.hidden.count { $0.column == column }
+                )
             }
         }
     }
 
     @ViewBuilder
-    private func columnHeader(_ column: TaskColumn, count: Int) -> some View {
+    private func columnHeader(_ column: TaskColumn, count: Int, hidden: Int) -> some View {
         let header = HStack(spacing: 6) {
             Text(column.title)
                 .font(.headline)
@@ -337,7 +384,7 @@ struct TaskBoardView: View {
                 Image(systemName: "info.circle")
                     .foregroundStyle(.secondary)
             }
-            if let notice = TaskArchive.hiddenNotice(count: partition.hidden.count { $0.column == column }) {
+            if let notice = TaskArchive.hiddenNotice(count: hidden) {
                 Text(notice)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -357,13 +404,13 @@ struct TaskBoardView: View {
     }
 
     @ViewBuilder
-    private func laneView(_ lane: Lane) -> some View {
-        let collapsed = lane.epic.map(isCollapsed) ?? false
+    private func laneView(_ lane: Lane, in layout: Layout) -> some View {
+        let collapsed = !layout.isSearching && (lane.epic.map(isCollapsed) ?? false)
         VStack(alignment: .leading, spacing: 8) {
             if let epic = lane.epic {
                 EpicLaneHeader(
                     epic: epic,
-                    count: EpicLane.taskCount(columns: lane.tasks.lazy.map(\.column)),
+                    count: lane.count,
                     integrationPending: epicsAwaitingIntegrationApproval.contains(epic.id),
                     isCollapsed: collapsed,
                     onToggleCollapse: { toggleCollapse(epic) },
@@ -371,7 +418,7 @@ struct TaskBoardView: View {
                     onOpenPullRequest: { openPullRequest(epic) },
                     onClose: { planClosure(epic, as: $0) }
                 )
-            } else if lanes.count > 1 {
+            } else if layout.lanes.count > 1 {
                 Text(lane.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -379,7 +426,7 @@ struct TaskBoardView: View {
             if !collapsed {
                 HStack(alignment: .top, spacing: 12) {
                     ForEach(TaskColumn.allCases, id: \.self) { column in
-                        columnCell(lane: lane, column: column)
+                        columnCell(lane: lane, column: column, hidden: layout.hiddenByEpicAndColumn)
                     }
                 }
             }
@@ -387,9 +434,9 @@ struct TaskBoardView: View {
         .id(lane.id)
     }
 
-    private func columnCell(lane: Lane, column: TaskColumn) -> some View {
+    private func columnCell(lane: Lane, column: TaskColumn, hidden: [Key: Int]) -> some View {
         VStack(spacing: 8) {
-            let hidden = hiddenByEpicAndColumn[Key(epicId: lane.epic?.id, column: column)] ?? 0
+            let hidden = hidden[Key(epicId: lane.epic?.id, column: column)] ?? 0
             if let notice = TaskArchive.hiddenNotice(count: hidden) {
                 HStack(spacing: 4) {
                     Image(systemName: "archivebox")
