@@ -31,6 +31,9 @@ public enum EpicState: String, Codable, Sendable, CaseIterable, Equatable, Datab
     case planning
     case active
     case integrating
+    /// A pull request from the epic branch is recorded and has not merged or closed (SPEC §5.2).
+    /// The epic still takes tasks; the merge check moves it to `done`, or back to `active`.
+    case pullRequestOpen = "pull_request_open"
     case done
     case abandoned
 
@@ -39,7 +42,7 @@ public enum EpicState: String, Codable, Sendable, CaseIterable, Equatable, Datab
     public var isTerminal: Bool {
         switch self {
         case .done, .abandoned: return true
-        case .planning, .active, .integrating: return false
+        case .planning, .active, .integrating, .pullRequestOpen: return false
         }
     }
 }

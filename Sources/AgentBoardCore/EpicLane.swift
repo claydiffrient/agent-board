@@ -48,7 +48,7 @@ public enum EpicLane {
     /// a live worker in the epic refuses it there.
     public static func actions(state: EpicState, readyForIntegration: Bool) -> [EpicLaneAction] {
         switch state {
-        case .planning, .active:
+        case .planning, .active, .pullRequestOpen:
             return (readyForIntegration ? [.requestIntegration] : []) + [.closeAsDone, .abandon]
         case .integrating:
             return [.closeAsDone, .abandon]
@@ -57,5 +57,11 @@ public enum EpicLane {
         case .abandoned:
             return []
         }
+    }
+
+    /// The lane's state badge. A PR-open epic names its pull request, as a task card's pill does.
+    public static func stateLabel(state: EpicState, pullRequest: PullRequestReference?) -> String {
+        guard state == .pullRequestOpen else { return state.rawValue }
+        return pullRequest.map { "PR #\($0.number) open" } ?? "PR open"
     }
 }

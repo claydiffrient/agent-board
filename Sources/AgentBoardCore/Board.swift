@@ -945,7 +945,8 @@ public struct Board: Sendable {
     /// row on the epic's or task's card carrying the pull request URL, and a `decision` report so
     /// the orchestrator reads the outcome through `list_reports` rather than a terminal. A pull
     /// request's URL is also kept on the approval, and one opened for a `done` task in no epic not
-    /// yet landed moves its landing to `pullRequestOpen` (§5).
+    /// yet landed moves its landing to `pullRequestOpen` (§5). One opened from an epic branch moves
+    /// the epic to `pullRequestOpen` from any state but `abandoned` (§5.2).
     @discardableResult
     public func recordPublished(
         approval: Approval, summary: String, url: String? = nil, failed: Bool = false
@@ -964,6 +965,10 @@ public struct Board: Sendable {
                    [.awaitingPullRequest, .unlanded, .pullRequestOpen].contains(task.landing) {
                     try TaskStore.setLanding(db, taskId, .pullRequestOpen, detail: PullRequestLanding.openDetail(pr))
                 }
+                if approval.taskId == nil, let epicId = approval.epicId,
+                   let epic = try Epic.fetchOne(db, key: epicId), epic.state != .abandoned {
+                    try EpicStore.setState(db, epicId, .pullRequestOpen)
+                }
             }
             return try ReportStore.insert(
                 db, projectId: approval.projectId, taskId: approval.taskId, sessionId: nil,
@@ -977,6 +982,10 @@ public struct Board: Sendable {
     static func publishProgressTask(_ db: Database, _ approval: Approval) throws -> String? {
         if let taskId = approval.taskId, try Task.exists(db, key: taskId) { return taskId }
         guard let epicId = approval.epicId else { return nil }
+        return try epicCardTask(db, epicId: epicId)
+    }
+
+    static func epicCardTask(_ db: Database, epicId: String) throws -> String? {
         if let integrator = try String.fetchOne(
             db,
             sql: "SELECT id FROM task WHERE epic_id = ? AND origin = 'integration' ORDER BY created_at DESC LIMIT 1",
