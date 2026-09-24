@@ -327,21 +327,16 @@ public struct TaskStore: Sendable {
         }
     }
 
-    /// The newest pull request an approved `open_pull_request` recorded on this task's card.
+    /// The newest pull request an approved `open_pull_request` opened for this task, or nil for a
+    /// task in an epic, which reaches the base branch through its epic's pull request instead.
     public func recordedPullRequest(taskId: String) throws -> PullRequestReference? {
         try db.reader.read { db in try Self.recordedPullRequest(db, taskId: taskId) }
     }
 
     static func recordedPullRequest(_ db: Database, taskId: String) throws -> PullRequestReference? {
-        let texts = try String.fetchAll(
-            db,
-            sql: """
-            SELECT text FROM progress WHERE task_id = ? AND kind = 'status' AND text LIKE '%/pull/%'
-            ORDER BY at DESC, id DESC
-            """,
-            arguments: [taskId]
-        )
-        return texts.lazy.compactMap(PullRequestReference.init(in:)).first
+        guard try Bool.fetchOne(db, sql: "SELECT epic_id IS NULL FROM task WHERE id = ?", arguments: [taskId]) == true
+        else { return nil }
+        return try ApprovalStore.publishedPullRequest(db, taskId: taskId)
     }
 
     /// `done` tasks whose recorded pull request has not merged yet: what the merge check visits.
@@ -360,9 +355,9 @@ public struct TaskStore: Sendable {
         }
     }
 
-    /// Moves a `done`, `unlanded` task with a recorded pull request to `pullRequestOpen`, so the
-    /// merge check picks it up. Idempotent: a task whose detail already names that pull request —
-    /// the closed-without-merging detail does — was checked and is left alone.
+    /// Moves a `done`, `unlanded` task in no epic with a recorded pull request to `pullRequestOpen`,
+    /// so the merge check picks it up. Idempotent: a task whose detail already names that pull
+    /// request — the closed-without-merging detail does — was checked and is left alone.
     @discardableResult
     public func adoptRecordedPullRequests(projectId: String? = nil, taskId: String? = nil) throws -> Int {
         try db.writer.write { db in
@@ -370,7 +365,7 @@ public struct TaskStore: Sendable {
                 db,
                 sql: """
                 SELECT * FROM task
-                WHERE column_name = 'done' AND landing = 'unlanded'
+                WHERE column_name = 'done' AND landing = 'unlanded' AND epic_id IS NULL
                   AND (?1 IS NULL OR project_id = ?1) AND (?2 IS NULL OR id = ?2)
                 """,
                 arguments: [projectId, taskId]

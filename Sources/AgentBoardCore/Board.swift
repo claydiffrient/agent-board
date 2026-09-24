@@ -944,7 +944,8 @@ public struct Board: Sendable {
     /// What the board keeps once a `push` or `pull_request` approval has actually run: a `progress`
     /// row on the epic's or task's card carrying the pull request URL, and a `decision` report so
     /// the orchestrator reads the outcome through `list_reports` rather than a terminal. A pull
-    /// request opened for a `done` task not yet landed moves its landing to `pullRequestOpen` (§5).
+    /// request's URL is also kept on the approval, and one opened for a `done` task in no epic not
+    /// yet landed moves its landing to `pullRequestOpen` (§5).
     @discardableResult
     public func recordPublished(
         approval: Approval, summary: String, url: String? = nil, failed: Bool = false
@@ -956,11 +957,13 @@ public struct Board: Sendable {
                     db, taskId: taskId, sessionId: nil, kind: failed ? .error : .status, text: text
                 )
             }
-            if !failed, approval.kind == .pullRequest, let taskId = approval.taskId,
-               let pr = url.flatMap(PullRequestReference.init(in:)),
-               let task = try Task.fetchOne(db, key: taskId), task.column == .done,
-               [.awaitingPullRequest, .unlanded, .pullRequestOpen].contains(task.landing) {
-                try TaskStore.setLanding(db, taskId, .pullRequestOpen, detail: PullRequestLanding.openDetail(pr))
+            if !failed, approval.kind == .pullRequest, let pr = url.flatMap(PullRequestReference.init(in:)) {
+                try ApprovalStore.recordPublishedURL(db, approvalId: approval.id, url: pr.url)
+                if let taskId = approval.taskId, let task = try Task.fetchOne(db, key: taskId),
+                   task.epicId == nil, task.column == .done,
+                   [.awaitingPullRequest, .unlanded, .pullRequestOpen].contains(task.landing) {
+                    try TaskStore.setLanding(db, taskId, .pullRequestOpen, detail: PullRequestLanding.openDetail(pr))
+                }
             }
             return try ReportStore.insert(
                 db, projectId: approval.projectId, taskId: approval.taskId, sessionId: nil,

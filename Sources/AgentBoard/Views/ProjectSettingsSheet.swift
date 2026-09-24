@@ -1,4 +1,5 @@
 import AgentBoardCore
+import AgentBoardRuntime
 import GRDB
 import SwiftUI
 
@@ -80,6 +81,7 @@ struct ProjectSettingsSheet: View {
     @State private var selectedAgentIds: Set<String> = []
     @State private var projectAgents: [RosterAgent] = []
     @State private var errorMessage: String?
+    @State private var integrationDefault: StandaloneIntegration?
 
     init(
         project: Project,
@@ -165,6 +167,14 @@ struct ProjectSettingsSheet: View {
             Text("Removes the project, its tasks, and session records from Agent Board. Worktrees and branches on disk are left alone.")
         }
         .errorAlert($errorMessage)
+    }
+
+    static func defaultIntegrationTitle(_ resolved: StandaloneIntegration?) -> String {
+        switch resolved {
+        case .pullRequest: "Pull request (default: has origin)"
+        case .localMerge: "Local merge (default: no origin)"
+        case nil: "Default"
+        }
     }
 
     @ViewBuilder
@@ -253,15 +263,22 @@ struct ProjectSettingsSheet: View {
                 .foregroundStyle(.secondary)
         case .publishing:
             Picker("Integrate standalone tasks by", selection: $settings.standaloneIntegration) {
+                Text(Self.defaultIntegrationTitle(integrationDefault)).tag(StandaloneIntegration?.none)
                 ForEach(StandaloneIntegration.allCases, id: \.self) { integration in
-                    Text(integration.title).tag(integration)
+                    Text(integration.title).tag(StandaloneIntegration?.some(integration))
                 }
+            }
+            .task {
+                let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
+                integrationDefault = await _Concurrency.Task.detached {
+                    publisher.defaultStandaloneIntegration()
+                }.value
             }
             TextField("Remote branch name", text: Binding(
                 get: { settings.remoteBranchTemplate ?? "" },
                 set: { settings.remoteBranchTemplate = $0.isEmpty ? nil : $0 }
             ), prompt: Text("e.g. clay/{slug}"))
-            Text("The name a branch takes on the remote. \(RemoteBranchTemplate.slugToken) comes from the epic's or task's title; \(RemoteBranchTemplate.idToken) is an optional short id. The local branch stays agentboard/<id> either way. Left empty, the local name is what reaches the remote. A task in no epic integrates by pull request by default: accepting it merges nothing, and it is marked landed once its recorded pull request merges on GitHub. Local merge instead merges it into the base branch on accept. A task in an epic always merges into its epic branch.")
+            Text("The name a branch takes on the remote. \(RemoteBranchTemplate.slugToken) comes from the epic's or task's title; \(RemoteBranchTemplate.idToken) is an optional short id. The local branch stays agentboard/<id> either way. Left empty, the local name is what reaches the remote. By pull request, accepting a task in no epic merges nothing, and it is marked landed once its recorded pull request merges on GitHub; local merge merges it into the base branch on accept. The default is pull request when the repository has an origin remote and local merge when it has none. A task in an epic always merges into its epic branch.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .archive:

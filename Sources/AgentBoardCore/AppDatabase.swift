@@ -97,6 +97,10 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("session_review_head") { db in
             try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN review_head TEXT")
         }
+        migrator.registerMigration("approval_published_url") { db in
+            try db.execute(sql: "ALTER TABLE approval ADD COLUMN published_url TEXT")
+            try ApprovalStore.backfillPublishedURLs(db)
+        }
         return migrator
     }
 }

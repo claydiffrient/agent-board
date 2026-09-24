@@ -882,7 +882,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let projectBase = project.baseBranch
         let epicBranch = epic?.branch
         let worktreeName = "merge-\(task.id)"
-        let byPullRequest = epic == nil && project.settings.standaloneIntegration == .pullRequest
+        var byPullRequest = false
+        if epic == nil {
+            let settings = project.settings
+            let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
+            byPullRequest = (try? await offMain { publisher.standaloneIntegration(settings) }) == .pullRequest
+        }
         let outcome: BranchMerge?
         do {
             outcome = try await offMain {

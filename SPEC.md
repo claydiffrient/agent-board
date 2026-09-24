@@ -1039,16 +1039,32 @@ nobody reviewed.
     merged. `landing_detail` leads with its URL.
 
   **Integrating standalone tasks by pull request.** Workflow → Publishing's
-  "Integrate standalone tasks by" is *Pull request* (the default, including for
-  a project stored before the setting existed) or *Local merge*. Under *Pull
+  "Integrate standalone tasks by" is *Pull request* or *Local merge*. A project
+  that never chose stores neither, and the accept resolves it by running
+  `git remote get-url origin` off the main actor: a repository with an `origin`
+  integrates by pull request, and one without — or a missing repository or
+  git — by local merge. The picker's first entry is that default, labelled with
+  what it resolved to ("Pull request (default: has origin)"); a stored choice
+  always wins. Only `gh` opens and checks pull requests, so an `origin` on a
+  host other than GitHub still resolves to *Pull request*: its tasks wait at
+  `awaiting_pull_request`, and an approved `open_pull_request` pushes the
+  branch to that `origin` and then fails with `gh`'s "none of the git remotes
+  configured for this repository point to a known GitHub host", so such a
+  project should choose *Local merge*. Under *Pull
   request* the accept of a task in no epic does no local merge: a task with no
   branch is still `no_branch`, and one whose branch the base branch already
   contains is still `landed`; any other is `awaiting_pull_request`, or
   `pull_request_open` when a pull request was recorded before the accept.
-  Tasks in an epic merge into their epic branch either way. `push_branch` and
-  `open_pull_request` keep their human approval; when an approved
-  `open_pull_request` records its URL against a `done` task that has not
-  landed, the task moves to `pull_request_open`. The merge check then asks
+  Tasks in an epic merge into their epic branch either way, and nothing below
+  ever applies to one: an epic's pull request carries the epic branch, which
+  says nothing about a member whose merge into it conflicted. `push_branch` and
+  `open_pull_request` keep their human approval. A task's pull request is the
+  URL an approved `open_pull_request` naming that task recorded on its
+  `approval` row (`published_url`) — never text read off the card, where a
+  worker's `update_status` detail is a `status` row too, written with no
+  session id until its grant is bound. When that URL is recorded against a
+  `done` task that has not landed, the task moves to `pull_request_open`. The
+  merge check then asks
   `gh pr view <url> --json state,mergedAt,mergeCommit`, off the main actor, on
   the first metering tick after launch, every 10 minutes after that, and when
   the inspector opens the task: `MERGED` makes it `landed` with the merge commit
@@ -1056,10 +1072,12 @@ nobody reviewed.
   new commit on the base branch — and `CLOSED` makes it `unlanded`, naming the
   pull request, with a `decision` report. A `gh` that is missing, logged out or
   failing leaves the landing as it was and puts the reason in its detail. The
-  same check adopts a `done`, `unlanded` task whose card carries a recorded pull
-  request its detail does not already name, which clears the tasks accepted
-  before this existed; a closed pull request's detail names it, so each is
-  checked once.
+  same check adopts a `done`, `unlanded` task whose recorded pull request its
+  detail does not already name, which clears the tasks accepted before this
+  existed; for those, the `published_url` migration recovered the URL from the
+  progress row the publish wrote. A closed pull request's detail names it, so
+  each is checked once: one reopened and merged afterwards is not re-adopted,
+  and the human lands that task by hand or opens a new pull request.
 
   `pending`, `unlanded`, `awaiting_pull_request` and `pull_request_open` show as
   a badge on the card and in the inspector. All but `pull_request_open` queue a

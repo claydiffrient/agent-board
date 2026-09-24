@@ -144,9 +144,9 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// task's title and is required; `{id}` is an optional short id. Nil publishes the local
     /// `agentboard/<id>` name unchanged, which is what every project had before this existed.
     public var remoteBranchTemplate: String? = nil
-    /// Missing from a stored project decodes as `.pullRequest`, so existing projects integrate by
-    /// pull request too.
-    public var standaloneIntegration: StandaloneIntegration = .pullRequest
+    /// Nil until the human picks one; accept then uses `.pullRequest` when the repository has an
+    /// `origin` remote and `.localMerge` otherwise (SPEC §5).
+    public var standaloneIntegration: StandaloneIntegration? = nil
 
     public init(
         caps: Caps = Caps(),
@@ -164,7 +164,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         sharedCheckoutMaxAgents: Int = 3,
         notifications: NotificationPreferences = NotificationPreferences(),
         remoteBranchTemplate: String? = nil,
-        standaloneIntegration: StandaloneIntegration = .pullRequest
+        standaloneIntegration: StandaloneIntegration? = nil
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -204,7 +204,6 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
             ?? NotificationPreferences()
         remoteBranchTemplate = try c.decodeIfPresent(String.self, forKey: .remoteBranchTemplate)
         standaloneIntegration = try c.decodeIfPresent(StandaloneIntegration.self, forKey: .standaloneIntegration)
-            ?? .pullRequest
     }
 
     public static func decode(_ json: String) -> ProjectSettings {

@@ -121,11 +121,38 @@ final class TaskLandingTests: XCTestCase {
         )
     }
 
-    func testAStoredProjectWithoutTheSettingIntegratesStandaloneTasksByPullRequest() {
-        XCTAssertEqual(ProjectSettings.decode("{}").standaloneIntegration, .pullRequest)
-        XCTAssertEqual(ProjectSettings.forNewProject().standaloneIntegration, .pullRequest)
+    /// The default depends on the repository's `origin`, which decoding cannot see, so a project
+    /// that never chose stores nothing.
+    func testAStoredProjectWithoutTheSettingLeavesTheChoiceUnmade() {
+        XCTAssertNil(ProjectSettings.decode("{}").standaloneIntegration)
+        XCTAssertNil(ProjectSettings.forNewProject().standaloneIntegration)
+        XCTAssertFalse(ProjectSettings().encoded().contains("standaloneIntegration"))
         var local = ProjectSettings()
         local.standaloneIntegration = .localMerge
         XCTAssertEqual(ProjectSettings.decode(local.encoded()).standaloneIntegration, .localMerge)
+    }
+
+    /// A pull request opened before `published_url` existed is known only by its progress row; the
+    /// migration recovers it from that row and not from a newer one a worker wrote.
+    func testTheBackfillRecoversAPullRequestFromThePublishRowAlone() throws {
+        let f = try Fixture.make()
+        let task = try f.task("Opened before the column", column: .review)
+        let branch = "agentboard/\(task.id)"
+        let approval = try f.board.requestPublish(
+            projectId: f.project.id, kind: .pullRequest,
+            request: PublishRequest(branch: branch, base: "main", title: task.title, body: ""),
+            taskId: task.id, requestedBy: "orchestrator"
+        )
+        try f.approvals.resolve(approval.id, .approved)
+        let url = "https://github.com/acme/widgets/pull/16"
+        try f.board.recordPublished(approval: approval, summary: "Pull request opened from \(branch) into main.", url: url)
+        try f.progress.append(
+            taskId: task.id, sessionId: nil, kind: .status, text: "working: see https://github.com/upstream/lib/pull/9"
+        )
+        try f.db.writer.write { db in
+            try db.execute(sql: "UPDATE approval SET published_url = NULL")
+            try ApprovalStore.backfillPublishedURLs(db)
+        }
+        XCTAssertEqual(try f.tasks.recordedPullRequest(taskId: task.id)?.url, url)
     }
 }
