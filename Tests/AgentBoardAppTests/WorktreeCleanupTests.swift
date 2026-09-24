@@ -33,6 +33,7 @@ final class WorktreeCleanupTests: XCTestCase {
     }
 
     func testAcceptKeepsAnUnmergedBranchAndSaysWhy() async throws {
+        try fixture.setStandaloneIntegration(.localMerge)
         let task = try makeTask()
         let session = try fixture.worktreeWorker(task: task)
         try fixture.commitInto(try XCTUnwrap(session.worktreePath))

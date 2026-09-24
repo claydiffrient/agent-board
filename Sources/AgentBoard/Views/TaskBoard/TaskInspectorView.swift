@@ -101,6 +101,10 @@ struct TaskInspectorView: View {
         .task(id: task.id) {
             await progress.run(ProgressStore(env.db).observe(taskId: task.id, limit: 200), in: env.db.reader)
         }
+        .task(id: task.id) {
+            guard task.column == .done, task.landing == .pullRequestOpen || task.landing == .unlanded else { return }
+            await (env.supervisor as? WorkerSupervisor)?.refreshPullRequestLandings(taskId: task.id)
+        }
         .errorAlert($errorMessage)
     }
 
@@ -117,7 +121,7 @@ struct TaskInspectorView: View {
                 Text(task.origin.rawValue)
                 if task.blocked { FlagBadge(text: "blocked") }
                 if task.failed { FlagBadge(text: "failed") }
-                if task.needsLanding { FlagBadge(text: task.landing?.label ?? TaskLanding.pending.label) }
+                if task.needsLanding { FlagBadge(text: task.landingLabel) }
                 if let archived = task.archivedDate {
                     Label("archived \(Format.relative(archived))", systemImage: "archivebox")
                 }

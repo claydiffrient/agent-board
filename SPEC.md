@@ -978,7 +978,8 @@ nobody reviewed.
   The accept then merges the task's branch into the branch meant to carry it:
   `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling
   spawned into the epic branches from work that is already in, and the project's
-  base branch for a task in none. The merge runs after the acceptance
+  base branch for a task in none — unless the project integrates standalone
+  tasks by pull request, below, when a task in none merges nothing. The merge runs after the acceptance
   transaction and off the main actor: nothing it does can hold the task out of
   `done`. When the target branch is an ancestor of the task branch the ref is
   advanced directly; otherwise a temporary worktree on the target branch carries
@@ -1031,10 +1032,40 @@ nobody reviewed.
   - `landed` — the target branch contains the task's commits.
   - `unlanded` — the task has commits and the target branch does not contain
     them. The work is reachable only from `agentboard/<task-id>`.
+  - `awaiting_pull_request` — a task in no epic, accepted in a project that
+    integrates standalone tasks by pull request; nothing was merged and the
+    task branch is kept.
+  - `pull_request_open` — a pull request is recorded for the task and has not
+    merged. `landing_detail` leads with its URL.
 
-  `pending` and `unlanded` show as a badge on the card and in the inspector, and
-  queue a `decision` report naming the task, the branch, the target and the
-  reason, so the orchestrator can dispatch a fix rather than discover the
+  **Integrating standalone tasks by pull request.** Workflow → Publishing's
+  "Integrate standalone tasks by" is *Pull request* (the default, including for
+  a project stored before the setting existed) or *Local merge*. Under *Pull
+  request* the accept of a task in no epic does no local merge: a task with no
+  branch is still `no_branch`, and one whose branch the base branch already
+  contains is still `landed`; any other is `awaiting_pull_request`, or
+  `pull_request_open` when a pull request was recorded before the accept.
+  Tasks in an epic merge into their epic branch either way. `push_branch` and
+  `open_pull_request` keep their human approval; when an approved
+  `open_pull_request` records its URL against a `done` task that has not
+  landed, the task moves to `pull_request_open`. The merge check then asks
+  `gh pr view <url> --json state,mergedAt,mergeCommit`, off the main actor, on
+  the first metering tick after launch, every 10 minutes after that, and when
+  the inspector opens the task: `MERGED` makes it `landed` with the merge commit
+  in `landing_detail` — ancestry cannot settle this, since a squash merge puts a
+  new commit on the base branch — and `CLOSED` makes it `unlanded`, naming the
+  pull request, with a `decision` report. A `gh` that is missing, logged out or
+  failing leaves the landing as it was and puts the reason in its detail. The
+  same check adopts a `done`, `unlanded` task whose card carries a recorded pull
+  request its detail does not already name, which clears the tasks accepted
+  before this existed; a closed pull request's detail names it, so each is
+  checked once.
+
+  `pending`, `unlanded`, `awaiting_pull_request` and `pull_request_open` show as
+  a badge on the card and in the inspector. All but `pull_request_open` queue a
+  `decision` report naming the task, the branch, the target and the
+  reason — for `awaiting_pull_request`, that a pull request is owed — so the
+  orchestrator can dispatch a fix rather than discover the
   divergence at integration time. The board can therefore never say `done` while
   silently meaning "done, and the work is nowhere": reaching `done` writes a
   landing, and the default value is the one that asks for attention.
@@ -2109,7 +2140,11 @@ word, since VoiceOver reads them consecutively along the row — are the only
 thing naming them there.
 
 **Task Board** — columns from §5, swimlanes by epic. A card shows title, epic,
-assigned agent, elapsed, spend, and its `blocked`/`failed` flag. Drag between
+assigned agent, elapsed, spend, and its `blocked`/`failed` flag. A `done` card
+whose landing (§5) asks for attention shows it as a pill — "not landed",
+"landing unknown", "PR pending", or "PR #N open" once a pull request is
+recorded — with the landing detail, including why a merge check could not run,
+as its tooltip. Drag between
 columns. Cards in `review` show the branch, worktree path, and a diffstat.
 
 The toolbar's **Archive** button names its target set in its label — "Archive

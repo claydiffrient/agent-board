@@ -50,6 +50,7 @@ final class ReviewInterruptionTests: XCTestCase {
         let (task, worker, reviewer) = try await taskUnderReview()
         // A checkout holding `main` would leave the work unlanded for a reason unrelated to review.
         _ = try fixture.git(["checkout", "-q", "--detach"])
+        try fixture.setStandaloneIntegration(.localMerge)
         await fixture.runtime.watch(worker.cwd)
 
         try await fixture.supervisor.accept(taskId: task.id)

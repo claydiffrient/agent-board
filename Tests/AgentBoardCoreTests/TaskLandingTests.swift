@@ -103,8 +103,29 @@ final class TaskLandingTests: XCTestCase {
     func testEveryLandingSaysWhetherItNeedsAttention() {
         XCTAssertEqual(
             TaskLanding.allCases.filter(\.needsAttention),
-            [.pending, .unlanded],
+            [.pending, .unlanded, .awaitingPullRequest, .pullRequestOpen],
             "a new landing must decide whether the board raises it"
         )
+    }
+
+    func testTheOpenPillNamesThePullRequestFromTheDetail() throws {
+        let f = try Fixture.make()
+        let task = try f.task("Shipped by pull request", column: .done)
+        let pr = try XCTUnwrap(PullRequestReference(in: "opened\nhttps://github.com/acme/widgets/pull/16"))
+        XCTAssertEqual(pr, PullRequestReference(url: "https://github.com/acme/widgets/pull/16", number: 16))
+        try f.tasks.setLanding(task.id, .pullRequestOpen, detail: PullRequestLanding.openDetail(pr))
+        XCTAssertEqual(try XCTUnwrap(try f.tasks.get(task.id)).landingLabel, "PR #16 open")
+        XCTAssertEqual(
+            PullRequestReference(in: PullRequestLanding.closedDetail(pr, branch: "agentboard/x")), pr,
+            "the closed detail must still name the pull request, or the one-time adoption re-checks it forever"
+        )
+    }
+
+    func testAStoredProjectWithoutTheSettingIntegratesStandaloneTasksByPullRequest() {
+        XCTAssertEqual(ProjectSettings.decode("{}").standaloneIntegration, .pullRequest)
+        XCTAssertEqual(ProjectSettings.forNewProject().standaloneIntegration, .pullRequest)
+        var local = ProjectSettings()
+        local.standaloneIntegration = .localMerge
+        XCTAssertEqual(ProjectSettings.decode(local.encoded()).standaloneIntegration, .localMerge)
     }
 }

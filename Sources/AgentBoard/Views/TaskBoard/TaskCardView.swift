@@ -56,7 +56,7 @@ struct TaskCardView: View {
             }
 
             if task.needsLanding {
-                FlagBadge(text: task.landing?.label ?? TaskLanding.pending.label)
+                FlagBadge(text: task.landingLabel)
                     .help(task.landingDetail ?? "This task reached done and its work is not in any other branch.")
             }
 

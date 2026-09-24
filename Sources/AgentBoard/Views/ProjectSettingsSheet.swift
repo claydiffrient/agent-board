@@ -252,11 +252,16 @@ struct ProjectSettingsSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .publishing:
+            Picker("Integrate standalone tasks by", selection: $settings.standaloneIntegration) {
+                ForEach(StandaloneIntegration.allCases, id: \.self) { integration in
+                    Text(integration.title).tag(integration)
+                }
+            }
             TextField("Remote branch name", text: Binding(
                 get: { settings.remoteBranchTemplate ?? "" },
                 set: { settings.remoteBranchTemplate = $0.isEmpty ? nil : $0 }
             ), prompt: Text("e.g. clay/{slug}"))
-            Text("The name a branch takes on the remote. \(RemoteBranchTemplate.slugToken) comes from the epic's or task's title; \(RemoteBranchTemplate.idToken) is an optional short id. The local branch stays agentboard/<id> either way. Left empty, the local name is what reaches the remote.")
+            Text("The name a branch takes on the remote. \(RemoteBranchTemplate.slugToken) comes from the epic's or task's title; \(RemoteBranchTemplate.idToken) is an optional short id. The local branch stays agentboard/<id> either way. Left empty, the local name is what reaches the remote. A task in no epic integrates by pull request by default: accepting it merges nothing, and it is marked landed once its recorded pull request merges on GitHub. Local merge instead merges it into the base branch on accept. A task in an epic always merges into its epic branch.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .archive:
