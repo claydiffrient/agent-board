@@ -57,10 +57,13 @@ final class StatusRosterAgentRenderTests: XCTestCase {
         XCTAssertFalse(plainRow.contains("Rita"), "plain row read as: \(plainRow)")
         XCTAssertFalse(plainRow.contains("reviewer"), "plain row read as: \(plainRow)")
 
-        XCTAssertTrue(
-            lines.contains { $0.text.contains("Rita reviews") },
-            "no agent-review line in: \(lines.map(\.text))"
-        )
+        // The banner text is a single OCR'd sentence and misreads on CI's paravirtual display
+        // (PR #19: "review" -> "revlew", "finished" -> "tinished"). Assert the data the banner is
+        // built from instead: StatusSnapshot's own gate (review level must be .agent) plus the same
+        // ReviewPolicy.agentRouting call it makes.
+        let level = try XCTUnwrap(try db.reader.read { try Project.fetchOne($0, key: project.id) }).settings.reviewLevel
+        let routing = level == .agent ? try db.reader.read { try ReviewPolicy.agentRouting($0, projectId: project.id) } : nil
+        XCTAssertEqual(routing, .agentReview(agentId: rita.id, agentName: rita.name))
     }
 
     private struct Line {
