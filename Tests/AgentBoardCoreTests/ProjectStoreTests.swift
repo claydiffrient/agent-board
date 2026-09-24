@@ -56,6 +56,25 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(try f.progress.list(taskId: t.id).count, 0)
     }
 
+    func testDeletedProjectsNotesDoNotMatchANoteReusingTheirRowid() throws {
+        let f = try Fixture.make()
+        let doomed = try f.otherProject()
+        let old = try f.notes.create(projectId: doomed.id, title: "Idle cap secrets", sections: [("Why", "the idle cap kills workers")])
+        let oldRowid = try rowid(f, old.id)
+
+        try f.projects.delete(doomed.id)
+        let new = try f.notes.create(projectId: f.project.id, title: "Groceries", sections: [("List", "milk")])
+
+        XCTAssertEqual(try rowid(f, new.id), oldRowid)
+        XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "idle"), [])
+        XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "workers"), [])
+        XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "milk").map(\.id), [new.id])
+    }
+
+    private func rowid(_ f: Fixture, _ noteId: String) throws -> Int64? {
+        try f.db.reader.read { try Int64.fetchOne($0, sql: "SELECT rowid FROM note WHERE id = ?", arguments: [noteId]) }
+    }
+
     func testObserveAllEmitsInitialValue() throws {
         let f = try Fixture.make()
         let expectation = expectation(description: "initial")

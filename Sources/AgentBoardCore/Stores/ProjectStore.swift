@@ -83,6 +83,9 @@ public struct ProjectStore: Sendable {
                 sql: "DELETE FROM note_link WHERE note_id IN (SELECT id FROM note WHERE project_id = ?)",
                 arguments: [id]
             )
+            for noteId in try String.fetchAll(db, sql: "SELECT id FROM note WHERE project_id = ?", arguments: [id]) {
+                try NoteStore.unindex(db, noteId: noteId)
+            }
             try db.execute(
                 sql: "DELETE FROM note_section WHERE note_id IN (SELECT id FROM note WHERE project_id = ?)",
                 arguments: [id]
