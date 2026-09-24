@@ -102,6 +102,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
     /// Tasks whose pull request is being checked, so overlapping checks cannot both report a close.
     @ObservationIgnored private var landingChecksInFlight: Set<String> = []
+    @ObservationIgnored private let mergeQueue = BranchMergeQueue()
     /// Which project needs a human and which of those has already been announced. Polled on the
     /// metering tick rather than observed, because `overdueShutdown` and any future deadline cause
     /// only become true as the clock moves, and a `ValueObservation` re-fires on writes alone.
@@ -871,12 +872,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         // A shared branch holds several tasks' commits on one ref, so it lands as a unit when its
         // last member is accepted (§8.4) rather than once per task.
         if let epic, let shared = sharedBranch(of: task) {
-            await mergeSharedBranch(task: task, epic: epic, project: project, branch: shared)
+            await mergeQueue.serialize(repo: project.repoPath, branch: epic.branch) {
+                await mergeSharedBranch(task: task, epic: epic, project: project, branch: shared)
+            }
             return
         }
+        let target = epic?.branch ?? project.baseBranch
+        await mergeQueue.serialize(repo: project.repoPath, branch: target) {
+            await mergeTaskBranch(task: task, epic: epic, project: project, into: target)
+        }
+    }
+
+    private func mergeTaskBranch(task: BoardTask, epic: Epic?, project: Project, into target: String) async {
         let manager = worktreeManager(for: project)
         let taskBranch = Self.taskBranchPrefix + task.id
-        let target = epic?.branch ?? project.baseBranch
         let taskTitle = task.title
         let targetTitle = epic?.title ?? project.baseBranch
         let projectBase = project.baseBranch
@@ -1079,6 +1088,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// then the accepted task is recorded as accepted and nothing is merged or reaped: its commits
     /// are interleaved with its siblings' on one ref, so there is no range that is its work alone.
     private func mergeSharedBranch(task: BoardTask, epic: Epic, project: Project, branch: String) async {
+        // A sibling accepted concurrently merged the branch first, carrying this task, and reaped it.
+        if (try? tasks.get(task.id))??.landing == .landed { return }
         let members = (try? sharedMembers(projectId: project.id, branch: branch)) ?? []
         guard SharedBranchAcceptance.isReadyToMerge(members) else {
             let waiting = SharedBranchAcceptance.waitingOn(members)

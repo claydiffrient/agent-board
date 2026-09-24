@@ -983,8 +983,11 @@ nobody reviewed.
   transaction and off the main actor: nothing it does can hold the task out of
   `done`. When the target branch is an ancestor of the task branch the ref is
   advanced directly; otherwise a temporary worktree on the target branch carries
-  the merge and is removed afterwards, keeping the branch. A conflict aborts and
-  leaves the target branch where it was. The merge commit's subject is
+  the merge and is removed afterwards, keeping the branch. Merges into one
+  target branch run one at a time, in the order their accepts arrived — git lets
+  only one worktree hold a branch, so a second accept waits for the first merge
+  rather than failing on it; this covers a shared branch's merge below too. A
+  conflict aborts and leaves the target branch where it was. The merge commit's subject is
   `Merge <task title> into <epic title or base branch name>` — titles, never
   `agentboard/<id>` branch names, because this commit is on the branch a pull
   request is opened from and those names would publish the task and epic
