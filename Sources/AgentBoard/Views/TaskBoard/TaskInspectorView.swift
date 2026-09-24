@@ -51,6 +51,7 @@ struct TaskInspectorView: View {
                 }
                 dependencies
                 sessionList
+                TaskCommentsSection(task: task)
                 progressLog
                 HStack {
                     if task.isArchived {

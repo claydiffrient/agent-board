@@ -55,6 +55,37 @@ public struct CommentStore: Sendable {
         ValueObservation.tracking { db in try Self.list(db, taskId: taskId) }
     }
 
+    public func observeThread(taskId: String) -> ValueObservation<ValueReducers.Fetch<CommentThread>> {
+        ValueObservation.tracking { db in try Self.thread(db, taskId: taskId) }
+    }
+
+    static func thread(_ db: Database, taskId: String) throws -> CommentThread {
+        let comments = try list(db, taskId: taskId)
+        let rosterIds = Array(Set(comments.compactMap(\.authorRosterAgentId)))
+        let sessionIds = Array(Set(comments.compactMap(\.authorSessionId)))
+        var thread = CommentThread(comments: comments)
+        if !rosterIds.isEmpty {
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT id, name FROM roster_agent WHERE id IN (\(databaseQuestionMarks(count: rosterIds.count)))",
+                arguments: StatementArguments(rosterIds)
+            )
+            thread.rosterNames = Dictionary(uniqueKeysWithValues: rows.map { ($0["id"], $0["name"]) })
+        }
+        if !sessionIds.isEmpty {
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT session_id, short_id FROM agent_session
+                    WHERE short_id IS NOT NULL AND session_id IN (\(databaseQuestionMarks(count: sessionIds.count)))
+                    """,
+                arguments: StatementArguments(sessionIds)
+            )
+            thread.shortIds = Dictionary(uniqueKeysWithValues: rows.map { ($0["session_id"], $0["short_id"]) })
+        }
+        return thread
+    }
+
     /// Comment count per task in the project, for the card badge. A task with no comments is absent.
     public func counts(projectId: String) throws -> [String: Int] {
         try db.reader.read { db in try Self.counts(db, projectId: projectId) }

@@ -101,3 +101,40 @@ extension Board {
         }
     }
 }
+
+/// A task's comments, oldest first, with what the inspector needs to name their authors.
+public struct CommentThread: Sendable, Equatable {
+    public var comments: [TaskComment]
+    /// Current roster names by roster agent id; a deleted agent is absent.
+    public var rosterNames: [String: String]
+    /// Session short ids by session id, for the sessions that have one.
+    public var shortIds: [String: String]
+
+    public init(comments: [TaskComment] = [], rosterNames: [String: String] = [:], shortIds: [String: String] = [:]) {
+        self.comments = comments
+        self.rosterNames = rosterNames
+        self.shortIds = shortIds
+    }
+
+    /// `You`, `Orchestrator`, `Rita · reviewer`, or `Worker 3f9a1c2e` (SPEC §10). With no roster
+    /// agent, a snapshot that is more than the role word names an agent since deleted from the roster.
+    public func authorLabel(_ comment: TaskComment) -> String {
+        let role = comment.authorKind.rawValue
+        switch comment.authorKind {
+        case .human:
+            return "You"
+        case .orchestrator:
+            return "Orchestrator"
+        case .worker, .reviewer:
+            if let id = comment.authorRosterAgentId, let name = rosterNames[id] {
+                return "\(name) · \(role)"
+            }
+            let snapshot = comment.authorName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !snapshot.isEmpty, snapshot.lowercased() != role {
+                return "\(snapshot) · \(role)"
+            }
+            guard let sessionId = comment.authorSessionId else { return role.capitalized }
+            return "\(role.capitalized) \(shortIds[sessionId] ?? String(sessionId.prefix(8)))"
+        }
+    }
+}
