@@ -297,6 +297,9 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     /// `PreToolUse` calls not yet matched by a `PostToolUse`. A count rather than a flag because
     /// Claude runs parallel tool calls: a short one returning must not end a long one's grace.
     public var toolsInFlight: Int
+    /// The branch HEAD a rostered reviewer was spawned on. A verdict is refused once HEAD has moved
+    /// from it (SPEC §5.1).
+    public var reviewHead: String?
 
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -325,6 +328,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case rosterAgentId = "roster_agent_id"
         case toolStartedAt = "tool_started_at"
         case toolsInFlight = "tools_in_flight"
+        case reviewHead = "review_head"
     }
 
     public init(
@@ -334,7 +338,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         transcriptPath: String? = nil, tokensIn: Int = 0, tokensOut: Int = 0, cacheRead: Int = 0,
         cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil,
         lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil,
-        rosterAgentId: String? = nil, toolStartedAt: Int64? = nil, toolsInFlight: Int = 0
+        rosterAgentId: String? = nil, toolStartedAt: Int64? = nil, toolsInFlight: Int = 0,
+        reviewHead: String? = nil
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -362,6 +367,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.rosterAgentId = rosterAgentId
         self.toolStartedAt = toolStartedAt
         self.toolsInFlight = toolsInFlight
+        self.reviewHead = reviewHead
     }
 
     public var id: String { sessionId }

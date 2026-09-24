@@ -89,6 +89,10 @@ actor FakeWorkerControl: WorkerControl {
         accepted.append((taskId, acceptedBy))
         try board?.accept(taskId: taskId, acceptedBy: acceptedBy)
     }
+
+    func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String? {
+        nil
+    }
 }
 
 struct BridgeFixture {

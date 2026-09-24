@@ -16,6 +16,7 @@ public final class StoreHookSink: HookSink {
     private let locks: FileLockStore
     private let waitPolicy: FileLockWaitPolicy
     private let board: Board
+    private let db: AppDatabase
     private let events: any BoardEventSink
     private let queue = DispatchQueue(label: "agent-board.hooks")
     /// Sessions whose context was just compacted and that have not yet been handed their task back.
@@ -70,6 +71,7 @@ public final class StoreHookSink: HookSink {
         locks = FileLockStore(db)
         waitPolicy = lockWait
         board = Board(db)
+        self.db = db
         self.events = events
     }
 
@@ -274,7 +276,10 @@ public final class StoreHookSink: HookSink {
         return .none
     }
 
-    private func reBrief(session: AgentSession, taskId: String?) -> String? {
+    private func reBrief(session: AgentSession, taskId: String?, scope: AgentBoardServer.TokenScope) -> String? {
+        if scope == .reviewer {
+            return (try? ReviewPrompt.postCompactionBrief(db: db, session: session)) ?? nil
+        }
         guard let taskId, let task = try? tasks.get(taskId) else { return nil }
         let epic = task.epicId.flatMap { try? epics.get($0) } ?? nil
         let injected = (try? notes.notesForSpawn(
@@ -284,7 +289,8 @@ public final class StoreHookSink: HookSink {
             task: task,
             branch: session.branch ?? TaskStore.branchName(for: taskId),
             epicGoal: epic?.goal,
-            notes: injected
+            notes: injected,
+            reviewFindings: (try? progress.openReviewFindings(taskId: taskId)) ?? nil
         )
     }
 
@@ -432,7 +438,8 @@ public final class StoreHookSink: HookSink {
             if [.starting, .idle, .blocked].contains(session.state) {
                 try? sessions.setState(sessionId, .running)
             }
-            if awaitingReBrief.remove(sessionId) != nil, let brief = reBrief(session: session, taskId: taskId) {
+            if awaitingReBrief.remove(sessionId) != nil,
+               let brief = reBrief(session: session, taskId: taskId, scope: identity.scope) {
                 return .respond(.context(brief))
             }
 

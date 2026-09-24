@@ -94,6 +94,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("review_level") { db in
             try db.execute(sql: Schema.reviewLevel)
         }
+        migrator.registerMigration("session_review_head") { db in
+            try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN review_head TEXT")
+        }
         return migrator
     }
 }

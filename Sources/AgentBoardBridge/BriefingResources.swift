@@ -7,13 +7,15 @@ import Foundation
 /// session can reach: measured against Claude Code 2.1.272, a `claude --bg` worker's client calls
 /// `prompts/list` in its handshake and exposes neither the result nor `prompts/get` to the agent.
 ///
-/// Both briefings are rendered on every read from the same functions the spawn path calls, so a
+/// Every briefing is rendered on every read from the same functions the spawn path calls, so a
 /// session that fetches one cannot be handed text that has drifted from what it was spawned with.
 public struct BriefingResourceHandler: ResourceHandler {
+    private let db: AppDatabase
     private let projects: ProjectStore
     private let sessions: SessionStore
 
     public init(db: AppDatabase) {
+        self.db = db
         projects = ProjectStore(db)
         sessions = SessionStore(db)
     }
@@ -40,9 +42,15 @@ public struct BriefingResourceHandler: ResourceHandler {
                 mimeType: Self.mimeType
             )]
         case .reviewer:
-            // Nothing spawns a rostered reviewer yet, so there is no briefing it was launched with
-            // to hand back. `read` refuses both uris for this scope through its `default` arm.
-            return []
+            guard identity.taskId != nil else { return [] }
+            return [ResourceDescriptor(
+                uri: BriefingResourceURI.reviewer,
+                name: "Reviewer briefing",
+                description: "The prompt you were spawned with: the task under review, how to review it without "
+                    + "changing anything, and how to finish with accept_task or reopen_task. "
+                    + "Read it after a resume or a compaction, when those instructions are no longer in context.",
+                mimeType: Self.mimeType
+            )]
         }
     }
 
@@ -68,6 +76,14 @@ public struct BriefingResourceHandler: ResourceHandler {
                 throw ResourceError(uri: uri, message: "No project \(identity.projectId).")
             }
             return [contents(uri, OrchestratorPrompt.systemPrompt(project: project))]
+        case (BriefingResourceURI.reviewer, .reviewer):
+            guard let taskId = identity.taskId,
+                  let session = try callerSession(identity, taskId: taskId),
+                  let prompt = try ReviewPrompt.recorded(db: db, session: session)
+            else {
+                throw ResourceError(uri: uri, message: "No review session is recorded for this token.")
+            }
+            return [contents(uri, prompt)]
         default:
             throw ResourceError(uri: uri, message: Self.refusal(for: identity))
         }
@@ -91,7 +107,11 @@ public struct BriefingResourceHandler: ResourceHandler {
     /// Names only the briefing this caller is allowed to read, so an orchestrator asking for the
     /// worker protocol is refused the same way an unknown uri is.
     static func refusal(for identity: TokenIdentity) -> String {
-        let mine = identity.scope == .worker ? BriefingResourceURI.worker : BriefingResourceURI.orchestrator
+        let mine = switch identity.scope {
+        case .worker: BriefingResourceURI.worker
+        case .orchestrator: BriefingResourceURI.orchestrator
+        case .reviewer: BriefingResourceURI.reviewer
+        }
         return "Not a briefing you can read. The one addressed to you is \(mine)."
     }
 }
