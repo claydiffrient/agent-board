@@ -9,6 +9,67 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.2.0 — 2026-09-24
+
+- **Board.** A project can run every worker in its own checkout on one shared
+  branch instead of a git worktree per task — set Project Settings → Workflow
+  → Isolation → Worktree strategy to Shared or Auto; acceptance waits for
+  every task on that branch before merging the whole thing into the epic at
+  once. Epic lanes on the Task Board now sort by state (active, planning,
+  integrating, done, then abandoned) instead of creation order, each with a
+  disclosure control, and a done epic's lane starts collapsed. A standalone
+  task (one in no epic) can integrate by opening a pull request instead of
+  merging locally — set on Workflow → Publishing — and Agent Board tracks it
+  to merged and lands the task itself once the PR is in. Launching Agent
+  Board from Finder or the Dock no longer fails an orchestrator's first
+  command with `claude: No such file or directory`.
+- **Reviews.** Work can go to a rostered specialist agent instead of only a
+  person: add, edit, and delete these agents from the new Roster screen in
+  the sidebar, pick one for a task, or turn on Agent review for a project so
+  every completed task routes to a named reviewer — choose which one in
+  Project Settings → Agents. A rostered reviewer can only look, comment,
+  accept, or reopen; it can't edit or push, and accept/reopen now refuse if
+  the branch moved or a tracked file changed while it worked. The review
+  column shows who's holding each pending review and how long they've been at
+  it, and accepting or reopening a task stops any reviewer still working it
+  first. Deleting an agent that has run sessions or reviews no longer fails —
+  its past work stays on record with the reference cleared instead.
+- **Status.** Each session's row now names the rostered agent that worked it,
+  and which agent is reviewing. A "Keep awake" checkbox in the status
+  footer, on by default, keeps the Mac from idle-sleeping while any worker is
+  running and lets go the moment the last one finishes — it doesn't cover a
+  closed lid.
+- **Search.** One field now sits above the Task Board, Notes, and the Status
+  pane (⌘F) and narrows whatever screen is in front to matching cards, notes,
+  or sessions and ports as you type, with a running count beside it.
+- **Terminal.** A second button beside Attach — on the Status pane and in the
+  task inspector — opens a worktree shell: a plain login shell rooted at a
+  session's own checkout, for poking around without dropping into its live
+  Claude session. A terminal building at launch no longer freezes the UI
+  while it waits on the login shell's PATH.
+- **Ports.** A Ports panel in the sidebar lists every TCP port a process
+  Agent Board started is listening on, who owns it, and lets you open or stop
+  it. The same rows, filtered to one project, also show on that project's
+  Status pane.
+- **Cross-project messages.** The Orchestrator screen's sidebar now has a
+  Messages section showing both directions of project-to-project notes —
+  which project, when it arrived, and whether the receiving side has pulled
+  it yet.
+- **Notifications.** A banner now fires only for a pending approval or a
+  blocked worker. A finished task with an unread report, or an overdue,
+  unacknowledged shutdown, raises a new sidebar badge and an At a Glance dot
+  instead — no banner. At a Glance's headline now shows how many projects
+  need you, alongside the existing review-column count. Clicking a banner
+  opens straight to what's waiting: the approvals sidebar, the blocked-task
+  section, or Status when a session blocked with no task. Project Settings
+  adds per-category banner toggles and a project-wide mute, timed or
+  indefinite — muting only silences banners, not the badge or dot.
+- **Settings.** Project Settings is six tabs instead of one long scrolling
+  form, and the sheet is wider and shorter to fit. The autoMode classifier
+  editor no longer silently turns a typed straight quote into a curly one
+  that fails to parse as JSON. Opus 5.5 is in the model catalog and priced
+  correctly, rather than being read as Opus 5.
+
 ## 0.1.0 — 2026-09-16
 
 First release.
