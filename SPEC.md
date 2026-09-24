@@ -2149,8 +2149,26 @@ word, since VoiceOver reads them consecutively along the row — are the only
 thing naming them there.
 
 **Task Board** — columns from §5, swimlanes by epic. A card shows title, epic,
-assigned agent, elapsed, spend, and its `blocked`/`failed` flag. Drag between
-columns. Cards in `review` show the branch, worktree path, and a diffstat.
+assigned agent, elapsed, spend, its `blocked`/`failed` flag, and a comment count
+when it has comments — one per-project count query for the whole board, not one
+per card. Drag between columns. Cards in `review` show the branch, worktree path,
+and a diffstat.
+
+The task inspector shows a **Comments** thread above the Progress log, oldest
+first. Each comment names its author in words — `You`, `Orchestrator`,
+`Rita · reviewer`, `Rita · worker`, or `Worker 3f9a1c2e` / `Reviewer 3f9a1c2e`
+for an agent with no roster agent — using the roster's current name, and the
+`author_name` snapshot once the agent is deleted (§4). No column records that a
+comment's roster reference was ever set, so a deleted agent is told from an
+unrostered one by its snapshot: one that is not the form `add_comment` writes for
+an unrostered agent (§6: `Worker <short id>`; a reviewer's bare session id) is
+shown as `<snapshot> · <kind>`.
+The time is relative, with the absolute date and time on hover; the body is
+selectable and wraps. The human's comments sit on an accent tint; agents' sit on
+neutral grey behind an icon for their kind. A composer under the thread adds a
+`human` comment with **Add Comment** or ⌘↩ and refuses a blank body. Its draft
+belongs to the task it was typed on: selecting another task shows that task's own
+draft, and returning restores the first.
 
 The toolbar's **Archive** button names its target set in its label — "Archive
 23 Done Tasks" — and confirms before acting; it is offered under every archive

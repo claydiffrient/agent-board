@@ -8,6 +8,7 @@ struct TaskBoardView: View {
     @Environment(AppEnvironment.self) private var env
     @State private var tasks = Observed<[BoardTask]>([])
     @State private var sessions = Observed<[AgentSession]>([])
+    @State private var commentCounts = Observed<[String: Int]>([:])
     @State private var epics = Observed<[Epic]>([])
     @State private var selectedTaskId: String?
     @State private var showNewTask = false
@@ -143,6 +144,9 @@ struct TaskBoardView: View {
         }
         .task(id: project.id) {
             await sessions.run(SessionStore(env.db).observe(projectId: project.id), in: env.db.reader)
+        }
+        .task(id: project.id) {
+            await commentCounts.run(CommentStore(env.db).observeCounts(projectId: project.id), in: env.db.reader)
         }
         .task(id: project.id) {
             let projectId = project.id
@@ -408,6 +412,7 @@ struct TaskBoardView: View {
                     activeSession: taskSessions.first { $0.state.isActive },
                     latestSession: taskSessions.first,
                     isSelected: task.id == selectedTaskId,
+                    commentCount: commentCounts.value[task.id] ?? 0,
                     onAccept: { accept(task.id) },
                     onReopen: { reopen(task.id) }
                 )

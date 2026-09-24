@@ -10,6 +10,12 @@ public enum CommentAuthorKind: String, Codable, Sendable, CaseIterable, Equatabl
 
 /// Who wrote a comment. `name` is a snapshot taken when the comment is written, so the comment
 /// still names a rostered agent after the agent is deleted and `rosterAgentId` is nulled (SPEC §4).
+///
+/// The snapshots the bridge writes: `human`; `Orchestrator`; a rostered worker or reviewer's roster
+/// name, with its `rosterAgentId`; an unrostered worker `Worker <short id>` (or the session id's first
+/// 8 characters); an unrostered reviewer its bare session id, or `an unnamed reviewer` with none.
+/// Nothing records that a roster id was ever set, so a deleted agent is told from an unrostered one
+/// only by its snapshot not matching these.
 public struct CommentAuthor: Sendable, Equatable {
     public var kind: CommentAuthorKind
     public var sessionId: String?
@@ -99,5 +105,50 @@ extension Board {
             }
             return try CommentStore.insert(db, task: task, author: author, body: text)
         }
+    }
+}
+
+/// A task's comments, oldest first, with what the inspector needs to name their authors.
+public struct CommentThread: Sendable, Equatable {
+    public var comments: [TaskComment]
+    /// Current roster names by roster agent id; a deleted agent is absent.
+    public var rosterNames: [String: String]
+    /// Session short ids by session id, for the sessions that have one.
+    public var shortIds: [String: String]
+
+    public init(comments: [TaskComment] = [], rosterNames: [String: String] = [:], shortIds: [String: String] = [:]) {
+        self.comments = comments
+        self.rosterNames = rosterNames
+        self.shortIds = shortIds
+    }
+
+    /// `You`, `Orchestrator`, `Rita · reviewer`, or `Worker 3f9a1c2e` (SPEC §10). With no roster
+    /// agent, a snapshot other than the unrostered form names an agent since deleted from the roster.
+    public func authorLabel(_ comment: TaskComment) -> String {
+        let role = comment.authorKind.rawValue
+        switch comment.authorKind {
+        case .human:
+            return "You"
+        case .orchestrator:
+            return "Orchestrator"
+        case .worker, .reviewer:
+            if let id = comment.authorRosterAgentId, let name = rosterNames[id] {
+                return "\(name) · \(role)"
+            }
+            let snapshot = comment.authorName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !isUnrosteredSnapshot(snapshot, of: comment) {
+                return "\(snapshot) · \(role)"
+            }
+            guard let sessionId = comment.authorSessionId else { return role.capitalized }
+            return "\(role.capitalized) \(shortIds[sessionId] ?? String(sessionId.prefix(8)))"
+        }
+    }
+
+    private func isUnrosteredSnapshot(_ snapshot: String, of comment: TaskComment) -> Bool {
+        let role = comment.authorKind.rawValue
+        if snapshot.isEmpty || snapshot.lowercased() == role { return true }
+        guard let sessionId = comment.authorSessionId else { return snapshot == "an unnamed \(role)" }
+        let ids = [shortIds[sessionId], String(sessionId.prefix(8)), sessionId].compactMap { $0 }
+        return ids.contains(snapshot) || ids.contains { snapshot == "\(role.capitalized) \($0)" }
     }
 }
