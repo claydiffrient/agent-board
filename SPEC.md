@@ -787,8 +787,12 @@ so adding a specialty must not need a migration. A project's *usable* set is
 `project_roster_agent` joined to `roster_agent` where `enabled = 1` — disabling
 an agent roster-wide takes it out of every project's rotation without removing
 anyone's selection. Deleting a rostered agent clears its `project_roster_agent`
-rows and nothing else: the tasks it worked, its sessions, and the `progress`
-rows naming it all survive it.
+rows and keeps its history: the tasks it worked or reviewed, its sessions, and the
+`progress` rows naming it all survive it. Their `roster_agent_id` and
+`reviewer_agent_id` are set to NULL in the same transaction, because those columns
+are foreign keys with no `ON DELETE` and a dangling id would fail the delete. The
+store refuses (`BoardError.rosterAgentWorking`) while a live session still runs as
+the agent, independently of the Roster screen's own guard (§10).
 
 There is no `is_reviewer` flag. A project names its reviewer outright in
 `settings_json.reviewAgent` — `{"id": …, "name": …}`, the name a snapshot taken

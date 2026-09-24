@@ -60,10 +60,26 @@ public struct RosterStore: Sendable {
         }
     }
 
-    /// Removes the agent from the roster and from every project that had opted in. Nothing else
-    /// is touched: the tasks it worked, its sessions, and the progress rows naming it all survive.
+    /// Removes the agent from the roster and from every project that had opted in. The tasks it
+    /// worked and reviewed, its sessions, and the progress rows naming it all survive; their
+    /// references to it are nulled, since the foreign keys forbid pointing at a deleted row (SPEC §4).
+    /// Refused while a live session still runs as the agent, which would be left with no identity.
     public func delete(_ id: String) throws {
         try db.writer.write { db in
+            if let live = try String.fetchOne(
+                db,
+                sql: """
+                SELECT session_id FROM agent_session
+                WHERE roster_agent_id = ? AND state IN (\(SessionStore.activeStatesSQL))
+                ORDER BY started_at LIMIT 1
+                """,
+                arguments: [id]
+            ) {
+                throw BoardError.rosterAgentWorking(agentId: id, sessionId: live)
+            }
+            try db.execute(sql: "UPDATE agent_session SET roster_agent_id = NULL WHERE roster_agent_id = ?", arguments: [id])
+            try db.execute(sql: "UPDATE task SET roster_agent_id = NULL WHERE roster_agent_id = ?", arguments: [id])
+            try db.execute(sql: "UPDATE task SET reviewer_agent_id = NULL WHERE reviewer_agent_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM project_roster_agent WHERE roster_agent_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM roster_agent WHERE id = ?", arguments: [id])
         }
