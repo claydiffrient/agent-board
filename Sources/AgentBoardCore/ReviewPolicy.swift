@@ -53,17 +53,23 @@ public enum ReviewPolicy {
             }
             return .autoAccept
         case .agent:
-            if let named = try Project.fetchOne(db, key: task.projectId)?.settings.reviewAgent {
-                return try namedReviewerRouting(db, named: named, projectId: task.projectId)
-            }
-            let reviewers = try RosterStore.agents(db, forProject: task.projectId, enabledOnly: true)
-                .filter(\.isReviewer)
-            guard let reviewer = reviewers.first else {
-                return .humanReview(reason: "Agent review, but this project has no rostered agent with a "
-                    + "reviewer role, so it needs a person.")
-            }
-            return .agentReview(agentId: reviewer.id, agentName: reviewer.name)
+            return try agentRouting(db, projectId: task.projectId)
         }
+    }
+
+    /// Where agent review sends this project's tasks: the named reviewer, else the first usable
+    /// agent whose role marks it a reviewer. Status shows this under the `agent` level (SPEC §10).
+    public static func agentRouting(_ db: Database, projectId: String) throws -> ReviewRouting {
+        if let named = try Project.fetchOne(db, key: projectId)?.settings.reviewAgent {
+            return try namedReviewerRouting(db, named: named, projectId: projectId)
+        }
+        let reviewers = try RosterStore.agents(db, forProject: projectId, enabledOnly: true)
+            .filter(\.isReviewer)
+        guard let reviewer = reviewers.first else {
+            return .humanReview(reason: "Agent review, but this project has no rostered agent with a "
+                + "reviewer role, so it needs a person.")
+        }
+        return .agentReview(agentId: reviewer.id, agentName: reviewer.name)
     }
 
     /// A named reviewer that cannot take the task sends it to a person, never to another agent
