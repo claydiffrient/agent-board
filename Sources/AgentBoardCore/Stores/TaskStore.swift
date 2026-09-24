@@ -406,6 +406,8 @@ public enum BoardError: Error, Equatable, Sendable {
     case approvalAlreadyResolved(String)
     case epicNotFound(String)
     case rosterAgentNotFound(String)
+    /// The agent cannot be deleted while this live session runs as it.
+    case rosterAgentWorking(agentId: String, sessionId: String)
     /// A reviewer was to be spawned for a task that is no longer in `review`, so there is nothing
     /// left for it to decide.
     case taskNotInReview(taskId: String, column: TaskColumn)

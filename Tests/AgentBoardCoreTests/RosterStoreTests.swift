@@ -276,6 +276,56 @@ final class RosterStoreTests: XCTestCase {
         XCTAssertEqual(orphans, 0)
     }
 
+    func testDeleteKeepsSessionsAndTasksThatNameTheAgentAndNullsTheirReferences() throws {
+        let f = try Fixture.make()
+        let ada = try f.roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
+        let bob = try f.roster.create(name: "Bob", role: "reviewer", systemPrompt: "p")
+        let worked = try f.task("worked by Ada")
+        let reviewed = try f.task("reviewed by Ada")
+        let untouched = try f.task("worked by Bob")
+        var session = f.session(state: .completed, taskId: worked.id)
+        session.rosterAgentId = ada.id
+        try f.sessions.insert(session)
+        var bobSession = f.session(state: .completed, taskId: untouched.id)
+        bobSession.rosterAgentId = bob.id
+        try f.sessions.insert(bobSession)
+        try f.tasks.setRosterAgent(worked.id, ada.id)
+        try f.tasks.setReviewer(worked.id, bob.id)
+        try f.tasks.setReviewer(reviewed.id, ada.id)
+        try f.tasks.setRosterAgent(untouched.id, bob.id)
+
+        try f.roster.delete(ada.id)
+
+        XCTAssertNil(try f.roster.get(ada.id))
+        XCTAssertNil(try f.sessions.get(session.sessionId)?.rosterAgentId)
+        XCTAssertEqual(try f.sessions.get(session.sessionId)?.state, .completed)
+        XCTAssertNil(try f.tasks.get(worked.id)?.rosterAgentId)
+        XCTAssertEqual(try f.tasks.get(worked.id)?.reviewerAgentId, bob.id)
+        XCTAssertNil(try f.tasks.get(reviewed.id)?.reviewerAgentId)
+        XCTAssertEqual(try f.tasks.get(reviewed.id)?.title, "reviewed by Ada")
+        XCTAssertEqual(try f.sessions.get(bobSession.sessionId)?.rosterAgentId, bob.id)
+        XCTAssertEqual(try f.tasks.get(untouched.id)?.rosterAgentId, bob.id)
+    }
+
+    func testDeleteIsRefusedWhileALiveSessionRunsAsTheAgent() throws {
+        let f = try Fixture.make()
+        let ada = try f.roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
+        try f.roster.enable(agentId: ada.id, forProject: f.project.id)
+        let task = try f.task("in flight", column: .running)
+        var live = f.session(state: .running, taskId: task.id)
+        live.rosterAgentId = ada.id
+        try f.sessions.insert(live)
+        try f.tasks.setRosterAgent(task.id, ada.id)
+
+        XCTAssertThrowsError(try f.roster.delete(ada.id)) {
+            XCTAssertEqual($0 as? BoardError, .rosterAgentWorking(agentId: ada.id, sessionId: live.sessionId))
+        }
+        XCTAssertNotNil(try f.roster.get(ada.id))
+        XCTAssertEqual(try f.roster.agents(forProject: f.project.id).map(\.id), [ada.id])
+        XCTAssertEqual(try f.sessions.get(live.sessionId)?.rosterAgentId, ada.id)
+        XCTAssertEqual(try f.tasks.get(task.id)?.rosterAgentId, ada.id)
+    }
+
     func testDeletingAProjectClearsItsRosterSelectionWithoutTouchingTheAgents() throws {
         let f = try Fixture.make()
         let other = try f.otherProject()
