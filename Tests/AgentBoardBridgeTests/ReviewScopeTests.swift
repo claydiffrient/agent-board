@@ -44,9 +44,9 @@ final class ReviewScopeTests: XCTestCase {
 
     // MARK: The scope boundary
 
-    func testTheReviewerScopeIsFourToolsAndHasNoSpawnOrReassign() async {
+    func testTheReviewerScopeIsFiveToolsAndHasNoSpawnOrReassign() async {
         let names = Set(await f.scoped.tools(for: f.reviewerIdentity(sessionId: "rev-1", taskId: task.id)).map(\.name))
-        XCTAssertEqual(names, ["get_my_task", "log_progress", "accept_task", "reopen_task"])
+        XCTAssertEqual(names, ["get_my_task", "log_progress", "add_comment", "accept_task", "reopen_task"])
         for forbidden in ["spawn_worker", "assign_to_agent", "move_task", "create_task", "update_task",
                           "list_tasks", "set_deps", "stop_worker", "promote_proposal", "request_integration",
                           "hand_off", "report_complete", "propose_task"] {
