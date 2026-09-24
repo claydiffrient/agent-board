@@ -1,9 +1,9 @@
-import AgentBoardCore
 import AppKit
 import SwiftUI
 import Vision
 import XCTest
 @testable import AgentBoard
+@testable import AgentBoardCore
 
 /// Reads the Status page's rendered text with Vision OCR over the window-server capture: SwiftUI
 /// `Text` leaves no string in the AppKit view tree to assert on.
@@ -57,13 +57,10 @@ final class StatusRosterAgentRenderTests: XCTestCase {
         XCTAssertFalse(plainRow.contains("Rita"), "plain row read as: \(plainRow)")
         XCTAssertFalse(plainRow.contains("reviewer"), "plain row read as: \(plainRow)")
 
-        // The banner text is a single OCR'd sentence and misreads on CI's paravirtual display
-        // (PR #19: "review" -> "revlew", "finished" -> "tinished"). Assert the data the banner is
-        // built from instead: StatusSnapshot's own gate (review level must be .agent) plus the same
-        // ReviewPolicy.agentRouting call it makes.
-        let level = try XCTUnwrap(try db.reader.read { try Project.fetchOne($0, key: project.id) }).settings.reviewLevel
-        let routing = level == .agent ? try db.reader.read { try ReviewPolicy.agentRouting($0, projectId: project.id) } : nil
-        XCTAssertEqual(routing, .agentReview(agentId: rita.id, agentName: rita.name))
+        // OCR misreads the banner sentence on CI's paravirtual display. Read StatusSnapshot.fetch
+        // directly instead — the same call observeStatus's ValueObservation makes on every change.
+        let snapshot = try db.reader.read { try StatusSnapshot.fetch($0, projectId: project.id) }
+        XCTAssertEqual(snapshot.review, .agentReview(agentId: rita.id, agentName: rita.name))
     }
 
     private struct Line {
