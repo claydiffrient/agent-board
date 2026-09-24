@@ -555,7 +555,7 @@ public struct Board: Sendable {
         }
         let ready = try newlyReady(db, projectId: task.projectId)
         var body = "Task \(taskId) (\(task.title)) was accepted into done by \(acceptedBy.describedActor)."
-        if case .reviewer(_, let verdict) = acceptedBy, !verdict.isEmpty {
+        if case .reviewer(_, let verdict, _) = acceptedBy, !verdict.isEmpty {
             body += "\n\n" + verdict
         }
         body += "\n\n" + (try describeNewlyReady(db, ready))

@@ -773,6 +773,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(task.projectId) else {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
+            try await stopLiveSessions(onTask: taskId, sparing: acceptedBy.acceptingSessionId)
             try board.accept(taskId: taskId, acceptedBy: acceptedBy)
             let taskSessions = try sessions.forTask(taskId)
             for session in taskSessions {
@@ -784,6 +785,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             await tearDownWorktrees(of: taskSessions, task: task, project: project)
             await landAcceptedBranch(task: task, project: project)
             announceReports(projectId: task.projectId)
+        }
+    }
+
+    /// SPEC §5: a rostered reviewer runs in the worker's own worktree, so a decision taken over its
+    /// head must end it before anything removes that checkout. A failed stop aborts the decision.
+    private func stopLiveSessions(onTask taskId: String, sparing: String? = nil) async throws {
+        for session in try sessions.forTask(taskId) where session.state.isActive && session.sessionId != sparing {
+            try await stop(sessionId: session.sessionId)
         }
     }
 
@@ -1059,6 +1068,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     func reopen(taskId: String) async throws {
         try await recording {
+            try await stopLiveSessions(onTask: taskId)
             let report = try board.reopen(taskId: taskId)
             announceReports(projectId: report.projectId)
         }
