@@ -752,6 +752,21 @@ CREATE TABLE project_roster_agent (
   PRIMARY KEY (project_id, roster_agent_id)
 );
 CREATE INDEX project_roster_agent_order ON project_roster_agent(project_id, ordering);
+
+-- A task's comment thread: the human and agents talking about the work, kept apart from the
+-- `progress` activity stream. Append-only; a comment goes only when its task does.
+CREATE TABLE task_comment (
+  id                     INTEGER PRIMARY KEY,
+  task_id                TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  project_id             TEXT NOT NULL REFERENCES project(id),
+  author_kind            TEXT NOT NULL,   -- human | orchestrator | worker | reviewer
+  author_session_id      TEXT,            -- not a foreign key: sessions are deleted before tasks
+  author_roster_agent_id TEXT REFERENCES roster_agent(id) ON DELETE SET NULL,
+  author_name            TEXT NOT NULL,   -- snapshot at write time; 'human' for the human, shown as "You"
+  body                   TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 10000),  -- trimmed
+  created_at             INTEGER NOT NULL
+);
+CREATE INDEX task_comment_task_created ON task_comment(task_id, created_at);
 ```
 
 Every `epic.state` value is written by exactly one place, and nothing writes one
@@ -792,10 +807,12 @@ so adding a specialty must not need a migration. A project's *usable* set is
 `project_roster_agent` joined to `roster_agent` where `enabled = 1` — disabling
 an agent roster-wide takes it out of every project's rotation without removing
 anyone's selection. Deleting a rostered agent clears its `project_roster_agent`
-rows and keeps its history: the tasks it worked or reviewed, its sessions, and the
-`progress` rows naming it all survive it. Their `roster_agent_id` and
+rows and keeps its history: the tasks it worked or reviewed, its sessions, the
+`progress` rows naming it and the comments it wrote all survive it. Their `roster_agent_id` and
 `reviewer_agent_id` are set to NULL in the same transaction, because those columns
-are foreign keys with no `ON DELETE` and a dangling id would fail the delete. The
+are foreign keys with no `ON DELETE` and a dangling id would fail the delete.
+`task_comment.author_roster_agent_id` is `ON DELETE SET NULL`, so SQLite nulls it
+in the same delete, and `author_name` still names the agent. The
 store refuses (`BoardError.rosterAgentWorking`) while a live session still runs as
 the agent, independently of the Roster screen's own guard (§10).
 
