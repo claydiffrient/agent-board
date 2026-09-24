@@ -2194,6 +2194,24 @@ section. Each section header carries a copy button that puts that section on the
 clipboard as `## heading` followed by the text on screen — unsaved edits
 included, since that is what the human is looking at.
 
+**Searching notes** — the shared `SearchField` (see *Searching the board*)
+heads the Notes screen and filters the list in place through
+`NoteStore.search`, the same FTS5 query `search_notes` runs; there is no
+second search path. A note matches on its title or on any section's heading
+or text, since `note_fts.body` is every section joined. The field's text is
+not FTS5 syntax: each whitespace-separated term becomes a quoted literal
+matched as a token prefix, all terms required (`NoteSearch.ftsQuery`), so
+"idl" already finds "idle", and `cap:`, `AND` or an unbalanced quote are
+searched for rather than parsed — a half-typed query cannot raise a syntax
+error. A term with no letter or digit is dropped, and text with nothing left
+leaves the list unfiltered rather than empty. Matching is by token prefix,
+not substring: "dle" does not find "idle", unlike the Task Board. The list
+keeps its own order (pinned first, then most recently updated) while
+filtered and ignores the bm25 rank, so a note does not jump as the query is
+typed out and is where it was when the query is cleared. An empty result is
+said beside the field ("No notes match “…”"), not in place of the list. A
+selected note stays open in the editor even when the query hides its row.
+
 **Project sidebar** — projects grouped into workspaces. Each workspace is a
 collapsible section in `workspace.ordering` order holding the projects whose
 `workspace_id` names it; projects with no workspace (or one that has since been

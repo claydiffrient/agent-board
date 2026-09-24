@@ -64,6 +64,7 @@ struct SearchNoun: Equatable {
     let many: String
 
     static let tasks = SearchNoun(one: "task", many: "tasks")
+    static let notes = SearchNoun(one: "note", many: "notes")
 
     var prompt: String { "Search \(many)" }
 
