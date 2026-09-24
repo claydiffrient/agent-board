@@ -8,23 +8,32 @@ struct NotesView: View {
     @Environment(AppEnvironment.self) private var env
     @State private var notes = Observed<[Note]>([])
     @State private var query = ""
-    @State private var matches: [Note]?
+    @State private var matchIds: Set<String>?
     @State private var selectedNoteId: String?
     @State private var newNoteTitle: String?
     @State private var errorMessage: String?
 
     private var store: NoteStore { NoteStore(env.db) }
 
+    /// The list's own order, narrowed: a query filters the notes in place rather than re-ranking
+    /// them, so a note keeps its position while the query is typed out and after it is cleared.
     private var visible: [Note] {
-        matches ?? notes.value
+        guard let matchIds else { return notes.value }
+        return notes.value.filter { matchIds.contains($0.id) }
     }
 
     var body: some View {
-        HSplitView {
-            list
-                .frame(minWidth: 260, idealWidth: 300, maxWidth: 420)
-            detail
-                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            SearchField(noun: .notes, text: $query, shown: visible.count, total: notes.value.count)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+            Divider()
+            HSplitView {
+                list
+                    .frame(minWidth: 260, idealWidth: 300, maxWidth: 420)
+                detail
+                    .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .task(id: project.id) {
             await notes.run(store.observe(projectId: project.id), in: env.db.reader)
@@ -51,34 +60,15 @@ struct NotesView: View {
 
     private var list: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Search notes", text: $query)
-                    .textFieldStyle(.plain)
-                if !query.isEmpty {
-                    Button {
-                        query = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
-                }
-            }
-            .padding(8)
-            Divider()
             List(visible, selection: $selectedNoteId) { note in
                 row(note).tag(note.id)
             }
             .overlay {
-                if visible.isEmpty {
+                if notes.value.isEmpty {
                     ContentUnavailableView(
-                        query.isEmpty ? "No notes yet" : "No matches",
-                        systemImage: query.isEmpty ? "note.text" : "magnifyingglass",
-                        description: Text(query.isEmpty
-                            ? "Notes you and your agents write show up here. Pinned notes go to every worker at spawn."
-                            : "Nothing in this project matches \"\(query)\".")
+                        "No notes yet",
+                        systemImage: "note.text",
+                        description: Text("Notes you and your agents write show up here. Pinned notes go to every worker at spawn.")
                     )
                 }
             }
@@ -127,16 +117,16 @@ struct NotesView: View {
         }
     }
 
+    /// Section headings and text are searched too: `note_fts.body` is every section's heading and
+    /// body. A failure leaves the last result on screen rather than emptying the list.
     private func runSearch() {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            matches = nil
+        guard let match = NoteSearch.ftsQuery(query) else {
+            matchIds = nil
             return
         }
         do {
-            matches = try store.search(projectId: project.id, query: trimmed)
+            matchIds = Set(try store.search(projectId: project.id, query: match).map(\.id))
         } catch {
-            matches = []
             errorMessage = errorText(error)
         }
     }

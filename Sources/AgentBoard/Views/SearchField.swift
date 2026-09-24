@@ -72,6 +72,7 @@ struct SearchNoun: Equatable {
     }
 
     static let tasks = SearchNoun(one: "task", many: "tasks")
+    static let notes = SearchNoun(one: "note", many: "notes")
 
     func counted(_ count: Int) -> String { count == 1 ? one : many }
 }
