@@ -1,5 +1,6 @@
 import AgentBoardBridge
 import AgentBoardCore
+import AgentBoardRuntime
 import AgentBoardServer
 import Foundation
 import XCTest
@@ -62,6 +63,56 @@ final class ReviewInterruptionTests: XCTestCase {
         let accepted = try XCTUnwrap(fixture.tasks.get(task.id))
         XCTAssertEqual(accepted.column, .done)
         XCTAssertEqual(accepted.landing, .landed)
+    }
+
+    func testAHumanAcceptEndsAReviewerWhoseProcessIsGoneAndLandsTheTask() async throws {
+        let (task, _, reviewer) = try await taskUnderReview()
+        _ = try fixture.git(["checkout", "-q", "--detach"])
+        let shortId = try XCTUnwrap(reviewer.shortId)
+        await fixture.runtime.failStop(shortId: shortId, FixtureError("No job matching \(shortId)"))
+        await fixture.runtime.setListed([])
+
+        try await fixture.supervisor.accept(taskId: task.id)
+
+        XCTAssertEqual(try fixture.sessions.get(reviewer.sessionId)?.state, .stopped)
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .done)
+        XCTAssertFalse(
+            fixture.supervisor.lastError?.contains("No job matching") ?? false,
+            "a stop the runtime could not do on a gone agent is not an error"
+        )
+    }
+
+    func testAHumanReopenEndsAStartingReviewerThatNeverGotAShortId() async throws {
+        let (task, _, reviewer) = try await taskUnderReview()
+        try await fixture.db.writer.write {
+            try $0.execute(
+                sql: "UPDATE agent_session SET short_id = NULL, state = 'starting' WHERE session_id = ?",
+                arguments: [reviewer.sessionId]
+            )
+        }
+        await fixture.runtime.setListed([])
+
+        try await fixture.supervisor.reopen(taskId: task.id)
+
+        XCTAssertEqual(try fixture.sessions.get(reviewer.sessionId)?.state, .stopped)
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .ready)
+    }
+
+    func testAHumanAcceptAbortsWhenAListedReviewerRefusesToStop() async throws {
+        let (task, _, reviewer) = try await taskUnderReview()
+        let shortId = try XCTUnwrap(reviewer.shortId)
+        await fixture.runtime.failStop(shortId: shortId, FixtureError("permission denied"))
+        await fixture.runtime.setListed([
+            AgentInfo(id: shortId, cwd: reviewer.cwd, kind: "bg", sessionId: reviewer.sessionId, status: "running"),
+        ])
+
+        do {
+            try await fixture.supervisor.accept(taskId: task.id)
+            XCTFail("a reviewer that is still running and will not stop must abort the accept")
+        } catch {}
+
+        XCTAssertEqual(try fixture.sessions.get(reviewer.sessionId)?.state.isActive, true)
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .review)
     }
 
     func testAReviewersOwnAcceptTaskDoesNotStopTheReviewer() async throws {

@@ -81,7 +81,13 @@ actor FakeRuntime: AgentRuntime {
 
     func watch(_ path: String) { watchedPath = path }
 
+    private var stopFailures: [String: Error] = [:]
+
+    /// `claude stop` on this short id fails the way it does for a job that is no longer running.
+    func failStop(shortId: String, _ error: Error) { stopFailures[shortId] = error }
+
     func stop(shortId: String) async throws {
+        if let failure = stopFailures[shortId] { throw failure }
         stopped.append(shortId)
         if let watchedPath { watchedPathExistedAtStop.append(FileManager.default.fileExists(atPath: watchedPath)) }
     }

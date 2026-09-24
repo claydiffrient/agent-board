@@ -955,8 +955,11 @@ nobody reviewed.
   rostered reviewer does. Every live session on the task is stopped first,
   through the same path as a human Stop, because a rostered reviewer runs in the
   worker's own worktree; the one exception is the reviewer whose `accept_task`
-  is doing the accepting. A human reopen stops them the same way. A stop that
-  fails aborts the accept or reopen before anything is written. Every attempt's
+  is doing the accepting. A human reopen stops them the same way. A session
+  whose process is already gone — absent from `claude agents`, or `starting`
+  with no short id and nothing listed under its id — is ended as vanished and
+  does not block the decision; only an agent still listed as live that refuses
+  to stop aborts the accept or reopen before anything is written. Every attempt's
   worktree is then removed (firing the
   existing `WorktreeRemove` hook, which reclaims Bazel `output_base` on
   Derivita), and `agentboard/<task-id>` is deleted once it is merged into the
