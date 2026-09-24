@@ -1,3 +1,4 @@
+import AgentBoardCore
 import Foundation
 
 /// Why publishing stopped. Each case names one cause, so "you are not logged in to gh" never
@@ -138,6 +139,16 @@ public struct BranchPublisher: Sendable {
             throw PublishFailure.noRemote(name: remote, repoPath: repoPath.path)
         }
         return url
+    }
+
+    /// SPEC §5: what a project with no stored choice integrates standalone tasks by. Anything that
+    /// stops `origin` being read — no remote, no repository, no git — means local merge.
+    public func defaultStandaloneIntegration() -> StandaloneIntegration {
+        (try? requireRemote()) == nil ? .localMerge : .pullRequest
+    }
+
+    public func standaloneIntegration(_ settings: ProjectSettings) -> StandaloneIntegration {
+        settings.standaloneIntegration ?? defaultStandaloneIntegration()
     }
 
     public func requireBranch(_ branch: String) throws {

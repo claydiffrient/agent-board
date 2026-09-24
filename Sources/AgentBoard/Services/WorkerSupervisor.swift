@@ -96,6 +96,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let archives: ArchiveSweep
     @ObservationIgnored private let fileLocks: FileLockStore
     @ObservationIgnored private let attention: ProjectAttentionStore
+    @ObservationIgnored private let pullRequestStates: PullRequestStateReader
+    /// Millis of the last pull request merge check; 0 means none yet, so the first tick after
+    /// launch checks.
+    @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
+    /// Tasks whose pull request is being checked, so overlapping checks cannot both report a close.
+    @ObservationIgnored private var landingChecksInFlight: Set<String> = []
     /// Which project needs a human and which of those has already been announced. Polled on the
     /// metering tick rather than observed, because `overdueShutdown` and any future deadline cause
     /// only become true as the clock moves, and a `ValueObservation` re-fires on writes alone.
@@ -123,6 +129,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// The archive policies are day-granular, so they ride the metering tick at a far coarser
     /// cadence rather than paying for a scan every 5 seconds — or a second timer.
     static let archiveSweepIntervalMillis: Int64 = 5 * 60 * 1000
+    static let pullRequestCheckIntervalMillis: Int64 = 10 * 60 * 1000
     /// Sessions that ended this recently still get one more transcript read so final spend lands.
     static let finalSpendWindowMillis: Int64 = 15_000
 
@@ -134,7 +141,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         worktreeBase: URL,
         projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
         sleepLedger: SleepLedger = .shared,
-        sleepGuard: SleepGuard? = nil
+        sleepGuard: SleepGuard? = nil,
+        gh: any GhRunning = SystemGh()
     ) {
         self.db = db
         self.runtime = runtime
@@ -159,6 +167,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         archives = ArchiveSweep(db)
         fileLocks = FileLockStore(db)
         attention = ProjectAttentionStore(db)
+        pullRequestStates = PullRequestStateReader(gh: gh)
     }
 
     private var sessionConfigDir: URL { appSupportDir.appendingPathComponent("sessions") }
@@ -851,7 +860,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// §5: an accepted task's branch is merged into the branch meant to carry it — the epic branch
-    /// for a task in an epic, the project's base branch otherwise — and, whatever happens, the
+    /// for a task in an epic, the project's base branch otherwise, unless the project integrates
+    /// standalone tasks by pull request, which merges nothing — and, whatever happens, the
     /// task's `landing` records where the work ended up. Deliberately outside the acceptance
     /// transaction: the human accepted the task, and no git failure may put it back. What a git
     /// failure does instead is leave `landing` at `.unlanded`, which the board shows, so `done`
@@ -872,9 +882,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let projectBase = project.baseBranch
         let epicBranch = epic?.branch
         let worktreeName = "merge-\(task.id)"
-        let outcome: BranchMerge
+        var byPullRequest = false
+        if epic == nil {
+            let settings = project.settings
+            let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
+            byPullRequest = (try? await offMain { publisher.standaloneIntegration(settings) }) == .pullRequest
+        }
+        let outcome: BranchMerge?
         do {
             outcome = try await offMain {
+                if byPullRequest { return try manager.premergeOutcome(taskBranch: taskBranch, into: target) }
                 // Only an epic branch is ever cut here. A missing base branch comes back as
                 // `.noTargetBranch` instead, because creating one would land the work on a ref
                 // nobody pulls and call it done.
@@ -886,6 +903,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 )
             }
         } catch {
+            if byPullRequest {
+                recordAwaitingPullRequest(task: task, branch: taskBranch, base: target)
+                return
+            }
             recordLanding(
                 task: task, epic: epic, landing: .unlanded,
                 detail: "`\(taskBranch)` could not be merged into `\(target)`: \(describe(error))",
@@ -894,6 +915,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             return
         }
         switch outcome {
+        case nil:
+            recordAwaitingPullRequest(task: task, branch: taskBranch, base: target)
         case .nothingToMerge:
             // No branch is two different facts. `tearDownWorktrees` runs first and deletes a task
             // branch whose work is already in, so "gone" can mean landed; the ledger tip ref, which
@@ -940,10 +963,86 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         case .skippedCheckedOut(let path):
             recordLanding(
                 task: task, epic: epic, landing: .unlanded,
-                detail: "`\(taskBranch)` was not merged into `\(target)`: that branch is checked out at \(path).",
-                advice: "Whoever holds that checkout must merge `\(taskBranch)` themselves."
+                detail: "`\(taskBranch)` was not merged into `\(target)`: `\(target)` is checked out at \(path), "
+                    + "and Agent Board does not move a branch a working tree holds.",
+                advice: "Merge `\(taskBranch)` into `\(target)` from that checkout, or open a pull request for it."
             )
         }
+    }
+
+    /// A pull request already recorded against the task — opened before the accept — goes straight
+    /// to `pullRequestOpen`; otherwise the task waits for one.
+    private func recordAwaitingPullRequest(task: BoardTask, branch: String, base: String) {
+        if let pr = try? tasks.recordedPullRequest(taskId: task.id) {
+            recordLanding(
+                task: task, epic: nil, landing: .pullRequestOpen, detail: PullRequestLanding.openDetail(pr), advice: nil
+            )
+            return
+        }
+        recordLanding(
+            task: task, epic: nil, landing: .awaitingPullRequest,
+            detail: PullRequestLanding.awaitingDetail(branch: branch, base: base),
+            advice: PullRequestLanding.awaitingAdvice(branch: branch)
+        )
+    }
+
+    /// SPEC §5: settles each `pullRequestOpen` landing against GitHub. Merged lands the task with the
+    /// merge commit, closed unlands it with the reason, and a `gh` failure keeps the landing and puts
+    /// the failure in its detail. Runs on the metering tick's first pass after launch and every
+    /// `pullRequestCheckIntervalMillis` after, and when the inspector opens the task.
+    func refreshPullRequestLandings(projectId: String? = nil, taskId: String? = nil) async {
+        do {
+            try tasks.adoptRecordedPullRequests(projectId: projectId, taskId: taskId)
+        } catch {
+            report(["could not adopt recorded pull requests: \(describe(error))"])
+        }
+        guard let open = try? tasks.openPullRequestLandings(projectId: projectId, taskId: taskId) else { return }
+        let reader = pullRequestStates
+        var touched: Set<String> = []
+        for task in open where !landingChecksInFlight.contains(task.id) {
+            guard let pr = task.landingDetail.flatMap(PullRequestReference.init(in:)),
+                  let project = try? projects.get(task.projectId)
+            else { continue }
+            landingChecksInFlight.insert(task.id)
+            defer { landingChecksInFlight.remove(task.id) }
+            let repo = URL(fileURLWithPath: project.repoPath)
+            let url = pr.url
+            let state: Result<PullRequestState, Error>
+            do {
+                state = .success(try await offMain { try reader.state(of: url, cwd: repo) })
+            } catch {
+                state = .failure(error)
+            }
+            guard let current = try? tasks.get(task.id), current.column == .done,
+                  current.landing == .pullRequestOpen
+            else { continue }
+            let epic = current.epicId.flatMap { try? epics.get($0) }
+            let branch = Self.taskBranchPrefix + current.id
+            switch state {
+            case .success(.merged(let commit)):
+                recordLanding(
+                    task: current, epic: epic, landing: .landed,
+                    detail: PullRequestLanding.mergedDetail(pr, commit: commit), advice: nil
+                )
+            case .success(.closed):
+                recordLanding(
+                    task: current, epic: epic, landing: .unlanded,
+                    detail: PullRequestLanding.closedDetail(pr, branch: branch),
+                    advice: PullRequestLanding.closedAdvice(branch: branch)
+                )
+                touched.insert(current.projectId)
+            case .success(.open):
+                keepOpenLanding(current, detail: PullRequestLanding.openDetail(pr))
+            case .failure(let error):
+                keepOpenLanding(current, detail: PullRequestLanding.openDetail(pr, uncheckedBecause: describe(error)))
+            }
+        }
+        for projectId in touched { announceReports(projectId: projectId) }
+    }
+
+    private func keepOpenLanding(_ task: BoardTask, detail: String) {
+        guard task.landingDetail != detail else { return }
+        recordLanding(task: task, epic: nil, landing: .pullRequestOpen, detail: detail, advice: nil)
     }
 
     /// The shared branch `task` ran on, or nil when it had a worktree of its own. Read from its
@@ -1047,7 +1146,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             recordLanding(
                 task: task, epic: epic, landing: .unlanded,
                 detail: "`\(branch)`, shared by \(memberIds.count) tasks, was not merged into the epic branch "
-                    + "`\(epicBranch)`: that branch is checked out at \(path).",
+                    + "`\(epicBranch)`: `\(epicBranch)` is checked out at \(path), and Agent Board does not move a "
+                    + "branch a working tree holds.",
                 advice: "Whoever holds it — the integrator, normally — must merge `\(branch)` themselves."
             )
         case .noTargetBranch(let missing):
@@ -1106,7 +1206,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             report(["could not record where \(task.id) landed: \(describe(error))"])
         }
-        guard landing.needsAttention, let detail else { return }
+        // An open pull request is already in front of the human; the merge check reports if it closes.
+        guard landing.needsAttention, landing != .pullRequestOpen, let detail else { return }
         let text = "Task \(task.id) (\(task.title)) was accepted into done, but its branch "
             + detail + (advice.map { "\n" + $0 } ?? "")
         do {
@@ -2073,6 +2174,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if now - lastArchiveSweep >= Self.archiveSweepIntervalMillis {
             lastArchiveSweep = now
             sweepArchives(all, now: now)
+        }
+        if now - lastPullRequestCheck >= Self.pullRequestCheckIntervalMillis {
+            lastPullRequestCheck = now
+            _Concurrency.Task { await self.refreshPullRequestLandings() }
         }
         for project in all {
             refreshShutdownProgressIfOrdered(projectId: project.id)

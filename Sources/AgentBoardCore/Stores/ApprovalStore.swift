@@ -118,6 +118,55 @@ public struct ApprovalStore: Sendable {
         return approval
     }
 
+    /// The URL an approved `open_pull_request` produced. It lives on the approval rather than being
+    /// read back from the card's progress rows, which a worker's `update_status` also writes (§5).
+    static func recordPublishedURL(_ db: Database, approvalId: String, url: String) throws {
+        try db.execute(sql: "UPDATE approval SET published_url = ? WHERE id = ?", arguments: [url, approvalId])
+    }
+
+    /// The newest pull request an approved `open_pull_request` naming this task opened.
+    static func publishedPullRequest(_ db: Database, taskId: String) throws -> PullRequestReference? {
+        try String.fetchOne(
+            db,
+            sql: """
+            SELECT published_url FROM approval
+            WHERE task_id = ? AND kind = 'pull_request' AND published_url IS NOT NULL
+            ORDER BY resolved_at DESC, created_at DESC, rowid DESC LIMIT 1
+            """,
+            arguments: [taskId]
+        ).flatMap(PullRequestReference.init(in:))
+    }
+
+    /// Fills `published_url` for pull requests opened before it existed, from the first progress row
+    /// the publish wrote after the approval resolved. That row leads with the summary
+    /// `WorkerSupervisor.publish` gives; a worker's status rows lead with its state word instead.
+    static func backfillPublishedURLs(_ db: Database) throws {
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+            SELECT id, task_id, COALESCE(resolved_at, created_at) AS since FROM approval
+            WHERE kind = 'pull_request' AND task_id IS NOT NULL AND published_url IS NULL
+            """
+        )
+        for row in rows {
+            let id: String = row["id"]
+            let taskId: String = row["task_id"]
+            let since: Int64 = row["since"]
+            let text = try String.fetchOne(
+                db,
+                sql: """
+                SELECT text FROM progress
+                WHERE task_id = ? AND kind = 'status' AND session_id IS NULL AND at >= ?
+                  AND (text LIKE 'Pull request opened from %' OR text LIKE 'Pull request already open from %')
+                ORDER BY at, id LIMIT 1
+                """,
+                arguments: [taskId, since]
+            )
+            guard let pr = text.flatMap(PullRequestReference.init(in:)) else { continue }
+            try recordPublishedURL(db, approvalId: id, url: pr.url)
+        }
+    }
+
     public func observePending(projectId: String) -> ValueObservation<ValueReducers.Fetch<[Approval]>> {
         ValueObservation.tracking { db in
             try Self.pending(db, projectId: projectId)

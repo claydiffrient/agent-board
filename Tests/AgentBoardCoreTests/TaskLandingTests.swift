@@ -103,8 +103,56 @@ final class TaskLandingTests: XCTestCase {
     func testEveryLandingSaysWhetherItNeedsAttention() {
         XCTAssertEqual(
             TaskLanding.allCases.filter(\.needsAttention),
-            [.pending, .unlanded],
+            [.pending, .unlanded, .awaitingPullRequest, .pullRequestOpen],
             "a new landing must decide whether the board raises it"
         )
+    }
+
+    func testTheOpenPillNamesThePullRequestFromTheDetail() throws {
+        let f = try Fixture.make()
+        let task = try f.task("Shipped by pull request", column: .done)
+        let pr = try XCTUnwrap(PullRequestReference(in: "opened\nhttps://github.com/acme/widgets/pull/16"))
+        XCTAssertEqual(pr, PullRequestReference(url: "https://github.com/acme/widgets/pull/16", number: 16))
+        try f.tasks.setLanding(task.id, .pullRequestOpen, detail: PullRequestLanding.openDetail(pr))
+        XCTAssertEqual(try XCTUnwrap(try f.tasks.get(task.id)).landingLabel, "PR #16 open")
+        XCTAssertEqual(
+            PullRequestReference(in: PullRequestLanding.closedDetail(pr, branch: "agentboard/x")), pr,
+            "the closed detail must still name the pull request, or the one-time adoption re-checks it forever"
+        )
+    }
+
+    /// The default depends on the repository's `origin`, which decoding cannot see, so a project
+    /// that never chose stores nothing.
+    func testAStoredProjectWithoutTheSettingLeavesTheChoiceUnmade() {
+        XCTAssertNil(ProjectSettings.decode("{}").standaloneIntegration)
+        XCTAssertNil(ProjectSettings.forNewProject().standaloneIntegration)
+        XCTAssertFalse(ProjectSettings().encoded().contains("standaloneIntegration"))
+        var local = ProjectSettings()
+        local.standaloneIntegration = .localMerge
+        XCTAssertEqual(ProjectSettings.decode(local.encoded()).standaloneIntegration, .localMerge)
+    }
+
+    /// A pull request opened before `published_url` existed is known only by its progress row; the
+    /// migration recovers it from that row and not from a newer one a worker wrote.
+    func testTheBackfillRecoversAPullRequestFromThePublishRowAlone() throws {
+        let f = try Fixture.make()
+        let task = try f.task("Opened before the column", column: .review)
+        let branch = "agentboard/\(task.id)"
+        let approval = try f.board.requestPublish(
+            projectId: f.project.id, kind: .pullRequest,
+            request: PublishRequest(branch: branch, base: "main", title: task.title, body: ""),
+            taskId: task.id, requestedBy: "orchestrator"
+        )
+        try f.approvals.resolve(approval.id, .approved)
+        let url = "https://github.com/acme/widgets/pull/16"
+        try f.board.recordPublished(approval: approval, summary: "Pull request opened from \(branch) into main.", url: url)
+        try f.progress.append(
+            taskId: task.id, sessionId: nil, kind: .status, text: "working: see https://github.com/upstream/lib/pull/9"
+        )
+        try f.db.writer.write { db in
+            try db.execute(sql: "UPDATE approval SET published_url = NULL")
+            try ApprovalStore.backfillPublishedURLs(db)
+        }
+        XCTAssertEqual(try f.tasks.recordedPullRequest(taskId: task.id)?.url, url)
     }
 }

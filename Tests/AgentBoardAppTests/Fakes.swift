@@ -102,6 +102,35 @@ actor FakeRuntime: AgentRuntime {
     }
 }
 
+/// `gh` with a canned answer per pull request URL. A URL with no answer fails, so no test reaches
+/// GitHub by accident.
+final class FakeGh: GhRunning, @unchecked Sendable {
+    private let lock = NSLock()
+    private var answers: [String: CommandResult] = [:]
+    private var recorded: [[String]] = []
+
+    var calls: [[String]] { lock.withLock { recorded } }
+
+    func answer(_ url: String, state: String, mergeCommit: String? = nil) {
+        let commit = mergeCommit.map { #"{"oid":"\#($0)"}"# } ?? "null"
+        let json = #"{"mergeCommit":\#(commit),"mergedAt":null,"state":"\#(state)"}"#
+        lock.withLock { answers[url] = CommandResult(status: 0, stdout: json, stderr: "") }
+    }
+
+    func fail(_ url: String, stderr: String) {
+        lock.withLock { answers[url] = CommandResult(status: 4, stdout: "", stderr: stderr) }
+    }
+
+    func run(_ arguments: [String], cwd: URL) throws -> CommandResult {
+        try lock.withLock {
+            recorded.append(arguments)
+            let url = arguments.count > 2 ? arguments[2] : ""
+            guard let answer = answers[url] else { throw PullRequestCheckFailure("FakeGh has no answer for \(url)") }
+            return answer
+        }
+    }
+}
+
 struct FixtureError: Error, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
@@ -113,6 +142,7 @@ struct SupervisorFixture {
     let project: Project
     let supervisor: WorkerSupervisor
     let runtime: FakeRuntime
+    let gh: FakeGh
     let resolver: StoreTokenResolver
     let supportDir: URL
     let repo: URL
@@ -162,6 +192,7 @@ struct SupervisorFixture {
             )
         )
         let runtime = FakeRuntime()
+        let gh = FakeGh()
         let fakeHome = supportDir.appendingPathComponent("home")
         let worktreeBase = SupportPaths.worktreeBase(
             environment: [SupportPaths.supportDirEnvKey: supportDir.path],
@@ -172,11 +203,12 @@ struct SupervisorFixture {
             worktreeBase: worktreeBase,
             projectsRoot: supportDir.appendingPathComponent("claude-projects"),
             sleepLedger: sleepLedger,
-            sleepGuard: sleepGuard
+            sleepGuard: sleepGuard,
+            gh: gh
         )
         sink.target = supervisor
         return SupervisorFixture(
-            db: db, project: project, supervisor: supervisor, runtime: runtime,
+            db: db, project: project, supervisor: supervisor, runtime: runtime, gh: gh,
             resolver: StoreTokenResolver(db: db), supportDir: supportDir, repo: repo,
             worktreeBase: worktreeBase, fakeHome: fakeHome
         )
@@ -186,6 +218,14 @@ struct SupervisorFixture {
         var settings = project.settings
         settings.worktreeStrategy = strategy
         if let maxAgents { settings.sharedCheckoutMaxAgents = maxAgents }
+        try ProjectStore(db).updateSettings(project.id, settings)
+    }
+
+    func setStandaloneIntegration(_ integration: StandaloneIntegration) throws {
+        guard var settings = try ProjectStore(db).get(project.id)?.settings else {
+            throw FixtureError("project \(project.id) is gone")
+        }
+        settings.standaloneIntegration = integration
         try ProjectStore(db).updateSettings(project.id, settings)
     }
 
@@ -205,7 +245,8 @@ struct SupervisorFixture {
         let supervisor = WorkerSupervisor(
             db: db, runtime: runtime, server: server, appSupportDir: supportDir,
             worktreeBase: worktreeBase,
-            projectsRoot: supportDir.appendingPathComponent("claude-projects")
+            projectsRoot: supportDir.appendingPathComponent("claude-projects"),
+            gh: gh
         )
         sink.target = supervisor
         return supervisor
