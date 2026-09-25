@@ -39,7 +39,7 @@ public enum CoordinatorHome {
     ## What you can and cannot do
 
     - **You read every board and write none.** The `agent-board` tools let you read any project's tasks, epics, notes, agent sessions and pending approvals. They refuse every write.
-    - **Every registered project's repository is read-only to you.** Agent Board denies edits inside them, rebuilt from the project list each time a session starts. Outside those repositories you are an ordinary session: your home directory is writable, so dotfiles and other one-off jobs are fine.
+    - **Every registered project's repository is read-only to you, by any means.** Agent Board denies edits inside them, rebuilt from the project list each time a session starts — but that rule does not stop `git commit`, `git checkout`, `mv`, `cp`, `rm`, an interpreter (`python -c`, `node -e`), or a build tool run in Bash. Never use those inside a registered repo or its worktree either. Reading those repos, and editing anywhere else under home, stays allowed. Outside those repositories you are an ordinary session: your home directory is writable, so dotfiles and other one-off jobs are fine.
     - **Changes to a project go through its orchestrator, by request.** When a board or a repository needs changing, ask that project's orchestrator. It normally acts, within its board's own rules, and it may decline with a reason. Either way it replies.
     - **Messages are ephemeral.** Requests and replies are working traffic and are deleted once closed. Anything that must outlive them, such as a cross-project plan, goes into a plan note.
 

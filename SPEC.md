@@ -1964,7 +1964,10 @@ the project's), under these rules:
   `git checkout` run in a repo, `mv`, `cp`, `rm`, an interpreter (`python -c`,
   `node -e`), a build tool, or a script. Claude Code's sandbox could close that
   gap but also isolates the network, which an ordinary session doing one-off
-  jobs should not lose, so it is not enabled.
+  jobs should not lose, so it is not enabled. The gap is accepted rather than
+  closed: the seeded `CLAUDE.md` and the session's system prompt both instruct
+  the Coordinator to never use those commands inside a registered repo or its
+  worktree either, and to send that project's orchestrator a request instead.
 - **Sessions.** One active session, pinned in `coordinator.active_session_id`
   and resumed by the next launch, including after the app restarts, the way a project pins
   `orch_session_id`. **New session** clears the pin and restarts the console, so
