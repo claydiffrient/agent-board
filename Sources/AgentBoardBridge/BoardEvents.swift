@@ -22,10 +22,16 @@ public protocol BoardEventSink: Sendable {
     /// doing nothing is the supervisor's to do. Which of the two it was is carried by the report
     /// kind, the task's column and the session's stop reason, never by this signal.
     func workerCompleted(projectId: String, sessionId: String) async
+    /// Something landed in the Coordinator's queue — today only a reply to one of its requests.
+    func coordinatorReportQueued() async
+    /// The Coordinator session's turn is over (its `Stop` hook), so a held notice may go out.
+    func coordinatorTurnEnded(sessionId: String) async
 }
 
 extension BoardEventSink {
     public func workerCompleted(projectId: String, sessionId: String) async {}
+    public func coordinatorReportQueued() async {}
+    public func coordinatorTurnEnded(sessionId: String) async {}
 }
 
 extension BoardEventSink {

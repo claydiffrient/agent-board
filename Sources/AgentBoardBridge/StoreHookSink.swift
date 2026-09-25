@@ -32,6 +32,7 @@ public final class StoreHookSink: HookSink {
         case orchestratorTurnEnded(projectId: String, sessionId: String)
         case reportQueued(projectId: String)
         case orchestratorCompacted(projectId: String, sessionId: String, manual: Bool)
+        case coordinatorTurnEnded(sessionId: String)
     }
 
     /// A write whose file another live session holds. Carried out of `process` so the wait happens
@@ -95,6 +96,8 @@ public final class StoreHookSink: HookSink {
                 await events.reportQueued(projectId: projectId)
             case .orchestratorCompacted(let projectId, let sessionId, let manual):
                 await events.orchestratorCompacted(projectId: projectId, sessionId: sessionId, manual: manual)
+            case .coordinatorTurnEnded(let sessionId):
+                await events.coordinatorTurnEnded(sessionId: sessionId)
             }
         }
         if let wait = outcome.lockWait {
@@ -404,6 +407,11 @@ public final class StoreHookSink: HookSink {
         }
 
         guard !sessionId.isEmpty else { return .none }
+
+        // SPEC §9.4: the Coordinator has no project session row for the paths below to find.
+        if identity.scope == .coordinator, event.name == "Stop" {
+            return .follow([.coordinatorTurnEnded(sessionId: sessionId)])
+        }
 
         let known = try? sessions.get(sessionId)
         if let known, known.projectId != identity.projectId { return .none }

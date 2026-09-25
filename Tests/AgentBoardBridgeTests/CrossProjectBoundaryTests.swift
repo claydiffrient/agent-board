@@ -26,7 +26,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "spawn_worker", "stop_worker", "archive_task", "unarchive_task", "get_report",
         "promote_proposal", "get_epic", "request_integration", "close_epic", "open_pull_request",
         "read_note", "append_section", "replace_section", "attach_note", "pin_note",
-        "assign_to_agent", "add_comment", "delete_message",
+        "assign_to_agent", "add_comment", "delete_message", "reply_to_request",
     ]
 
     /// The whole of the permitted crossing: queue text into another project's channel, and learn
@@ -40,8 +40,11 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "list_notes", "search_notes", "read_note",
     ]
 
+    /// The Coordinator's own queue and request ledger (SPEC §9.4), which belong to no project.
+    static let coordinatorOwn: Set<String> = ["list_reports", "get_report", "send_request", "withdraw_request", "list_requests"]
+
     /// A project orchestrator's inbox, which is not board state.
-    static let refusedToCoordinatorAsInbox: Set<String> = ["list_reports", "get_report", "delete_message"]
+    static let refusedToCoordinatorAsInbox: Set<String> = ["delete_message"]
 
     /// Every tool on any scope that writes a board. The Coordinator must be refused each one.
     static let refusedToCoordinatorAsWrite: Set<String> = [
@@ -50,7 +53,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "create_epic", "request_integration", "close_epic", "push_branch", "open_pull_request", "send_message",
         "create_note", "append_section", "replace_section", "attach_note", "pin_note",
         "update_status", "propose_task", "report_complete", "hand_off", "report_blocked", "acknowledge_shutdown",
-        "commit_my_work", "accept_task", "reopen_task",
+        "commit_my_work", "accept_task", "reopen_task", "reply_to_request",
     ]
 
     /// Reads of a caller's own roster or task, which mean nothing to a session with no project.
@@ -87,7 +90,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
             "a tool was added to the orchestrator surface without a cross-project test in this file"
         )
         XCTAssertEqual(classified.subtracting(surface), [], "this audit names tools that no longer exist")
-        XCTAssertEqual(surface.count, 37)
+        XCTAssertEqual(surface.count, 38)
     }
 
     func testOnlySendMessageAcceptsAnotherProjectsId() async {
@@ -546,6 +549,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
                 + ReviewerToolHandler.descriptors + CoordinatorToolHandler.descriptors).map(\.name)
         )
         let classified = Self.coordinatorReads
+            .union(Self.coordinatorOwn)
             .union(Self.refusedToCoordinatorAsInbox)
             .union(Self.refusedToCoordinatorAsWrite)
             .union(Self.notOfferedToCoordinator)
@@ -553,7 +557,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         XCTAssertEqual(everyTool.subtracting(classified), [], "a tool was added without saying whether the Coordinator may call it")
         XCTAssertEqual(classified.subtracting(everyTool), [], "this audit names tools that no longer exist")
         let offered = Set(await f.scoped.tools(for: f.coordinatorIdentity).map(\.name))
-        XCTAssertEqual(offered, Self.coordinatorReads)
+        XCTAssertEqual(offered, Self.coordinatorReads.union(Self.coordinatorOwn))
     }
 
     func testTheCoordinatorIsRefusedEveryWriteAndEveryInboxAndTheBoardsAreUntouched() async throws {

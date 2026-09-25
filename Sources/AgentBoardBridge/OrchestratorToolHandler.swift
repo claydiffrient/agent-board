@@ -11,6 +11,7 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let progress: ProgressStore
     private let reports: ReportStore
     private let messages: MessageStore
+    private let requests: RequestStore
     private let approvals: ApprovalStore
     private let epics: EpicStore
     private let board: Board
@@ -28,6 +29,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         progress = ProgressStore(db)
         reports = ReportStore(db)
         messages = MessageStore(db)
+        requests = RequestStore(db)
         approvals = ApprovalStore(db)
         epics = EpicStore(db)
         board = Board(db)
@@ -410,6 +412,27 @@ public final class OrchestratorToolHandler: ToolHandler {
                 required: ["message_id"]
             )
         ),
+        ToolDescriptor(
+            name: "reply_to_request",
+            description: "Answer a request from your coordinator — the `request_id` on a `request` report from "
+                + "list_reports. Every request gets a reply: `accepted` when you take it on, with the ids of any "
+                + "epics it produced; `declined` with your reason; `done` once it is finished. You may reply "
+                + "`accepted` more than once to add epics. `declined` and `done` close the request, and a closed "
+                + "or withdrawn request refuses further replies. This is the only way to write to the Coordinator: "
+                + "you answer its requests, and cannot start a conversation with it. The body is capped at "
+                + "\(CoordinatorRequest.maxBodyLength) characters.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "request_id": ToolSchema.integer("The `request_id` from a `request` report."),
+                    "state": ToolSchema.enumeration(RequestState.replies.map(\.rawValue)),
+                    "body": ToolSchema.string(
+                        "What you did or will do, or why you decline.", maxLength: CoordinatorRequest.maxBodyLength
+                    ),
+                    "epic_ids": ToolSchema.stringArray("Epics on this board the request produced."),
+                ],
+                required: ["request_id", "state", "body"]
+            )
+        ),
     ] + NoteTools.orchestratorDescriptors
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
@@ -451,6 +474,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "list_projects": return try listProjects(identity: identity)
         case "send_message": return try await sendMessage(arguments, identity: identity)
         case "delete_message": return try deleteMessage(arguments, identity: identity)
+        case "reply_to_request": return try await replyToRequest(arguments, identity: identity)
         default: throw ToolError("Unknown tool: \(name)")
         }
     }
@@ -893,6 +917,40 @@ public final class OrchestratorToolHandler: ToolHandler {
         return ToolResult(text: "Deleted message \(id) for both projects.")
     }
 
+    // MARK: Coordinator requests (SPEC §9.4)
+
+    private func replyToRequest(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+        guard let requestId = try ToolArguments.optionalInteger("request_id", in: arguments) else {
+            throw ToolError("Missing required argument: request_id")
+        }
+        let rawState = try ToolArguments.requiredString("state", in: arguments)
+        guard let state = RequestState(rawValue: rawState), RequestState.replies.contains(state) else {
+            throw ToolError("state must be one of \(RequestState.replies.map(\.rawValue).joined(separator: ", ")).")
+        }
+        let body = try ToolArguments.requiredString("body", in: arguments).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { throw ToolError("Reply body is blank; say what you did or why you decline.") }
+        guard body.count <= CoordinatorRequest.maxBodyLength else {
+            throw ToolError("Reply body is \(body.count) characters; the cap is \(CoordinatorRequest.maxBodyLength).")
+        }
+        let epicIds = try ToolArguments.stringArray("epic_ids", in: arguments) ?? []
+        do {
+            try requests.reply(
+                requestId: requestId, fromProjectId: identity.projectId, state: state, body: body, epicIds: epicIds
+            )
+        } catch RequestError.unknownRequest, RequestError.notAddressedTo {
+            throw ToolError(
+                "Request \(requestId) was not sent to this project. You can only answer a request your coordinator "
+                    + "sent you; you cannot start a conversation with it."
+            )
+        } catch RequestError.closed(_, let closedState) {
+            throw ToolError("Request \(requestId) is already \(closedState.rawValue); it takes no further replies.")
+        } catch RequestError.foreignEpic(let epicId) {
+            throw ToolError("Epic \(epicId) is not in this project.")
+        }
+        await events.coordinatorReportQueued()
+        return ToolResult(text: "Replied \(state.rawValue) to request \(requestId); your coordinator will be told.")
+    }
+
     // MARK: Epics
 
     private func createEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
@@ -1214,6 +1272,9 @@ public final class OrchestratorToolHandler: ToolHandler {
            let messageId = try messages.delivered(asReportId: reportId)?.id
         {
             fields["message_id"] = .number(Double(messageId))
+        }
+        if report.kind == .request, let reportId = report.id, let requestId = try requests.request(forReportId: reportId) {
+            fields["request_id"] = .number(Double(requestId))
         }
         return .object(fields)
     }

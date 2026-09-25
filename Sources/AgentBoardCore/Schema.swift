@@ -339,11 +339,46 @@ enum Schema {
     );
     """
 
+    /// The Coordinator's request ledger (SPEC §9.4). `plan_note_id` has no foreign key: a plan note
+    /// lives in the Coordinator's own note space and need not exist yet. `request_event` is the
+    /// history — the send, each reply, a withdrawal — with the report each one queued.
+    static let coordinatorRequest = """
+    CREATE TABLE coordinator_request (
+      id           INTEGER PRIMARY KEY,
+      project_id   TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+      body         TEXT NOT NULL,
+      plan_note_id TEXT,
+      state        TEXT NOT NULL,
+      created_at   INTEGER NOT NULL,
+      closed_at    INTEGER
+    );
+    CREATE INDEX coordinator_request_closed ON coordinator_request(closed_at);
+
+    CREATE TABLE request_event (
+      id         INTEGER PRIMARY KEY,
+      request_id INTEGER NOT NULL REFERENCES coordinator_request(id) ON DELETE CASCADE,
+      state      TEXT NOT NULL,
+      author     TEXT NOT NULL,
+      body       TEXT NOT NULL,
+      report_id  INTEGER REFERENCES report(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX request_event_request ON request_event(request_id);
+    CREATE INDEX request_event_report ON request_event(report_id);
+
+    CREATE TABLE request_epic (
+      request_id INTEGER NOT NULL REFERENCES coordinator_request(id) ON DELETE CASCADE,
+      epic_id    TEXT NOT NULL REFERENCES epic(id) ON DELETE CASCADE,
+      PRIMARY KEY (request_id, epic_id)
+    );
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
         "approval", "shutdown_order", "shutdown_delivery", "workspace", "file_lock", "message",
         "task_commit",
         "roster_agent", "project_roster_agent", "task_comment", "comment_delivery",
+        "coordinator_request", "request_event", "request_epic",
     ]
 }

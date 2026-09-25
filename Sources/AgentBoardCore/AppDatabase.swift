@@ -114,6 +114,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("coordinator") { db in
             try db.execute(sql: Schema.coordinator)
         }
+        migrator.registerMigration("coordinator_request") { db in
+            try db.execute(sql: Schema.coordinatorRequest)
+        }
         return migrator
     }
 }

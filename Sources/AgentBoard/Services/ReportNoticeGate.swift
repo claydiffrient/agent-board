@@ -1,4 +1,14 @@
+import AgentBoardCore
 import Foundation
+
+/// A console whose session is told about its report queue through a `ReportNoticeGate`.
+@MainActor
+protocol ReportAnnouncing: AnyObject {
+    /// The session's `Stop` hook fired.
+    func turnEnded()
+    /// The queue this console announces gained a report.
+    func reportsChanged()
+}
 
 /// The only gate between an app-authored injection and the orchestrator PTY (SPEC §9.1, §9.2).
 ///
@@ -11,6 +21,10 @@ import Foundation
 @MainActor
 final class ReportNoticeGate {
     typealias Pending = (count: Int, maxId: Int64)
+
+    static func pending(_ unconsumed: [Report]) -> Pending {
+        (unconsumed.count, unconsumed.compactMap(\.id).max() ?? 0)
+    }
 
     enum Request: Equatable {
         /// The board changed. Reports already announced are not announced again.

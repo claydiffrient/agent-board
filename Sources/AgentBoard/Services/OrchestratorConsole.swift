@@ -34,7 +34,7 @@ final class OrchestratorTerminalView: LocalProcessTerminalView {
 /// One per project; owns the orchestrator PTY and is the only place that writes into it (SPEC §9.1).
 @MainActor
 @Observable
-final class OrchestratorConsole {
+final class OrchestratorConsole: ReportAnnouncing {
     enum State: Equatable {
         case idle
         case starting
@@ -223,8 +223,7 @@ final class OrchestratorConsole {
     }
 
     private func pendingReports() throws -> (count: Int, maxId: Int64) {
-        let unconsumed = try reports.unconsumed(projectId: projectId)
-        return (unconsumed.count, unconsumed.compactMap(\.id).max() ?? 0)
+        ReportNoticeGate.pending(try reports.unconsumed(projectId: projectId))
     }
 
     private func sendNotice(count: Int) {

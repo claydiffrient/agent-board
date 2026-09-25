@@ -46,7 +46,7 @@ enum Wiring {
             worker: WorkerToolHandler(db: db, control: sink, events: sink, scopedCommits: scopedCommits),
             orchestrator: orchestrator,
             reviewer: ReviewerToolHandler(db: db, control: sink, events: sink),
-            coordinator: CoordinatorToolHandler(db: db, board: orchestrator)
+            coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: sink)
         )
     }
 }
@@ -87,6 +87,14 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
 
     func workerCompleted(projectId: String, sessionId: String) async {
         await target?.workerCompleted(projectId: projectId, sessionId: sessionId)
+    }
+
+    func coordinatorReportQueued() async {
+        await target?.coordinatorReportQueued()
+    }
+
+    func coordinatorTurnEnded(sessionId: String) async {
+        await target?.coordinatorTurnEnded(sessionId: sessionId)
     }
 
     func spawnWorker(taskId: String) async throws -> WorkerSpawn {

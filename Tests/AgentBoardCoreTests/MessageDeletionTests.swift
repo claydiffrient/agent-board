@@ -48,4 +48,26 @@ final class MessageDeletionTests: XCTestCase {
         XCTAssertEqual(try f.messages.deleteExpired(), 1)
         XCTAssertEqual(try bodies(beta.id), ["still unread", "consumed 1 day ago"])
     }
+
+    /// SPEC §9.4: the same sweep deletes a request closed more than 7 days ago, and never an open one.
+    func testTheSweepDeletesARequestClosedEightDaysAgoAndKeepsAnOpenOne() throws {
+        let f = try Fixture.make()
+        let requests = RequestStore(f.db)
+        let eightDaysAgo = Int64.nowMillis - 8 * ArchiveSweep.millisPerDay
+        let open = try requests.send(toProjectId: f.project.id, body: "still wanted", planNoteId: nil)
+        let closed = try requests.send(toProjectId: f.project.id, body: "declined", planNoteId: "plan-1")
+        let reply = try requests.reply(
+            requestId: try XCTUnwrap(closed.request.id), fromProjectId: f.project.id, state: .declined, body: "no capacity"
+        )
+        try f.db.writer.write { db in
+            try db.execute(sql: "UPDATE coordinator_request SET created_at = ?", arguments: [eightDaysAgo])
+            try db.execute(sql: "UPDATE coordinator_request SET closed_at = ? WHERE id = ?", arguments: [eightDaysAgo, closed.request.id])
+        }
+
+        XCTAssertEqual(try requests.deleteExpired(), 1)
+        XCTAssertEqual(try requests.ledger().compactMap(\.request.id), [try XCTUnwrap(open.request.id)])
+        XCTAssertNil(try f.reports.get(try XCTUnwrap(closed.report.id)))
+        XCTAssertNil(try f.reports.get(try XCTUnwrap(reply.report.id)))
+        XCTAssertNotNil(try f.reports.get(try XCTUnwrap(open.report.id)))
+    }
 }

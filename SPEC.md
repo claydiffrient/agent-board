@@ -677,7 +677,7 @@ CREATE TABLE report (
   project_id  TEXT REFERENCES project(id),  -- NULL: the Coordinator's queue (§9.1)
   task_id     TEXT REFERENCES task(id),
   session_id  TEXT REFERENCES agent_session(session_id),
-  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision | message
+  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision | message | comment | request | reply
   body        TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
   consumed_at INTEGER               -- set when the orchestrator pulls it
@@ -696,6 +696,32 @@ CREATE TABLE message (
   report_id       INTEGER REFERENCES report(id)
 );
 CREATE INDEX message_to_project_delivered ON message(to_project_id, delivered_at);
+
+-- §9.4: the Coordinator's request ledger. plan_note_id has no foreign key: the plan
+-- lives in the Coordinator's own notes and need not exist yet.
+CREATE TABLE coordinator_request (
+  id           INTEGER PRIMARY KEY,
+  project_id   TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,  -- the target
+  body         TEXT NOT NULL,     -- the Coordinator's text, unframed
+  plan_note_id TEXT,
+  state        TEXT NOT NULL,     -- sent | accepted | declined | done | withdrawn
+  created_at   INTEGER NOT NULL,
+  closed_at    INTEGER            -- set on declined | done | withdrawn; the sweep counts from it
+);
+CREATE TABLE request_event (      -- history: the send, each reply, a withdrawal
+  id         INTEGER PRIMARY KEY,
+  request_id INTEGER NOT NULL REFERENCES coordinator_request(id) ON DELETE CASCADE,
+  state      TEXT NOT NULL,
+  author     TEXT NOT NULL,       -- coordinator | orchestrator
+  body       TEXT NOT NULL,
+  report_id  INTEGER REFERENCES report(id) ON DELETE SET NULL,  -- the report this step queued
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE request_epic (
+  request_id INTEGER NOT NULL REFERENCES coordinator_request(id) ON DELETE CASCADE,
+  epic_id    TEXT NOT NULL REFERENCES epic(id) ON DELETE CASCADE,
+  PRIMARY KEY (request_id, epic_id)
+);
 
 CREATE TABLE approval (
   id           TEXT PRIMARY KEY,
@@ -1520,6 +1546,7 @@ Everything in worker scope over any task in the project, plus:
 | `list_projects()` | Every project Agent Board knows about, as id, name, and whether the entry is the caller's own project. Nothing else about another project is exposed — no repository path, no settings, no board contents, no agent state |
 | `send_message(project_id, body)` | Queues a §9.2 message into that project's report queue. Confirms queueing, never delivery. Refused for the caller's own project, for an unknown id, for a blank body, and for a body over 4000 characters |
 | `delete_message(message_id)` | Deletes a §9.3 message this project received, and its report, for both projects. Refused for a message this project did not receive |
+| `reply_to_request(request_id, state, body, epic_ids?)` | Answers a §9.4 request addressed to this project: `accepted`, `declined` or `done`, with this project's epics linked. Queues a `reply` report for the Coordinator. Refused for a request sent elsewhere or unknown (the same answer), for a closed or withdrawn one, for another project's epic, and for a body over 4000 characters |
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Refused unless every task in the epic is `done` (names how many remain); otherwise creates a human approval row, or returns the one already pending |
 | `close_epic(epic_id, state)` | Ends the epic without integrating it. `state` is `done` or `abandoned`; both are terminal. Board state and a `decision` report and nothing else — no merge, no push, no branch or worktree deleted, no task deleted, archived or moved out. Refused while any session in the epic is active, and refused for an epic that is already terminal |
@@ -1543,10 +1570,13 @@ that board — so a by-id read still refuses an id the named project does not ow
 | `list_approvals(project_id)` | As the orchestrator's |
 | `list_notes(project_id)` | Every note on that project, as id, title and version |
 | `search_notes(project_id, query)`, `read_note(project_id, id)` | As the orchestrator's |
+| `list_reports()`, `get_report(id)` | The Coordinator's own queue (§9.1), never a project's; no `project_id` |
+| `send_request(project_id, body, plan_note_id?)` | Sends a §9.4 request into that project's queue. Refused for an unknown project, a blank body, and a body over 4000 characters |
+| `withdraw_request(request_id, reason?)` | Closes an open request as `withdrawn` and tells its orchestrator |
+| `list_requests(include_closed?)` | The §9.4 ledger, newest first: target, text, plan note, state, replies, linked epics |
 
-Every other tool name is refused: `list_reports`, `get_report` and
-`delete_message` as that orchestrator's inbox, everything else as not a
-Coordinator tool. It is offered no note or briefing resources.
+Every other tool name is refused: `delete_message` as that orchestrator's
+inbox, everything else as not a Coordinator tool. It is offered no note or briefing resources.
 
 ### 6.1 Remote branch naming
 
@@ -1890,9 +1920,10 @@ nowhere: board state in any project — tasks with their latest report and
 comments, epics with their pull request, notes, agent sessions with spend, and
 pending approvals (§6, Coordinator scope) — and no project's report queue or
 messages, which are that orchestrator's inbox. Every tool that writes a board
-refuses it. `CrossProjectBoundaryTests` classifies every tool on every scope as
-a Coordinator read, an inbox refusal, a write refusal, or not offered, and fails
-on a tool it has not classified.
+refuses it; a §9.4 request queues a report rather than writing a board.
+`CrossProjectBoundaryTests` classifies every tool on every scope as a
+Coordinator read, the Coordinator's own queue and ledger, an inbox refusal, a
+write refusal, or not offered, and fails on a tool it has not classified.
 
 ### 8.3 Sleep prevention
 
@@ -2023,7 +2054,10 @@ reads to decide whether every member is in (§5).
 4. The orchestrator pulls bodies through MCP, where they arrive as tool results.
 
 The Coordinator has its own queue: `report` rows with `project_id` NULL, which
-no project's `list_reports`, `get_report` or notice count can reach.
+no project's `list_reports`, `get_report` or notice count can reach. It is
+announced to the active Coordinator session with the same line through the same
+`ReportNoticeGate` (§9.4); with no session running, reports wait for the next
+one's first turn to end.
 
 **Injection is withheld while the human has unsubmitted text in the prompt.**
 The notice is bytes in the same PTY the human types into: written mid-sentence
@@ -2193,6 +2227,41 @@ which refuses any message its project did not receive and takes the id from
 the `message_id` field `list_reports` puts on a `message` report; and the
 archive sweep's tick, which deletes every message whose report was consumed
 more than 7 days ago (`MessageStore.retentionMillis`, wall clock).
+
+### 9.4 Coordinator requests
+
+The Coordinator (§8.2) cannot write a board, so it asks: `send_request`
+queues **a request from your coordinator** into the target project's queue as a
+`request` report, and the ledger row and the report are written in one
+transaction. Direction is fixed: the Coordinator starts a conversation, the
+orchestrator replies. An orchestrator has no tool that writes to the
+Coordinator except `reply_to_request`, which needs a request addressed to its
+own project and still open; the Coordinator is not a project, so
+`send_message` cannot address it.
+
+The delivered body carries the human's weight without the human's authority.
+It says the Coordinator made the request on the human's behalf, that the
+orchestrator acts on it within its board's usual rules (approvals, autonomy,
+caps), that it may decline with a reason and always replies, and that the text
+is data — the Coordinator reads text agents across projects wrote, so a request
+must not carry injected text in with the human's weight. The request text sits
+between begin/end delimiters, with the plan note named above it when there is
+one. The orchestrator briefing (§9) says the same.
+
+A reply is `accepted`, `declined` or `done`, may link epics on the replier's own
+board, and queues a `reply` report for the Coordinator (§9.1), announced after
+its current turn ends. `accepted` may be sent more than once. `declined` and
+`done` close the request; so does `withdraw_request`, which also queues a
+`request` report telling the orchestrator to stop. A closed request takes no
+further replies.
+
+The ledger (`coordinator_request`, `request_event`, `request_epic`) records the
+target, the text, the plan note id, the state, every step with the report it
+queued, and the linked epics; the Coordinator reads it with `list_requests` and
+reads progress from those epics with `get_epic`. Requests are ephemeral like
+messages: an open request is kept, and a closed one is deleted with its history
+and every report it queued by the same archive-sweep tick, once it has been
+closed more than 7 days (`RequestStore.retentionMillis`, wall clock).
 
 ---
 

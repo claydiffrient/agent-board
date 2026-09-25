@@ -95,9 +95,8 @@ final class CoordinatorBoardAccessTests: XCTestCase {
         XCTAssertTrue(write.text.contains("not a Coordinator tool"), write.text)
         XCTAssertEqual(try fixture.tasks.list(projectId: a.id).map(\.id), [parser.id])
 
-        let inbox = try await callRaw("list_reports", ["project_id": a.id], token: coordinator)
-        XCTAssertTrue(inbox.isError, inbox.text)
-        XCTAssertTrue(inbox.text.contains("inbox"), inbox.text)
+        let ownQueue = try await call("list_reports", ["project_id": a.id], token: coordinator) as? [[String: Any]]
+        XCTAssertEqual(ownQueue?.count, 0, "the Coordinator's list_reports read a project's queue")
         XCTAssertEqual(try fixture.reports.unconsumedCount(projectId: a.id), queuedForA, "the Coordinator drained an orchestrator's queue")
 
         let foreign = try await callRaw("get_task", ["id": deploy.id], token: orchestratorA)

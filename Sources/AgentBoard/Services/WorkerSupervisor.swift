@@ -95,6 +95,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let board: Board
     @ObservationIgnored private let archives: ArchiveSweep
     @ObservationIgnored private let messages: MessageStore
+    @ObservationIgnored private let requests: RequestStore
     @ObservationIgnored private let fileLocks: FileLockStore
     @ObservationIgnored private let attention: ProjectAttentionStore
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
@@ -121,6 +122,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// trailers have already been read back this run.
     @ObservationIgnored private var trailersBackfilled: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
+    /// The active Coordinator session's console, if one is running (SPEC §9.4). Replies queued while
+    /// it is nil wait in the Coordinator's queue and are announced after the next session's first turn.
+    @ObservationIgnored var coordinatorConsole: (any ReportAnnouncing)?
     @ObservationIgnored private var shellConsoles: [String: ShellConsole] = [:]
     /// Keyed by setup session id, so a test — or a human stopping a worker mid-setup — can wait on
     /// or cancel the half of a spawn that outlives the call.
@@ -171,6 +175,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         board = Board(db)
         archives = ArchiveSweep(db)
         messages = MessageStore(db)
+        requests = RequestStore(db)
         fileLocks = FileLockStore(db)
         attention = ProjectAttentionStore(db)
         pullRequestStates = PullRequestStateReader(gh: gh)
@@ -2186,6 +2191,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         consoles[projectId]?.compactionCompleted(manual: manual)
     }
 
+    func coordinatorReportQueued() async {
+        coordinatorConsole?.reportsChanged()
+    }
+
+    func coordinatorTurnEnded(sessionId: String) async {
+        coordinatorConsole?.turnEnded()
+    }
+
     /// The worker has committed and recorded its note; this is the orderly end of its session. The
     /// cause is neither a human kill nor a cap kill, and `terminate` puts the unfinished task back
     /// in `ready` with the note attached to the report.
@@ -2376,6 +2389,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @discardableResult
     func sweepArchives(_ all: [Project], now: Int64 = .nowMillis) -> [String] {
         _ = try? messages.deleteExpired(now: now)
+        _ = try? requests.deleteExpired(now: now)
         return all.flatMap { (try? archives.run(projectId: $0.id, now: now)) ?? [] }
     }
 
