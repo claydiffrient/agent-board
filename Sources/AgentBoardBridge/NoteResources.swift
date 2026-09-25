@@ -23,7 +23,7 @@ public struct NoteResourceHandler: ResourceHandler {
         let headings = try notes.headings(projectId: identity.projectId)
         return try notes.list(projectId: identity.projectId).map { note in
             ResourceDescriptor(
-                uri: Self.uri(projectId: note.projectId, noteId: note.id),
+                uri: Self.uri(projectId: identity.projectId, noteId: note.id),
                 name: note.title,
                 description: Self.describe(note, headings: headings[note.id] ?? []),
                 mimeType: Self.mimeType

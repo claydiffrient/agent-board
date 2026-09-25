@@ -739,7 +739,7 @@ CREATE INDEX approval_pending ON approval(project_id, resolved_at);
 
 CREATE TABLE note (
   id          TEXT PRIMARY KEY,
-  project_id  TEXT NOT NULL REFERENCES project(id),
+  project_id  TEXT REFERENCES project(id),  -- NULL: one of the Coordinator's plans (§8.2)
   title       TEXT NOT NULL,
   pinned      INTEGER NOT NULL DEFAULT 0,
   version     INTEGER NOT NULL DEFAULT 1,
@@ -761,7 +761,7 @@ CREATE TABLE note_link (
   epic_id  TEXT REFERENCES epic(id)
 );
 
-CREATE VIRTUAL TABLE note_fts USING fts5(title, body, content='');
+CREATE VIRTUAL TABLE note_fts USING fts5(title, body, content='');  -- keyed to note.rowid
 
 CREATE TABLE hook_event (
   id          INTEGER PRIMARY KEY,
@@ -1555,10 +1555,12 @@ Everything in worker scope over any task in the project, plus:
 
 ### Coordinator scope
 
-Held by the Coordinator, which belongs to no project (§8.2). Every tool but
-`list_projects` takes a required `project_id` naming the board to read, and
-answers through the orchestrator's own handler for that tool as if asked from
-that board — so a by-id read still refuses an id the named project does not own.
+Held by the Coordinator, which belongs to no project (§8.2). Every board read
+takes a `project_id` naming the board to read, and answers through the
+orchestrator's own handler for that tool as if asked from that board — so a
+by-id read still refuses an id the named project does not own. The note tools
+also reach the Coordinator's own plans, notes with no project: a note read
+without `project_id` reads the plans, and a note write reaches only the plans.
 
 | Tool | Effect |
 |---|---|
@@ -1568,8 +1570,9 @@ that board — so a by-id read still refuses an id the named project does not ow
 | `list_epics(project_id)`, `get_epic(project_id, id)` | As the orchestrator's, including the newest pull request |
 | `list_agents(project_id, include_ended)` | As the orchestrator's: state and spend |
 | `list_approvals(project_id)` | As the orchestrator's |
-| `list_notes(project_id)` | Every note on that project, as id, title and version |
-| `search_notes(project_id, query)`, `read_note(project_id, id)` | As the orchestrator's |
+| `list_notes(project_id?)` | Every note on that project, or every plan without `project_id`, as id, title and version |
+| `search_notes(project_id?, query)`, `read_note(project_id?, id)` | As the orchestrator's; without `project_id`, over the plans |
+| `create_note(title, sections)`, `append_section(note_id, …)`, `replace_section(note_id, …)` | As the worker's, on a plan only. Refused when `project_id` is passed or `note_id` is a project's note |
 | `list_reports()`, `get_report(id)` | The Coordinator's own queue (§9.1), never a project's; no `project_id` |
 | `send_request(project_id, body, plan_note_id?)` | Sends a §9.4 request into that project's queue. Refused for an unknown project, a blank body, and a body over 4000 characters |
 | `withdraw_request(request_id, reason?)` | Closes an open request as `withdrawn` and tells its orchestrator |
@@ -1920,10 +1923,14 @@ nowhere: board state in any project — tasks with their latest report and
 comments, epics with their pull request, notes, agent sessions with spend, and
 pending approvals (§6, Coordinator scope) — and no project's report queue or
 messages, which are that orchestrator's inbox. Every tool that writes a board
-refuses it; a §9.4 request queues a report rather than writing a board.
-`CrossProjectBoundaryTests` classifies every tool on every scope as a
-Coordinator read, the Coordinator's own queue and ledger, an inbox refusal, a
-write refusal, or not offered, and fails on a tool it has not classified.
+refuses it; a §9.4 request queues a report rather than writing a board. What
+it writes is its own plans: `note` rows with `project_id` NULL, which `note_fts`
+indexes like any note. Every note query matches `project_id IS ?`, so a
+project's list, search or by-id read never reaches a plan, and a plan query
+never reaches a project's note. `CrossProjectBoundaryTests` classifies every
+tool on every scope as a Coordinator read, the Coordinator's own queue and
+ledger, a plan write, an inbox refusal, a write refusal, or not offered, and
+fails on a tool it has not classified.
 
 ### 8.3 Sleep prevention
 

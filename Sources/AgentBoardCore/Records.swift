@@ -615,7 +615,8 @@ public struct Note: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public static let databaseTableName = "note"
 
     public var id: String
-    public var projectId: String
+    /// nil for one of the Coordinator's plans, which belong to no project (SPEC §8.2).
+    public var projectId: String?
     public var title: String
     public var pinned: Bool
     public var version: Int64
@@ -630,7 +631,7 @@ public struct Note: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case updatedAt = "updated_at"
     }
 
-    public init(id: String, projectId: String, title: String, pinned: Bool = false, version: Int64 = 1, updatedAt: Int64) {
+    public init(id: String, projectId: String?, title: String, pinned: Bool = false, version: Int64 = 1, updatedAt: Int64) {
         self.id = id
         self.projectId = projectId
         self.title = title

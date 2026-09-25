@@ -3,9 +3,9 @@ import AgentBoardServer
 import Foundation
 
 /// The Coordinator's surface (SPEC §6, §8.2, §9.4): board state in any project, read through the
-/// orchestrator's own handlers with the project named per call, plus its own report queue and the
-/// requests it sends. Nothing here writes to a board or reads a project's report queue or messages;
-/// every other tool name is refused.
+/// orchestrator's own handlers with the project named per call, plus its own plan notes, its own
+/// report queue and the requests it sends. Nothing here writes to a board or reads a project's
+/// report queue or messages; every other tool name is refused.
 public struct CoordinatorToolHandler: ToolHandler {
     private let board: OrchestratorToolHandler
     private let projects: ProjectStore
@@ -13,6 +13,7 @@ public struct CoordinatorToolHandler: ToolHandler {
     private let reports: ReportStore
     private let requests: RequestStore
     private let events: any BoardEventSink
+    private let plans: NoteTools
 
     public init(db: AppDatabase, board: OrchestratorToolHandler, events: any BoardEventSink) {
         self.board = board
@@ -21,6 +22,7 @@ public struct CoordinatorToolHandler: ToolHandler {
         reports = ReportStore(db)
         requests = RequestStore(db)
         self.events = events
+        plans = NoteTools(db: db)
     }
 
     static let projectIdArgument = ToolSchema.string("The project to read, as an id from list_projects.")
@@ -39,11 +41,15 @@ public struct CoordinatorToolHandler: ToolHandler {
         onProject("list_approvals", "Approvals on that project still waiting on the human."),
         ToolDescriptor(
             name: "list_notes",
-            description: "Every note on that project, as id, title and current version. Use read_note to see one in full.",
-            inputSchema: ToolSchema.object(properties: ["project_id": projectIdArgument], required: ["project_id"])
+            description: "Every note on that project, or every one of your own plans when project_id is omitted, as id, "
+                + "title and current version. Use read_note to see one in full.",
+            inputSchema: ToolSchema.object(properties: ["project_id": planOrProjectArgument], required: [])
         ),
-        onProject("search_notes", "Full-text search that project's notes; returns id, title and current version."),
-        onProject("read_note", "One of that project's notes in full: every section, plus its current version."),
+        onPlansOrProject("search_notes", "Full-text search that project's notes, or your own plans when project_id is omitted; returns id, title and current version."),
+        onPlansOrProject("read_note", "One note in full, from that project or from your own plans when project_id is omitted: every section, plus its current version."),
+        onPlans("create_note", "Create a plan in your own note space, which belongs to no project. Search your plans first. A project's notes are read-only to you; to add one, ask that project's orchestrator."),
+        onPlans("append_section", "Add to one of your plans. If `heading` already exists its body is kept and yours is appended after a blank line; otherwise a new section is added at the end. A project's notes are read-only to you."),
+        onPlans("replace_section", "Replace one section of one of your plans outright, creating it if it does not exist. Pass `if_version` so you cannot overwrite a write you have not seen. A project's notes are read-only to you."),
         ToolDescriptor(
             name: "list_reports",
             description: "Pull the replies to your requests that have arrived since you last called this. Each is "
@@ -96,6 +102,13 @@ public struct CoordinatorToolHandler: ToolHandler {
         ),
     ]
 
+    static let planOrProjectArgument = ToolSchema.string(
+        "The project to read, as an id from list_projects. Omit it to reach your own plans."
+    )
+
+    /// Note writes, which reach only the Coordinator's own plans and refuse any project's note.
+    static let planWriteNames: Set<String> = ["create_note", "append_section", "replace_section"]
+
     /// A project orchestrator's inbox: refused by name, so the answer says why rather than "unknown".
     static let inboxToolNames: Set<String> = ["delete_message"]
 
@@ -110,8 +123,16 @@ public struct CoordinatorToolHandler: ToolHandler {
                 .object(["id": .string(project.id), "name": .string(project.name)])
             }))
         case "list_notes":
-            let project = try requiredProject(arguments)
-            return .json(.array(try notes.list(projectId: project.id).map(NoteTools.renderSummary)))
+            let project = try optionalProject(arguments)
+            return .json(.array(try notes.list(projectId: project?.id).map(NoteTools.renderSummary)))
+        case "search_notes", "read_note":
+            guard let project = try optionalProject(arguments) else {
+                return try plans.call(name, arguments: arguments, identity: identity, space: nil)
+            }
+            return try await board.boardRead(name, arguments: Self.dropProjectId(arguments), projectId: project.id)
+        case _ where Self.planWriteNames.contains(name):
+            try refuseProjectNoteWrite(name, arguments: arguments)
+            return try plans.call(name, arguments: arguments, identity: identity, space: nil)
         case "list_reports":
             return .json(.array(try reports.consumeAllForCoordinator().map(renderReport)))
         case "get_report":
@@ -131,9 +152,7 @@ public struct CoordinatorToolHandler: ToolHandler {
             return .json(.array(try requests.ledger(includeClosed: includeClosed).map(Self.renderLedgerEntry)))
         case _ where OrchestratorToolHandler.boardReadNames.contains(name):
             let project = try requiredProject(arguments)
-            var rest = arguments.objectValue ?? [:]
-            rest["project_id"] = nil
-            return try await board.boardRead(name, arguments: .object(rest), projectId: project.id)
+            return try await board.boardRead(name, arguments: Self.dropProjectId(arguments), projectId: project.id)
         case _ where Self.inboxToolNames.contains(name):
             throw ToolError(
                 "\(name) reads a project's report queue, which is that orchestrator's inbox. The Coordinator reads "
@@ -224,6 +243,45 @@ public struct CoordinatorToolHandler: ToolHandler {
             throw ToolError("No project has id \(id). Call list_projects for the ids you can read.")
         }
         return project
+    }
+
+    private func optionalProject(_ arguments: JSONValue) throws -> Project? {
+        guard ToolArguments.optionalString("project_id", in: arguments) != nil else { return nil }
+        return try requiredProject(arguments)
+    }
+
+    private func refuseProjectNoteWrite(_ name: String, arguments: JSONValue) throws {
+        let namesProject = ToolArguments.optionalString("project_id", in: arguments) != nil
+        let projectNote = try ToolArguments.optionalString("note_id", in: arguments)
+            .flatMap { try notes.get($0) }?.projectId != nil
+        guard namesProject || projectNote else { return }
+        throw ToolError(
+            "\(name) would write a project's note. The Coordinator writes only its own plans; to change a "
+                + "project's notes, ask that project's orchestrator."
+        )
+    }
+
+    private static func dropProjectId(_ arguments: JSONValue) -> JSONValue {
+        var rest = arguments.objectValue ?? [:]
+        rest["project_id"] = nil
+        return .object(rest)
+    }
+
+    private static func onPlans(_ name: String, _ description: String) -> ToolDescriptor {
+        guard let source = NoteTools.workerDescriptors.first(where: { $0.name == name }) else {
+            preconditionFailure("\(name) is not a note tool")
+        }
+        return ToolDescriptor(name: name, description: description, inputSchema: source.inputSchema)
+    }
+
+    private static func onPlansOrProject(_ name: String, _ description: String) -> ToolDescriptor {
+        guard let source = NoteTools.workerDescriptors.first(where: { $0.name == name }),
+              var schema = source.inputSchema.objectValue
+        else { preconditionFailure("\(name) is not a note tool") }
+        var properties = schema["properties"]?.objectValue ?? [:]
+        properties["project_id"] = planOrProjectArgument
+        schema["properties"] = .object(properties)
+        return ToolDescriptor(name: name, description: description, inputSchema: .object(schema))
     }
 
     private static func onProject(_ name: String, _ description: String) -> ToolDescriptor {

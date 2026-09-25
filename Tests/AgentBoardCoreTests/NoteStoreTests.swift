@@ -180,6 +180,21 @@ final class NoteStoreTests: XCTestCase {
         XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "shared").map(\.id), [mine.id])
     }
 
+    func testTheCoordinatorsPlansAreReachableOnlyFromItsOwnSpace() throws {
+        let f = try Fixture.make()
+        let plan = try f.notes.create(projectId: nil, title: "Cross-repo rollout", sections: [("Order", "ui first")])
+        try f.notes.appendSection(noteId: plan.id, heading: "Infrastructure", body: "migrate the terraform state")
+        let theirs = try f.notes.create(projectId: f.project.id, title: "Local", sections: [("A", "terraform quirks")])
+
+        XCTAssertEqual(try f.notes.search(projectId: nil, query: "terraform").map(\.id), [plan.id])
+        XCTAssertEqual(try f.notes.list(projectId: nil).map(\.id), [plan.id])
+        XCTAssertEqual(try f.notes.get(plan.id, projectId: nil)?.version, 2)
+
+        XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "terraform").map(\.id), [theirs.id])
+        XCTAssertEqual(try f.notes.list(projectId: f.project.id).map(\.id), [theirs.id])
+        XCTAssertNil(try f.notes.get(plan.id, projectId: f.project.id))
+    }
+
     func testSearchStopsMatchingReplacedText() throws {
         let f = try Fixture.make()
         let note = try f.notes.create(

@@ -43,6 +43,9 @@ final class CrossProjectBoundaryTests: XCTestCase {
     /// The Coordinator's own queue and request ledger (SPEC §9.4), which belong to no project.
     static let coordinatorOwn: Set<String> = ["list_reports", "get_report", "send_request", "withdraw_request", "list_requests"]
 
+    /// Note writes that reach only the Coordinator's own plans and refuse any project's note.
+    static let coordinatorWritesOwnPlansOnly: Set<String> = ["create_note", "append_section", "replace_section"]
+
     /// A project orchestrator's inbox, which is not board state.
     static let refusedToCoordinatorAsInbox: Set<String> = ["delete_message"]
 
@@ -51,7 +54,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "create_task", "update_task", "move_task", "set_epic", "set_deps", "log_progress", "add_comment",
         "spawn_worker", "assign_to_agent", "stop_worker", "archive_task", "unarchive_task", "promote_proposal",
         "create_epic", "request_integration", "close_epic", "push_branch", "open_pull_request", "send_message",
-        "create_note", "append_section", "replace_section", "attach_note", "pin_note",
+        "attach_note", "pin_note",
         "update_status", "propose_task", "report_complete", "hand_off", "report_blocked", "acknowledge_shutdown",
         "commit_my_work", "accept_task", "reopen_task", "reply_to_request",
     ]
@@ -550,6 +553,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         )
         let classified = Self.coordinatorReads
             .union(Self.coordinatorOwn)
+            .union(Self.coordinatorWritesOwnPlansOnly)
             .union(Self.refusedToCoordinatorAsInbox)
             .union(Self.refusedToCoordinatorAsWrite)
             .union(Self.notOfferedToCoordinator)
@@ -557,7 +561,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         XCTAssertEqual(everyTool.subtracting(classified), [], "a tool was added without saying whether the Coordinator may call it")
         XCTAssertEqual(classified.subtracting(everyTool), [], "this audit names tools that no longer exist")
         let offered = Set(await f.scoped.tools(for: f.coordinatorIdentity).map(\.name))
-        XCTAssertEqual(offered, Self.coordinatorReads.union(Self.coordinatorOwn))
+        XCTAssertEqual(offered, Self.coordinatorReads.union(Self.coordinatorOwn).union(Self.coordinatorWritesOwnPlansOnly))
     }
 
     func testTheCoordinatorIsRefusedEveryWriteAndEveryInboxAndTheBoardsAreUntouched() async throws {
@@ -601,6 +605,38 @@ final class CrossProjectBoundaryTests: XCTestCase {
         let spawned = await f.control.spawned
         let stopped = await f.control.stopped
         XCTAssertEqual(spawned + stopped, [])
+    }
+
+    func testTheCoordinatorWritesItsOwnPlansAndIsRefusedAProjectsNote() async throws {
+        let theirNote = try f.note("Theirs", sections: [(heading: "H", body: "their text")], in: other.id)
+        let plan = try await f.callJSON("create_note", ["title": .string("Plan")], as: f.coordinatorIdentity)
+        let planId = try XCTUnwrap(plan["id"]?.stringValue)
+        _ = try await f.call(
+            "append_section",
+            ["note_id": .string(planId), "heading": .string("Steps"), "body": .string("ask ui")],
+            as: f.coordinatorIdentity
+        )
+
+        for name in ["append_section", "replace_section"] {
+            await XCTAssertToolError(
+                try await f.call(
+                    name,
+                    ["note_id": .string(theirNote.id), "heading": .string("H"), "body": .string("seized")],
+                    as: f.coordinatorIdentity
+                ),
+                containing: "would write a project's note"
+            )
+        }
+        await XCTAssertToolError(
+            try await f.call(
+                "create_note", ["project_id": .string(other.id), "title": .string("seized")], as: f.coordinatorIdentity
+            ),
+            containing: "would write a project's note"
+        )
+
+        XCTAssertEqual(try f.notes.read(theirNote.id)?.1.map(\.body), ["their text"])
+        XCTAssertEqual(try f.notes.list(projectId: other.id).map(\.id), [theirNote.id])
+        XCTAssertEqual(try f.notes.read(planId)?.1.map(\.heading), ["Steps"])
     }
 
     /// `project_id` names the board to read, and the id checks still hold within it: a task is not
