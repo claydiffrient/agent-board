@@ -125,6 +125,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Keyed by setup session id, so a test — or a human stopping a worker mid-setup — can wait on
     /// or cancel the half of a spawn that outlives the call.
     @ObservationIgnored private var setupTasks: [String: _Concurrency.Task<Void, Never>] = [:]
+    /// A resume starts the process before it moves the task back to `running`, so until then its
+    /// session looks like a stray one on a settled task to `reconcile`.
+    @ObservationIgnored private var resuming: Set<String> = []
 
     nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
@@ -744,6 +747,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func resume(_ session: AgentSession, prompt: String) async throws {
         do {
             let sessionId = session.sessionId
+            resuming.insert(sessionId)
+            defer { resuming.remove(sessionId) }
             guard let port = serverPort else { throw SupervisorError.serverNotRunning }
             guard let taskId = session.taskId else { throw SupervisorError.taskNotFound("(none for session \(sessionId))") }
             guard let project = try projects.get(session.projectId) else {
@@ -1151,7 +1156,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return branch
     }
 
-    /// Every task that has run on `branch`, newest session state per task.
+    /// Every task that has run on `branch`.
     private func sharedMembers(projectId: String, branch: String) throws -> [SharedBranchMember] {
         var members: [String: SharedBranchMember] = [:]
         var order: [String] = []
@@ -1162,9 +1167,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let taskId = row.taskId, let task = try tasks.get(taskId) else { continue }
             if members[taskId] == nil {
                 order.append(taskId)
-                members[taskId] = SharedBranchMember(taskId: taskId, isAccepted: task.column == .done, isLive: false)
+                members[taskId] = SharedBranchMember(taskId: taskId, isAccepted: task.column == .done)
             }
-            if row.state.isActive { members[taskId]?.isLive = true }
         }
         return order.compactMap { members[$0] }
     }
@@ -1182,9 +1186,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 task: task, epic: epic, landing: .unlanded,
                 detail: "`\(branch)` carries \(members.count) tasks' commits and has not been merged into the "
                     + "epic branch `\(epic.branch)`."
-                    + "\nA shared branch merges once, when every task on it has been accepted and no worker is "
-                    + "still standing in the checkout: its members' commits are interleaved on one ref, so there "
-                    + "is no range that is one task's work alone and Agent Board does not unpick commits."
+                    + "\nA shared branch merges once, when every task on it has been accepted: its members' "
+                    + "commits are interleaved on one ref, so there is no range that is one task's work alone "
+                    + "and Agent Board does not unpick commits."
                     + "\n\nStill outstanding on `\(branch)`:\n"
                     + waiting.map { "- \($0)" }.joined(separator: "\n"),
                 advice: nil
@@ -1395,7 +1399,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     queuedReport = queuedReport || report != nil
                 }
             } else if status == "running" {
-                if [.starting, .idle, .stopped].contains(session.state) {
+                if session.state == .stopped || session.state.isActive, let taskId = session.taskId,
+                   !resuming.contains(session.sessionId),
+                   (try? board.isSettled(taskId: taskId, apartFrom: session.sessionId)) == true {
+                    let queued = await stopOnSettledTask(session, listed: info)
+                    queuedReport = queuedReport || queued
+                } else if [.starting, .idle, .stopped].contains(session.state) {
                     try? sessions.setState(session.sessionId, .running)
                 }
             } else if state == "done" || status == "idle" {
@@ -1408,6 +1417,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         await recoverStrandedTasks(projectId: projectId)
         await reapOrphanedWorktrees(projectId: projectId, keeping: liveWorktrees)
         refreshSleepAssertion()
+    }
+
+    /// SPEC §10, Status: nothing belongs running on a settled task, so its process is stopped and
+    /// its row is not revived. True when that queued a report.
+    private func stopOnSettledTask(_ session: AgentSession, listed info: AgentInfo) async -> Bool {
+        guard let shortId = session.shortId ?? info.id,
+              (try? await runtime.stop(shortId: shortId)) != nil,
+              session.state.isActive
+        else { return false }
+        let report = (try? board.terminate(sessionId: session.sessionId, cause: .taskSettled)) ?? nil
+        try? grants.revokeAll(sessionId: session.sessionId)
+        return report != nil
     }
 
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? {

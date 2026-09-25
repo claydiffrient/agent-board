@@ -74,6 +74,16 @@ final class ForkAdoptionTests: XCTestCase {
         XCTAssertEqual(try f.projects.get(f.project.id)?.orchSessionId, "orch-1")
     }
 
+    func testAForkOnADoneTaskIsAdoptedStopped() async throws {
+        let task = try f.task("Add the sidebar", column: .done)
+        try f.session("w1", taskId: task.id)
+        let identity = try await identity(scope: .worker, boundTo: "w1", taskId: task.id)
+
+        _ = await f.hooks.handle(HookEvent(name: "SessionStart", sessionId: "w2", rawJSON: "{\"source\":\"fork\"}"), identity: identity)
+
+        XCTAssertEqual(try f.sessions.get("w2")?.state, .stopped)
+    }
+
     func testUnknownSessionWithNoLiveGrantIsStillIgnored() async throws {
         let identity = try await identity(scope: .worker, boundTo: String?.none)
 

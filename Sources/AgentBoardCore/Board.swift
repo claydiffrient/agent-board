@@ -63,11 +63,14 @@ public enum SessionTermination: Sendable, Equatable {
     /// The worker was told to wind down, committed, and answered. Neither a kill nor a cap breach:
     /// the task is unfinished work with a note on it, so it must not read as failed or accepted.
     case shutdownAcknowledged(note: String?)
+    /// `reconcile` found a process still running on a task in `done`, or in `ready` with no
+    /// session on it (SPEC §10, Status), and stopped it.
+    case taskSettled
 
     var sessionState: SessionState {
         switch self {
         case .capBreach, .setupFailed: return .failed
-        case .stopped, .vanished, .shutdownAcknowledged: return .stopped
+        case .stopped, .vanished, .shutdownAcknowledged, .taskSettled: return .stopped
         }
     }
 
@@ -77,14 +80,14 @@ public enum SessionTermination: Sendable, Equatable {
     var salvagesBranchWork: Bool {
         switch self {
         case .capBreach, .vanished, .stopped: return true
-        case .setupFailed, .shutdownAcknowledged: return false
+        case .setupFailed, .shutdownAcknowledged, .taskSettled: return false
         }
     }
 
     var flagsTaskFailed: Bool {
         switch self {
         case .capBreach, .vanished, .setupFailed: return true
-        case .stopped, .shutdownAcknowledged: return false
+        case .stopped, .shutdownAcknowledged, .taskSettled: return false
         }
     }
 
@@ -95,12 +98,13 @@ public enum SessionTermination: Sendable, Equatable {
         case .vanished: return "the session is no longer running and Agent Board did not stop it"
         case .setupFailed(let detail): return "setting up the worktree failed before the worker started: \(detail)"
         case .shutdownAcknowledged: return "wound down for the project shutdown order and acknowledged"
+        case .taskSettled: return "claude agents still listed it as running on a task with no work left for it"
         }
     }
 
     var reportKind: ReportKind {
         switch self {
-        case .shutdownAcknowledged: return .decision
+        case .shutdownAcknowledged, .taskSettled: return .decision
         case .capBreach, .stopped, .vanished, .setupFailed: return .failed
         }
     }
@@ -110,6 +114,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .shutdownAcknowledged: return "Worker wound down for the shutdown order: \(reason)"
         case .setupFailed: return "Worker never started: \(reason)"
         case .capBreach, .stopped, .vanished: return "Worker session ended without reporting: \(reason)"
+        case .taskSettled: return "Session ended after its task was settled: \(reason)"
         }
     }
 
@@ -119,7 +124,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .shutdownAcknowledged(let note):
             guard let note, !note.isEmpty else { return nil }
             return note
-        case .capBreach, .stopped, .vanished, .setupFailed: return nil
+        case .capBreach, .stopped, .vanished, .setupFailed, .taskSettled: return nil
         }
     }
 }
@@ -764,16 +769,42 @@ public struct Board: Sendable {
         }
     }
 
-    /// A task already accepted, or sent back by a review verdict, has nothing a session's end can
-    /// leave unfinished, so its report must not read as a failure. Nil for any other task.
+    /// A task already accepted, sent back by a review verdict, or in `ready` with nobody on it has
+    /// nothing a session's end can leave unfinished, so its report must not read as a failure. Nil
+    /// for any other task.
     static func settledLine(_ db: Database, task: Task) throws -> String? {
         switch task.column {
         case .done:
             return "The task is in done; ending this session changed nothing on it."
         case .ready where try ProgressStore.openReviewFindings(db, taskId: task.id) != nil:
             return "The task is back in ready with a reviewer's findings; ending this session changed nothing on it."
+        case .ready where try SessionStore.activeHolder(db, taskId: task.id) == nil:
+            return "The task is back in ready with no session on it; ending this session changed nothing on it."
         default:
             return nil
+        }
+    }
+
+    /// SPEC §7, §10 Status: no session belongs running on a task in `done`, or in `ready` with no
+    /// other session on it, so `reconcile` and `SessionStart` never set one running there.
+    public func isSettled(taskId: String, apartFrom sessionId: String) throws -> Bool {
+        try db.reader.read { db in
+            switch try Task.fetchOne(db, key: taskId)?.column {
+            case .done:
+                return true
+            case .ready:
+                let held = try Bool.fetchOne(
+                    db,
+                    sql: """
+                    SELECT EXISTS(SELECT 1 FROM agent_session
+                    WHERE task_id = ? AND session_id != ? AND state IN (\(SessionStore.activeStatesSQL)))
+                    """,
+                    arguments: [taskId, sessionId]
+                ) ?? false
+                return !held
+            default:
+                return false
+            }
         }
     }
 

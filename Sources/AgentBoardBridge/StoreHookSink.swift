@@ -312,6 +312,7 @@ public final class StoreHookSink: HookSink {
     /// name its parent. The grant is the only link back, so an unknown session id arriving on a live
     /// grant bound to a known session is the fork signal. The old row keeps its state and its spend —
     /// the fork writes its own transcript, and metering reads transcripts — but its queued comments move.
+    /// A fork on a settled task is adopted stopped (SPEC §7).
     private func adoptFork(newSessionId: String, identity: TokenIdentity) {
         guard let priorId = identity.sessionId, priorId != newSessionId,
               (try? sessions.get(newSessionId)) == nil,
@@ -320,6 +321,7 @@ public final class StoreHookSink: HookSink {
               prior.role.rawValue == identity.scope.rawValue
         else { return }
 
+        let settled = prior.taskId.flatMap { try? board.isSettled(taskId: $0, apartFrom: newSessionId) } ?? false
         let adopted = AgentSession(
             sessionId: newSessionId,
             shortId: prior.shortId,
@@ -329,7 +331,8 @@ public final class StoreHookSink: HookSink {
             worktreePath: prior.worktreePath,
             branch: prior.branch,
             cwd: prior.cwd,
-            state: .running,
+            state: settled ? .stopped : .running,
+            endedAt: settled ? .nowMillis : nil,
             attempt: prior.attempt,
             model: prior.model
         )
@@ -413,7 +416,10 @@ public final class StoreHookSink: HookSink {
 
         switch event.name {
         case "SessionStart":
-            try? sessions.setState(sessionId, .running)
+            // SPEC §7: never revived on a settled task, and never stopped from here either: a resume's
+            // own SessionStart can beat its move back to `running`, and `resume` marks the row itself.
+            let settled = session.taskId.flatMap { try? board.isSettled(taskId: $0, apartFrom: sessionId) } ?? false
+            if !settled { try? sessions.setState(sessionId, .running) }
             if let path = event.transcriptPath {
                 try? sessions.setTranscriptPath(sessionId, path)
             }
