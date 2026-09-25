@@ -413,7 +413,10 @@ public final class StoreHookSink: HookSink {
 
         switch event.name {
         case "SessionStart":
-            try? sessions.setState(sessionId, .running)
+            // SPEC §7: never revived on a settled task, and never stopped from here either: a resume's
+            // own SessionStart can beat its move back to `running`, and `resume` marks the row itself.
+            let settled = session.taskId.flatMap { try? board.isSettled(taskId: $0, apartFrom: sessionId) } ?? false
+            if !settled { try? sessions.setState(sessionId, .running) }
             if let path = event.transcriptPath {
                 try? sessions.setTranscriptPath(sessionId, path)
             }

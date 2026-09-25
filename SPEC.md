@@ -1038,8 +1038,10 @@ nobody reviewed.
   commits interleaved on one ref, so there is no range that is this task's
   work alone — accepting it only marks this task accepted and checks whether
   it was the last one still owed: every task that ever ran on the branch must
-  be accepted, and none still `isLive` (a worker of theirs still standing in
-  the checkout). Short of that, acceptance queues a `decision` report naming
+  be accepted. No member's worker can still be standing in the checkout by
+  then, because each accept stopped its own task's sessions and nothing sets a
+  session on a task in `done` running again (§7, §10 Status). Short of that,
+  acceptance queues a `decision` report naming
   what the branch is still waiting on and merges nothing. Once it holds, the
   branch's attribution is written to `task_commit` for every member (backfilling
   from any pre-ledger `Agent-Board-Task` trailer first, since this is the last
@@ -1219,7 +1221,8 @@ end while a build the reviewer started in the background still runs; the
 orchestrator can message it or `stop_worker` it.
 
 A session that ends on a task already in `done`, or back in `ready` with a
-reviewer's findings, left nothing unfinished: `Board.terminate` queues a
+reviewer's findings or with no other session on it, left nothing unfinished:
+`Board.terminate` queues a
 `decision` report headed "Session ended after its task was settled: <reason>",
 with no branch-salvage line and no failure flag. A stop's reason names who asked
 for it — a human, the orchestrator's `stop_worker`, or the acceptance that ran
@@ -1592,7 +1595,7 @@ Generated into each managed session's `--settings`. All post to
 
 | Event | Agent Board's reaction |
 |---|---|
-| `SessionStart` | Mark `agent_session.state = running`; record transcript path |
+| `SessionStart` | Mark `agent_session.state = running`, unless its task is in `done`, or in `ready` with no other session on it; record transcript path |
 | `PreToolUse` (matcher `Bash`) | Deny `git push`, `gh pr create`, `gh pr merge`; append an `error` progress row (§8) |
 | `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row; reply with a worker's post-compaction brief or queued human comments as `additionalContext` |
 | `Notification` | Set `blocked` + reason on the task and session; the task appears in the orchestrator's **Blocked** section (§10) and raises the project's attention signal, which posts the banner |
@@ -2378,7 +2381,11 @@ under the same guards; workers get no such tool.
 
 **Status** — the agent roster. Reconciled from `claude agents --json --all`
 joined against `agent_session`, so a session that died outside the app is shown
-as dead rather than phantom-running. Per agent: role, task, state, elapsed, spend
+as dead rather than phantom-running. A session listed as running on a task in
+`done`, or in `ready` with no other session on it, is not set running again:
+`reconcile` stops its process, and a row still active is ended with the
+settled-task `decision` report (§5.1), never a `failed` one. Per agent: role,
+task, state, elapsed, spend
 against cap, last tool used. A blocked agent's row opens its terminal, which is
 how permission prompts get answered (D15).
 
