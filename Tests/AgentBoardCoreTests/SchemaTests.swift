@@ -20,7 +20,7 @@ final class SchemaTests: XCTestCase {
         try db.reader.read { db in
             let grant = try db.columns(in: "token_grant")
             XCTAssertEqual(grant.first { $0.name == "session_id" }?.isNotNull, false)
-            XCTAssertTrue(grant.contains { $0.name == "project_id" && $0.isNotNull })
+            XCTAssertEqual(grant.first { $0.name == "project_id" }?.isNotNull, false, "the Coordinator's grant has no project")
             XCTAssertTrue(grant.contains { $0.name == "created_at" && $0.isNotNull })
 
             let session = try db.columns(in: "agent_session").map(\.name)
@@ -40,6 +40,47 @@ final class SchemaTests: XCTestCase {
             XCTAssertEqual(
                 try db.columns(in: "project_roster_agent").map(\.name),
                 ["project_id", "roster_agent_id", "ordering"]
+            )
+        }
+    }
+
+    /// SQLite cannot drop NOT NULL in place, so the migration rebuilds both tables; nothing already in
+    /// them may be lost, including a message's link to the report that delivered it.
+    func testTheCoordinatorMigrationKeepsEveryRowAndTiesANullProjectToTheCoordinatorScope() throws {
+        var configuration = Configuration()
+        configuration.foreignKeysEnabled = true
+        let queue = try DatabaseQueue(configuration: configuration)
+        try AppDatabase.migrator.migrate(queue, upTo: "comment_delivery")
+        try queue.write { db in
+            for id in ["p1", "p2"] {
+                try db.execute(
+                    sql: "INSERT INTO project (id, name, repo_path, worktree_root, settings_json, created_at) VALUES (?, ?, ?, '/w', '{}', 0)",
+                    arguments: [id, id, "/repo/\(id)"]
+                )
+            }
+            try db.execute(sql: "INSERT INTO token_grant (token, project_id, scope, created_at) VALUES ('t1', 'p1', 'orchestrator', 5)")
+            try db.execute(sql: "INSERT INTO report (id, project_id, kind, body, created_at) VALUES (7, 'p2', 'message', 'hello', 6)")
+            try db.execute(sql: "INSERT INTO message (from_project_id, to_project_id, body, created_at, report_id) VALUES ('p1', 'p2', 'hello', 6, 7)")
+        }
+
+        try AppDatabase.migrator.migrate(queue)
+
+        try queue.write { db in
+            XCTAssertEqual(try TokenGrant.fetchOne(db, key: "t1")?.projectId, "p1")
+            XCTAssertEqual(try Report.fetchOne(db, key: 7)?.body, "hello")
+            XCTAssertEqual(try Int64.fetchOne(db, sql: "SELECT r.id FROM message m JOIN report r ON r.id = m.report_id"), 7)
+            XCTAssertEqual(try Row.fetchAll(db, sql: "PRAGMA foreign_key_check").count, 0)
+            XCTAssertTrue(try db.indexes(on: "report").map(\.name).contains("report_project_consumed"))
+            XCTAssertTrue(try db.indexes(on: "token_grant").map(\.name).contains("token_grant_session"))
+
+            try db.execute(sql: "INSERT INTO token_grant (token, scope, created_at) VALUES ('c', 'coordinator', 0)")
+            XCTAssertThrowsError(
+                try db.execute(sql: "INSERT INTO token_grant (token, scope, created_at) VALUES ('w', 'worker', 0)"),
+                "only the Coordinator's grant may have no project"
+            )
+            XCTAssertThrowsError(
+                try db.execute(sql: "INSERT INTO token_grant (token, project_id, scope, created_at) VALUES ('c2', 'p1', 'coordinator', 0)"),
+                "the Coordinator's grant may not name a project"
             )
         }
     }

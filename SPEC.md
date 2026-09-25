@@ -631,11 +631,12 @@ CREATE TABLE agent_session (
 CREATE TABLE token_grant (
   token       TEXT PRIMARY KEY,      -- random, per session
   session_id  TEXT REFERENCES agent_session(session_id),  -- NULL until `claude --bg` returns the id
-  project_id  TEXT NOT NULL REFERENCES project(id),
-  scope       TEXT NOT NULL,         -- orchestrator | worker
+  project_id  TEXT REFERENCES project(id),  -- NULL for the Coordinator's grant only (§8.2)
+  scope       TEXT NOT NULL,         -- orchestrator | worker | reviewer | coordinator
   task_id     TEXT,                  -- worker: the only task it may mutate
   created_at  INTEGER NOT NULL,
-  revoked_at  INTEGER
+  revoked_at  INTEGER,
+  CHECK ((scope = 'coordinator') = (project_id IS NULL))
 );
 
 -- §8.4: one file in a project's own checkout, claimed by the session editing it. Only a
@@ -673,7 +674,7 @@ CREATE TABLE progress (
 
 CREATE TABLE report (
   id          INTEGER PRIMARY KEY,
-  project_id  TEXT NOT NULL REFERENCES project(id),
+  project_id  TEXT REFERENCES project(id),  -- NULL: the Coordinator's queue (§9.1)
   task_id     TEXT REFERENCES task(id),
   session_id  TEXT REFERENCES agent_session(session_id),
   kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision | message
@@ -1506,8 +1507,8 @@ Everything in worker scope over any task in the project, plus:
 | `set_deps(task_id, depends_on[])` | Dependency graph |
 | `set_epic(task_id, epic_id)` | Moves an existing task into an epic, between epics, or — with `epic_id` omitted — out of its epic. Refused for a task that has ever been spawned, and for a `done` destination epic. Dependencies are left alone |
 | `create_epic(title, goal, tasks[])` | One transaction: the epic (state `planning`) plus every task in `tasks`. Each task's `depends_on` is a zero-based index into this same array, validated before anything is written |
-| `list_epics()` | Every epic on the project with its state, branch, and done/total task count |
-| `get_epic(id)` | One epic in full: goal, branch, its tasks grouped by column, and whether it is ready for integration |
+| `list_epics()` | Every epic on the project with its state, branch, newest pull request opened from the branch (or null), and done/total task count |
+| `get_epic(id)` | One epic in full: goal, branch, newest pull request, its tasks grouped by column, and whether it is ready for integration |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
 | `pin_note(note_id, pinned)` | Every future agent sees it in its note index and can fetch it |
 | `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting |
@@ -1524,6 +1525,28 @@ Everything in worker scope over any task in the project, plus:
 | `close_epic(epic_id, state)` | Ends the epic without integrating it. `state` is `done` or `abandoned`; both are terminal. Board state and a `decision` report and nothing else — no merge, no push, no branch or worktree deleted, no task deleted, archived or moved out. Refused while any session in the epic is active, and refused for an epic that is already terminal |
 | `push_branch(branch)` | Always creates a human approval row. Refused for any branch that is not `agentboard/<something>` or the project's base branch. The approval carries both the local branch and the name it takes on the remote (§6.1) |
 | `open_pull_request(epic_id \| branch, title, body, base?)` | Always creates a human approval row. Same branch rule; `base` defaults to the project's base branch. On approval the branch is pushed if the remote lacks it, the pull request is opened from the **published** name (§6.1), and its URL lands in `progress` and in a `decision` report |
+
+### Coordinator scope
+
+Held by the Coordinator, which belongs to no project (§8.2). Every tool but
+`list_projects` takes a required `project_id` naming the board to read, and
+answers through the orchestrator's own handler for that tool as if asked from
+that board — so a by-id read still refuses an id the named project does not own.
+
+| Tool | Effect |
+|---|---|
+| `list_projects()` | Every project, as id and name |
+| `list_tasks(project_id, column, epic_id, include_archived)` | As the orchestrator's |
+| `get_task(project_id, id)` | As the orchestrator's: full detail, latest report and comment thread |
+| `list_epics(project_id)`, `get_epic(project_id, id)` | As the orchestrator's, including the newest pull request |
+| `list_agents(project_id, include_ended)` | As the orchestrator's: state and spend |
+| `list_approvals(project_id)` | As the orchestrator's |
+| `list_notes(project_id)` | Every note on that project, as id, title and version |
+| `search_notes(project_id, query)`, `read_note(project_id, id)` | As the orchestrator's |
+
+Every other tool name is refused: `list_reports`, `get_report` and
+`delete_message` as that orchestrator's inbox, everything else as not a
+Coordinator tool. It is offered no note or briefing resources.
 
 ### 6.1 Remote branch naming
 
@@ -1859,6 +1882,18 @@ widening what using it is allowed to do. `delete_message` (§9.3) reaches only a
 message the caller's project received; the sender's panel loses the row
 because the two projects share it, not because the tool reaches the sender.
 
+The Coordinator is the one grant D4 does not bind to a project: scope
+`coordinator` with `project_id` NULL, a pairing the `token_grant` CHECK holds
+both ways. It is not a project row, so it is absent from `list_projects`, the
+project list and every project-scoped query. Its authority is read everywhere, write
+nowhere: board state in any project — tasks with their latest report and
+comments, epics with their pull request, notes, agent sessions with spend, and
+pending approvals (§6, Coordinator scope) — and no project's report queue or
+messages, which are that orchestrator's inbox. Every tool that writes a board
+refuses it. `CrossProjectBoundaryTests` classifies every tool on every scope as
+a Coordinator read, an inbox refusal, a write refusal, or not offered, and fails
+on a tool it has not classified.
+
 ### 8.3 Sleep prevention
 
 A Mac that sleeps with workers running kills them, and the idle cap counts the
@@ -1986,6 +2021,9 @@ reads to decide whether every member is in (§5).
    a carriage return (`\r`); Claude Code's TUI submits on Enter and treats
    `\n` as a literal newline inside the prompt.
 4. The orchestrator pulls bodies through MCP, where they arrive as tool results.
+
+The Coordinator has its own queue: `report` rows with `project_id` NULL, which
+no project's `list_reports`, `get_report` or notice count can reach.
 
 **Injection is withheld while the human has unsubmitted text in the prompt.**
 The notice is bytes in the same PTY the human types into: written mid-sentence

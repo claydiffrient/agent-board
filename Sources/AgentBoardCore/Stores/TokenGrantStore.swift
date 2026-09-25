@@ -22,6 +22,20 @@ public struct TokenGrantStore: Sendable {
         return grant
     }
 
+    @discardableResult
+    public func issueCoordinator() throws -> TokenGrant {
+        let grant = TokenGrant(
+            token: Self.randomToken(),
+            sessionId: nil,
+            projectId: nil,
+            scope: .coordinator,
+            taskId: nil,
+            createdAt: .nowMillis
+        )
+        try db.writer.write { db in try grant.insert(db) }
+        return grant
+    }
+
     static func randomToken() -> String {
         var generator = SystemRandomNumberGenerator()
         return (0..<16).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max, using: &generator)) }.joined()

@@ -6,7 +6,8 @@ import XCTest
 
 /// Every tool on the orchestrator surface, classified by how it holds the project boundary, with a
 /// refusal test per tool. `send_message` and `list_projects` are the only crossings; the sets below
-/// fail the moment a new tool appears unclassified, or a classified one changes side.
+/// fail the moment a new tool appears unclassified, or a classified one changes side. The Coordinator
+/// scope, which has no project, gets the same audit over every tool on every scope.
 final class CrossProjectBoundaryTests: XCTestCase {
     private var f: BridgeFixture!
     private var other: Project!
@@ -32,6 +33,28 @@ final class CrossProjectBoundaryTests: XCTestCase {
     /// that other projects exist by id and name. Adding to this set is the widening this file exists
     /// to catch.
     static let crossesDeliberately: Set<String> = ["list_projects", "send_message"]
+
+    /// The Coordinator's whole surface: board state in any project it names, read-only.
+    static let coordinatorReads: Set<String> = [
+        "list_projects", "list_tasks", "get_task", "list_epics", "get_epic", "list_agents", "list_approvals",
+        "list_notes", "search_notes", "read_note",
+    ]
+
+    /// A project orchestrator's inbox, which is not board state.
+    static let refusedToCoordinatorAsInbox: Set<String> = ["list_reports", "get_report", "delete_message"]
+
+    /// Every tool on any scope that writes a board. The Coordinator must be refused each one.
+    static let refusedToCoordinatorAsWrite: Set<String> = [
+        "create_task", "update_task", "move_task", "set_epic", "set_deps", "log_progress", "add_comment",
+        "spawn_worker", "assign_to_agent", "stop_worker", "archive_task", "unarchive_task", "promote_proposal",
+        "create_epic", "request_integration", "close_epic", "push_branch", "open_pull_request", "send_message",
+        "create_note", "append_section", "replace_section", "attach_note", "pin_note",
+        "update_status", "propose_task", "report_complete", "hand_off", "report_blocked", "acknowledge_shutdown",
+        "commit_my_work", "accept_task", "reopen_task",
+    ]
+
+    /// Reads of a caller's own roster or task, which mean nothing to a session with no project.
+    static let notOfferedToCoordinator: Set<String> = ["list_roster_agents", "get_my_task"]
 
     override func setUpWithError() throws {
         f = try BridgeFixture.make()
@@ -513,6 +536,85 @@ final class CrossProjectBoundaryTests: XCTestCase {
 
         _ = try await f.call("propose_task", ["title": .string("follow-up")], as: worker)
         XCTAssertEqual(try f.tasks.list(projectId: other.id, column: .proposed).count, 0)
+    }
+
+    // MARK: The Coordinator: reads every board, writes none
+
+    func testEveryToolOnEveryScopeIsClassifiedForTheCoordinator() async {
+        let everyTool = Set(
+            (OrchestratorToolHandler.descriptors + WorkerToolHandler.descriptors + [WorkerToolHandler.commitDescriptor]
+                + ReviewerToolHandler.descriptors + CoordinatorToolHandler.descriptors).map(\.name)
+        )
+        let classified = Self.coordinatorReads
+            .union(Self.refusedToCoordinatorAsInbox)
+            .union(Self.refusedToCoordinatorAsWrite)
+            .union(Self.notOfferedToCoordinator)
+
+        XCTAssertEqual(everyTool.subtracting(classified), [], "a tool was added without saying whether the Coordinator may call it")
+        XCTAssertEqual(classified.subtracting(everyTool), [], "this audit names tools that no longer exist")
+        let offered = Set(await f.scoped.tools(for: f.coordinatorIdentity).map(\.name))
+        XCTAssertEqual(offered, Self.coordinatorReads)
+    }
+
+    func testTheCoordinatorIsRefusedEveryWriteAndEveryInboxAndTheBoardsAreUntouched() async throws {
+        try f.setAutonomy(true)
+        let theirTask = try f.task("theirs", column: .ready, in: other.id)
+        let theirEpic = try f.epic("theirs", in: other.id)
+        let theirNote = try f.note("Theirs", sections: [(heading: "H", body: "their text")], in: other.id)
+        try f.sessions.insert(AgentSession(
+            sessionId: "w-theirs", projectId: other.id, taskId: theirTask.id, role: .worker, cwd: "/tmp", state: .running
+        ))
+        try f.reports.insert(projectId: other.id, taskId: theirTask.id, sessionId: nil, kind: .complete, body: "their report")
+        let everything: [String: JSONValue] = [
+            "project_id": .string(other.id), "task_id": .string(theirTask.id), "id": .string(theirTask.id),
+            "epic_id": .string(theirEpic.id), "note_id": .string(theirNote.id), "session_id": .string("w-theirs"),
+            "title": .string("seized"), "body": .string("seized"), "column": .string("review"), "heading": .string("H"),
+            "text": .string("seized"), "state": .string("abandoned"), "pinned": .bool(true), "message_id": .number(1),
+            "branch": .string("agentboard/x"), "summary": .string("s"), "reason": .string("r"),
+            "verdict": .string("v"), "findings": .string("f"), "tasks": .array([.object(["title": .string("t")])]),
+        ]
+
+        for name in Self.refusedToCoordinatorAsWrite.sorted() {
+            await XCTAssertToolError(
+                try await f.call(name, everything, as: f.coordinatorIdentity), containing: "not a Coordinator tool"
+            )
+        }
+        for name in Self.refusedToCoordinatorAsInbox.sorted() {
+            await XCTAssertToolError(try await f.call(name, everything, as: f.coordinatorIdentity), containing: "inbox")
+        }
+
+        XCTAssertEqual(try f.tasks.list(projectId: other.id).map(\.title), ["theirs"])
+        XCTAssertEqual(try f.tasks.get(theirTask.id)?.column, .ready)
+        XCTAssertEqual(try EpicStore(f.db).get(theirEpic.id)?.state, .active)
+        XCTAssertEqual(try f.notes.read(theirNote.id)?.1.map(\.body), ["their text"])
+        XCTAssertEqual(try f.notes.get(theirNote.id)?.pinned, false)
+        XCTAssertEqual(try f.progress.list(taskId: theirTask.id).count, 0)
+        XCTAssertEqual(try CommentStore(f.db).list(taskId: theirTask.id), [])
+        XCTAssertEqual(try f.approvals.pending(projectId: other.id).count, 0)
+        XCTAssertEqual(try f.reports.unconsumedCount(projectId: other.id), 1, "the Coordinator drained their queue")
+        XCTAssertEqual(try MessageStore(f.db).inbox(projectId: other.id).count, 0)
+        XCTAssertEqual(try f.sessions.get("w-theirs")?.state, .running)
+        let spawned = await f.control.spawned
+        let stopped = await f.control.stopped
+        XCTAssertEqual(spawned + stopped, [])
+    }
+
+    /// `project_id` names the board to read, and the id checks still hold within it: a task is not
+    /// found through a project it does not belong to.
+    func testTheCoordinatorReadsOnlyThroughTheProjectThatOwnsTheId() async throws {
+        let theirs = try f.task("theirs", in: other.id)
+
+        let listed = try await f.callJSON("list_tasks", ["project_id": .string(other.id)], as: f.coordinatorIdentity)
+        XCTAssertEqual(listed.arrayValue?.compactMap { $0["id"]?.stringValue }, [theirs.id])
+        await XCTAssertToolError(
+            try await f.call("get_task", ["project_id": .string(f.project.id), "id": .string(theirs.id)], as: f.coordinatorIdentity),
+            containing: "not in this project"
+        )
+        await XCTAssertToolError(
+            try await f.call("list_tasks", ["project_id": .string("no-such-project")], as: f.coordinatorIdentity),
+            containing: "No project has id"
+        )
+        await XCTAssertToolError(try await f.call("list_tasks", [:], as: f.coordinatorIdentity), containing: "project_id")
     }
 
     // MARK: An unknown id reads the same as a foreign one, deliberately

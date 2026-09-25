@@ -1325,7 +1325,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording {
             try await stopLiveSessions(onTask: taskId, by: .human)
             let report = try board.reopen(taskId: taskId)
-            announceReports(projectId: report.projectId)
+            report.projectId.map { announceReports(projectId: $0) }
         }
     }
 
@@ -1927,7 +1927,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let plan = try board.epicClosurePlan(epicId: epicId, as: closure)
             if plan.isRefused { throw SupervisorError.epicCloseRefused(plan.message) }
             let report = try board.closeEpic(epicId: epicId, as: closure, by: .human)
-            announceReports(projectId: report.projectId)
+            report.projectId.map { announceReports(projectId: $0) }
         }
     }
 

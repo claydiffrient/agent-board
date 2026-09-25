@@ -279,13 +279,14 @@ public final class OrchestratorToolHandler: ToolHandler {
         ),
         ToolDescriptor(
             name: "list_epics",
-            description: "Every epic on this project with its state, integration branch, and how many of its tasks are done.",
+            description: "Every epic on this project with its state, integration branch, the newest pull request opened "
+                + "from that branch (null if none), and how many of its tasks are done.",
             inputSchema: ToolSchema.object(properties: [:], required: [])
         ),
         ToolDescriptor(
             name: "get_epic",
-            description: "One epic in full: its goal, integration branch, its tasks grouped by column, and whether it is "
-                + "ready for integration.",
+            description: "One epic in full: its goal, integration branch, newest pull request, its tasks grouped by column, "
+                + "and whether it is ready for integration.",
             inputSchema: ToolSchema.object(properties: ["id": ToolSchema.string()], required: ["id"])
         ),
         ToolDescriptor(
@@ -455,6 +456,18 @@ public final class OrchestratorToolHandler: ToolHandler {
     }
 
     static let noteToolNames = Set(NoteTools.orchestratorDescriptors.map(\.name))
+
+    /// The handlers the Coordinator reads a project's board through (SPEC §8.2), answered as if asked
+    /// from that board. None writes, and none reaches the report queue or messages.
+    static let boardReadNames: Set<String> = [
+        "list_tasks", "get_task", "list_epics", "get_epic", "list_agents", "list_approvals", "search_notes", "read_note",
+    ]
+
+    func boardRead(_ name: String, arguments: JSONValue, projectId: String) async throws -> ToolResult {
+        guard Self.boardReadNames.contains(name) else { throw ToolError("\(name) is not a board read.") }
+        let reader = TokenIdentity(token: "", scope: .coordinator, projectId: projectId)
+        return try await call(name, arguments: arguments, identity: reader)
+    }
 
     // MARK: Tasks
 
@@ -943,6 +956,7 @@ public final class OrchestratorToolHandler: ToolHandler {
                 "title": .string(epic.title),
                 "state": .string(epic.state.rawValue),
                 "branch": .string(epic.branch),
+                "pull_request": try renderPullRequest(epic),
                 "done_tasks": .number(Double(counts.done)),
                 "total_tasks": .number(Double(counts.total)),
             ])
@@ -964,6 +978,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "state": .string(epic.state.rawValue),
             "branch": .string(epic.branch),
             "created_at": .millis(epic.createdAt),
+            "pull_request": try renderPullRequest(epic),
             "done_tasks": .number(Double(counts.done)),
             "total_tasks": .number(Double(counts.total)),
             "ready_for_integration": .bool(try board.epicReadyForIntegration(epicId: epic.id)),
@@ -1201,6 +1216,11 @@ public final class OrchestratorToolHandler: ToolHandler {
             fields["message_id"] = .number(Double(messageId))
         }
         return .object(fields)
+    }
+
+    private func renderPullRequest(_ epic: Epic) throws -> JSONValue {
+        guard let pullRequest = try approvals.publishedEpicPullRequest(epicId: epic.id) else { return .null }
+        return .object(["number": .number(Double(pullRequest.number)), "url": .string(pullRequest.url)])
     }
 
     private func renderApproval(_ approval: Approval) -> JSONValue {

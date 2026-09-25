@@ -186,11 +186,7 @@ struct SupervisorFixture {
         let server = BoardServer(
             tokens: StoreTokenResolver(db: db),
             hooks: StoreHookSink(db: db, events: sink),
-            tools: ScopedToolHandler(
-                worker: WorkerToolHandler(db: db, control: sink, events: sink),
-                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink),
-                reviewer: ReviewerToolHandler(db: db, control: sink, events: sink)
-            )
+            tools: Wiring.tools(db: db, sink: sink, scopedCommits: nil)
         )
         let runtime = FakeRuntime()
         let gh = FakeGh()
@@ -237,11 +233,7 @@ struct SupervisorFixture {
         let server = BoardServer(
             tokens: StoreTokenResolver(db: db),
             hooks: StoreHookSink(db: db, events: sink),
-            tools: ScopedToolHandler(
-                worker: WorkerToolHandler(db: db, control: sink, events: sink),
-                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink),
-                reviewer: ReviewerToolHandler(db: db, control: sink, events: sink)
-            )
+            tools: Wiring.tools(db: db, sink: sink, scopedCommits: nil)
         )
         let supervisor = WorkerSupervisor(
             db: db, runtime: runtime, server: server, appSupportDir: supportDir,

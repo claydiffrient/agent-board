@@ -134,6 +134,9 @@ public enum TokenScope: String, Codable, Sendable, CaseIterable, Equatable, Data
     case worker
     /// A rostered reviewer under agent review: it may move its one task out of `review` and nothing else.
     case reviewer
+    /// The Coordinator (SPEC §8.2): belongs to no project, so its grant has no `project_id`. It reads
+    /// every project's board and writes to none.
+    case coordinator
 }
 
 /// How much human acceptance a finished task needs before it reaches `done`.

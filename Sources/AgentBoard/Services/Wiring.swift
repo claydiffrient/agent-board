@@ -21,11 +21,7 @@ enum Wiring {
         let server = BoardServer(
             tokens: StoreTokenResolver(db: db),
             hooks: StoreHookSink(db: db, events: sink),
-            tools: ScopedToolHandler(
-                worker: WorkerToolHandler(db: db, control: sink, events: sink, scopedCommits: ScopedCommitRunner()),
-                orchestrator: OrchestratorToolHandler(db: db, control: sink, events: sink),
-                reviewer: ReviewerToolHandler(db: db, control: sink, events: sink)
-            ),
+            tools: tools(db: db, sink: sink, scopedCommits: ScopedCommitRunner()),
             resources: CompositeResourceHandler([
                 (NoteResourceURI.scheme, NoteResourceHandler(db: db)),
                 (BriefingResourceURI.scheme, BriefingResourceHandler(db: db)),
@@ -42,6 +38,16 @@ enum Wiring {
         )
         sink.target = supervisor
         return supervisor
+    }
+
+    static func tools(db: AppDatabase, sink: LateBoundSink, scopedCommits: (any ScopedCommitting)?) -> ScopedToolHandler {
+        let orchestrator = OrchestratorToolHandler(db: db, control: sink, events: sink)
+        return ScopedToolHandler(
+            worker: WorkerToolHandler(db: db, control: sink, events: sink, scopedCommits: scopedCommits),
+            orchestrator: orchestrator,
+            reviewer: ReviewerToolHandler(db: db, control: sink, events: sink),
+            coordinator: CoordinatorToolHandler(db: db, board: orchestrator)
+        )
     }
 }
 

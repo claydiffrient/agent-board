@@ -396,7 +396,8 @@ public struct TokenGrant: Codable, FetchableRecord, PersistableRecord, Identifia
 
     public var token: String
     public var sessionId: String?
-    public var projectId: String
+    /// nil only for a `.coordinator` grant; the table's CHECK holds the two together.
+    public var projectId: String?
     public var scope: TokenScope
     public var taskId: String?
     public var createdAt: Int64
@@ -412,7 +413,7 @@ public struct TokenGrant: Codable, FetchableRecord, PersistableRecord, Identifia
         case revokedAt = "revoked_at"
     }
 
-    public init(token: String, sessionId: String?, projectId: String, scope: TokenScope, taskId: String?, createdAt: Int64, revokedAt: Int64? = nil) {
+    public init(token: String, sessionId: String?, projectId: String?, scope: TokenScope, taskId: String?, createdAt: Int64, revokedAt: Int64? = nil) {
         self.token = token
         self.sessionId = sessionId
         self.projectId = projectId
@@ -465,7 +466,8 @@ public struct Report: Codable, FetchableRecord, MutablePersistableRecord, Identi
     public static let databaseTableName = "report"
 
     public var id: Int64?
-    public var projectId: String
+    /// nil for a report in the Coordinator's queue, which belongs to no project (SPEC §9.1).
+    public var projectId: String?
     public var taskId: String?
     public var sessionId: String?
     public var kind: ReportKind
@@ -484,7 +486,7 @@ public struct Report: Codable, FetchableRecord, MutablePersistableRecord, Identi
         case consumedAt = "consumed_at"
     }
 
-    public init(id: Int64? = nil, projectId: String, taskId: String?, sessionId: String?, kind: ReportKind, body: String, createdAt: Int64, consumedAt: Int64? = nil) {
+    public init(id: Int64? = nil, projectId: String?, taskId: String?, sessionId: String?, kind: ReportKind, body: String, createdAt: Int64, consumedAt: Int64? = nil) {
         self.id = id
         self.projectId = projectId
         self.taskId = taskId

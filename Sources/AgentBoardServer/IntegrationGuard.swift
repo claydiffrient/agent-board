@@ -31,8 +31,10 @@ public enum IntegrationGuard {
                 return "Agent Board blocks pushing from the shell. Call push_branch(branch); it queues an approval the human grants."
             case (.pullRequestCreate, .orchestrator):
                 return "Agent Board blocks opening pull requests from the shell. Call open_pull_request(epic_id or branch, title, body); it queues an approval the human grants."
-            case (.pullRequestMerge, .orchestrator):
+            case (.pullRequestMerge, .orchestrator), (.pullRequestMerge, .coordinator):
                 return "Agent Board blocks merging pull requests. Merging a pull request is the human's call and there is no tool for it."
+            case (.push, .coordinator), (.pullRequestCreate, .coordinator):
+                return "Agent Board blocks pushing and opening pull requests on a project's behalf from the Coordinator. Ask that project's orchestrator."
             }
         }
     }

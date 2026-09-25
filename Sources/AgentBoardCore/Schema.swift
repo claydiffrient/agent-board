@@ -267,6 +267,42 @@ enum Schema {
     CREATE INDEX message_to_project_delivered ON message(to_project_id, delivered_at);
     """
 
+    /// `project_id` becomes nullable on both tables (SQLite cannot drop NOT NULL in place, so each is
+    /// rebuilt). A NULL grant is the Coordinator's and nothing else's; a NULL report is in its queue.
+    static let coordinator = """
+    CREATE TABLE token_grant_new (
+      token       TEXT PRIMARY KEY,
+      session_id  TEXT REFERENCES agent_session(session_id),
+      project_id  TEXT REFERENCES project(id),
+      scope       TEXT NOT NULL,
+      task_id     TEXT,
+      created_at  INTEGER NOT NULL,
+      revoked_at  INTEGER,
+      CHECK ((scope = 'coordinator') = (project_id IS NULL))
+    );
+    INSERT INTO token_grant_new (token, session_id, project_id, scope, task_id, created_at, revoked_at)
+      SELECT token, session_id, project_id, scope, task_id, created_at, revoked_at FROM token_grant;
+    DROP TABLE token_grant;
+    ALTER TABLE token_grant_new RENAME TO token_grant;
+    CREATE INDEX token_grant_session ON token_grant(session_id);
+
+    CREATE TABLE report_new (
+      id          INTEGER PRIMARY KEY,
+      project_id  TEXT REFERENCES project(id),
+      task_id     TEXT REFERENCES task(id),
+      session_id  TEXT REFERENCES agent_session(session_id),
+      kind        TEXT NOT NULL,
+      body        TEXT NOT NULL,
+      created_at  INTEGER NOT NULL,
+      consumed_at INTEGER
+    );
+    INSERT INTO report_new (id, project_id, task_id, session_id, kind, body, created_at, consumed_at)
+      SELECT id, project_id, task_id, session_id, kind, body, created_at, consumed_at FROM report;
+    DROP TABLE report;
+    ALTER TABLE report_new RENAME TO report;
+    CREATE INDEX report_project_consumed ON report(project_id, consumed_at);
+    """
+
     static let taskCommit = """
     CREATE TABLE task_commit (
       task_id TEXT NOT NULL,
