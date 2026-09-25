@@ -689,6 +689,7 @@ CREATE TABLE report (
   created_at  INTEGER NOT NULL,
   consumed_at INTEGER               -- set when the orchestrator pulls it
 );
+CREATE INDEX report_project_consumed ON report(project_id, consumed_at);
 
 -- Text one project's orchestrator sent to another (§9.2). The recipient never sees this row:
 -- delivery writes a framed `message` report into its queue, which it pulls like any other.
@@ -715,6 +716,7 @@ CREATE TABLE coordinator_request (
   created_at   INTEGER NOT NULL,
   closed_at    INTEGER            -- set on declined | done | withdrawn; the sweep counts from it
 );
+CREATE INDEX coordinator_request_closed ON coordinator_request(closed_at);
 CREATE TABLE request_event (      -- history: the send, each reply, a withdrawal
   id         INTEGER PRIMARY KEY,
   request_id INTEGER NOT NULL REFERENCES coordinator_request(id) ON DELETE CASCADE,
@@ -724,6 +726,8 @@ CREATE TABLE request_event (      -- history: the send, each reply, a withdrawal
   report_id  INTEGER REFERENCES report(id) ON DELETE SET NULL,  -- the report this step queued
   created_at INTEGER NOT NULL
 );
+CREATE INDEX request_event_request ON request_event(request_id);
+CREATE INDEX request_event_report ON request_event(report_id);
 CREATE TABLE request_epic (
   request_id INTEGER NOT NULL REFERENCES coordinator_request(id) ON DELETE CASCADE,
   epic_id    TEXT NOT NULL REFERENCES epic(id) ON DELETE CASCADE,
