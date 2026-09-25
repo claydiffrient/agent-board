@@ -10,13 +10,14 @@ public enum ReviewPrompt {
         base: String,
         verification: VerificationCommands = VerificationCommands(),
         workingDirectory: String? = nil,
-        agent: AgentIdentity? = nil
+        agent: AgentIdentity? = nil,
+        comments: [TaskComment] = []
     ) -> String {
         var sections = agent.map { [OpeningPrompt.renderIdentity($0)] } ?? []
         sections.append(
             "You are reviewing the task below. Another agent did the work; you decide whether it is done."
         )
-        sections += OpeningPrompt.taskSections(task: task)
+        sections += OpeningPrompt.taskSections(task: task, comments: comments)
         sections.append(howToReview(
             branch: branch, base: base, verification: verification, workingDirectory: workingDirectory
         ))
@@ -39,7 +40,8 @@ public enum ReviewPrompt {
             base: base,
             verification: project.settings.verification,
             workingDirectory: session.cwd,
-            agent: agent
+            agent: agent,
+            comments: try CommentStore(db).list(taskId: taskId)
         )
     }
 

@@ -16,6 +16,7 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let board: Board
     private let roster: RosterStore
     private let notes: NoteTools
+    private let comments: CommentTools
     private let control: any WorkerControl
     private let events: any BoardEventSink
 
@@ -32,6 +33,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         board = Board(db)
         roster = RosterStore(db)
         notes = NoteTools(db: db)
+        comments = CommentTools(db: db)
         self.control = control
         self.events = events
     }
@@ -57,9 +59,11 @@ public final class OrchestratorToolHandler: ToolHandler {
         ),
         ToolDescriptor(
             name: "get_task",
-            description: "Full detail for one task: body, acceptance criteria, flags, dependencies, and the most recent "
-                + "worker report on it if any. Archived tasks are returned too, carrying `archived: true` and the "
-                + "`archived_at` timestamp.",
+            description: "Full detail for one task: body, acceptance criteria, flags, dependencies, the most recent "
+                + "worker report on it if any, and its comment thread oldest first — each comment's author kind "
+                + "(human, orchestrator, worker, reviewer), name, rostered agent, time and body. Archived tasks are "
+                + "returned too, carrying `archived: true` and the `archived_at` timestamp. "
+                + CommentTools.authority,
             inputSchema: ToolSchema.object(properties: ["id": ToolSchema.string()], required: ["id"])
         ),
         ToolDescriptor(
@@ -153,6 +157,15 @@ public final class OrchestratorToolHandler: ToolHandler {
                     "text": ToolSchema.string(maxLength: 4000),
                 ],
                 required: ["task_id", "text"]
+            )
+        ),
+        ToolDescriptor(
+            name: "add_comment",
+            description: "Add a comment to a task in this project, signed as the Orchestrator. "
+                + CommentTools.purpose + " " + CommentTools.authority,
+            inputSchema: ToolSchema.object(
+                properties: ["task_id": ToolSchema.string(), "body": CommentTools.bodySchema],
+                required: ["task_id", "body"]
             )
         ),
         ToolDescriptor(
@@ -403,6 +416,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "archive_task": return try archiveTask(arguments, identity: identity)
         case "unarchive_task": return try unarchiveTask(arguments, identity: identity)
         case "log_progress": return try logProgress(arguments, identity: identity)
+        case "add_comment": return try addComment(arguments, identity: identity)
         case "spawn_worker": return try await spawnWorker(arguments, identity: identity)
         case "list_roster_agents": return try listRosterAgents(identity: identity)
         case "assign_to_agent": return try await assignToAgent(arguments, identity: identity)
@@ -478,6 +492,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "deps": .array(deps),
             "active_session": try activeSession(for: task.id),
             "latest_report": .null,
+            "comments": try comments.thread(taskId: task.id),
         ]
         if let report = latestReport {
             object["latest_report"] = renderReport(report)
@@ -605,6 +620,12 @@ public final class OrchestratorToolHandler: ToolHandler {
         let text = try ToolArguments.requiredString("text", in: arguments)
         try progress.append(taskId: task.id, sessionId: identity.sessionId, kind: .note, text: text)
         return ToolResult(text: "Logged.")
+    }
+
+    private func addComment(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let task = try projectTask(try ToolArguments.requiredString("task_id", in: arguments), identity: identity)
+        let author = CommentAuthor(kind: .orchestrator, sessionId: identity.sessionId, name: "Orchestrator")
+        return try comments.add(projectId: identity.projectId, taskId: task.id, author: author, arguments: arguments)
     }
 
     private func archiveTask(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {

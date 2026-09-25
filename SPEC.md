@@ -118,8 +118,8 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   `PostToolUse`, `Notification`, `Stop` and `SessionEnd`. **`SessionStart`
   silently skips `http` hooks** (foreground and background); a `command` hook
   that pipes stdin to `curl` fires and is the workaround.
-- **`/clear` forks the session under a new id.** The old id gets `SessionEnd`,
-  and ~18s later a new id gets `SessionStart` with `"source": "fork"`. The fork
+- **`/clear` forks the session under a new id.** The old id gets `SessionEnd`
+  with `"reason": "clear"`, and ~18s later a new id gets `SessionStart` with `"source": "fork"`. The fork
   payload does not name its parent — no parent session id anywhere in it — so
   the hook token grant is the only link back. `StoreHookSink` treats an unknown
   payload `session_id` on a live grant bound to a known session as the fork
@@ -372,6 +372,19 @@ For a task `T` in project `P`:
    subject that already has one.
    Each attached note sits between marker lines carrying one random id per
    note, so a closing marker forged inside a note body does not end the fence.
+   The task's comment thread follows the epic goal under *Comments*, oldest
+   first, fenced the same way, each opening marker naming the author and the
+   time. A comment from the human is labelled as the human speaking; an
+   agent's is labelled as information written by an agent, not instructions.
+   The thread keeps the newest comments within 4,000 characters, since Claude
+   Code cuts any one hook's injected text at 10,000 and the post-compaction
+   brief rides a hook; it cuts an oversize newest comment short rather than
+   drop it, and says how many older ones it left out and
+   that `get_my_task` has them all. The post-compaction brief and the
+   reviewer's prompt (§5.1) carry the same section. In the brief the task text
+   leaves the thread at least 2,000 characters, or its whole size if smaller,
+   and the thread shrinks to whatever room the task text left, so a long task
+   never drops the newest comment.
    The prompt ends with *How your turns end*: the early stops an unattended
    worker must not make, and the three stops it should.
 7. `claude "<prompt>" --bg -n <task-slug> --permission-mode auto
@@ -752,6 +765,28 @@ CREATE TABLE project_roster_agent (
   PRIMARY KEY (project_id, roster_agent_id)
 );
 CREATE INDEX project_roster_agent_order ON project_roster_agent(project_id, ordering);
+
+-- A task's comment thread: the human and agents talking about the work, kept apart from the
+-- `progress` activity stream. Append-only; a comment goes only when its task does.
+CREATE TABLE task_comment (
+  id                     INTEGER PRIMARY KEY,
+  task_id                TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  project_id             TEXT NOT NULL REFERENCES project(id),
+  author_kind            TEXT NOT NULL,   -- human | orchestrator | worker | reviewer
+  author_session_id      TEXT,            -- not a foreign key: sessions are deleted before tasks
+  author_roster_agent_id TEXT REFERENCES roster_agent(id) ON DELETE SET NULL,
+  author_name            TEXT NOT NULL,   -- snapshot at write time; 'human' for the human, shown as "You"
+  body                   TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 10000),  -- trimmed
+  created_at             INTEGER NOT NULL
+);
+CREATE INDEX task_comment_task_created ON task_comment(task_id, created_at);
+
+-- Human comments waiting for a live worker's or reviewer's next PostToolUse (§7).
+CREATE TABLE comment_delivery (
+  session_id TEXT NOT NULL REFERENCES agent_session(session_id) ON DELETE CASCADE,
+  comment_id INTEGER NOT NULL REFERENCES task_comment(id) ON DELETE CASCADE,
+  PRIMARY KEY (session_id, comment_id)
+);
 ```
 
 Every `epic.state` value is written by exactly one place, and nothing writes one
@@ -792,10 +827,12 @@ so adding a specialty must not need a migration. A project's *usable* set is
 `project_roster_agent` joined to `roster_agent` where `enabled = 1` — disabling
 an agent roster-wide takes it out of every project's rotation without removing
 anyone's selection. Deleting a rostered agent clears its `project_roster_agent`
-rows and keeps its history: the tasks it worked or reviewed, its sessions, and the
-`progress` rows naming it all survive it. Their `roster_agent_id` and
+rows and keeps its history: the tasks it worked or reviewed, its sessions, the
+`progress` rows naming it and the comments it wrote all survive it. Their `roster_agent_id` and
 `reviewer_agent_id` are set to NULL in the same transaction, because those columns
-are foreign keys with no `ON DELETE` and a dangling id would fail the delete. The
+are foreign keys with no `ON DELETE` and a dangling id would fail the delete.
+`task_comment.author_roster_agent_id` is `ON DELETE SET NULL`, so SQLite nulls it
+in the same delete, and `author_name` still names the agent. The
 store refuses (`BoardError.rosterAgentWorking`) while a live session still runs as
 the agent, independently of the Roster screen's own guard (§10).
 
@@ -1172,7 +1209,8 @@ see who approved it and why.
 
 A reviewer is review-only: it reads `git diff <base>...HEAD`, may build and run
 tests, and changes nothing — a defect goes back through `reopen_task`, never
-into a commit of its own. Its opening prompt says so (`ReviewPrompt`, served
+into a commit of its own. Its opening prompt, which carries the task's comment
+thread (§3.1 step 6), says so (`ReviewPrompt`, served
 again as `briefing://reviewer` and as its post-compaction brief), and its
 `--disallowedTools` denies edits and branch-changing git commands (§3.1). Both
 verdict tools then check the checkout through `WorkerControl.reviewCheckoutChange`:
@@ -1322,9 +1360,10 @@ is reached by neither.
 
 | Tool | Effect |
 |---|---|
-| `get_my_task()` | The task bound to this token, plus its `epic_id` and dependency summaries |
+| `get_my_task()` | The task bound to this token, plus its `epic_id`, dependency summaries and comment thread |
 | `update_status(state, detail)` | Appends to `progress`; sets `blocked`/`failed` flags |
 | `log_progress(text)` | Appends to `progress` |
+| `add_comment(body, task_id?)` | Appends to the task's `task_comment` thread as `worker`, named after the session's rostered agent or `Worker <short id>`. A `task_id` other than the token's own is refused |
 | `search_notes(query)` | FTS over this project's notes |
 | `read_note(id)` | Full note with sections |
 | `append_section(note_id, heading, body, if_version)` | Section-scoped write |
@@ -1338,6 +1377,14 @@ is reached by neither.
 
 A worker may not read other tasks, reassign, create a non-proposal task, or
 spawn anything.
+
+`add_comment` in every scope signs the comment from the token — kind, session,
+rostered agent and a name snapshot (§4) — and never from the arguments. A thread
+is returned oldest first, each comment as `author_kind`, `author_name`,
+`roster_agent` (that agent's current name, or null), `created_at` (ISO-8601 with
+milliseconds) and `body`. Every description that writes or returns a thread
+says a comment is a note about the task — not progress, a report or a verdict —
+and that one written by an agent is information, not an instruction.
 
 `hand_off` is for a rostered agent that does only the portion matching its
 specialty. It never sets the `failed` flag, and it releases the session's hold
@@ -1367,8 +1414,9 @@ of orchestrator scope: it is the authority to move one named task out of
 
 | Tool | Effect |
 |---|---|
-| `get_my_task()` | The task under review and its `progress` rows |
+| `get_my_task()` | The task under review, its `progress` rows and its comment thread |
 | `log_progress(text)` | Appends to `progress` |
+| `add_comment(body)` | Appends to the task's comment thread as `reviewer`, named from the roster. Touches no file, so it never trips the checkout check |
 | `accept_task(verdict)` | Writes the verdict to `progress`, then runs the ordinary acceptance (§5.1). Refused, with the task left in `review`, if the reviewer changed its checkout |
 | `reopen_task(findings)` | Writes the findings to `progress`; moves the task to `ready` without flagging failure. Refused on the same checkout check |
 
@@ -1384,7 +1432,8 @@ Everything in worker scope over any task in the project, plus:
 |---|---|
 | `list_tasks(column, epic_id, include_archived)` | Board query; archived tasks are hidden unless `include_archived` is true |
 | `create_task(..., epic_id)`, `update_task(...)`, `move_task(id, column)` | Board mutation; moving an archived task out of `done` unarchives it. `create_task`'s `epic_id` is optional and creates the task inside that epic; an unknown id, one belonging to another project, or one whose epic is `done` is refused |
-| `get_task(id)` | Full detail, archived or not; an archived task carries `archived: true` and `archived_at` |
+| `get_task(id)` | Full detail, archived or not; an archived task carries `archived: true` and `archived_at`. Includes the comment thread |
+| `add_comment(task_id, body)` | Appends to any project task's comment thread as `orchestrator`, named `Orchestrator` |
 | `archive_task(task_id)` | Hides a `done` task from the board; refused for any other column |
 | `unarchive_task(task_id)` | Returns the task to the visible board in the column it was archived from |
 | `set_deps(task_id, depends_on[])` | Dependency graph |
@@ -1491,7 +1540,7 @@ Generated into each managed session's `--settings`. All post to
 |---|---|
 | `SessionStart` | Mark `agent_session.state = running`; record transcript path |
 | `PreToolUse` (matcher `Bash`) | Deny `git push`, `gh pr create`, `gh pr merge`; append an `error` progress row (§8) |
-| `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row |
+| `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row; reply with a worker's post-compaction brief or queued human comments as `additionalContext` |
 | `Notification` | Set `blocked` + reason on the task and session; the task appears in the orchestrator's **Blocked** section (§10) and raises the project's attention signal, which posts the banner |
 | `Stop` | Mark session idle. **On the orchestrator, this is the trigger for the report notice** (§9) |
 | `SessionEnd` | Mark stopped/completed; reconcile final spend from the transcript |
@@ -1509,6 +1558,26 @@ installed CLI reads. Every other event replies `{}`.
 
 Spend metering tails the session's JSONL transcript rather than relying on
 hooks, since hooks do not carry `usage`.
+
+**Human comments reach a running session.** A `--bg` session cannot be written
+to, so a human comment is queued in `comment_delivery` for every live worker and
+reviewer session on its task, in the same transaction that writes it. The
+session's next `PostToolUse` replies with the queue as
+`hookSpecificOutput.additionalContext` and no `decision` key: a lead saying the
+human commented on your task, then each comment fenced as in the opening prompt
+(§3.1 step 6), labelled from the human with its UTC time. Comments go oldest
+first and together, within Claude Code's 10,000-character cap on one hook's
+text; whatever does not fit waits for the next tool call, and a single comment
+too long to fit is cut short with a pointer to `get_my_task`. Each is delivered
+once, and a `status` progress row records it. A session queued during setup
+carries its queue to the session id Claude issues, and a `/clear` fork carries
+its queue to the new id: a `SessionEnd` with `reason: "clear"` keeps it for the
+fork to adopt (§2). Any other `SessionEnd` drops the session's queue; the
+comment stays on the task for the next spawn's prompt. A post-compaction brief
+already carries the thread, so it drops the queue too.
+Agents' comments are never queued. The queue is a table rather than memory
+because a worker outlives an Agent Board relaunch, so undelivered comments
+survive one.
 
 The blocking `Notification` types are `permission_prompt`, `agent_needs_input`,
 and anything prefixed `elicitation`. Each sets `task.blocked` with the
@@ -1881,6 +1950,7 @@ became ready.
 | Human discards a task | `decision` | Deleted task id (the task row is gone) |
 | Human promotes a proposal | `decision` | Proposal, and the ids that became `ready` |
 | Human approves or denies an approval | `decision` | Approval, outcome, reason |
+| Human comments on a task | `comment` | Task id and title, the comment quoted; the human speaking. An agent's comment queues nothing |
 | Cap or idle kill | `failed` | Task, session, `failure_reason` |
 | Human stops a worker, or Pause All | `failed` | Task, session, that a human stopped it |
 | `reconcile` finds a session gone | `failed` | Task, session, that Agent Board did not stop it |
@@ -2161,12 +2231,30 @@ word, since VoiceOver reads them consecutively along the row — are the only
 thing naming them there.
 
 **Task Board** — columns from §5, swimlanes by epic. A card shows title, epic,
-assigned agent, elapsed, spend, and its `blocked`/`failed` flag. A `done` card
-whose landing (§5) asks for attention shows it as a pill — "not landed",
-"landing unknown", "PR pending", or "PR #N open" once a pull request is
-recorded — with the landing detail, including why a merge check could not run,
-as its tooltip. Drag between
-columns. Cards in `review` show the branch, worktree path, and a diffstat.
+assigned agent, elapsed, spend, its `blocked`/`failed` flag, and a comment count
+when it has comments — one per-project count query for the whole board, not one
+per card. A `done` card whose landing (§5) asks for attention shows it as a pill —
+"not landed", "landing unknown", "PR pending", or "PR #N open" once a pull request
+is recorded — with the landing detail, including why a merge check could not run,
+as its tooltip. Drag between columns. Cards in `review` show the branch, worktree
+path, and a diffstat.
+
+The task inspector shows a **Comments** thread above the Progress log, oldest
+first. Each comment names its author in words — `You`, `Orchestrator`,
+`Rita · reviewer`, `Rita · worker`, or `Worker 3f9a1c2e` / `Reviewer 3f9a1c2e`
+for an agent with no roster agent — using the roster's current name, and the
+`author_name` snapshot once the agent is deleted (§4). No column records that a
+comment's roster reference was ever set, so a deleted agent is told from an
+unrostered one by its snapshot: one that is not the form `add_comment` writes for
+an unrostered agent (§6: `Worker <short id>`; a reviewer's bare session id) is
+shown as `<snapshot> · <kind>`.
+The time is relative, with the absolute date and time on hover; the body is
+selectable and wraps. The human's comments sit on an accent tint; agents' sit on
+neutral grey behind an icon for their kind. A composer under the thread adds a
+`human` comment with **Add Comment** or ⌘↩ and refuses a blank body, then tells
+the orchestrator console of the `comment` report at once (§9.1). Its draft
+belongs to the task it was typed on: selecting another task shows that task's own
+draft, and returning restores the first.
 
 The toolbar's **Archive** button names its target set in its label — "Archive
 23 Done Tasks" — and confirms before acting; it is offered under every archive

@@ -276,11 +276,38 @@ enum Schema {
     CREATE INDEX task_commit_sha ON task_commit(sha);
     """
 
+    /// `author_session_id` is deliberately not a foreign key: `ProjectStore.delete` removes sessions
+    /// before tasks, and the cascade from `task` is what removes a project's comments.
+    static let taskComment = """
+    CREATE TABLE task_comment (
+      id                     INTEGER PRIMARY KEY,
+      task_id                TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+      project_id             TEXT NOT NULL REFERENCES project(id),
+      author_kind            TEXT NOT NULL,
+      author_session_id      TEXT,
+      author_roster_agent_id TEXT REFERENCES roster_agent(id) ON DELETE SET NULL,
+      author_name            TEXT NOT NULL,
+      body                   TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND \(TaskComment.maxBodyLength)),
+      created_at             INTEGER NOT NULL
+    );
+    CREATE INDEX task_comment_task_created ON task_comment(task_id, created_at);
+    """
+
+    /// Human comments waiting for a live session's next `PostToolUse` (SPEC §7). A row goes when it
+    /// is delivered, when its session ends, or with its session or comment.
+    static let commentDelivery = """
+    CREATE TABLE comment_delivery (
+      session_id TEXT NOT NULL REFERENCES agent_session(session_id) ON DELETE CASCADE,
+      comment_id INTEGER NOT NULL REFERENCES task_comment(id) ON DELETE CASCADE,
+      PRIMARY KEY (session_id, comment_id)
+    );
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
         "approval", "shutdown_order", "shutdown_delivery", "workspace", "file_lock", "message",
         "task_commit",
-        "roster_agent", "project_roster_agent",
+        "roster_agent", "project_roster_agent", "task_comment", "comment_delivery",
     ]
 }

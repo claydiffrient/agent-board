@@ -42,6 +42,8 @@ public struct HookEvent: Sendable {
     public var lastAssistantMessage: String?
     /// `SessionStart.source`: `startup`, `resume`, `clear`, or `compact`.
     public var sessionSource: String?
+    /// `SessionEnd.reason`: `clear` when `/clear` ended it and a fork under a new id follows.
+    public var sessionEndReason: String?
     /// `PreCompact.trigger`: "manual" for `/compact`, "auto" for the context-window trigger.
     public var compactTrigger: String?
     /// `SubagentStop`: the agent name, e.g. "Explore".
@@ -53,7 +55,7 @@ public struct HookEvent: Sendable {
                 toolCommand: String? = nil, toolFilePath: String? = nil, notificationType: String? = nil,
                 notificationMessage: String? = nil,
                 lastAssistantMessage: String? = nil, sessionSource: String? = nil,
-                compactTrigger: String? = nil, agentType: String? = nil,
+                sessionEndReason: String? = nil, compactTrigger: String? = nil, agentType: String? = nil,
                 rawJSON: String, receivedAt: Date = Date()) {
         self.name = name
         self.sessionId = sessionId
@@ -66,6 +68,7 @@ public struct HookEvent: Sendable {
         self.notificationMessage = notificationMessage
         self.lastAssistantMessage = lastAssistantMessage
         self.sessionSource = sessionSource
+        self.sessionEndReason = sessionEndReason
         self.compactTrigger = compactTrigger
         self.agentType = agentType
         self.rawJSON = rawJSON

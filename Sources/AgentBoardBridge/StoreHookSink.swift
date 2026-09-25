@@ -12,6 +12,7 @@ public final class StoreHookSink: HookSink {
     private let shutdowns: ShutdownOrderStore
     private let deliveries: ShutdownDeliveryStore
     private let notes: NoteStore
+    private let comments: CommentStore
     private let epics: EpicStore
     private let locks: FileLockStore
     private let waitPolicy: FileLockWaitPolicy
@@ -67,6 +68,7 @@ public final class StoreHookSink: HookSink {
         shutdowns = ShutdownOrderStore(db)
         deliveries = ShutdownDeliveryStore(db)
         notes = NoteStore(db)
+        comments = CommentStore(db)
         epics = EpicStore(db)
         locks = FileLockStore(db)
         waitPolicy = lockWait
@@ -290,7 +292,8 @@ public final class StoreHookSink: HookSink {
             branch: session.branch ?? TaskStore.branchName(for: taskId),
             epicGoal: epic?.goal,
             notes: injected,
-            reviewFindings: (try? progress.openReviewFindings(taskId: taskId)) ?? nil
+            reviewFindings: (try? progress.openReviewFindings(taskId: taskId)) ?? nil,
+            comments: (try? comments.list(taskId: taskId)) ?? []
         )
     }
 
@@ -308,7 +311,7 @@ public final class StoreHookSink: HookSink {
     /// `/clear` ends the session and starts a new one under a new id, and the fork payload does not
     /// name its parent. The grant is the only link back, so an unknown session id arriving on a live
     /// grant bound to a known session is the fork signal. The old row keeps its state and its spend —
-    /// the fork writes its own transcript, and metering reads transcripts.
+    /// the fork writes its own transcript, and metering reads transcripts — but its queued comments move.
     private func adoptFork(newSessionId: String, identity: TokenIdentity) {
         guard let priorId = identity.sessionId, priorId != newSessionId,
               (try? sessions.get(newSessionId)) == nil,
@@ -330,7 +333,7 @@ public final class StoreHookSink: HookSink {
             attempt: prior.attempt,
             model: prior.model
         )
-        guard (try? sessions.insert(adopted)) != nil else { return }
+        guard (try? sessions.insertFork(adopted, from: priorId)) != nil else { return }
 
         try? grants.bind(token: identity.token, sessionId: newSessionId)
         if prior.role == .orchestrator {
@@ -440,7 +443,19 @@ public final class StoreHookSink: HookSink {
             }
             if awaitingReBrief.remove(sessionId) != nil,
                let brief = reBrief(session: session, taskId: taskId, scope: identity.scope) {
+                // The brief carries the comment thread, and its budget keeps the newest comments.
+                try? comments.dropDeliveries(sessionId: sessionId)
                 return .respond(.context(brief))
+            }
+            if let delivery = (try? comments.takeDelivery(sessionId: sessionId)) ?? nil {
+                if let taskId {
+                    let what = delivery.count == 1 ? "the human's comment" : "\(delivery.count) of the human's comments"
+                    _ = try? progress.append(
+                        taskId: taskId, sessionId: sessionId, kind: .status,
+                        text: "Delivered \(what) to the running session."
+                    )
+                }
+                return .respond(.context(delivery.text))
             }
 
         case "SubagentStop":
@@ -494,6 +509,10 @@ public final class StoreHookSink: HookSink {
                 try? sessions.setState(sessionId, .stopped, endedAt: .nowMillis)
             }
             try? locks.releaseAll(sessionId: sessionId)
+            // A `/clear` fork arrives next under a new id, and `adoptFork` hands it this queue.
+            if event.sessionEndReason != "clear" {
+                try? comments.dropDeliveries(sessionId: sessionId)
+            }
 
         default:
             break

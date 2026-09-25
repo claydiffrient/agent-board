@@ -9,7 +9,9 @@ public final class ReviewerToolHandler: ToolHandler {
     private let tasks: TaskStore
     private let progress: ProgressStore
     private let roster: RosterStore
+    private let sessions: SessionStore
     private let board: Board
+    private let comments: CommentTools
     private let control: any WorkerControl
     private let events: any BoardEventSink
 
@@ -17,7 +19,9 @@ public final class ReviewerToolHandler: ToolHandler {
         tasks = TaskStore(db)
         progress = ProgressStore(db)
         roster = RosterStore(db)
+        sessions = SessionStore(db)
         board = Board(db)
+        comments = CommentTools(db: db)
         self.control = control
         self.events = events
     }
@@ -26,7 +30,8 @@ public final class ReviewerToolHandler: ToolHandler {
         ToolDescriptor(
             name: "get_my_task",
             description: "Return the task you are reviewing: id, title, body, acceptance criteria, the worker's "
-                + "report, and the progress recorded against it. Call it first.",
+                + "report, the progress recorded against it, and its comment thread oldest first. Call it first. "
+                + CommentTools.authority,
             inputSchema: ToolSchema.object(properties: [:], required: [])
         ),
         ToolDescriptor(
@@ -37,6 +42,13 @@ public final class ReviewerToolHandler: ToolHandler {
                 properties: ["text": ToolSchema.string(maxLength: 4000)],
                 required: ["text"]
             )
+        ),
+        ToolDescriptor(
+            name: "add_comment",
+            description: "Add a comment to the task you are reviewing, signed with your roster name. "
+                + CommentTools.purpose + " It does not record your verdict — accept_task and reopen_task do — and it "
+                + "is not a change to the checkout. " + CommentTools.authority,
+            inputSchema: ToolSchema.object(properties: ["body": CommentTools.bodySchema], required: ["body"])
         ),
         ToolDescriptor(
             name: "accept_task",
@@ -77,6 +89,11 @@ public final class ReviewerToolHandler: ToolHandler {
             let text = try ToolArguments.requiredString("text", in: arguments)
             try progress.append(taskId: task.id, sessionId: identity.sessionId, kind: .note, text: text)
             return ToolResult(text: "Logged.")
+        case "add_comment":
+            return try comments.add(
+                projectId: identity.projectId, taskId: task.id, author: try commentAuthor(task, identity: identity),
+                arguments: arguments
+            )
         case "accept_task":
             let verdict = try ToolArguments.requiredString("verdict", in: arguments)
             try requireUnderReview(task)
@@ -157,6 +174,14 @@ public final class ReviewerToolHandler: ToolHandler {
         return identity.sessionId ?? "an unnamed reviewer"
     }
 
+    private func commentAuthor(_ task: BoardTask, identity: TokenIdentity) throws -> CommentAuthor {
+        let sessionAgent = try identity.sessionId.flatMap { try sessions.get($0) }?.rosterAgentId
+        guard let agentId = sessionAgent ?? task.reviewerAgentId, let agent = try roster.get(agentId) else {
+            return CommentAuthor(kind: .reviewer, sessionId: identity.sessionId, name: try reviewerName(task, identity: identity))
+        }
+        return CommentAuthor(kind: .reviewer, sessionId: identity.sessionId, rosterAgentId: agent.id, name: agent.name)
+    }
+
     private func getMyTask(_ task: BoardTask) throws -> ToolResult {
         let rows: [JSONValue] = try progress.list(taskId: task.id).map { row in
             .object([
@@ -173,6 +198,7 @@ public final class ReviewerToolHandler: ToolHandler {
             "priority": .optional(task.priority),
             "column": .string(task.column.rawValue),
             "progress": .array(rows),
+            "comments": try comments.thread(taskId: task.id),
         ]))
     }
 }
