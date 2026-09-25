@@ -1,29 +1,47 @@
 import AgentBoardCore
+import AgentBoardRuntime
 import Foundation
 import GRDB
 import XCTest
 @testable import AgentBoard
 
 /// SPEC §9.4: the Coordinator asks, an orchestrator answers, the ledger records it, and the reply is
-/// announced after the Coordinator's turn ends. Real supervisor and server, tools and hooks over HTTP.
+/// announced in the Coordinator's PTY after its turn ends. Real supervisor, server and Coordinator
+/// console, with a fake `claude` that echoes its input; tools and hooks over HTTP.
 @MainActor
 final class CoordinatorRequestTests: XCTestCase {
     private var fixture: SupervisorFixture!
+    private var fakeClaudeDir: URL!
 
     override func setUp() async throws {
-        fixture = try SupervisorFixture.make()
+        fakeClaudeDir = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("agentboard-fake-claude/\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: fakeClaudeDir, withIntermediateDirectories: true)
+        let script = fakeClaudeDir.appendingPathComponent("claude")
+        try "#!/bin/sh\nexec /bin/cat\n".write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+        fixture = try SupervisorFixture.make(claude: ClaudeInvocation(executable: script.path))
         await fixture.supervisor.start()
         try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
     }
 
     override func tearDown() async throws {
+        fixture.supervisor.stopOrchestratorConsoles()
         fixture.cleanUp()
+        try? FileManager.default.removeItem(at: fakeClaudeDir)
         fixture = nil
     }
 
     func testARequestIsAnsweredRecordedAndAnnouncedAfterTheCoordinatorsTurn() async throws {
         let a = fixture.project
-        let coordinator = try fixture.grants.issueCoordinator().token
+        let console = fixture.supervisor.coordinatorSessionConsole()
+        XCTAssertNil(fixture.supervisor.coordinatorConsole)
+        console.start()
+        try await waitUntil("the Coordinator console never started") { fixture.supervisor.coordinatorConsole != nil }
+        XCTAssertTrue(fixture.supervisor.coordinatorConsole === console)
+        let activeId = try XCTUnwrap(CoordinatorStore(fixture.db).activeSessionId())
+        let coordinator = try XCTUnwrap(fixture.grants.forSession(activeId).first).token
         let orchestratorA = try fixture.grants.issue(projectId: a.id, scope: .orchestrator, taskId: nil).token
         let epic = Epic(
             id: Epic.newId(), projectId: a.id, title: "DNS cutover", goal: nil,
@@ -54,19 +72,26 @@ final class CoordinatorRequestTests: XCTestCase {
             XCTAssertTrue(briefing.contains(phrase), "the orchestrator briefing does not say \(phrase)")
         }
 
-        let console = FakeCoordinatorConsole(reports: fixture.reports)
-        fixture.supervisor.coordinatorConsole = console
-
         let replied = try await callRaw(
             "reply_to_request",
             ["request_id": requestId, "state": "accepted", "body": "Opened an epic for it.", "epic_ids": [epic.id]],
             token: orchestratorA
         )
         XCTAssertFalse(replied.isError, replied.text)
-        XCTAssertEqual(console.notices, [], "a reply was announced before the Coordinator's turn ended")
 
-        _ = try await hook(["hook_event_name": "Stop"], sessionId: "coordinator-session", token: coordinator)
-        XCTAssertEqual(console.notices, ["[agent-board] 1 reports pending. Call list_reports."])
+        // A session "New session" left behind keeps its row and its bound grant, so its hooks still land.
+        let staleId = UUID().uuidString.lowercased()
+        try fixture.sessions.insert(AgentSession(
+            sessionId: staleId, projectId: "", role: .coordinator, cwd: fixture.coordinatorDir.path, state: .stopped
+        ))
+        let staleToken = try fixture.grants.issueCoordinator().token
+        try fixture.grants.bind(token: staleToken, sessionId: staleId)
+        _ = try await hook(["hook_event_name": "Stop"], sessionId: staleId, token: staleToken)
+        try await _Concurrency.Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(screen(console).contains(notice), "a stale session's Stop released the notice")
+
+        _ = try await hook(["hook_event_name": "Stop"], sessionId: activeId, token: coordinator)
+        try await waitUntil("the reply was never announced in the Coordinator's PTY") { screen(console).contains(notice) }
 
         let listed = try await call("list_requests", [:], token: coordinator)
         let ledger = try XCTUnwrap(listed as? [[String: Any]])
@@ -91,6 +116,23 @@ final class CoordinatorRequestTests: XCTestCase {
         let queue = try XCTUnwrap(own as? [[String: Any]])
         XCTAssertEqual(queue.map { $0["request_id"] as? Int }, [requestId])
         XCTAssertTrue((queue.first?["body"] as? String)?.contains("Epics: \(epic.id)") ?? false)
+
+        console.stop()
+        XCTAssertNil(fixture.supervisor.coordinatorConsole, "a stopped console still receives notices")
+    }
+
+    private let notice = "[agent-board] 1 reports pending. Call list_reports."
+
+    private func screen(_ console: OrchestratorConsole) -> String {
+        String(decoding: console.terminal.getTerminal().getBufferAsData(), as: UTF8.self)
+    }
+
+    private func waitUntil(_ message: String, _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while !condition(), ContinuousClock.now < deadline {
+            try await _Concurrency.Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(condition(), message)
     }
 
     private func call(_ name: String, _ arguments: [String: Any], token: String) async throws -> Any? {
@@ -130,24 +172,4 @@ final class CoordinatorRequestTests: XCTestCase {
         request.httpBody = try JSONSerialization.data(withJSONObject: payload.merging(["session_id": sessionId]) { $1 })
         return try await URLSession.shared.data(for: request).0
     }
-}
-
-/// Stands in for the Coordinator session's console: the real notice gate over the Coordinator's
-/// queue, with the line recorded instead of written into a PTY.
-@MainActor
-private final class FakeCoordinatorConsole: ReportAnnouncing {
-    private(set) var notices: [String] = []
-    private var gate: ReportNoticeGate!
-
-    init(reports: ReportStore) {
-        gate = ReportNoticeGate(
-            isRunning: { true },
-            promptIsDirty: { false },
-            pendingReports: { try? ReportNoticeGate.pending(reports.unconsumedForCoordinator()) },
-            deliver: { [weak self] count in self?.notices.append("[agent-board] \(count) reports pending. Call list_reports.") }
-        )
-    }
-
-    func turnEnded() { gate.turnEnded() }
-    func reportsChanged() { gate.reportsChanged() }
 }

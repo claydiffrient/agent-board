@@ -76,6 +76,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let appSupportDir: URL
     @ObservationIgnored private let worktreeBase: URL
     @ObservationIgnored private let projectsRoot: URL
+    @ObservationIgnored private let coordinatorDir: URL
+    @ObservationIgnored private let home: URL
+    /// The `claude` every PTY console runs; a test substitutes a script.
+    @ObservationIgnored private let claude: ClaudeInvocation
     /// Sampled once per metering tick. Every cap and grace deadline is measured against it so a
     /// suspended machine does not count against a worker.
     @ObservationIgnored private let sleepLedger: SleepLedger
@@ -125,6 +129,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// The active Coordinator session's console, if one is running (SPEC §9.4). Replies queued while
     /// it is nil wait in the Coordinator's queue and are announced after the next session's first turn.
     @ObservationIgnored var coordinatorConsole: (any ReportAnnouncing)?
+    @ObservationIgnored private var coordinatorConsoleInstance: OrchestratorConsole?
+    @ObservationIgnored private let coordinator: CoordinatorStore
     @ObservationIgnored private var shellConsoles: [String: ShellConsole] = [:]
     /// Keyed by setup session id, so a test — or a human stopping a worker mid-setup — can wait on
     /// or cancel the half of a spawn that outlives the call.
@@ -149,6 +155,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         appSupportDir: URL,
         worktreeBase: URL,
         projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
+        coordinatorDir: URL = SupportPaths.coordinatorDir(),
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        claude: ClaudeInvocation = .installed(),
         sleepLedger: SleepLedger = .shared,
         sleepGuard: SleepGuard? = nil,
         gh: any GhRunning = SystemGh()
@@ -159,6 +168,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         self.appSupportDir = appSupportDir
         self.worktreeBase = worktreeBase
         self.projectsRoot = projectsRoot
+        self.coordinatorDir = coordinatorDir
+        self.home = home
+        self.claude = claude
+        coordinator = CoordinatorStore(db)
         self.sleepLedger = sleepLedger
         self.sleepGuard = sleepGuard
         projects = ProjectStore(db)
@@ -195,6 +208,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             lastError = describe(error)
         }
         failInterruptedSetups()
+        stopOrphanedCoordinatorSessions()
         sweepStaleFileLocks()
         await sweepLeakedAgents()
         await migrateWorktreeRoots()
@@ -529,6 +543,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             )
         }
         return swept
+    }
+
+    /// SPEC §8.2: a crash leaves the Coordinator's row live with no PTY behind it, where it would be
+    /// metered every tick and read as running.
+    private func stopOrphanedCoordinatorSessions() {
+        guard coordinatorConsoleInstance?.isProcessRunning != true else { return }
+        for session in (try? coordinator.sessions()) ?? [] where session.state.isActive {
+            _ = try? board.terminate(sessionId: session.sessionId, cause: .vanished)
+        }
     }
 
     /// A setup that was still running when Agent Board quit has no process behind it any more, and
@@ -1810,10 +1833,46 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             projectId: projectId,
             db: db,
             sessionConfigDir: sessionConfigDir,
+            projectsRoot: projectsRoot,
+            claude: claude,
             currentPort: { [weak self] in self?.serverPort }
         )
         consoles[projectId] = console
         return console
+    }
+
+    /// The one Coordinator console (SPEC §8.2), created on first call; does not start the process.
+    func coordinatorSessionConsole() -> OrchestratorConsole {
+        if let existing = coordinatorConsoleInstance { return existing }
+        let console = OrchestratorConsole(
+            source: CoordinatorSource(
+                db: db, folder: coordinatorDir, home: home, sessionConfigDir: sessionConfigDir,
+                projectsRoot: projectsRoot, claude: claude
+            ),
+            db: db,
+            currentPort: { [weak self] in self?.serverPort }
+        )
+        console.liveChanged = { [weak self, weak console] live in
+            self?.coordinatorConsole = live ? console : nil
+        }
+        coordinatorConsoleInstance = console
+        return console
+    }
+
+    /// Ends the running Coordinator session, which stays in the history and resumable, and starts
+    /// a fresh one.
+    func newCoordinatorSession() throws {
+        try coordinator.setActiveSession(nil)
+        coordinatorSessionConsole().restart()
+    }
+
+    /// Makes a previous Coordinator session the active one and resumes it in place of the current.
+    func resumeCoordinatorSession(sessionId: String) throws {
+        guard let row = try sessions.get(sessionId), row.role == .coordinator else {
+            throw SupervisorError.sessionNotFound(sessionId)
+        }
+        try coordinator.setActiveSession(sessionId)
+        coordinatorSessionConsole().restart()
     }
 
     /// The live shell pid per project, for anything that has to recognise a process the board
@@ -2087,6 +2146,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// active in a database the next launch reads.
     func stopOrchestratorConsoles() {
         for console in consoles.values { console.stop() }
+        coordinatorConsoleInstance?.stop()
     }
 
     func isShuttingDown(projectId: String) -> Bool {
@@ -2195,8 +2255,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         coordinatorConsole?.reportsChanged()
     }
 
+    /// A stale Coordinator session's hooks still reach the board; only the active one's are heard.
     func coordinatorTurnEnded(sessionId: String) async {
+        guard isActiveCoordinatorSession(sessionId) else { return }
         coordinatorConsole?.turnEnded()
+    }
+
+    func coordinatorCompacted(sessionId: String, manual: Bool) async {
+        guard isActiveCoordinatorSession(sessionId) else { return }
+        coordinatorConsoleInstance?.compactionCompleted(manual: manual)
+    }
+
+    private func isActiveCoordinatorSession(_ sessionId: String) -> Bool {
+        (try? coordinator.activeSessionId()) == sessionId
     }
 
     /// The worker has committed and recorded its note; this is the orderly end of its session. The
@@ -2319,6 +2390,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             for session in projectSessions where Self.shouldMeter(session, now: now) {
                 await meter(session, limits: limits, stallSeconds: stallSeconds, awake: awake)
             }
+        }
+        // Metered like an orchestrator, with no cap: `meter` enforces caps on workers only.
+        for session in (try? coordinator.sessions()) ?? [] where Self.shouldMeter(session, now: now) {
+            await meter(session, limits: .default, stallSeconds: 0, awake: awake)
         }
         refreshSleepAssertion(all)
     }
@@ -2444,6 +2519,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         if current.role == .orchestrator, let context {
             consoles[current.projectId]?.contextPressureObserved(context)
+        }
+        if current.role == .coordinator, let context {
+            coordinatorConsoleInstance?.contextPressureObserved(context)
         }
         guard current.role == .worker else {
             stallNotified.remove(session.sessionId)

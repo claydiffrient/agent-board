@@ -31,7 +31,18 @@ final class OrchestratorTerminalView: LocalProcessTerminalView {
     }
 }
 
-/// One per project; owns the orchestrator PTY and is the only place that writes into it (SPEC §9.1).
+/// Who a console's session belongs to. The console owns the PTY, the notice gate and compaction;
+/// the source records the session and its grant, writes the config and builds the command.
+@MainActor
+protocol ConsoleSessionSource: AnyObject {
+    /// The session the next launch runs under, pinning a new one when there is none.
+    func resolveSession(port: Int?) throws -> String
+    func prepareLaunch(sessionId: String, port: Int) throws -> InteractiveSessionCommand
+    func pendingReports() throws -> [Report]
+}
+
+/// One per project, plus the Coordinator's; owns the PTY and is the only place that writes into it
+/// (SPEC §9.1, §8.2).
 @MainActor
 @Observable
 final class OrchestratorConsole: ReportAnnouncing {
@@ -42,7 +53,6 @@ final class OrchestratorConsole: ReportAnnouncing {
         case exited(Int32?)
     }
 
-    let projectId: String
     private(set) var state: State = .idle
     private(set) var sessionId: String?
     private(set) var lastError: String?
@@ -54,25 +64,33 @@ final class OrchestratorConsole: ReportAnnouncing {
     private(set) var compactionCount = 0
     /// Nil until the metering tick has read the session's transcript at least once.
     private(set) var contextPressure: ContextPressure?
+    /// True once a launch's process is up, false again once it exits or is stopped.
+    @ObservationIgnored var liveChanged: ((_ live: Bool) -> Void)?
 
     @ObservationIgnored let terminal: OrchestratorTerminalView
-    @ObservationIgnored private let projects: ProjectStore
+    @ObservationIgnored private let source: any ConsoleSessionSource
     @ObservationIgnored private let sessions: SessionStore
-    @ObservationIgnored private let grants: TokenGrantStore
-    @ObservationIgnored private let reports: ReportStore
-    @ObservationIgnored private let sessionConfigDir: URL
     @ObservationIgnored private let currentPort: @MainActor () -> Int?
     @ObservationIgnored private let processObserver = ProcessObserver()
     @ObservationIgnored private var restartAfterExit = false
     @ObservationIgnored private var noticeGate: ReportNoticeGate!
 
-    init(projectId: String, db: AppDatabase, sessionConfigDir: URL, currentPort: @escaping @MainActor () -> Int?) {
-        self.projectId = projectId
-        projects = ProjectStore(db)
+    convenience init(
+        projectId: String, db: AppDatabase, sessionConfigDir: URL, projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
+        claude: ClaudeInvocation = .installed(), currentPort: @escaping @MainActor () -> Int?
+    ) {
+        self.init(
+            source: ProjectOrchestratorSource(
+                projectId: projectId, db: db, sessionConfigDir: sessionConfigDir, projectsRoot: projectsRoot, claude: claude
+            ),
+            db: db,
+            currentPort: currentPort
+        )
+    }
+
+    init(source: any ConsoleSessionSource, db: AppDatabase, currentPort: @escaping @MainActor () -> Int?) {
+        self.source = source
         sessions = SessionStore(db)
-        grants = TokenGrantStore(db)
-        reports = ReportStore(db)
-        self.sessionConfigDir = sessionConfigDir
         self.currentPort = currentPort
         terminal = OrchestratorTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         terminal.nativeForegroundColor = .white
@@ -109,6 +127,7 @@ final class OrchestratorConsole: ReportAnnouncing {
             do {
                 try launch(environment: environment)
                 state = .running
+                liveChanged?(true)
             } catch {
                 lastError = errorText(error)
                 state = .idle
@@ -116,10 +135,13 @@ final class OrchestratorConsole: ReportAnnouncing {
         }
     }
 
+    /// Signals the child rather than calling `terminate()`: SwiftTerm's `terminate()` cancels its own
+    /// exit monitor, so `processTerminated` would never arrive to start the replacement.
     func restart() {
-        if isProcessRunning {
+        let pid = terminal.process.shellPid
+        if isProcessRunning, pid > 0 {
             restartAfterExit = true
-            terminal.terminate()
+            kill(pid, SIGTERM)
         } else {
             start()
         }
@@ -130,68 +152,24 @@ final class OrchestratorConsole: ReportAnnouncing {
         if state == .starting { state = .idle }
         guard isProcessRunning else { return }
         terminal.terminate()
+        liveChanged?(false)
         if let sessionId {
             try? sessions.setState(sessionId, .stopped, endedAt: .nowMillis)
         }
     }
 
     private func launch(environment: [String]) throws {
-        guard let project = try projects.get(projectId) else {
-            throw SupervisorError.projectNotFound(projectId)
-        }
-        guard let port = currentPort() else { throw SupervisorError.serverNotRunning }
-
-        let sessionId: String
-        if let pinned = project.orchSessionId, !pinned.isEmpty {
-            sessionId = pinned
-        } else {
-            sessionId = UUID().uuidString.lowercased()
-            try projects.setOrchestratorSession(project.id, sessionId: sessionId)
-        }
+        let sessionId = try source.resolveSession(port: currentPort())
         self.sessionId = sessionId
-
-        if try sessions.get(sessionId) == nil {
-            try sessions.insert(AgentSession(
-                sessionId: sessionId,
-                projectId: project.id,
-                taskId: nil,
-                role: .orchestrator,
-                cwd: project.repoPath,
-                state: .starting
-            ))
-        } else {
-            try sessions.markResumed(sessionId)
-            try sessions.setState(sessionId, .starting)
-        }
-
-        try grants.revokeAll(sessionId: sessionId)
-        let grant = try grants.issue(projectId: project.id, scope: .orchestrator, taskId: nil)
-        try grants.bind(token: grant.token, sessionId: sessionId)
-
-        let configFiles = try SessionConfigWriter.write(
-            configDir: sessionConfigDir,
-            configId: "orchestrator-\(project.id)",
-            port: port,
-            token: grant.token,
-            autoModeJSON: nil,
-            extraMcpServers: nil
-        )
-
-        let command = InteractiveSessionCommand(
-            sessionId: sessionId,
-            cwd: URL(fileURLWithPath: project.repoPath),
-            configFiles: configFiles,
-            appendSystemPrompt: OrchestratorPrompt.systemPrompt(project: project),
-            model: project.settings.defaultModel,
-            strictMcpConfig: false
-        )
+        guard let port = currentPort() else { throw SupervisorError.serverNotRunning }
+        let command = try source.prepareLaunch(sessionId: sessionId, port: port)
         noticeGate.processRestarted()
         terminal.startProcess(
             executable: command.executable,
             args: command.arguments(),
             environment: environment,
             execName: nil,
-            currentDirectory: project.repoPath
+            currentDirectory: command.cwd.path
         )
     }
 
@@ -199,6 +177,7 @@ final class OrchestratorConsole: ReportAnnouncing {
     /// `WaitStatus` so `exit 7` reports 7, not the shifted 1792 (shared with `ShellConsole`).
     private func processExited(code: Int32?) {
         state = .exited(code.map(WaitStatus.exitCode(fromWaitStatus:)))
+        liveChanged?(false)
         if let sessionId, let row = try? sessions.get(sessionId), row.state.isActive {
             try? sessions.setState(sessionId, .stopped, endedAt: .nowMillis)
         }
@@ -223,7 +202,7 @@ final class OrchestratorConsole: ReportAnnouncing {
     }
 
     private func pendingReports() throws -> (count: Int, maxId: Int64) {
-        ReportNoticeGate.pending(try reports.unconsumed(projectId: projectId))
+        ReportNoticeGate.pending(try source.pendingReports())
     }
 
     private func sendNotice(count: Int) {

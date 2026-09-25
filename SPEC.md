@@ -600,9 +600,9 @@ CREATE TABLE task_dep (
 CREATE TABLE agent_session (
   session_id     TEXT PRIMARY KEY,   -- the pinned uuid
   short_id       TEXT,               -- claude --bg short id
-  project_id     TEXT NOT NULL REFERENCES project(id),
+  project_id     TEXT REFERENCES project(id),  -- NULL for a Coordinator session only (§8.2)
   task_id        TEXT REFERENCES task(id),
-  role           TEXT NOT NULL,      -- orchestrator | worker
+  role           TEXT NOT NULL,      -- orchestrator | worker | coordinator
   worktree_path  TEXT,
   branch         TEXT,
   cwd            TEXT NOT NULL,
@@ -625,7 +625,14 @@ CREATE TABLE agent_session (
   tools_in_flight INTEGER NOT NULL DEFAULT 0,
   blocked_on_path TEXT,               -- §8.4: the shared-checkout file lock this session is waiting on
   roster_agent_id TEXT REFERENCES roster_agent(id),  -- §10: the rostered identity this session runs as
-  review_head    TEXT                -- §5.1: HEAD (and uncommitted-change fingerprint) a rostered reviewer was spawned on
+  review_head    TEXT,               -- §5.1: HEAD (and uncommitted-change fingerprint) a rostered reviewer was spawned on
+  CHECK ((role = 'coordinator') = (project_id IS NULL))
+);
+
+CREATE TABLE coordinator (           -- one row (§8.2)
+  id                INTEGER PRIMARY KEY CHECK (id = 1),
+  active_session_id TEXT REFERENCES agent_session(session_id),  -- resumed on the next launch; NULL starts a fresh one
+  model             TEXT             -- Coordinator settings; NULL = Claude Code's default
 );
 
 CREATE TABLE token_grant (
@@ -1932,6 +1939,47 @@ tool on every scope as a Coordinator read, the Coordinator's own queue and
 ledger, a plan write, an inbox refusal, a write refusal, or not offered, and
 fails on a tool it has not classified.
 
+**The Coordinator's session.** It runs in the same console machinery as an
+orchestrator (§9 — `OrchestratorConsole`, with a `CoordinatorSource` in place of
+the project's), under these rules:
+
+- **Folder.** cwd is `~/.agentboard/coordinator` (`<AGENTBOARD_SUPPORT_DIR>/coordinator`
+  under the override), created on first start and seeded with a `CLAUDE.md`
+  saying what the Coordinator is and is not. The file is written only when
+  missing, so one the human has edited is never overwritten. Its memory is
+  Claude Code's own for that folder.
+- **File reach.** The launch adds `--add-dir ~`, so the home directory is
+  writable, and `--disallowedTools` carries one `Edit(//<path>/**)` rule per
+  registered project's repo path and worktree root (both spellings when a path
+  resolves through a symlink). The list is rebuilt from the project list on
+  every launch, so a project registered since takes effect at the next session
+  start. Reads stay allowed. Claude Code applies an `Edit` deny to Write,
+  MultiEdit and NotebookEdit, to the file commands it recognizes in Bash
+  (`sed`, `tee`) and to redirection targets (`> file`). **What still gets
+  through:** any Bash command that writes by other means — `git commit` or
+  `git checkout` run in a repo, `mv`, `cp`, `rm`, an interpreter (`python -c`,
+  `node -e`), a build tool, or a script. Claude Code's sandbox could close that
+  gap but also isolates the network, which an ordinary session doing one-off
+  jobs should not lose, so it is not enabled.
+- **Sessions.** One active session, pinned in `coordinator.active_session_id`
+  and resumed by the next launch, including after the app restarts, the way a project pins
+  `orch_session_id`. **New session** clears the pin and restarts the console, so
+  the running session ends and a fresh one starts; the old row stays. The
+  history offers the 10 most recent sessions other than the active one; resuming
+  one pins it and restarts the console with `--resume`. A `/clear` fork moves the
+  pin to the fork (§7).
+- **Model.** `coordinator.model`, NULL for Claude Code's default; the
+  Coordinator settings sheet is where it will be set.
+- **Hooks and spend.** Its `agent_session` row has role `coordinator` and
+  `project_id` NULL (read as `""`, like its `TokenIdentity`), so the hook sink
+  binds its grant, adopts its forks and records its transcript like an
+  orchestrator's, and every project-scoped query still misses it. The metering
+  tick reads its spend after the projects', with no cap. Its `Stop` and
+  compaction hooks reach its own console only from the session pinned in
+  `active_session_id`; a stale session's are ignored. At launch, while no
+  Coordinator console is running, every active `coordinator` row is marked
+  stopped, as `reconcile` does for an orchestrator row with no console.
+
 ### 8.3 Sleep prevention
 
 A Mac that sleeps with workers running kills them, and the idle cap counts the
@@ -2041,6 +2089,9 @@ reads to decide whether every member is in (§5).
   call `list_reports` when told to, and the project's `modelGuidance` text so
   it can set `model` on the tasks it creates. The orchestrator itself runs on
   `settings.defaultModel` when set.
+- **Restart** signals the child with SIGTERM and relaunches on its exit. It
+  does not call SwiftTerm's `terminate()`, which cancels the exit monitor, so
+  the relaunch would never fire.
 - Resume sends a fixed app-authored first turn ("Agent Board resumed this
   session; continue from where you left off") because a resumed background
   session otherwise waits for input until the idle cap stops it.
@@ -2061,10 +2112,10 @@ reads to decide whether every member is in (§5).
 4. The orchestrator pulls bodies through MCP, where they arrive as tool results.
 
 The Coordinator has its own queue: `report` rows with `project_id` NULL, which
-no project's `list_reports`, `get_report` or notice count can reach. It is
-announced to the active Coordinator session with the same line through the same
-`ReportNoticeGate` (§9.4); with no session running, reports wait for the next
-one's first turn to end.
+no project's `list_reports`, `get_report` or notice count can reach. Its console
+counts that queue for the same notice through the same `ReportNoticeGate`,
+written after the active Coordinator session's own `Stop` (§8.2, §9.4); with no
+session running, reports wait for the next one's first turn to end.
 
 **Injection is withheld while the human has unsubmitted text in the prompt.**
 The notice is bytes in the same PTY the human types into: written mid-sentence

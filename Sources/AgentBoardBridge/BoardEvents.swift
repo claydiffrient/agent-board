@@ -24,14 +24,17 @@ public protocol BoardEventSink: Sendable {
     func workerCompleted(projectId: String, sessionId: String) async
     /// Something landed in the Coordinator's queue — today only a reply to one of its requests.
     func coordinatorReportQueued() async
-    /// The Coordinator session's turn is over (its `Stop` hook), so a held notice may go out.
+    /// The Coordinator's counterparts of `orchestratorTurnEnded` and `orchestratorCompacted`: its
+    /// session has no project to name.
     func coordinatorTurnEnded(sessionId: String) async
+    func coordinatorCompacted(sessionId: String, manual: Bool) async
 }
 
 extension BoardEventSink {
     public func workerCompleted(projectId: String, sessionId: String) async {}
     public func coordinatorReportQueued() async {}
     public func coordinatorTurnEnded(sessionId: String) async {}
+    public func coordinatorCompacted(sessionId: String, manual: Bool) async {}
 }
 
 extension BoardEventSink {

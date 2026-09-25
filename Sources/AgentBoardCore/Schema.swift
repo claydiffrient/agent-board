@@ -320,6 +320,59 @@ enum Schema {
     ALTER TABLE note_new RENAME TO note;
     """
 
+    /// The Coordinator's session gets a row with no project, so hooks can bind its grant and the
+    /// metering tick can read its spend (SPEC §8.2). `coordinator` is its one row of state: the
+    /// session it resumes and the model it runs on, NULL for Claude Code's default.
+    static let coordinatorSession = """
+    CREATE TABLE agent_session_new (
+      session_id      TEXT PRIMARY KEY,
+      short_id        TEXT,
+      project_id      TEXT REFERENCES project(id),
+      task_id         TEXT REFERENCES task(id),
+      role            TEXT NOT NULL,
+      worktree_path   TEXT,
+      branch          TEXT,
+      cwd             TEXT NOT NULL,
+      state           TEXT NOT NULL,
+      started_at      INTEGER NOT NULL,
+      ended_at        INTEGER,
+      last_activity   INTEGER,
+      transcript_path TEXT,
+      tokens_in       INTEGER NOT NULL DEFAULT 0,
+      tokens_out      INTEGER NOT NULL DEFAULT 0,
+      cache_read      INTEGER NOT NULL DEFAULT 0,
+      cache_write     INTEGER NOT NULL DEFAULT 0,
+      est_cost_usd    REAL NOT NULL DEFAULT 0,
+      attempt         INTEGER NOT NULL DEFAULT 1,
+      model           TEXT,
+      last_tool       TEXT,
+      stop_reason     TEXT,
+      roster_agent_id TEXT REFERENCES roster_agent(id),
+      blocked_on_path TEXT,
+      tool_started_at INTEGER,
+      tools_in_flight INTEGER NOT NULL DEFAULT 0,
+      review_head     TEXT,
+      CHECK ((role = 'coordinator') = (project_id IS NULL))
+    );
+    INSERT INTO agent_session_new
+      SELECT session_id, short_id, project_id, task_id, role, worktree_path, branch, cwd, state,
+             started_at, ended_at, last_activity, transcript_path, tokens_in, tokens_out, cache_read,
+             cache_write, est_cost_usd, attempt, model, last_tool, stop_reason, roster_agent_id,
+             blocked_on_path, tool_started_at, tools_in_flight, review_head
+      FROM agent_session;
+    DROP TABLE agent_session;
+    ALTER TABLE agent_session_new RENAME TO agent_session;
+    CREATE INDEX agent_session_project_state ON agent_session(project_id, state);
+    CREATE INDEX agent_session_task ON agent_session(task_id);
+
+    CREATE TABLE coordinator (
+      id                INTEGER PRIMARY KEY CHECK (id = 1),
+      active_session_id TEXT REFERENCES agent_session(session_id),
+      model             TEXT
+    );
+    INSERT INTO coordinator (id) VALUES (1);
+    """
+
     static let taskCommit = """
     CREATE TABLE task_commit (
       task_id TEXT NOT NULL,
@@ -395,7 +448,7 @@ enum Schema {
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
         "approval", "shutdown_order", "shutdown_delivery", "workspace", "file_lock", "message",
         "task_commit",
-        "roster_agent", "project_roster_agent", "task_comment", "comment_delivery",
+        "roster_agent", "project_roster_agent", "task_comment", "comment_delivery", "coordinator",
         "coordinator_request", "request_event", "request_epic",
     ]
 }

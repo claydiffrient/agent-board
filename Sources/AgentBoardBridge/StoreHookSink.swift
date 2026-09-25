@@ -14,6 +14,7 @@ public final class StoreHookSink: HookSink {
     private let notes: NoteStore
     private let comments: CommentStore
     private let epics: EpicStore
+    private let coordinator: CoordinatorStore
     private let locks: FileLockStore
     private let waitPolicy: FileLockWaitPolicy
     private let board: Board
@@ -33,6 +34,7 @@ public final class StoreHookSink: HookSink {
         case reportQueued(projectId: String)
         case orchestratorCompacted(projectId: String, sessionId: String, manual: Bool)
         case coordinatorTurnEnded(sessionId: String)
+        case coordinatorCompacted(sessionId: String, manual: Bool)
     }
 
     /// A write whose file another live session holds. Carried out of `process` so the wait happens
@@ -71,6 +73,7 @@ public final class StoreHookSink: HookSink {
         notes = NoteStore(db)
         comments = CommentStore(db)
         epics = EpicStore(db)
+        coordinator = CoordinatorStore(db)
         locks = FileLockStore(db)
         waitPolicy = lockWait
         board = Board(db)
@@ -98,6 +101,8 @@ public final class StoreHookSink: HookSink {
                 await events.orchestratorCompacted(projectId: projectId, sessionId: sessionId, manual: manual)
             case .coordinatorTurnEnded(let sessionId):
                 await events.coordinatorTurnEnded(sessionId: sessionId)
+            case .coordinatorCompacted(let sessionId, let manual):
+                await events.coordinatorCompacted(sessionId: sessionId, manual: manual)
             }
         }
         if let wait = outcome.lockWait {
@@ -345,6 +350,9 @@ public final class StoreHookSink: HookSink {
         if prior.role == .orchestrator {
             try? projects.setOrchestratorSession(identity.projectId, sessionId: newSessionId)
         }
+        if prior.role == .coordinator {
+            try? coordinator.setActiveSession(newSessionId)
+        }
     }
 
     /// A hook payload names whatever session id it likes, and the grant in the query string decides
@@ -408,11 +416,6 @@ public final class StoreHookSink: HookSink {
 
         guard !sessionId.isEmpty else { return .none }
 
-        // SPEC §9.4: the Coordinator has no project session row for the paths below to find.
-        if identity.scope == .coordinator, event.name == "Stop" {
-            return .follow([.coordinatorTurnEnded(sessionId: sessionId)])
-        }
-
         let known = try? sessions.get(sessionId)
         if let known, known.projectId != identity.projectId { return .none }
         if identity.sessionId == nil {
@@ -439,6 +442,11 @@ public final class StoreHookSink: HookSink {
                     projectId: session.projectId,
                     sessionId: sessionId,
                     manual: lastCompactTrigger(sessionId: sessionId) != "auto"
+                )])
+            }
+            if event.sessionSource == "compact", session.role == .coordinator {
+                return .follow([.coordinatorCompacted(
+                    sessionId: sessionId, manual: lastCompactTrigger(sessionId: sessionId) != "auto"
                 )])
             }
 
@@ -509,6 +517,9 @@ public final class StoreHookSink: HookSink {
             try? sessions.clearToolCalls(sessionId)
             if session.role == .orchestrator {
                 return .follow([.orchestratorTurnEnded(projectId: session.projectId, sessionId: sessionId)])
+            }
+            if session.role == .coordinator {
+                return .follow([.coordinatorTurnEnded(sessionId: sessionId)])
             }
             if session.state.isActive {
                 try? sessions.setState(sessionId, .idle)
