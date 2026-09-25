@@ -377,7 +377,7 @@ public struct Board: Sendable {
                 return CompletionOutcome(
                     report: existing,
                     level: try ReviewPolicy.level(db, task: task),
-                    routing: try ReviewPolicy.routing(db, task: task),
+                    routing: try ReviewPolicy.routing(db, task: task, completedBy: sessionId),
                     column: task.column,
                     wasAlreadyComplete: true
                 )
@@ -404,7 +404,7 @@ public struct Board: Sendable {
                 }
             }
             let level = try ReviewPolicy.level(db, task: task)
-            let routing = try ReviewPolicy.routing(db, task: task)
+            let routing = try ReviewPolicy.routing(db, task: task, completedBy: sessionId)
             switch routing {
             case .autoAccept:
                 break
@@ -556,6 +556,7 @@ public struct Board: Sendable {
         if let reviewerSession = acceptedBy.acceptingSessionId {
             try finishReview(db, sessionId: reviewerSession)
         }
+        try closeReviewFindings(db, taskId: taskId, by: "accepted by \(acceptedBy.describedActor)")
         let ready = try newlyReady(db, projectId: task.projectId)
         var body = "Task \(taskId) (\(task.title)) was accepted into done by \(acceptedBy.describedActor)."
         if case .reviewer(_, let verdict, _) = acceptedBy, !verdict.isEmpty {
@@ -588,6 +589,18 @@ public struct Board: Sendable {
 
     public static let reviewPassedLead = "Agent review passed."
     public static let reviewFailedLead = "Agent review failed."
+    public static let reviewFindingsClosedLead = "Review findings closed."
+
+    /// SPEC §5.1: a human's reopen or any acceptance supersedes a failed review, so its findings stop
+    /// reaching new workers. Writes nothing when no findings are open.
+    static func closeReviewFindings(_ db: Database, taskId: String, by action: String) throws {
+        guard try ProgressStore.openReviewFindings(db, taskId: taskId) != nil else { return }
+        _ = try ProgressStore.append(
+            db, taskId: taskId, sessionId: nil, kind: .note,
+            text: "\(reviewFindingsClosedLead) The task was \(action), so the last agent review's findings no "
+                + "longer go to new workers."
+        )
+    }
 
     /// A rostered reviewer rejecting its task: back to `ready` with its findings on the task, so the
     /// next agent picks the work up knowing what was wrong.
@@ -660,6 +673,7 @@ public struct Board: Sendable {
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             try TaskStore.setFailed(db, taskId, false, reason: nil)
             try TaskStore.move(db, taskId, to: .ready, before: nil)
+            try Self.closeReviewFindings(db, taskId: taskId, by: "reopened by a human")
             return try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision,
                 body: "Task \(taskId) (\(task.title)) was reopened by a human and is back in ready."

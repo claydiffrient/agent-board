@@ -306,8 +306,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     /// `PreToolUse` calls not yet matched by a `PostToolUse`. A count rather than a flag because
     /// Claude runs parallel tool calls: a short one returning must not end a long one's grace.
     public var toolsInFlight: Int
-    /// The branch HEAD a rostered reviewer was spawned on. A verdict is refused once HEAD has moved
-    /// from it (SPEC §5.1).
+    /// The checkout a rostered reviewer was spawned on (`ReviewCheckout.baseline`). A verdict is refused
+    /// once HEAD or the uncommitted tracked changes differ from it (SPEC §5.1).
     public var reviewHead: String?
 
     public enum CodingKeys: String, CodingKey {
