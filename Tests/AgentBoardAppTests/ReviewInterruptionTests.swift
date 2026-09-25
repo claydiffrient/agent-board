@@ -184,7 +184,7 @@ final class ReviewHoldLabelTests: XCTestCase {
         var ended = reviewer
         ended.state = .stopped
         let stopped = hold([ended, worker])
-        XCTAssertEqual(stopped.label(now: now), "Rita stopped")
+        XCTAssertEqual(stopped.label(now: now), "Rita stopped without a verdict")
         XCTAssertNil(stopped.interruption(accepting: true))
 
         XCTAssertEqual(

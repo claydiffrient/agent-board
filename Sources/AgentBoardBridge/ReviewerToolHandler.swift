@@ -107,9 +107,9 @@ public final class ReviewerToolHandler: ToolHandler {
                 acceptedBy: .reviewer(name: name, verdict: verdict, sessionId: identity.sessionId)
             )
             await events.reportQueued(projectId: identity.projectId)
-            return ToolResult(
+            return stoppingAfterwards(ToolResult(
                 text: "Accepted into Done. Your verdict is on the task. Stop here; do not start further work."
-            )
+            ), identity: identity)
         case "reopen_task":
             let findings = try ToolArguments.requiredString("findings", in: arguments)
             try requireUnderReview(task)
@@ -121,14 +121,24 @@ public final class ReviewerToolHandler: ToolHandler {
                 taskId: task.id, sessionId: identity.sessionId,
                 reviewerName: try reviewerName(task, identity: identity), findings: findings
             )
-
             await events.reportQueued(projectId: identity.projectId)
-            return ToolResult(
+            return stoppingAfterwards(ToolResult(
                 text: "Sent back to Ready with your findings. Stop here; do not start further work."
-            )
+            ), identity: identity)
         default:
             throw ToolError("Unknown tool: \(name)")
         }
+    }
+
+    /// A verdict ends the review the way `report_complete` ends a worker: the stop runs once the
+    /// answer is written, because it kills the session waiting on it (SPEC §5.1).
+    private func stoppingAfterwards(_ result: ToolResult, identity: TokenIdentity) -> ToolResult {
+        guard let sessionId = identity.sessionId else { return result }
+        var result = result
+        result.afterResponse = { [events] in
+            await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
+        }
+        return result
     }
 
     private func assignedTask(_ identity: TokenIdentity) throws -> BoardTask {

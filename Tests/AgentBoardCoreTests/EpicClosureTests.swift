@@ -18,7 +18,7 @@ final class EpicClosureTests: XCTestCase {
         try f.tasks.move(created[2].id, to: .review)
         let before = try f.tasks.list(projectId: f.project.id, column: nil, epicId: epic.id)
 
-        try f.board.closeEpic(epicId: epic.id, as: .done, by: "human")
+        try f.board.closeEpic(epicId: epic.id, as: .done, by: .human)
 
         XCTAssertEqual(try EpicStore(f.db).get(epic.id)?.state, .done)
         let after = try f.tasks.list(projectId: f.project.id, column: nil, epicId: epic.id)
@@ -31,7 +31,7 @@ final class EpicClosureTests: XCTestCase {
     func testAbandonWritesAbandoned() throws {
         let f = try Fixture.make()
         let e = try epic(f, tasks: [NewEpicTask(title: "One")])
-        try f.board.closeEpic(epicId: e.id, as: .abandoned, by: "human")
+        try f.board.closeEpic(epicId: e.id, as: .abandoned, by: .human)
         XCTAssertEqual(try EpicStore(f.db).get(e.id)?.state, .abandoned)
     }
 
@@ -46,7 +46,7 @@ final class EpicClosureTests: XCTestCase {
         let branch = e.branch
         let taskBranches = created.map { TaskStore.branchName(for: $0.id) }
 
-        try f.board.closeEpic(epicId: e.id, as: .abandoned, by: "human")
+        try f.board.closeEpic(epicId: e.id, as: .abandoned, by: .human)
 
         XCTAssertEqual(try EpicStore(f.db).get(e.id)?.branch, branch)
         XCTAssertEqual(
@@ -58,7 +58,7 @@ final class EpicClosureTests: XCTestCase {
 
     func testUnknownEpicThrows() throws {
         let f = try Fixture.make()
-        XCTAssertThrowsError(try f.board.closeEpic(epicId: "nope", as: .done, by: "human")) { error in
+        XCTAssertThrowsError(try f.board.closeEpic(epicId: "nope", as: .done, by: .human)) { error in
             XCTAssertEqual(error as? BoardError, .epicNotFound("nope"))
         }
     }
@@ -72,7 +72,7 @@ final class EpicClosureTests: XCTestCase {
         )
         try f.sessions.insert(f.session("s1", state: .running, taskId: created[0].id))
 
-        XCTAssertThrowsError(try f.board.closeEpic(epicId: e.id, as: .done, by: "human")) { error in
+        XCTAssertThrowsError(try f.board.closeEpic(epicId: e.id, as: .done, by: .human)) { error in
             XCTAssertEqual(error as? BoardError, .epicHasRunningWorkers(epicId: e.id, sessionIds: ["s1"]))
         }
         XCTAssertEqual(try EpicStore(f.db).get(e.id)?.state, .planning, "a refused close still wrote the state")
@@ -99,7 +99,7 @@ final class EpicClosureTests: XCTestCase {
         )
         try f.sessions.insert(f.session("s1", state: .running, taskId: theirTasks[0].id))
 
-        try f.board.closeEpic(epicId: mine.id, as: .done, by: "human")
+        try f.board.closeEpic(epicId: mine.id, as: .done, by: .human)
         XCTAssertEqual(try EpicStore(f.db).get(mine.id)?.state, .done)
         XCTAssertEqual(try EpicStore(f.db).get(theirs.id)?.state, .planning)
     }
@@ -113,7 +113,7 @@ final class EpicClosureTests: XCTestCase {
         try EpicStore(f.db).setState(e.id, .integrating)
         try f.sessions.insert(f.session("integ", state: .starting, taskId: integrator.id))
 
-        XCTAssertThrowsError(try f.board.closeEpic(epicId: e.id, as: .abandoned, by: "human"))
+        XCTAssertThrowsError(try f.board.closeEpic(epicId: e.id, as: .abandoned, by: .human))
         XCTAssertEqual(try EpicStore(f.db).get(e.id)?.state, .integrating)
     }
 
@@ -123,7 +123,7 @@ final class EpicClosureTests: XCTestCase {
             projectId: f.project.id, title: "Ship it", goal: nil, tasks: [NewEpicTask(title: "One")]
         )
         try f.sessions.insert(f.session("s1", state: .completed, taskId: created[0].id))
-        try f.board.closeEpic(epicId: e.id, as: .done, by: "human")
+        try f.board.closeEpic(epicId: e.id, as: .done, by: .human)
         XCTAssertEqual(try EpicStore(f.db).get(e.id)?.state, .done)
     }
 
@@ -132,9 +132,9 @@ final class EpicClosureTests: XCTestCase {
     func testAClosedEpicCannotBeClosedAgainIntoTheOtherTerminalState() throws {
         let f = try Fixture.make()
         let e = try epic(f)
-        try f.board.closeEpic(epicId: e.id, as: .done, by: "human")
+        try f.board.closeEpic(epicId: e.id, as: .done, by: .human)
 
-        XCTAssertThrowsError(try f.board.closeEpic(epicId: e.id, as: .abandoned, by: "human")) { error in
+        XCTAssertThrowsError(try f.board.closeEpic(epicId: e.id, as: .abandoned, by: .human)) { error in
             XCTAssertEqual(error as? BoardError, .epicAlreadyClosed(epicId: e.id, state: .done))
         }
         XCTAssertEqual(try EpicStore(f.db).get(e.id)?.state, .done)
@@ -143,16 +143,16 @@ final class EpicClosureTests: XCTestCase {
     func testAnAbandonedEpicCannotBeClosedAsDone() throws {
         let f = try Fixture.make()
         let e = try epic(f)
-        try f.board.closeEpic(epicId: e.id, as: .abandoned, by: "human")
-        XCTAssertThrowsError(try f.board.closeEpic(epicId: e.id, as: .done, by: "human"))
+        try f.board.closeEpic(epicId: e.id, as: .abandoned, by: .human)
+        XCTAssertThrowsError(try f.board.closeEpic(epicId: e.id, as: .done, by: .human))
         XCTAssertEqual(try EpicStore(f.db).get(e.id)?.state, .abandoned)
     }
 
     func testClosingIntoTheSameStateTwiceIsAlsoRefused() throws {
         let f = try Fixture.make()
         let e = try epic(f)
-        try f.board.closeEpic(epicId: e.id, as: .done, by: "human")
-        XCTAssertThrowsError(try f.board.closeEpic(epicId: e.id, as: .done, by: "human"))
+        try f.board.closeEpic(epicId: e.id, as: .done, by: .human)
+        XCTAssertThrowsError(try f.board.closeEpic(epicId: e.id, as: .done, by: .human))
         XCTAssertEqual(try f.reports.unconsumed(projectId: f.project.id).count, 1, "the refused close queued a second report")
     }
 
@@ -160,7 +160,7 @@ final class EpicClosureTests: XCTestCase {
         let f = try Fixture.make()
         let e = try epic(f)
         try EpicStore(f.db).setState(e.id, .done)
-        XCTAssertThrowsError(try f.board.closeEpic(epicId: e.id, as: .abandoned, by: "human"))
+        XCTAssertThrowsError(try f.board.closeEpic(epicId: e.id, as: .abandoned, by: .human))
     }
 
     // MARK: The decision report
@@ -173,7 +173,7 @@ final class EpicClosureTests: XCTestCase {
         )
         try f.tasks.move(created[0].id, to: .done)
 
-        let report = try f.board.closeEpic(epicId: e.id, as: .abandoned, by: "human")
+        let report = try f.board.closeEpic(epicId: e.id, as: .abandoned, by: .human)
 
         XCTAssertEqual(report.kind, .decision)
         XCTAssertEqual(report.projectId, f.project.id)
@@ -191,7 +191,7 @@ final class EpicClosureTests: XCTestCase {
             projectId: f.project.id, title: "Ship it", goal: nil, tasks: [NewEpicTask(title: "One")]
         )
         try f.tasks.move(created[0].id, to: .done)
-        let report = try f.board.closeEpic(epicId: e.id, as: .done, by: "human")
+        let report = try f.board.closeEpic(epicId: e.id, as: .done, by: .human)
         XCTAssertTrue(report.body.contains("Every task in the epic was already finished."), report.body)
     }
 
@@ -251,7 +251,7 @@ final class EpicClosureTests: XCTestCase {
     func testAClosedEpicsPlanSaysItIsAlreadyClosed() throws {
         let f = try Fixture.make()
         let e = try epic(f)
-        try f.board.closeEpic(epicId: e.id, as: .done, by: "human")
+        try f.board.closeEpic(epicId: e.id, as: .done, by: .human)
         let plan = try f.board.epicClosurePlan(epicId: e.id, as: .abandoned)
         XCTAssertEqual(plan.alreadyClosed, .done)
         XCTAssertTrue(plan.isRefused)

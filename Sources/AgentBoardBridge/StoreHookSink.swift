@@ -502,6 +502,12 @@ public final class StoreHookSink: HookSink {
             if let message = event.lastAssistantMessage {
                 try? sessions.setStopReason(sessionId, String(message.prefix(200)))
             }
+            // SPEC §5.1: the session is left idle rather than stopped, because a turn can end while a
+            // build the reviewer started in the background is still running.
+            if identity.scope == .reviewer, let taskId,
+               (try? board.reviewerStoppedWithoutVerdict(taskId: taskId, sessionId: sessionId)) != nil {
+                return .follow([.reportQueued(projectId: session.projectId)])
+            }
 
         case "SessionEnd":
             try? sessions.clearToolCalls(sessionId)

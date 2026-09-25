@@ -119,4 +119,12 @@ public enum TaskAcceptance: Sendable, Equatable {
         guard case .reviewer(_, _, let sessionId) = self else { return nil }
         return sessionId
     }
+
+    public var actor: BoardActor {
+        switch self {
+        case .human: return .human
+        case .policy(let level): return .policy(level)
+        case .reviewer(let name, _, _): return .reviewer(name: name)
+        }
+    }
 }
