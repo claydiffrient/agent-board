@@ -4,7 +4,7 @@ import Foundation
 /// Who a task in Pending reviews is waiting on (SPEC §10, Pending reviews).
 enum ReviewHold: Equatable {
     case reviewing(reviewer: String, since: Date)
-    /// The reviewer's session ended with the task still in `review`, so it gave no verdict.
+    /// The reviewer's turn or session ended with the task still in `review`, so it gave no verdict.
     case reviewerStopped(reviewer: String)
     /// `reason` is the board's own note on why no agent holds it.
     case waitingOnYou(reason: String?)
@@ -26,7 +26,7 @@ enum ReviewHold: Equatable {
             return .waitingOnYou(reason: boardNote(.error, in: progress, since: completedAt))
         }
         let name = roster.first { $0.id == reviewerId }?.name ?? unknownReviewer
-        return newest.state.isActive
+        return newest.state.isActive && newest.state != .idle
             ? .reviewing(reviewer: name, since: newest.startedDate)
             : .reviewerStopped(reviewer: name)
     }
@@ -46,7 +46,7 @@ enum ReviewHold: Equatable {
         case .reviewing(let reviewer, let since):
             return "\(reviewer) reviewing · \(Format.elapsed(from: since, to: now))"
         case .reviewerStopped(let reviewer):
-            return "\(reviewer) stopped"
+            return "\(reviewer) stopped without a verdict"
         case .waitingOnYou:
             return "Waiting on you"
         }

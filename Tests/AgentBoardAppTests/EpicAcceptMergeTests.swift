@@ -59,6 +59,33 @@ final class EpicAcceptMergeTests: XCTestCase {
         XCTAssertEqual(try mergeReports(), [])
     }
 
+    /// Both merges need the temporary worktree, and git lets only one worktree hold the epic branch.
+    func testTwoConcurrentAcceptsInOneEpicBothLand() async throws {
+        let epic = try makeEpic()
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        let first = try makeTask(epicId: epic.id)
+        let second = try makeTask(epicId: epic.id)
+        let firstSession = try epicWorker(task: first, epic: epic)
+        let secondSession = try epicWorker(task: second, epic: epic)
+        try fixture.commitInto(try XCTUnwrap(firstSession.worktreePath), file: "first.txt")
+        try fixture.commitInto(try XCTUnwrap(secondSession.worktreePath), file: "second.txt")
+        try fixture.commitOn(branch: epic.branch, message: "Sibling work already on the epic branch")
+        let firstHead = try headOf("agentboard/\(first.id)")
+        let secondHead = try headOf("agentboard/\(second.id)")
+
+        let supervisor = fixture.supervisor
+        async let firstAccept: Void = supervisor.accept(taskId: first.id)
+        async let secondAccept: Void = supervisor.accept(taskId: second.id)
+        _ = try await (firstAccept, secondAccept)
+
+        XCTAssertTrue(try isAncestor(firstHead, of: epic.branch), "the first task's commit is not on the epic branch")
+        XCTAssertTrue(try isAncestor(secondHead, of: epic.branch), "the second task's commit is not on the epic branch")
+        XCTAssertEqual(try landing(first.id), .landed)
+        XCTAssertEqual(try landing(second.id), .landed)
+        XCTAssertEqual(try mergeReports(), [])
+        XCTAssertEqual(try worktreePaths(), [])
+    }
+
     func testAConflictingMergeLeavesTheEpicBranchAloneAndReportsTheFiles() async throws {
         let epic = try makeEpic()
         try fixture.manager.ensureBranch(epic.branch, from: "main")
@@ -170,6 +197,7 @@ final class EpicAcceptMergeTests: XCTestCase {
         XCTAssertEqual(try headOf(epic.branch), epicHeadBefore)
         XCTAssertTrue(FileManager.default.fileExists(atPath: integration.path))
         XCTAssertEqual(try column(task.id), .done)
+        XCTAssertEqual(try landing(task.id), .unlanded)
         let body = try XCTUnwrap(try mergeReports().first)
         XCTAssertTrue(body.contains(integration.path), body)
     }
@@ -225,6 +253,17 @@ final class EpicAcceptMergeTests: XCTestCase {
 
     private func headOf(_ ref: String) throws -> String {
         try trimmed(fixture.git(["rev-parse", "--verify", ref]))
+    }
+
+    private func isAncestor(_ commit: String, of ref: String) throws -> Bool {
+        let repo = URL(fileURLWithPath: fixture.project.repoPath)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: WorktreeManager.gitPath)
+        process.arguments = ["merge-base", "--is-ancestor", commit, ref]
+        process.currentDirectoryURL = repo
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus == 0
     }
 
     private func parents(_ commit: String) throws -> [String] {

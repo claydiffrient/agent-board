@@ -34,11 +34,12 @@ public enum OpeningPrompt {
         placement: WorkerPlacement = .worktree,
         workingDirectory: String? = nil,
         agent: AgentIdentity? = nil,
-        reviewFindings: String? = nil
+        reviewFindings: String? = nil,
+        comments: [TaskComment] = []
     ) -> String {
         // Identity comes first: the agent should know what it is before it knows what it is doing.
         var sections = agent.map { [renderIdentity($0)] } ?? []
-        sections += taskSections(task: task, epicGoal: epicGoal)
+        sections += taskSections(task: task, epicGoal: epicGoal, comments: comments)
         if let reviewFindings {
             sections.append(reviewFindingsSection(reviewFindings))
         }
@@ -151,9 +152,12 @@ public enum OpeningPrompt {
     on risky or destructive actions.
     """
 
-    /// The task material a worker is handed: what the task is, what counts as done, and the epic it
-    /// sits in. Shared with `postCompactionBrief` so a re-brief cannot drift from the spawn prompt.
-    public static func taskSections(task: BoardTask, epicGoal: String? = nil) -> [String] {
+    /// The task material a worker is handed: what the task is, what counts as done, the epic it
+    /// sits in, and its comment thread. Shared with `postCompactionBrief` and `ReviewPrompt` so a
+    /// re-brief or a review cannot drift from the spawn prompt.
+    public static func taskSections(
+        task: BoardTask, epicGoal: String? = nil, comments: [TaskComment] = []
+    ) -> [String] {
         var sections: [String] = []
         sections.append("# Task: \(task.title)")
         sections.append(task.body?.isEmpty == false ? task.body! : "(No further description was given.)")
@@ -168,6 +172,9 @@ public enum OpeningPrompt {
 
             Stay inside your own task; the goal is context for the choices you make, not extra scope.
             """)
+        }
+        if let thread = CommentPrompt.section(comments) {
+            sections.append(thread)
         }
         return sections
     }
@@ -187,6 +194,11 @@ public enum OpeningPrompt {
     /// file, so the brief drops whole sections from the end — the notes first — rather than overflow.
     public static let briefCharacterBudget = 10_000
 
+    /// Held back from the task text for the comment thread, so a long task cannot push out the
+    /// newest comment: the thread shrinks to the room left, but never below this or its own size
+    /// (SPEC §3.1 step 6).
+    static let briefCommentFloor = 2_000
+
     /// Handed back to a worker after its context is compacted. Built from the same sections as the
     /// spawn prompt; the standing instructions are left out to stay inside `briefCharacterBudget`,
     /// which the task material has the stronger claim on.
@@ -196,32 +208,39 @@ public enum OpeningPrompt {
         epicGoal: String? = nil,
         notes: SpawnNotes = SpawnNotes(),
         reviewFindings: String? = nil,
+        comments: [TaskComment] = [],
         budget: Int = briefCharacterBudget
     ) -> String {
-        var sections = [
-            """
+        let lead = """
             Your conversation was just compacted, so the assignment below may have been summarized \
             away. It is reproduced in full. You are still on branch `\(branch)`, and the task is not \
             finished until you commit and call `report_complete`. Keep going until then: a message with \
             no tool call in it ends your turn, and nothing starts the next one.
-            """,
-        ]
-        sections.append(contentsOf: taskSections(task: task, epicGoal: epicGoal))
+            """
+        var trailing: [String] = []
         if let reviewFindings {
-            sections.append(reviewFindingsSection(reviewFindings))
+            trailing.append(reviewFindingsSection(reviewFindings))
         }
         if let notesSection = renderNotes(notes) {
-            sections.append(notesSection)
+            trailing.append(notesSection)
         }
 
         var kept: [String] = []
         var used = 0
-        for section in sections {
-            let cost = section.count + (kept.isEmpty ? 0 : 2)
-            guard used + cost <= budget else { break }
-            kept.append(section)
-            used += cost
+        func fit(_ sections: [String], within limit: Int) {
+            for section in sections {
+                let cost = section.count + (kept.isEmpty ? 0 : 2)
+                guard used + cost <= limit else { return }
+                kept.append(section)
+                used += cost
+            }
         }
+        let reserve = CommentPrompt.section(comments).map { min($0.count + 2, briefCommentFloor) } ?? 0
+        fit([lead] + taskSections(task: task, epicGoal: epicGoal), within: budget - reserve)
+        if let thread = CommentPrompt.section(comments, fitting: budget - used - 2) {
+            fit([thread], within: budget)
+        }
+        fit(trailing, within: budget)
         return kept.joined(separator: "\n\n")
     }
 

@@ -98,7 +98,7 @@ final class BoardAnnouncementTests: XCTestCase {
         let task = try f.task("t", column: .ready)
         try f.board.assign(taskId: task.id, session: f.session("w1", state: .running))
 
-        let report = try XCTUnwrap(f.board.terminate(sessionId: "w1", cause: .stoppedByHuman))
+        let report = try XCTUnwrap(f.board.terminate(sessionId: "w1", cause: .stopped(by: .human)))
 
         XCTAssertEqual(report.kind, .failed)
         let stopped = try XCTUnwrap(f.tasks.get(task.id))

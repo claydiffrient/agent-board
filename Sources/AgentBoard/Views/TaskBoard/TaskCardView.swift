@@ -7,6 +7,7 @@ struct TaskCardView: View {
     let activeSession: AgentSession?
     let latestSession: AgentSession?
     let isSelected: Bool
+    var commentCount = 0
     let onAccept: () -> Void
     let onReopen: () -> Void
 
@@ -24,6 +25,12 @@ struct TaskCardView: View {
                     PriorityChip(priority: priority)
                 }
                 if let model = task.model { ModelChip(model: model) }
+                if commentCount > 0 {
+                    Label("\(commentCount)", systemImage: "text.bubble")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help(commentCount == 1 ? "1 comment" : "\(commentCount) comments")
+                }
             }
 
             if let epicTitle {

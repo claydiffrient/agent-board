@@ -19,6 +19,7 @@ extension HookEvent {
             notificationMessage: notification?["message"] as? String ?? object["message"] as? String,
             lastAssistantMessage: object["last_assistant_message"] as? String,
             sessionSource: object["source"] as? String,
+            sessionEndReason: object["reason"] as? String,
             compactTrigger: object["trigger"] as? String,
             agentType: object["agent_type"] as? String,
             rawJSON: String(decoding: body, as: UTF8.self)

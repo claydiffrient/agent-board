@@ -8,6 +8,8 @@ public final class WorkerToolHandler: ToolHandler {
     private let progress: ProgressStore
     private let board: Board
     private let notes: NoteTools
+    private let comments: CommentTools
+    private let roster: RosterStore
     private let control: any WorkerControl
     private let projects: ProjectStore
     private let locks: FileLockStore
@@ -24,6 +26,8 @@ public final class WorkerToolHandler: ToolHandler {
         progress = ProgressStore(db)
         board = Board(db)
         notes = NoteTools(db: db)
+        comments = CommentTools(db: db)
+        roster = RosterStore(db)
         self.control = control
         projects = ProjectStore(db)
         locks = FileLockStore(db)
@@ -36,7 +40,8 @@ public final class WorkerToolHandler: ToolHandler {
         ToolDescriptor(
             name: "get_my_task",
             description: "Return the task assigned to you: id, title, body, acceptance criteria, priority, board column, "
-                + "the tasks it depends on, and which attempt this is. Call it first if anything about the assignment is unclear.",
+                + "the tasks it depends on, which attempt this is, and its comment thread oldest first. Call it first if "
+                + "anything about the assignment is unclear. " + CommentTools.authority,
             inputSchema: ToolSchema.object(properties: [:], required: [])
         ),
         ToolDescriptor(
@@ -59,6 +64,18 @@ public final class WorkerToolHandler: ToolHandler {
             inputSchema: ToolSchema.object(
                 properties: ["text": ToolSchema.string(maxLength: 4000)],
                 required: ["text"]
+            )
+        ),
+        ToolDescriptor(
+            name: "add_comment",
+            description: "Add a comment to your own task's thread, signed with your name. " + CommentTools.purpose
+                + " You cannot comment on any other task. " + CommentTools.authority,
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "body": CommentTools.bodySchema,
+                    "task_id": ToolSchema.string("Optional; if given it must be your own task's id."),
+                ],
+                required: ["body"]
             )
         ),
         ToolDescriptor(
@@ -175,6 +192,8 @@ public final class WorkerToolHandler: ToolHandler {
             let text = try ToolArguments.requiredString("text", in: arguments)
             try progress.append(taskId: task.id, sessionId: identity.sessionId, kind: .note, text: text)
             return ToolResult(text: "Logged.")
+        case "add_comment":
+            return try addComment(task, arguments: arguments, identity: identity)
         case "propose_task":
             return try await proposeTask(arguments, identity: identity)
         case "commit_my_work":
@@ -305,7 +324,24 @@ public final class WorkerToolHandler: ToolHandler {
             "epic_goal": .null,
             "dependencies": .array(dependencies),
             "attempt": .number(Double(attempt)),
+            "comments": try comments.thread(taskId: task.id),
         ]))
+    }
+
+    private func addComment(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        if let named = ToolArguments.optionalString("task_id", in: arguments), !named.isEmpty, named != task.id {
+            throw ToolError("Task \(named) is not your task; a worker comments only on its own task, \(task.id).")
+        }
+        let sessionId = try requiredSession(identity)
+        guard let session = try sessions.get(sessionId) else {
+            throw ToolError("Session is still registering; retry in a moment.")
+        }
+        let agent = try session.rosterAgentId.flatMap { try roster.get($0) }
+        let author = CommentAuthor(
+            kind: .worker, sessionId: sessionId, rosterAgentId: agent?.id,
+            name: agent?.name ?? "Worker \(session.shortId ?? String(sessionId.prefix(8)))"
+        )
+        return try comments.add(projectId: identity.projectId, taskId: task.id, author: author, arguments: arguments)
     }
 
     private func updateStatus(_ task: BoardTask, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {

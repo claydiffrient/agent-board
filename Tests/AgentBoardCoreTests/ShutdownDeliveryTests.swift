@@ -109,7 +109,7 @@ final class ShutdownDeliveryTests: XCTestCase {
         let killed = try runningWorker("Killed")
 
         let capReport = try XCTUnwrap(f.board.terminate(sessionId: capped.session.sessionId, cause: .capBreach("token cap reached")))
-        let killReport = try XCTUnwrap(f.board.terminate(sessionId: killed.session.sessionId, cause: .stoppedByHuman))
+        let killReport = try XCTUnwrap(f.board.terminate(sessionId: killed.session.sessionId, cause: .stopped(by: .human)))
 
         XCTAssertEqual(capReport.kind, .failed)
         XCTAssertTrue(capReport.body.contains("ended without reporting"), capReport.body)

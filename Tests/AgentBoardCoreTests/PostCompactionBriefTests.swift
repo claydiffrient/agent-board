@@ -91,4 +91,36 @@ final class PostCompactionBriefTests: XCTestCase {
         XCTAssertFalse(brief.contains(String(repeating: "x", count: 100)))
         XCTAssertTrue(brief.contains("swift build clean."), brief)
     }
+
+    /// A long task used to fill the budget before the thread was considered, dropping it whole.
+    func testALongTaskStillLeavesRoomForTheNewestHumanComment() throws {
+        let (f, _, epic) = try seed()
+        let body = String(repeating: "Parse the input. ", count: 313)
+        let task = try f.tasks.create(
+            projectId: f.project.id, title: "A long task", body: body, acceptance: "swift build clean.",
+            priority: nil, column: .ready, origin: .human, epicId: epic.id
+        )
+        var thread = (1...12).map { n in
+            TaskComment(
+                id: Int64(n), taskId: task.id, projectId: f.project.id,
+                author: CommentAuthor(kind: .worker, name: "Worker"),
+                body: "Finding \(n). " + String(repeating: "y", count: 400), createdAt: Int64(n) * 1000
+            )
+        }
+        thread.append(TaskComment(
+            id: 13, taskId: task.id, projectId: f.project.id, author: .human,
+            body: "Stop: the migration must stay reversible.", createdAt: 13_000
+        ))
+
+        let brief = OpeningPrompt.postCompactionBrief(
+            task: task, branch: "agentboard/t1", epicGoal: epic.goal, comments: thread
+        )
+
+        XCTAssertGreaterThanOrEqual(body.count, 5_000)
+        XCTAssertLessThanOrEqual(brief.count, OpeningPrompt.briefCharacterBudget)
+        XCTAssertTrue(brief.contains(body))
+        XCTAssertTrue(brief.contains("swift build clean."))
+        XCTAssertTrue(brief.contains("Stop: the migration must stay reversible."), String(brief.suffix(1_500)))
+        XCTAssertTrue(brief.contains("older comments are left out"))
+    }
 }

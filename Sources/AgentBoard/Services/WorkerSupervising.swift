@@ -74,8 +74,12 @@ protocol WorkerSupervising: AnyObject {
     /// The project the human has open, or nil for At a Glance. Attention banners for it are
     /// suppressed while Agent Board is frontmost.
     func focusChanged(projectId: String?)
+    /// A report was queued outside the supervisor — the human's comment (SPEC §9.1) — so the
+    /// orchestrator console is told now rather than on the next board event.
+    func reportQueued(projectId: String) async
 }
 
 extension WorkerSupervising {
     func focusChanged(projectId: String?) {}
+    func reportQueued(projectId: String) async {}
 }

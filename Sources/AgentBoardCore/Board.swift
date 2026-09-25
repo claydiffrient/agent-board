@@ -54,7 +54,7 @@ public struct CapCheck: Sendable {
 /// Why Agent Board, rather than the worker itself, is ending a session.
 public enum SessionTermination: Sendable, Equatable {
     case capBreach(String)
-    case stoppedByHuman
+    case stopped(by: BoardActor)
     /// `reconcile` found the process gone without Agent Board having stopped it.
     case vanished
     /// Preparing the worktree failed after `spawn_worker` had already answered, so the session
@@ -67,7 +67,7 @@ public enum SessionTermination: Sendable, Equatable {
     var sessionState: SessionState {
         switch self {
         case .capBreach, .setupFailed: return .failed
-        case .stoppedByHuman, .vanished, .shutdownAcknowledged: return .stopped
+        case .stopped, .vanished, .shutdownAcknowledged: return .stopped
         }
     }
 
@@ -76,7 +76,7 @@ public enum SessionTermination: Sendable, Equatable {
     /// failure never ran a worker, so neither gets to reinterpret what is on the branch.
     var salvagesBranchWork: Bool {
         switch self {
-        case .capBreach, .vanished, .stoppedByHuman: return true
+        case .capBreach, .vanished, .stopped: return true
         case .setupFailed, .shutdownAcknowledged: return false
         }
     }
@@ -84,14 +84,14 @@ public enum SessionTermination: Sendable, Equatable {
     var flagsTaskFailed: Bool {
         switch self {
         case .capBreach, .vanished, .setupFailed: return true
-        case .stoppedByHuman, .shutdownAcknowledged: return false
+        case .stopped, .shutdownAcknowledged: return false
         }
     }
 
     var reason: String {
         switch self {
         case .capBreach(let breach): return breach
-        case .stoppedByHuman: return "stopped from Agent Board by a human"
+        case .stopped(let actor): return "stopped from Agent Board by \(actor.described)"
         case .vanished: return "the session is no longer running and Agent Board did not stop it"
         case .setupFailed(let detail): return "setting up the worktree failed before the worker started: \(detail)"
         case .shutdownAcknowledged: return "wound down for the project shutdown order and acknowledged"
@@ -101,7 +101,7 @@ public enum SessionTermination: Sendable, Equatable {
     var reportKind: ReportKind {
         switch self {
         case .shutdownAcknowledged: return .decision
-        case .capBreach, .stoppedByHuman, .vanished, .setupFailed: return .failed
+        case .capBreach, .stopped, .vanished, .setupFailed: return .failed
         }
     }
 
@@ -109,7 +109,7 @@ public enum SessionTermination: Sendable, Equatable {
         switch self {
         case .shutdownAcknowledged: return "Worker wound down for the shutdown order: \(reason)"
         case .setupFailed: return "Worker never started: \(reason)"
-        case .capBreach, .stoppedByHuman, .vanished: return "Worker session ended without reporting: \(reason)"
+        case .capBreach, .stopped, .vanished: return "Worker session ended without reporting: \(reason)"
         }
     }
 
@@ -119,7 +119,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .shutdownAcknowledged(let note):
             guard let note, !note.isEmpty else { return nil }
             return note
-        case .capBreach, .stoppedByHuman, .vanished, .setupFailed: return nil
+        case .capBreach, .stopped, .vanished, .setupFailed: return nil
         }
     }
 }
@@ -553,6 +553,9 @@ public struct Board: Sendable {
         if let epicId = task.epicId, try Epic.fetchOne(db, key: epicId)?.state == .planning {
             try EpicStore.setState(db, epicId, .active)
         }
+        if let reviewerSession = acceptedBy.acceptingSessionId {
+            try finishReview(db, sessionId: reviewerSession)
+        }
         let ready = try newlyReady(db, projectId: task.projectId)
         var body = "Task \(taskId) (\(task.title)) was accepted into done by \(acceptedBy.describedActor)."
         if case .reviewer(_, let verdict, _) = acceptedBy, !verdict.isEmpty {
@@ -604,8 +607,48 @@ public struct Board: Sendable {
             try TaskStore.setFailed(db, taskId, false, reason: nil)
             try TaskStore.setReviewer(db, taskId, nil)
             try TaskStore.move(db, taskId, to: .ready, before: nil)
+            if let sessionId { try Self.finishReview(db, sessionId: sessionId) }
             return try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .decision, body: body
+            )
+        }
+    }
+
+    /// SPEC §5.1: a verdict is a reviewer's `report_complete`. Its session ends `completed`, so the
+    /// stop that follows the answer, and its `SessionEnd`, read as the orderly end they are.
+    static func finishReview(_ db: Database, sessionId: String) throws {
+        guard let session = try AgentSession.fetchOne(db, key: sessionId), session.state.isActive else { return }
+        try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
+    }
+
+    public static let reviewerStalledLead = "Reviewer stopped without a verdict."
+
+    /// SPEC §5.1: a reviewer's turn ended with its task still in `review`. Nothing accepts the task;
+    /// one `blocked` report per reviewer session tells the orchestrator. Nil when the task has left
+    /// review, the session has ended, or it already raised one.
+    @discardableResult
+    public func reviewerStoppedWithoutVerdict(taskId: String, sessionId: String) throws -> Report? {
+        try db.writer.write { db in
+            guard let task = try Task.fetchOne(db, key: taskId), task.column == .review,
+                  let session = try AgentSession.fetchOne(db, key: sessionId), session.state.isActive
+            else { return nil }
+            let raised = try Bool.fetchOne(
+                db,
+                sql: "SELECT EXISTS(SELECT 1 FROM report WHERE task_id = ? AND session_id = ? AND body GLOB ?)",
+                arguments: [taskId, sessionId, Self.reviewerStalledLead + "*"]
+            ) ?? false
+            guard !raised else { return nil }
+            let rosterId = task.reviewerAgentId ?? session.rosterAgentId
+            let name = try rosterId.flatMap { try RosterAgent.fetchOne(db, key: $0)?.name } ?? "The reviewer"
+            let body = [
+                "\(Self.reviewerStalledLead) \(name)'s turn on task \(taskId) (\(task.title)) ended without "
+                    + "accept_task or reopen_task, so the task is still in review and nothing accepted it.",
+                "Session: \(sessionId)",
+                "The session is idle, not stopped. Message it for its verdict, stop it with stop_worker, "
+                    + "or leave the task to a person.",
+            ].joined(separator: "\n")
+            return try ReportStore.insert(
+                db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .blocked, body: body
             )
         }
     }
@@ -671,6 +714,18 @@ public struct Board: Sendable {
             let taskId = task.id
 
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
+            if let settledLine = try Self.settledLine(db, task: task) {
+                let lines = [
+                    "Session ended after its task was settled: \(reason)",
+                    "Task: \(taskId) (\(task.title))",
+                    "Session: \(sessionId) (attempt \(session.attempt))",
+                    settledLine,
+                ]
+                return try ReportStore.insert(
+                    db, projectId: session.projectId, taskId: taskId, sessionId: sessionId,
+                    kind: .decision, body: lines.joined(separator: "\n")
+                )
+            }
             if cause.flagsTaskFailed {
                 try TaskStore.setFailed(db, taskId, true, reason: reason)
             }
@@ -692,6 +747,19 @@ public struct Board: Sendable {
                 db, projectId: session.projectId, taskId: taskId, sessionId: sessionId,
                 kind: cause.reportKind, body: lines.joined(separator: "\n")
             )
+        }
+    }
+
+    /// A task already accepted, or sent back by a review verdict, has nothing a session's end can
+    /// leave unfinished, so its report must not read as a failure. Nil for any other task.
+    static func settledLine(_ db: Database, task: Task) throws -> String? {
+        switch task.column {
+        case .done:
+            return "The task is in done; ending this session changed nothing on it."
+        case .ready where try ProgressStore.openReviewFindings(db, taskId: task.id) != nil:
+            return "The task is back in ready with a reviewer's findings; ending this session changed nothing on it."
+        default:
+            return nil
         }
     }
 
@@ -945,7 +1013,8 @@ public struct Board: Sendable {
     /// row on the epic's or task's card carrying the pull request URL, and a `decision` report so
     /// the orchestrator reads the outcome through `list_reports` rather than a terminal. A pull
     /// request's URL is also kept on the approval, and one opened for a `done` task in no epic not
-    /// yet landed moves its landing to `pullRequestOpen` (§5).
+    /// yet landed moves its landing to `pullRequestOpen` (§5). One opened from an epic branch moves
+    /// the epic to `pullRequestOpen` from any state but `abandoned` (§5.2).
     @discardableResult
     public func recordPublished(
         approval: Approval, summary: String, url: String? = nil, failed: Bool = false
@@ -964,6 +1033,10 @@ public struct Board: Sendable {
                    [.awaitingPullRequest, .unlanded, .pullRequestOpen].contains(task.landing) {
                     try TaskStore.setLanding(db, taskId, .pullRequestOpen, detail: PullRequestLanding.openDetail(pr))
                 }
+                if approval.taskId == nil, let epicId = approval.epicId,
+                   let epic = try Epic.fetchOne(db, key: epicId), epic.state != .abandoned {
+                    try EpicStore.setState(db, epicId, .pullRequestOpen)
+                }
             }
             return try ReportStore.insert(
                 db, projectId: approval.projectId, taskId: approval.taskId, sessionId: nil,
@@ -977,6 +1050,10 @@ public struct Board: Sendable {
     static func publishProgressTask(_ db: Database, _ approval: Approval) throws -> String? {
         if let taskId = approval.taskId, try Task.exists(db, key: taskId) { return taskId }
         guard let epicId = approval.epicId else { return nil }
+        return try epicCardTask(db, epicId: epicId)
+    }
+
+    static func epicCardTask(_ db: Database, epicId: String) throws -> String? {
         if let integrator = try String.fetchOne(
             db,
             sql: "SELECT id FROM task WHERE epic_id = ? AND origin = 'integration' ORDER BY created_at DESC LIMIT 1",
@@ -1005,7 +1082,7 @@ public struct Board: Sendable {
     /// against a closed epic, and refused for an epic that is already terminal: `done` and
     /// `abandoned` mean different things and one does not silently become the other.
     @discardableResult
-    public func closeEpic(epicId: String, as closure: EpicClosure, by: String) throws -> Report {
+    public func closeEpic(epicId: String, as closure: EpicClosure, by: BoardActor) throws -> Report {
         try db.writer.write { db in
             let plan = try Self.closurePlan(db, epicId: epicId, as: closure)
             if let state = plan.alreadyClosed {
@@ -1020,7 +1097,7 @@ public struct Board: Sendable {
             try EpicStore.setState(db, epicId, closure.state)
 
             var lines = [
-                "Epic \(epicId) (\(epic.title)) was closed as \(closure.state.rawValue) by a human, "
+                "Epic \(epicId) (\(epic.title)) was closed as \(closure.state.rawValue) by \(by.described), "
                     + "without being integrated. Do not plan or dispatch further work into it.",
                 "Nothing was merged, pushed or deleted: the epic branch \(epic.branch) and every "
                     + "`agentboard/<task-id>` branch and worktree are untouched.",
@@ -1039,7 +1116,7 @@ public struct Board: Sendable {
                         + "set_epic(task_id) and no epic_id, and it stands alone on the board."
                 )
             }
-            lines.append("Closed by: \(by)")
+            lines.append("Closed by: \(by.recorded)")
             return try ReportStore.insert(
                 db, projectId: epic.projectId, taskId: nil, sessionId: nil, kind: .decision,
                 body: lines.joined(separator: "\n\n")

@@ -102,6 +102,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
     /// Tasks whose pull request is being checked, so overlapping checks cannot both report a close.
     @ObservationIgnored private var landingChecksInFlight: Set<String> = []
+    @ObservationIgnored private let mergeQueue = BranchMergeQueue()
     /// Which project needs a human and which of those has already been announced. Polled on the
     /// metering tick rather than observed, because `overdueShutdown` and any future deadline cause
     /// only become true as the clock moves, and a `ValueObservation` re-fires on writes alone.
@@ -348,7 +349,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             task: task, branch: branch, base: base,
                             verification: project.settings.verification,
                             workingDirectory: site.cwd.path,
-                            agent: agent?.identity
+                            agent: agent?.identity,
+                            comments: try CommentStore(db).list(taskId: taskId)
                         )
                         : Self.openingPrompt(
                             task: task, branch: branch, attempt: placeholder.attempt, epicGoal: epic?.goal,
@@ -359,7 +361,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             placement: site.placement,
                             workingDirectory: site.cwd.path,
                             agent: agent?.identity,
-                            reviewFindings: try ProgressStore(db).openReviewFindings(taskId: taskId)
+                            reviewFindings: try ProgressStore(db).openReviewFindings(taskId: taskId),
+                            comments: try CommentStore(db).list(taskId: taskId)
                         ),
                     // Most specific override wins: this task, then the agent's standing preference,
                     // then the project default.
@@ -669,7 +672,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 )
             )
             assigned = placeholder
-            try epics.setState(epicId, .integrating)
+            // A PR-open epic stays so: its pull request, not this integrator, decides when it is done.
+            if epic.state != .pullRequestOpen { try epics.setState(epicId, .integrating) }
             beginSetup(
                 LaunchPlan(
                     project: project,
@@ -700,10 +704,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func stop(sessionId: String) async throws {
-        try await recording { try await stopSession(sessionId) }
+        try await recording { try await stopSession(sessionId, by: .human) }
     }
 
-    private func stopSession(_ sessionId: String) async throws {
+    private func stopSession(_ sessionId: String, by actor: BoardActor) async throws {
         let session = try requireSession(sessionId)
         if let shortId = session.shortId {
             try await runtime.stop(shortId: shortId)
@@ -714,7 +718,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.sessionHasNoShortId(sessionId)
         }
         let salvage = await branchSalvage(taskId: session.taskId)
-        try board.terminate(sessionId: sessionId, cause: .stoppedByHuman, salvage: salvage)
+        try board.terminate(sessionId: sessionId, cause: .stopped(by: actor), salvage: salvage)
         try grants.revokeAll(sessionId: sessionId)
         announceReports(projectId: session.projectId)
         refreshSleepAssertion()
@@ -788,7 +792,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     } else {
                         throw SupervisorError.sessionHasNoShortId(session.sessionId)
                     }
-                    try board.terminate(sessionId: session.sessionId, cause: .stoppedByHuman)
+                    try board.terminate(sessionId: session.sessionId, cause: .stopped(by: .human))
                 } catch {
                     firstFailure = firstFailure ?? error
                 }
@@ -809,7 +813,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(task.projectId) else {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
-            try await stopLiveSessions(onTask: taskId, sparing: acceptedBy.acceptingSessionId)
+            try await stopLiveSessions(onTask: taskId, sparing: acceptedBy.acceptingSessionId, by: acceptedBy.actor)
             try board.accept(taskId: taskId, acceptedBy: acceptedBy)
             let taskSessions = try sessions.forTask(taskId)
             for session in taskSessions {
@@ -827,11 +831,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// SPEC §5: a rostered reviewer runs in the worker's own worktree, so a decision taken over its
     /// head must end it before anything removes that checkout. Only an agent `claude agents` still
     /// lists as live can abort the decision; a row whose process is gone is ended as vanished.
-    private func stopLiveSessions(onTask taskId: String, sparing: String? = nil) async throws {
+    private func stopLiveSessions(onTask taskId: String, sparing: String? = nil, by actor: BoardActor) async throws {
         var listing: [AgentInfo]?
         for session in try sessions.forTask(taskId) where session.state.isActive && session.sessionId != sparing {
             do {
-                try await stopSession(session.sessionId)
+                try await stopSession(session.sessionId, by: actor)
             } catch {
                 if listing == nil {
                     guard let listed = try? await runtime.listSessions() else { throw error }
@@ -847,7 +851,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
                 guard session.shortId == nil, let shortId = info.id else { throw error }
                 try sessions.setShortId(session.sessionId, shortId)
-                try await stopSession(session.sessionId)
+                try await stopSession(session.sessionId, by: actor)
             }
         }
     }
@@ -871,12 +875,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         // A shared branch holds several tasks' commits on one ref, so it lands as a unit when its
         // last member is accepted (§8.4) rather than once per task.
         if let epic, let shared = sharedBranch(of: task) {
-            await mergeSharedBranch(task: task, epic: epic, project: project, branch: shared)
+            await mergeQueue.serialize(repo: project.repoPath, branch: epic.branch) {
+                await mergeSharedBranch(task: task, epic: epic, project: project, branch: shared)
+            }
             return
         }
+        let target = epic?.branch ?? project.baseBranch
+        await mergeQueue.serialize(repo: project.repoPath, branch: target) {
+            await mergeTaskBranch(task: task, epic: epic, project: project, into: target)
+        }
+    }
+
+    private func mergeTaskBranch(task: BoardTask, epic: Epic?, project: Project, into target: String) async {
         let manager = worktreeManager(for: project)
         let taskBranch = Self.taskBranchPrefix + task.id
-        let target = epic?.branch ?? project.baseBranch
         let taskTitle = task.title
         let targetTitle = epic?.title ?? project.baseBranch
         let projectBase = project.baseBranch
@@ -1019,7 +1031,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let epic = current.epicId.flatMap { try? epics.get($0) }
             let branch = Self.taskBranchPrefix + current.id
             switch state {
-            case .success(.merged(let commit)):
+            case .success(.merged(let commit, _)):
                 recordLanding(
                     task: current, epic: epic, landing: .landed,
                     detail: PullRequestLanding.mergedDetail(pr, commit: commit), advice: nil
@@ -1037,7 +1049,85 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 keepOpenLanding(current, detail: PullRequestLanding.openDetail(pr, uncheckedBecause: describe(error)))
             }
         }
+        if taskId == nil { touched.formUnion(await refreshEpicPullRequests(projectId: projectId)) }
         for projectId in touched { announceReports(projectId: projectId) }
+    }
+
+    /// SPEC §5.2: settles each PR-open epic against GitHub. Merged makes the epic `done`, lands the
+    /// done tasks the merged head carries, and unlands those only the local epic branch carries;
+    /// closed returns it to `active` with a `decision` report. Returns the projects that gained a report.
+    private func refreshEpicPullRequests(projectId: String?) async -> Set<String> {
+        guard let checks = try? board.epicPullRequestChecks(projectId: projectId) else { return [] }
+        let reader = pullRequestStates
+        var touched: Set<String> = []
+        for check in checks where !landingChecksInFlight.contains(check.epic.id) {
+            guard let project = try? projects.get(check.epic.projectId) else { continue }
+            landingChecksInFlight.insert(check.epic.id)
+            defer { landingChecksInFlight.remove(check.epic.id) }
+            let repo = URL(fileURLWithPath: project.repoPath)
+            let url = check.pullRequest.url
+            do {
+                switch try await offMain({ try reader.state(of: url, cwd: repo) }) {
+                case .merged(let commit, let head):
+                    let carried = await tasksCarried(by: check.epic, head: head, project: project)
+                    if try board.landEpicPullRequest(
+                        epicId: check.epic.id, pullRequest: check.pullRequest, commit: commit, carriage: carried
+                    ) {
+                        touched.insert(project.id)
+                    }
+                case .closed:
+                    if try board.reopenEpicAfterClosedPullRequest(epicId: check.epic.id, pullRequest: check.pullRequest) != nil {
+                        touched.insert(project.id)
+                    }
+                case .open:
+                    break
+                }
+            } catch {
+                report(["could not check pull request #\(check.pullRequest.number) for epic \(check.epic.id): \(describe(error))"])
+            }
+        }
+        return touched
+    }
+
+    /// Splits the epic's `done` tasks by their tip (branch, or reaped tip): `landed` when the merged
+    /// `head` contains it, `late` when only the local epic branch does, neither for a conflicted
+    /// merge the integrator never finished. A task with no tip is judged by a commit its landing
+    /// detail records, else is `unverified` if marked `.landed`. A `head` that cannot be fetched judges
+    /// no task.
+    private func tasksCarried(by epic: Epic, head: String?, project: Project) async -> EpicCarriage {
+        let members = ((try? tasks.list(projectId: project.id, epicId: epic.id, includeArchived: true)) ?? [])
+            .filter { $0.column == .done && $0.landing != .noBranch }
+        let manager = worktreeManager(for: project)
+        let epicBranch = epic.branch
+        do {
+            return try await offMain { () -> EpicCarriage in
+                guard let head else { return EpicCarriage(headUnresolved: "GitHub reported no head commit") }
+                guard try manager.fetchCommitIfMissing(head, from: "origin") else {
+                    return EpicCarriage(headUnresolved: "head \(head) could not be fetched from origin")
+                }
+                var carriage = EpicCarriage()
+                for task in members {
+                    let tip = try manager.refCommit("refs/heads/" + Self.taskBranchPrefix + task.id)
+                        ?? manager.refCommit(TaskBranchLedger.tipRef(taskId: task.id))
+                    if let tip {
+                        if try manager.isMerged(commit: tip, into: head) {
+                            carriage.landed.append(task.id)
+                        } else if try manager.isMerged(commit: tip, into: epicBranch) {
+                            carriage.late.append(task.id)
+                        }
+                    } else if try EpicCarriage.recordedCommits(in: task.landingDetail).contains(where: {
+                        try manager.commitExists($0) && manager.isMerged(commit: $0, into: head)
+                    }) {
+                        carriage.landed.append(task.id)
+                    } else if task.landing == .landed {
+                        carriage.unverified.append(task.id)
+                    }
+                }
+                return carriage
+            }
+        } catch {
+            return EpicCarriage(headUnresolved: describe(error))
+        }
     }
 
     private func keepOpenLanding(_ task: BoardTask, detail: String) {
@@ -1079,6 +1169,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// then the accepted task is recorded as accepted and nothing is merged or reaped: its commits
     /// are interleaved with its siblings' on one ref, so there is no range that is its work alone.
     private func mergeSharedBranch(task: BoardTask, epic: Epic, project: Project, branch: String) async {
+        // A sibling accepted concurrently merged the branch first, carrying this task, and reaped it.
+        if (try? tasks.get(task.id))??.landing == .landed { return }
         let members = (try? sharedMembers(projectId: project.id, branch: branch)) ?? []
         guard SharedBranchAcceptance.isReadyToMerge(members) else {
             let waiting = SharedBranchAcceptance.waitingOn(members)
@@ -1223,7 +1315,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     func reopen(taskId: String) async throws {
         try await recording {
-            try await stopLiveSessions(onTask: taskId)
+            try await stopLiveSessions(onTask: taskId, by: .human)
             let report = try board.reopen(taskId: taskId)
             announceReports(projectId: report.projectId)
         }
@@ -1809,7 +1901,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording {
             let plan = try board.epicClosurePlan(epicId: epicId, as: closure)
             if plan.isRefused { throw SupervisorError.epicCloseRefused(plan.message) }
-            let report = try board.closeEpic(epicId: epicId, as: closure, by: "human")
+            let report = try board.closeEpic(epicId: epicId, as: closure, by: .human)
             announceReports(projectId: report.projectId)
         }
     }
@@ -1989,8 +2081,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording { try await spawn(taskId: taskId, rosterAgentId: rosterAgentId, scope: scope) }
     }
 
+    /// Only the orchestrator's `stop_worker` reaches this; a human's Stop calls `stop(sessionId:)`.
     func stopWorker(sessionId: String) async throws {
-        try await stop(sessionId: sessionId)
+        try await recording { try await stopSession(sessionId, by: .orchestrator(sessionId: nil)) }
     }
 
     // MARK: - BoardEventSink
@@ -2086,8 +2179,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
-    /// The orderly end of a worker's life, and until now the only one that left its process running:
-    /// the agent is told to take no further turns, so the session sits `idle` holding its whole
+    /// The orderly end of a worker's life, after `report_complete` or a reviewer's verdict, and until
+    /// now the only one that left its process running: the agent is told to take no further turns, so the session sits `idle` holding its whole
     /// context forever. Stopping it frees ~300 MB and costs nothing — `claude --bg --resume` reads
     /// the transcript, which a stop leaves intact, so the task in `review` can still be reopened
     /// and attached to.
@@ -2480,12 +2573,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         placement: WorkerPlacement = .worktree,
         workingDirectory: String? = nil,
         agent: AgentIdentity? = nil,
-        reviewFindings: String? = nil
+        reviewFindings: String? = nil,
+        comments: [TaskComment] = []
     ) -> String {
         OpeningPrompt.compose(
             task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes,
             verification: verification, placement: placement, workingDirectory: workingDirectory,
-            agent: agent, reviewFindings: reviewFindings
+            agent: agent, reviewFindings: reviewFindings, comments: comments
         )
     }
 

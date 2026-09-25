@@ -111,9 +111,10 @@ final class FakeGh: GhRunning, @unchecked Sendable {
 
     var calls: [[String]] { lock.withLock { recorded } }
 
-    func answer(_ url: String, state: String, mergeCommit: String? = nil) {
+    func answer(_ url: String, state: String, mergeCommit: String? = nil, head: String? = nil) {
         let commit = mergeCommit.map { #"{"oid":"\#($0)"}"# } ?? "null"
-        let json = #"{"mergeCommit":\#(commit),"mergedAt":null,"state":"\#(state)"}"#
+        let headRefOid = head.map { #""\#($0)""# } ?? "null"
+        let json = #"{"headRefOid":\#(headRefOid),"mergeCommit":\#(commit),"mergedAt":null,"state":"\#(state)"}"#
         lock.withLock { answers[url] = CommandResult(status: 0, stdout: json, stderr: "") }
     }
 
@@ -417,6 +418,19 @@ struct SupervisorFixture {
     func callWorkerTool(_ name: String, arguments: JSONValue, token: String) async throws -> ToolResult {
         let result = try await workerHandler().call(
             name, arguments: arguments, identity: try await identity(token: token)
+        )
+        await result.afterResponse?()
+        return result
+    }
+
+    /// An orchestrator tool call under a fresh orchestrator grant, wired to this fixture's supervisor.
+    @discardableResult
+    func callOrchestratorTool(_ name: String, arguments: JSONValue) async throws -> ToolResult {
+        let sink = LateBoundSink()
+        sink.target = supervisor
+        let grant = try grants.issue(projectId: project.id, scope: .orchestrator, taskId: nil)
+        let result = try await OrchestratorToolHandler(db: db, control: sink, events: sink).call(
+            name, arguments: arguments, identity: try await identity(token: grant.token)
         )
         await result.afterResponse?()
         return result

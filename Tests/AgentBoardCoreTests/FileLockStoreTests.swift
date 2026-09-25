@@ -150,7 +150,7 @@ final class FileLockStoreTests: XCTestCase {
 
     func testEveryTerminationRouteReleasesLocksIncludingACapKill() throws {
         let causes: [SessionTermination] = [
-            .capBreach("idle cap reached"), .stoppedByHuman, .vanished,
+            .capBreach("idle cap reached"), .stopped(by: .human), .vanished,
             .setupFailed("worktree"), .shutdownAcknowledged(note: nil),
         ]
         for (index, cause) in causes.enumerated() {

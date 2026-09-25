@@ -95,6 +95,27 @@ final class SharedBranchAcceptTests: XCTestCase {
         XCTAssertTrue(try fileExistsOnBranch("beta.txt", epic.branch))
     }
 
+    /// Both accepts see every member accepted, so both reach the merge; only one may run it.
+    func testTwoConcurrentLastAcceptsMergeTheSharedBranchOnce() async throws {
+        try write("alpha.txt", "a\n")
+        try await commit(alpha, paths: ["alpha.txt"], message: "Add alpha")
+        try write("beta.txt", "b\n")
+        try await commit(beta, paths: ["beta.txt"], message: "Add beta")
+        try fixture.commitOn(branch: epic.branch, message: "Sibling work already on the epic branch")
+        let sharedHead = try headOf(branch)
+
+        let supervisor = fixture.supervisor
+        async let alphaAccept: Void = supervisor.accept(taskId: alpha.id)
+        async let betaAccept: Void = supervisor.accept(taskId: beta.id)
+        _ = try await (alphaAccept, betaAccept)
+
+        XCTAssertTrue(try isAncestor(sharedHead, of: epic.branch), "the shared branch never reached the epic branch")
+        XCTAssertEqual(try mergeCommitCount(epic.branch), 1, "the shared branch was merged more than once")
+        XCTAssertEqual(try fixture.tasks.get(alpha.id)?.landing, .landed)
+        XCTAssertEqual(try fixture.tasks.get(beta.id)?.landing, .landed)
+        XCTAssertEqual(try mergeReports(), [])
+    }
+
     // MARK: - Reaping
 
     /// `reconcile`'s sweep is the second path that drops merged `agentboard/*` branches.
@@ -193,16 +214,21 @@ final class SharedBranchAcceptTests: XCTestCase {
     }
 
     /// A member still running holds the checkout; nothing may be reaped out from under it. An accept
-    /// stops every live session on its task but the one doing the accepting, so that is the one left.
+    /// stops only its own task's sessions, so the live one left is an already-accepted sibling's
+    /// stopped worker that `reconcile` revives because `claude agents` still lists it running.
     func testALiveMemberKeepsTheSharedBranch() async throws {
-        try fixture.sessions.setState("beta-session", .running)
+        try fixture.sessions.setState("alpha-session", .stopped)
         try write("alpha.txt", "a\n")
         try await commit(alpha, paths: ["alpha.txt"], message: "Add alpha")
-
         try await fixture.supervisor.accept(taskId: alpha.id)
-        try await fixture.supervisor.accept(
-            taskId: beta.id, acceptedBy: .reviewer(name: "Rae", verdict: "ok", sessionId: "beta-session")
-        )
+
+        await fixture.runtime.listing([
+            AgentInfo(id: "alpha-session", cwd: fixture.repo.path, kind: "bg", sessionId: "alpha-session", status: "running"),
+        ])
+        await fixture.supervisor.reconcile(projectId: fixture.project.id)
+        XCTAssertEqual(try fixture.sessions.get("alpha-session")?.state, .running)
+
+        try await fixture.supervisor.accept(taskId: beta.id)
 
         XCTAssertTrue(try fixture.manager.branchExists(branch), "a live member's branch was reaped")
     }

@@ -31,6 +31,9 @@ public enum EpicState: String, Codable, Sendable, CaseIterable, Equatable, Datab
     case planning
     case active
     case integrating
+    /// A pull request from the epic branch is recorded and has not merged or closed (SPEC §5.2).
+    /// The epic still takes tasks; the merge check moves it to `done`, or back to `active`.
+    case pullRequestOpen = "pull_request_open"
     case done
     case abandoned
 
@@ -39,7 +42,7 @@ public enum EpicState: String, Codable, Sendable, CaseIterable, Equatable, Datab
     public var isTerminal: Bool {
         switch self {
         case .done, .abandoned: return true
-        case .planning, .active, .integrating: return false
+        case .planning, .active, .integrating, .pullRequestOpen: return false
         }
     }
 }
@@ -103,6 +106,8 @@ public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, Data
     /// Text another project's orchestrator sent here. Delivered through the report queue so the
     /// orchestrator pulls it, and framed as untrusted: see `CrossProjectMessage`.
     case message
+    /// The human commented on a task; the body quotes it. An agent's comment queues nothing (SPEC §9.1).
+    case comment
 }
 
 public enum ApprovalKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {

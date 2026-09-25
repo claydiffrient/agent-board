@@ -44,18 +44,20 @@ public struct ProgressStore: Sendable {
     /// The note the latest agent review left, when that review sent the task back. Nil when no
     /// review has run or the latest one passed. The next worker's opening prompt carries it (SPEC §5.1).
     public func openReviewFindings(taskId: String) throws -> String? {
-        let latest = try db.reader.read { db in
-            try ProgressEntry.fetchOne(
-                db,
-                sql: """
-                SELECT * FROM progress WHERE task_id = ? AND kind = ? AND (text GLOB ? OR text GLOB ?)
-                ORDER BY at DESC, id DESC LIMIT 1
-                """,
-                arguments: [
-                    taskId, ProgressKind.note, Board.reviewFailedLead + "*", Board.reviewPassedLead + "*",
-                ]
-            )
-        }
+        try db.reader.read { db in try Self.openReviewFindings(db, taskId: taskId) }
+    }
+
+    static func openReviewFindings(_ db: Database, taskId: String) throws -> String? {
+        let latest = try ProgressEntry.fetchOne(
+            db,
+            sql: """
+            SELECT * FROM progress WHERE task_id = ? AND kind = ? AND (text GLOB ? OR text GLOB ?)
+            ORDER BY at DESC, id DESC LIMIT 1
+            """,
+            arguments: [
+                taskId, ProgressKind.note, Board.reviewFailedLead + "*", Board.reviewPassedLead + "*",
+            ]
+        )
         guard let latest, latest.text.hasPrefix(Board.reviewFailedLead) else { return nil }
         return latest.text
     }
