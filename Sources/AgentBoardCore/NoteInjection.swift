@@ -126,7 +126,7 @@ extension NoteStore {
                     NoteIndexEntry(
                         id: note.id,
                         title: note.title,
-                        uri: NoteResourceURI.uri(projectId: note.projectId, noteId: note.id),
+                        uri: NoteResourceURI.uri(projectId: projectId, noteId: note.id),
                         headings: headings[note.id] ?? [],
                         pinned: note.pinned
                     )

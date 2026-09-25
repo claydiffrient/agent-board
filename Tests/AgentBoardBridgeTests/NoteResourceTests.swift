@@ -27,7 +27,7 @@ final class NoteResourceTests: XCTestCase {
     }
 
     private func uri(_ note: Note) -> String {
-        NoteResourceHandler.uri(projectId: note.projectId, noteId: note.id)
+        NoteResourceHandler.uri(projectId: note.projectId!, noteId: note.id)
     }
 
     // MARK: Listing

@@ -116,26 +116,31 @@ struct NoteTools: Sendable {
     ]
 
     func call(_ name: String, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        try call(name, arguments: arguments, identity: identity, space: identity.projectId)
+    }
+
+    /// `space` is the project whose notes the call reaches, or nil for the Coordinator's plans.
+    func call(_ name: String, arguments: JSONValue, identity: TokenIdentity, space: String?) throws -> ToolResult {
         switch name {
         case "search_notes":
             let query = try ToolArguments.requiredString("query", in: arguments)
-            let matches = try notes.search(projectId: identity.projectId, query: query)
+            let matches = try notes.search(projectId: space, query: query)
             return .json(.array(matches.map(Self.renderSummary)))
         case "read_note":
-            let note = try projectNote(try ToolArguments.requiredString("id", in: arguments), identity: identity)
+            let note = try spaceNote(try ToolArguments.requiredString("id", in: arguments), space: space)
             guard let (_, sections) = try notes.read(note.id) else {
-                throw ToolError("Note \(note.id) is not in this project.")
+                throw Self.notInSpace(note.id, space: space)
             }
             return ToolResult(text: Self.body(note, sections: sections))
         case "append_section":
-            return try write(arguments, identity: identity) { noteId, heading, body, ifVersion in
+            return try write(arguments, identity: identity, space: space) { noteId, heading, body, ifVersion in
                 try notes.appendSection(
                     noteId: noteId, heading: heading, body: body,
                     ifVersion: ifVersion, writtenBy: identity.sessionId
                 )
             }
         case "replace_section":
-            return try write(arguments, identity: identity) { noteId, heading, body, ifVersion in
+            return try write(arguments, identity: identity, space: space) { noteId, heading, body, ifVersion in
                 try notes.replaceSection(
                     noteId: noteId, heading: heading, body: body,
                     ifVersion: ifVersion, writtenBy: identity.sessionId
@@ -144,7 +149,7 @@ struct NoteTools: Sendable {
         case "create_note":
             let title = try ToolArguments.requiredString("title", in: arguments)
             let note = try notes.create(
-                projectId: identity.projectId,
+                projectId: space,
                 title: title,
                 sections: try Self.parseSections(arguments["sections"]),
                 writtenBy: identity.sessionId
@@ -153,7 +158,7 @@ struct NoteTools: Sendable {
         case "attach_note":
             return try attach(arguments, identity: identity)
         case "pin_note":
-            let note = try projectNote(try ToolArguments.requiredString("note_id", in: arguments), identity: identity)
+            let note = try spaceNote(try ToolArguments.requiredString("note_id", in: arguments), space: identity.projectId)
             let pinned = try ToolArguments.requiredBool("pinned", in: arguments)
             try notes.pin(note.id, pinned)
             return ToolResult(text: pinned
@@ -167,9 +172,10 @@ struct NoteTools: Sendable {
     private func write(
         _ arguments: JSONValue,
         identity: TokenIdentity,
+        space: String?,
         _ apply: (String, String, String, Int64?) throws -> Note
     ) throws -> ToolResult {
-        let note = try projectNote(try ToolArguments.requiredString("note_id", in: arguments), identity: identity)
+        let note = try spaceNote(try ToolArguments.requiredString("note_id", in: arguments), space: space)
         let heading = try ToolArguments.requiredString("heading", in: arguments)
         let body = try ToolArguments.requiredString("body", in: arguments)
         let ifVersion = try ToolArguments.optionalInteger("if_version", in: arguments)
@@ -182,7 +188,7 @@ struct NoteTools: Sendable {
     }
 
     private func attach(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
-        let note = try projectNote(try ToolArguments.requiredString("note_id", in: arguments), identity: identity)
+        let note = try spaceNote(try ToolArguments.requiredString("note_id", in: arguments), space: identity.projectId)
         let taskId = ToolArguments.optionalString("task_id", in: arguments)
         let epicId = ToolArguments.optionalString("epic_id", in: arguments)
         switch (taskId, epicId) {
@@ -208,11 +214,13 @@ struct NoteTools: Sendable {
         }
     }
 
-    private func projectNote(_ id: String, identity: TokenIdentity) throws -> Note {
-        guard let note = try notes.get(id), note.projectId == identity.projectId else {
-            throw ToolError("Note \(id) is not in this project.")
-        }
+    private func spaceNote(_ id: String, space: String?) throws -> Note {
+        guard let note = try notes.get(id, projectId: space) else { throw Self.notInSpace(id, space: space) }
         return note
+    }
+
+    private static func notInSpace(_ id: String, space: String?) -> ToolError {
+        ToolError(space == nil ? "Note \(id) is not one of your plans." : "Note \(id) is not in this project.")
     }
 
     static func toolError(_ error: NoteError) -> ToolError {

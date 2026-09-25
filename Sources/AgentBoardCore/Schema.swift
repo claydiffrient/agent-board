@@ -303,6 +303,23 @@ enum Schema {
     CREATE INDEX report_project_consumed ON report(project_id, consumed_at);
     """
 
+    /// `note.project_id` becomes nullable: a NULL note is one of the Coordinator's plans (SPEC §8.2).
+    /// Rowids are copied, not reassigned, because `note_fts` is keyed to them and holds no text of its own.
+    static let coordinatorNotes = """
+    CREATE TABLE note_new (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT REFERENCES project(id),
+      title       TEXT NOT NULL,
+      pinned      INTEGER NOT NULL DEFAULT 0,
+      version     INTEGER NOT NULL DEFAULT 1,
+      updated_at  INTEGER NOT NULL
+    );
+    INSERT INTO note_new (rowid, id, project_id, title, pinned, version, updated_at)
+      SELECT rowid, id, project_id, title, pinned, version, updated_at FROM note;
+    DROP TABLE note;
+    ALTER TABLE note_new RENAME TO note;
+    """
+
     /// The Coordinator's session gets a row with no project, so hooks can bind its grant and the
     /// metering tick can read its spend (SPEC §8.2). `coordinator` is its one row of state: the
     /// session it resumes and the model it runs on, NULL for Claude Code's default.
