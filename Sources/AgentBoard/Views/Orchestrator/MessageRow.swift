@@ -1,13 +1,16 @@
 import AgentBoardCore
 import SwiftUI
 
-/// One cross-project message in the orchestrator sidebar. Read-only: the channel is between
-/// orchestrators, and a human who wants to say something types it into that project's console.
+/// One cross-project message in the orchestrator sidebar. The human can delete it but not write
+/// one: the channel is between orchestrators, and a human who wants to say something types it into
+/// that project's console.
 struct MessageRow: View {
     let entry: MessageEntry
     let projectName: String
+    let delete: () -> Void
 
     @State private var expanded = false
+    @State private var hovering = false
 
     private var isReceived: Bool { entry.direction == .received }
 
@@ -40,6 +43,15 @@ struct MessageRow: View {
                     .fontWeight(entry.isConsumed ? .regular : .semibold)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                Spacer(minLength: 0)
+                Button(action: delete) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .opacity(hovering ? 1 : 0)
+                .help("Delete this message for both projects")
+                .accessibilityLabel("Delete message")
             }
             .font(.callout)
             HStack(spacing: 6) {
@@ -75,6 +87,10 @@ struct MessageRow: View {
                     .fill(Color.orange)
                     .frame(width: 2)
             }
+        }
+        .onHover { hovering = $0 }
+        .contextMenu {
+            Button("Delete Message", role: .destructive, action: delete)
         }
     }
 }

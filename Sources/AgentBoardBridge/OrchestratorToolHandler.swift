@@ -382,6 +382,17 @@ public final class OrchestratorToolHandler: ToolHandler {
                 required: ["project_id", "body"]
             )
         ),
+        ToolDescriptor(
+            name: "delete_message",
+            description: "Delete a message another project sent you, once you have acted on it. Messages are "
+                + "ephemeral: anything in one that must outlive it belongs in a note or a task first. Deleting removes "
+                + "it for both projects — the sender's panel too — along with its report. Only messages you received "
+                + "can be deleted; the id is the `message_id` on a `message` report from list_reports.",
+            inputSchema: ToolSchema.object(
+                properties: ["message_id": ToolSchema.integer("The `message_id` from a `message` report.")],
+                required: ["message_id"]
+            )
+        ),
     ] + NoteTools.orchestratorDescriptors
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
@@ -421,6 +432,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "open_pull_request": return try openPullRequest(arguments, identity: identity)
         case "list_projects": return try listProjects(identity: identity)
         case "send_message": return try await sendMessage(arguments, identity: identity)
+        case "delete_message": return try deleteMessage(arguments, identity: identity)
         default: throw ToolError("Unknown tool: \(name)")
         }
     }
@@ -751,7 +763,7 @@ public final class OrchestratorToolHandler: ToolHandler {
 
     private func listReports(identity: TokenIdentity) throws -> ToolResult {
         let consumed = try reports.consumeAll(projectId: identity.projectId)
-        return .json(.array(consumed.map(renderReport)))
+        return .json(.array(try consumed.map(renderReport)))
     }
 
     private func getReport(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
@@ -761,7 +773,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         guard let report = try reports.get(id), report.projectId == identity.projectId else {
             throw ToolError("Report \(id) is not in this project.")
         }
-        return .json(renderReport(report))
+        return .json(try renderReport(report))
     }
 
     private func listApprovals(identity: TokenIdentity) throws -> ToolResult {
@@ -831,6 +843,17 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "That project's orchestrator will see it the next time it pulls its reports; it may not be running, "
                 + "and nothing tells you when or whether it reads it."
         )
+    }
+
+    private func deleteMessage(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let raw = arguments["message_id"]
+        let id: Int64? = raw?.numberValue.map(Int64.init) ?? raw?.stringValue.flatMap(Int64.init)
+        guard let id else { throw ToolError("Missing required argument: message_id") }
+        guard let message = try messages.get(id), message.toProjectId == identity.projectId else {
+            throw ToolError("Message \(id) was not received by this project; you can delete only messages sent to you.")
+        }
+        try messages.delete(id: id)
+        return ToolResult(text: "Deleted message \(id) for both projects.")
     }
 
     // MARK: Epics
@@ -1139,15 +1162,21 @@ public final class OrchestratorToolHandler: ToolHandler {
         ])
     }
 
-    private func renderReport(_ report: Report) -> JSONValue {
-        .object([
+    private func renderReport(_ report: Report) throws -> JSONValue {
+        var fields: [String: JSONValue] = [
             "id": report.id.map { .number(Double($0)) } ?? .null,
             "kind": .string(report.kind.rawValue),
             "task_id": .optional(report.taskId),
             "session_id": .optional(report.sessionId),
             "created_at": .millis(report.createdAt),
             "body": .string(report.body),
-        ])
+        ]
+        if report.kind == .message, let reportId = report.id,
+           let messageId = try messages.delivered(asReportId: reportId)?.id
+        {
+            fields["message_id"] = .number(Double(messageId))
+        }
+        return .object(fields)
     }
 
     private func renderApproval(_ approval: Approval) -> JSONValue {

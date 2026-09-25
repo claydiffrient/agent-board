@@ -57,6 +57,73 @@ public struct MessageStore: Sendable {
         try db.reader.read { db in try Message.fetchOne(db, key: id) }
     }
 
+    /// Messages consumed longer ago than this are deleted by `deleteConsumed(before:)`.
+    public static let retentionMillis: Int64 = 7 * ArchiveSweep.millisPerDay
+
+    /// Deletes the message for both projects, and its delivered report with it: the report body is
+    /// the message text, so a surviving report would keep the message alive, or announce one that
+    /// is gone if it was still unread. SPEC §9.3.
+    public func delete(id: Int64) throws {
+        try db.writer.write { db in try Self.delete(db, ids: [id]) }
+    }
+
+    /// Deletes every message in this project's conversation whose report has been consumed.
+    @discardableResult
+    public func deleteRead(projectId: String) throws -> Int {
+        try db.writer.write { db in
+            let ids = try Int64.fetchAll(
+                db,
+                sql: """
+                    SELECT m.id FROM message m JOIN report r ON r.id = m.report_id
+                    WHERE (m.to_project_id = :p OR m.from_project_id = :p) AND r.consumed_at IS NOT NULL
+                    """,
+                arguments: ["p": projectId]
+            )
+            try Self.delete(db, ids: ids)
+            return ids.count
+        }
+    }
+
+    /// Deletes, across every project, the messages whose report was consumed before `cutoff`.
+    @discardableResult
+    public func deleteConsumed(before cutoff: Int64) throws -> Int {
+        try db.writer.write { db in
+            let ids = try Int64.fetchAll(
+                db,
+                sql: """
+                    SELECT m.id FROM message m JOIN report r ON r.id = m.report_id
+                    WHERE r.consumed_at < ?
+                    """,
+                arguments: [cutoff]
+            )
+            try Self.delete(db, ids: ids)
+            return ids.count
+        }
+    }
+
+    private static func delete(_ db: Database, ids: [Int64]) throws {
+        guard !ids.isEmpty else { return }
+        let placeholders = databaseQuestionMarks(count: ids.count)
+        let reportIds = try Int64.fetchAll(
+            db,
+            sql: "SELECT report_id FROM message WHERE id IN (\(placeholders)) AND report_id IS NOT NULL",
+            arguments: StatementArguments(ids)
+        )
+        try db.execute(sql: "DELETE FROM message WHERE id IN (\(placeholders))", arguments: StatementArguments(ids))
+        guard !reportIds.isEmpty else { return }
+        try db.execute(
+            sql: "DELETE FROM report WHERE id IN (\(databaseQuestionMarks(count: reportIds.count)))",
+            arguments: StatementArguments(reportIds)
+        )
+    }
+
+    /// The message delivered as this report, if the report is a delivered message.
+    public func delivered(asReportId reportId: Int64) throws -> Message? {
+        try db.reader.read { db in
+            try Message.fetchOne(db, sql: "SELECT * FROM message WHERE report_id = ?", arguments: [reportId])
+        }
+    }
+
     /// Messages this project received, oldest first.
     public func inbox(projectId: String) throws -> [Message] {
         try db.reader.read { db in
