@@ -94,6 +94,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let roster: RosterStore
     @ObservationIgnored private let board: Board
     @ObservationIgnored private let archives: ArchiveSweep
+    @ObservationIgnored private let messages: MessageStore
     @ObservationIgnored private let fileLocks: FileLockStore
     @ObservationIgnored private let attention: ProjectAttentionStore
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
@@ -166,6 +167,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         roster = RosterStore(db)
         board = Board(db)
         archives = ArchiveSweep(db)
+        messages = MessageStore(db)
         fileLocks = FileLockStore(db)
         attention = ProjectAttentionStore(db)
         pullRequestStates = PullRequestStateReader(gh: gh)
@@ -2350,7 +2352,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// deadline that passing time can cross.
     @discardableResult
     func sweepArchives(_ all: [Project], now: Int64 = .nowMillis) -> [String] {
-        all.flatMap { (try? archives.run(projectId: $0.id, now: now)) ?? [] }
+        _ = try? messages.deleteExpired(now: now)
+        return all.flatMap { (try? archives.run(projectId: $0.id, now: now)) ?? [] }
     }
 
     private static func shouldMeter(_ session: AgentSession, now: Int64) -> Bool {

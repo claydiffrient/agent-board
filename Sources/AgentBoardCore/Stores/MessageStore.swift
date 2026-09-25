@@ -57,7 +57,7 @@ public struct MessageStore: Sendable {
         try db.reader.read { db in try Message.fetchOne(db, key: id) }
     }
 
-    /// Messages consumed longer ago than this are deleted by `deleteConsumed(before:)`.
+    /// Messages consumed longer ago than this are deleted by `deleteExpired(now:)`.
     public static let retentionMillis: Int64 = 7 * ArchiveSweep.millisPerDay
 
     /// Deletes the message for both projects, and its delivered report with it: the report body is
@@ -84,10 +84,12 @@ public struct MessageStore: Sendable {
         }
     }
 
-    /// Deletes, across every project, the messages whose report was consumed before `cutoff`.
+    /// The backstop for messages nobody deleted: across every project, deletes those whose report
+    /// was consumed more than `retentionMillis` ago. Runs on the archive sweep's tick. SPEC §9.3.
     @discardableResult
-    public func deleteConsumed(before cutoff: Int64) throws -> Int {
-        try db.writer.write { db in
+    public func deleteExpired(now: Int64 = .nowMillis) throws -> Int {
+        let cutoff = now - Self.retentionMillis
+        return try db.writer.write { db in
             let ids = try Int64.fetchAll(
                 db,
                 sql: """

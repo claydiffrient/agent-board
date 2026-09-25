@@ -510,7 +510,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "comments": try comments.thread(taskId: task.id),
         ]
         if let report = latestReport {
-            object["latest_report"] = renderReport(report)
+            object["latest_report"] = try renderReport(report)
         }
         return .json(.object(object))
     }
