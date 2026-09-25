@@ -85,6 +85,74 @@ final class SchemaTests: XCTestCase {
         }
     }
 
+    /// `note_fts` is contentless and keyed to `note.rowid`; rebuilding `note` without carrying rowid
+    /// forward renumbers survivors past a gap and leaves the index pointing at the wrong notes. This
+    /// mirrors a real database: two projects, a note deleted from the middle before the migration runs.
+    func testCoordinatorNotesMigrationKeepsNotesSearchableAcrossARowidGap() throws {
+        var configuration = Configuration()
+        configuration.foreignKeysEnabled = true
+        let queue = try DatabaseQueue(configuration: configuration)
+        try AppDatabase.migrator.migrate(queue, upTo: "coordinator")
+
+        try queue.write { db in
+            for id in ["p1", "p2"] {
+                try db.execute(
+                    sql: "INSERT INTO project (id, name, repo_path, worktree_root, settings_json, created_at) VALUES (?, ?, ?, '/w', '{}', 0)",
+                    arguments: [id, id, "/repo/\(id)"]
+                )
+            }
+            try self.insertNote(db, id: "noteA", projectId: "p1", title: "Sunflower report", body: "growth chart for sunflower yield")
+            try self.insertNote(db, id: "noteB", projectId: "p2", title: "Harmonica ledger", body: "loaned harmonica inventory")
+            try self.insertNote(db, id: "noteC", projectId: "p1", title: "Octopus manual", body: "care instructions for octopus tank")
+            try self.insertNote(db, id: "noteD", projectId: "p1", title: "Telescope invoice", body: "purchase order for telescope mount")
+
+            // Delete the middle note the normal way, leaving a gap at its rowid.
+            try NoteStore.unindex(db, noteId: "noteB")
+            try db.execute(sql: "DELETE FROM note_section WHERE note_id = ?", arguments: ["noteB"])
+            try db.execute(sql: "DELETE FROM note WHERE id = ?", arguments: ["noteB"])
+        }
+
+        try AppDatabase.migrator.migrate(queue)
+
+        try queue.write { db in
+            XCTAssertEqual(try self.search(db, projectId: "p1", term: "sunflower"), ["noteA"])
+            XCTAssertEqual(try self.search(db, projectId: "p1", term: "octopus"), ["noteC"])
+            XCTAssertEqual(try self.search(db, projectId: "p1", term: "telescope"), ["noteD"])
+            XCTAssertEqual(try self.search(db, projectId: "p2", term: "harmonica"), [], "the deleted note must stay gone")
+
+            try self.insertNote(db, id: "noteE", projectId: "p1", title: "Quokka report", body: "quokka population survey notes")
+            XCTAssertEqual(try self.search(db, projectId: "p1", term: "quokka"), ["noteE"], "a note created after the migration must index and search")
+            XCTAssertEqual(try self.search(db, projectId: "p1", term: "octopus"), ["noteC"], "the new note must not collide with a rowid the migration freed")
+        }
+    }
+
+    private func insertNote(_ db: Database, id: String, projectId: String, title: String, body: String) throws {
+        try db.execute(
+            sql: "INSERT INTO note (id, project_id, title, pinned, version, updated_at) VALUES (?, ?, ?, 0, 1, 0)",
+            arguments: [id, projectId, title]
+        )
+        try db.execute(
+            sql: "INSERT INTO note_section (note_id, heading, body, ordering) VALUES (?, 'Body', ?, 1)",
+            arguments: [id, body]
+        )
+        try NoteStore.index(db, noteId: id)
+    }
+
+    /// Mirrors `NoteStore.matches` exactly, since `NoteStore` itself can only be built on an
+    /// already-fully-migrated `AppDatabase` and this test needs to stop mid-migration.
+    private func search(_ db: Database, projectId: String, term: String) throws -> [String] {
+        guard let match = NoteSearch.ftsQuery(term) else { return [] }
+        return try String.fetchAll(
+            db,
+            sql: """
+            SELECT n.id FROM note_fts f JOIN note n ON n.rowid = f.rowid
+            WHERE f.note_fts MATCH ? AND n.project_id IS ?
+            ORDER BY bm25(note_fts), n.updated_at DESC
+            """,
+            arguments: [match, projectId]
+        )
+    }
+
     func testForeignKeysAreEnforced() throws {
         let db = try AppDatabase.inMemory()
         XCTAssertThrowsError(try db.writer.write { db in
