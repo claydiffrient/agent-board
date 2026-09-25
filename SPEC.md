@@ -2665,7 +2665,8 @@ three sections:
   first line, its state (`sent`, `accepted`, `declined`, `done`, `withdrawn`), the
   latest text an orchestrator replied with, and one link per linked epic. A link
   selects that project on its Task Board and scrolls to the epic's lane, through
-  the same route a banner click uses (`NotificationRoute.Subject.epic`).
+  the same route a banner click uses (`NotificationRoute.Subject.epic`). Each
+  click routes once: the board returning to view later does not scroll again.
 - **Plans** — the Coordinator's notes (project NULL). Each opens read-only in a
   sheet; the Coordinator writes them through its note tools.
 - **Sessions** — **New Session**, the active session, and the history; clicking

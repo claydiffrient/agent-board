@@ -369,7 +369,7 @@ struct ProjectDetailView: View {
         }
         .navigationTitle(project.name)
         .task(id: env.router.sequence) {
-            if let route = env.router.route, route.projectId == project.id { screen = route.screen }
+            if let route = env.router.take(.screen, projectId: project.id) { screen = route.screen }
         }
         .toolbar {
             ToolbarItem(placement: .principal) {

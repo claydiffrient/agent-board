@@ -210,7 +210,7 @@ struct TaskBoardView: View {
             await rosterAgents.run(RosterStore(env.db).observe(), in: env.db.reader)
         }
         .task(id: env.router.sequence) {
-            guard let route = env.router.route, route.projectId == project.id,
+            guard let route = env.router.take(.epicLane, projectId: project.id),
                   case .epic(let epicId) = route.subject else { return }
             routedEpicId = epicId
             await jumpToRoutedEpic()
