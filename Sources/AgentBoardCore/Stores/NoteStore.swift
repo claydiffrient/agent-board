@@ -6,6 +6,7 @@ public enum NoteError: Error, Equatable, Sendable {
     case versionConflict(noteId: String, expected: Int64, current: Int64)
 }
 
+/// A `projectId` of nil names the Coordinator's plan space, which no project's `projectId` reaches.
 public struct NoteStore: Sendable {
     let db: AppDatabase
 
@@ -15,7 +16,7 @@ public struct NoteStore: Sendable {
 
     @discardableResult
     public func create(
-        projectId: String,
+        projectId: String?,
         title: String,
         sections: [(heading: String, body: String)],
         writtenBy: String? = nil
@@ -43,6 +44,13 @@ public struct NoteStore: Sendable {
         try db.reader.read { db in try Note.fetchOne(db, key: id) }
     }
 
+    /// The note only if it is in that space; a note from any other project or space reads as absent.
+    public func get(_ id: String, projectId: String?) throws -> Note? {
+        try db.reader.read { db in
+            try Note.fetchOne(db, sql: "SELECT * FROM note WHERE id = ? AND project_id IS ?", arguments: [id, projectId])
+        }
+    }
+
     public func read(_ id: String) throws -> (Note, [NoteSection])? {
         try db.reader.read { db in
             guard let note = try Note.fetchOne(db, key: id) else { return nil }
@@ -50,31 +58,31 @@ public struct NoteStore: Sendable {
         }
     }
 
-    public func list(projectId: String) throws -> [Note] {
+    public func list(projectId: String?) throws -> [Note] {
         try db.reader.read { db in try Self.list(db, projectId: projectId) }
     }
 
-    static func list(_ db: Database, projectId: String) throws -> [Note] {
+    static func list(_ db: Database, projectId: String?) throws -> [Note] {
         try Note.fetchAll(
             db,
-            sql: "SELECT * FROM note WHERE project_id = ? ORDER BY pinned DESC, updated_at DESC, title",
+            sql: "SELECT * FROM note WHERE project_id IS ? ORDER BY pinned DESC, updated_at DESC, title",
             arguments: [projectId]
         )
     }
 
     /// Section headings for every note in the project, keyed by note id and in section order.
     /// Bodies are deliberately not fetched: this feeds a listing whose point is to be cheap.
-    public func headings(projectId: String) throws -> [String: [String]] {
+    public func headings(projectId: String?) throws -> [String: [String]] {
         try db.reader.read { db in try Self.headings(db, projectId: projectId) }
     }
 
-    static func headings(_ db: Database, projectId: String) throws -> [String: [String]] {
+    static func headings(_ db: Database, projectId: String?) throws -> [String: [String]] {
         let rows = try Row.fetchAll(
             db,
             sql: """
                 SELECT s.note_id AS note_id, s.heading AS heading
                 FROM note_section s JOIN note n ON n.id = s.note_id
-                WHERE n.project_id = ?
+                WHERE n.project_id IS ?
                 ORDER BY s.note_id, s.ordering, s.heading
                 """,
             arguments: [projectId]
@@ -234,9 +242,9 @@ public struct NoteStore: Sendable {
         )
     }
 
-    /// Full-text search over this project's notes. `query` is FTS5 syntax; if it does not
+    /// Full-text search over one space's notes. `query` is FTS5 syntax; if it does not
     /// parse, every whitespace-separated token is re-tried as a quoted literal.
-    public func search(projectId: String, query: String) throws -> [Note] {
+    public func search(projectId: String?, query: String) throws -> [Note] {
         let tokens = query.split(whereSeparator: \.isWhitespace)
         guard !tokens.isEmpty else { return [] }
         return try db.reader.read { db in
@@ -249,12 +257,12 @@ public struct NoteStore: Sendable {
         }
     }
 
-    private func matches(_ db: Database, projectId: String, match: String) throws -> [Note] {
+    private func matches(_ db: Database, projectId: String?, match: String) throws -> [Note] {
         try Note.fetchAll(
             db,
             sql: """
             SELECT n.* FROM note_fts f JOIN note n ON n.rowid = f.rowid
-            WHERE f.note_fts MATCH ? AND n.project_id = ?
+            WHERE f.note_fts MATCH ? AND n.project_id IS ?
             ORDER BY bm25(note_fts), n.updated_at DESC
             """,
             arguments: [match, projectId]
@@ -274,7 +282,7 @@ public struct NoteStore: Sendable {
         }
     }
 
-    public func observe(projectId: String) -> ValueObservation<ValueReducers.Fetch<[Note]>> {
+    public func observe(projectId: String?) -> ValueObservation<ValueReducers.Fetch<[Note]>> {
         ValueObservation.tracking { db in
             try Self.list(db, projectId: projectId)
         }
