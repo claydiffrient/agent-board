@@ -412,7 +412,7 @@ after the fixed push/PR block. `assign_to_agent` under `reviewer` scope (used
 only to start a rostered reviewer, §5.1) skips the `running` transition step 8
 would otherwise make — the task stays in `review` — and lands the reviewer in
 the *worker's own* worktree rather than cutting one, since it is keyed on the
-same task id. It records the branch HEAD in `agent_session.review_head`, opens
+same task id. It records the checkout's baseline in `agent_session.review_head`, opens
 with `ReviewPrompt.compose` in place of the worker prompt, and step 7 adds
 `SpawnRequest.reviewerDisallowedTools` (file edits and every git command that
 changes a branch or the index, plus `rm` and `mv`) after the push/PR block.
@@ -625,7 +625,7 @@ CREATE TABLE agent_session (
   tools_in_flight INTEGER NOT NULL DEFAULT 0,
   blocked_on_path TEXT,               -- §8.4: the shared-checkout file lock this session is waiting on
   roster_agent_id TEXT REFERENCES roster_agent(id),  -- §10: the rostered identity this session runs as
-  review_head    TEXT                -- §5.1: branch HEAD a rostered reviewer was spawned on
+  review_head    TEXT                -- §5.1: HEAD (and uncommitted-change fingerprint) a rostered reviewer was spawned on
 );
 
 CREATE TABLE token_grant (
@@ -1231,12 +1231,21 @@ into a commit of its own. Its opening prompt, which carries the task's comment
 thread (§3.1 step 6), says so (`ReviewPrompt`, served
 again as `briefing://reviewer` and as its post-compaction brief), and its
 `--disallowedTools` denies edits and branch-changing git commands (§3.1). Both
-verdict tools then check the checkout through `WorkerControl.reviewCheckoutChange`:
-if HEAD has moved from `review_head`, a tracked file differs from it, or no
-`review_head` was recorded, the verdict is refused, an `error` row names why, and
-the task stays in `review` for a person. The next worker spawned on a reopened
+verdict tools then check the checkout through `WorkerControl.reviewCheckoutChange`
+against the baseline spawn recorded in `review_head` (`ReviewCheckout.baseline`:
+the HEAD, plus a fingerprint of `git status --porcelain` and `git diff HEAD` when
+the worker left uncommitted tracked changes): if HEAD has moved, the tracked
+changes differ from that baseline, or no `review_head` was recorded, the verdict
+is refused, an `error` row names why — saying so when the tree was already dirty
+at spawn, so the worker's leftovers are not blamed on the reviewer — and the task
+stays in `review` for a person. Work finished in the shared checkout never
+reaches a reviewer: co-resident workers move its HEAD and dirty its tree, and
+`<base>...HEAD` carries their commits, so `ReviewPolicy.routing(completedBy:)`
+sends it to a person with that reason, and a reviewer's spawn ignores the
+worktree strategy. The next worker spawned on a reopened
 task gets the reviewer's `progress` note verbatim in its opening prompt, and in
-its post-compaction brief, until a later review passes.
+its post-compaction brief, until a later review passes, a human reopens the task,
+or it is accepted (`Board.closeReviewFindings`).
 
 ### 5.2 Epic integration
 

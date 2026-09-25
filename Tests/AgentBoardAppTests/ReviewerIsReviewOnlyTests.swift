@@ -25,19 +25,16 @@ final class ReviewerIsReviewOnlyTests: XCTestCase {
     }
 
     /// A worker that committed its work and reported, then Rita spawned on the task in `review`.
-    private func taskUnderReview() async throws -> (task: BoardTask, reviewer: AgentSession, token: String) {
-        let rita = try RosterStore(fixture.db).create(
-            name: "Rita", role: "reviewer", systemPrompt: "You review for correctness."
-        )
-        try RosterStore(fixture.db).enable(agentId: rita.id, forProject: fixture.project.id)
-        let task = try fixture.tasks.create(
-            projectId: fixture.project.id, title: "Add the parser", body: "Parse it.", acceptance: "Tests pass.",
-            priority: nil, column: .ready, origin: .human, epicId: nil
-        )
+    private func taskUnderReview(
+        workerLeaves: (AgentSession) throws -> Void = { _ in }
+    ) async throws -> (task: BoardTask, reviewer: AgentSession, token: String) {
+        let rita = try enableRita()
+        let task = try makeTask()
         try await fixture.supervisor.assign(taskId: task.id)
         await fixture.supervisor.waitForSetup()
         let worker = try XCTUnwrap(fixture.sessions.forTask(task.id).last)
         try fixture.commitInto(worker.cwd, file: "parser.txt")
+        try workerLeaves(worker)
         _ = try fixture.board.complete(taskId: task.id, sessionId: worker.sessionId, summary: "done")
 
         _ = try await fixture.supervisor.assignAgent(taskId: task.id, rosterAgentId: rita.id, scope: .reviewer)
@@ -45,6 +42,21 @@ final class ReviewerIsReviewOnlyTests: XCTestCase {
         let reviewer = try XCTUnwrap(fixture.sessions.forTask(task.id).first { $0.sessionId != worker.sessionId })
         let token = try XCTUnwrap(fixture.grants.forSession(reviewer.sessionId).first).token
         return (task, reviewer, token)
+    }
+
+    private func enableRita() throws -> RosterAgent {
+        let rita = try RosterStore(fixture.db).create(
+            name: "Rita", role: "reviewer", systemPrompt: "You review for correctness."
+        )
+        try RosterStore(fixture.db).enable(agentId: rita.id, forProject: fixture.project.id)
+        return rita
+    }
+
+    private func makeTask() throws -> BoardTask {
+        try fixture.tasks.create(
+            projectId: fixture.project.id, title: "Add the parser", body: "Parse it.", acceptance: "Tests pass.",
+            priority: nil, column: .ready, origin: .human, epicId: nil
+        )
     }
 
     private func callReviewerTool(_ name: String, _ arguments: [String: JSONValue], token: String) async throws {
@@ -95,5 +107,69 @@ final class ReviewerIsReviewOnlyTests: XCTestCase {
         let spawns = await fixture.runtime.spawns
         let prompt = try XCTUnwrap(spawns.last).prompt
         XCTAssertTrue(prompt.contains(findings), "the next worker never saw the reviewer's findings")
+    }
+
+    func testUncommittedWorkerEditsDoNotRefuseTheVerdictButAReviewersEditStillDoes() async throws {
+        let (task, reviewer, token) = try await taskUnderReview { worker in
+            try "left uncommitted\n".write(
+                toFile: worker.cwd + "/parser.txt", atomically: true, encoding: .utf8
+            )
+        }
+        let parser = reviewer.cwd + "/parser.txt"
+
+        try "the reviewer's fix\n".write(toFile: parser, atomically: true, encoding: .utf8)
+        do {
+            try await callReviewerTool("reopen_task", ["findings": .string("Needs work.")], token: token)
+            XCTFail("a reviewer that edited a tracked file had its verdict recorded")
+        } catch let error as ToolError {
+            XCTAssertTrue(error.message.contains("already had uncommitted tracked changes"), error.message)
+        }
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .review)
+
+        try "left uncommitted\n".write(toFile: parser, atomically: true, encoding: .utf8)
+        try await callReviewerTool("reopen_task", ["findings": .string("Commit parser.txt.")], token: token)
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .ready)
+    }
+
+    func testWorkDoneInTheSharedCheckoutGoesToAPersonNotTheReviewer() async throws {
+        try fixture.setWorktreeStrategy(.shared)
+        var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
+        settings.reviewLevel = .agent
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+        _ = try enableRita()
+        let task = try makeTask()
+        try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
+        let worker = try XCTUnwrap(fixture.sessions.forTask(task.id).last)
+        XCTAssertNil(worker.worktreePath, "the worker did not land in the shared checkout")
+
+        let outcome = try fixture.board.complete(taskId: task.id, sessionId: worker.sessionId, summary: "done")
+
+        guard case .humanReview(let reason) = outcome.routing else {
+            return XCTFail("shared-checkout work was routed to \(outcome.routing)")
+        }
+        XCTAssertTrue(reason?.contains("shared checkout") == true, reason ?? "no reason given")
+        XCTAssertNil(try fixture.tasks.get(task.id)?.reviewerAgentId)
+    }
+
+    func testAHumanReopenStopsTheLastReviewersFindingsReachingNewWorkers() async throws {
+        let (task, reviewer, token) = try await taskUnderReview()
+        let findings = "parser.txt:1 — the parser drops the trailing newline."
+        try await callReviewerTool("reopen_task", ["findings": .string(findings)], token: token)
+        try fixture.sessions.setState(reviewer.sessionId, .completed)
+
+        try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
+        let second = try XCTUnwrap(fixture.sessions.forTask(task.id).last)
+        _ = try fixture.board.complete(taskId: task.id, sessionId: second.sessionId, summary: "fixed")
+        try await fixture.supervisor.reopen(taskId: task.id)
+
+        try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
+        let spawns = await fixture.runtime.spawns
+        XCTAssertFalse(
+            try XCTUnwrap(spawns.last).prompt.contains(findings),
+            "a reviewer's findings outlived a human reopen"
+        )
     }
 }

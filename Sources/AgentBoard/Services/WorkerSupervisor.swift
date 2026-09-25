@@ -287,7 +287,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let attempt = try sessions.forTask(taskId).count + 1
         let manager = worktreeManager(for: project)
         let epic = try task.epicId.flatMap { try epics.get($0) }
-        let placement = WorkerPlacementDecision.decide(
+        // A reviewer reads the worker's own worktree. A task worked in the shared checkout never
+        // reaches agent review (SPEC §5.1), so the strategy has no say here.
+        let placement = scope == .reviewer ? WorkerPlacement.worktree : WorkerPlacementDecision.decide(
             strategy: project.settings.worktreeStrategy,
             wantedSharedBranch: SharedCheckoutGroup.branch(epicId: task.epicId),
             group: try SharedCheckoutGroup.current(db: db, projectId: project.id)
@@ -321,7 +323,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
         do {
             let reviewHead = scope == .reviewer
-                ? try await offMain { try ReviewCheckout.head(in: site.cwd) }
+                ? try await offMain { try ReviewCheckout.baseline(in: site.cwd) }
                 : nil
             let row = Self.setupRow(
                 projectId: project.id, taskId: taskId, site: site, attempt: attempt,
@@ -384,7 +386,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// SPEC §5.1: the reviewer's checkout must be as `spawn` recorded it. A session with no recorded
-    /// HEAD cannot be vouched for, so its verdict is refused too.
+    /// baseline cannot be vouched for, so its verdict is refused too.
     func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String? {
         let session = try sessionId.flatMap { try sessions.get($0) }
             ?? sessions.forTask(taskId).first { $0.reviewHead != nil && $0.state.isActive }

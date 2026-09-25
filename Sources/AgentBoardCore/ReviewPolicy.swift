@@ -57,6 +57,19 @@ public enum ReviewPolicy {
         }
     }
 
+    /// `routing` for the work one session finished. Work done in the shared checkout goes to a person:
+    /// co-resident workers move its HEAD and dirty its tree, and `<base>...HEAD` carries their commits
+    /// too, so a reviewer could neither read this task's diff alone nor pass its own check (SPEC §5.1).
+    public static func routing(_ db: Database, task: Task, completedBy sessionId: String) throws -> ReviewRouting {
+        let routing = try routing(db, task: task)
+        guard case .agentReview = routing,
+              let session = try AgentSession.fetchOne(db, key: sessionId), session.worktreePath == nil,
+              session.cwd == (try Project.fetchOne(db, key: task.projectId))?.repoPath
+        else { return routing }
+        return .humanReview(reason: "Agent review, but this task was worked in the shared checkout, where other "
+            + "workers' commits and edits share its branch, so a reviewer cannot isolate its diff. It needs a person.")
+    }
+
     /// Where agent review sends this project's tasks: the named reviewer, else the first usable
     /// agent whose role marks it a reviewer. Status shows this under the `agent` level (SPEC §10).
     public static func agentRouting(_ db: Database, projectId: String) throws -> ReviewRouting {
