@@ -159,9 +159,9 @@ final class SidebarAttentionLiveTests: XCTestCase {
     /// baseline can be the sidebar as it looks before its observations have delivered, which differs
     /// from every later capture across the whole strip rather than by a badge.
     ///
-    /// `pinnedRows` is the rows `MainWindow` lists outside every `Section` — At a Glance, then
-    /// Roster — so each count below reads as "the pinned rows, plus this board's project rows".
-    private static let pinnedRows = 2
+    /// `pinnedRows` is the rows `MainWindow` lists outside every `Section` — At a Glance, Roster,
+    /// then Coordinator — so each count below reads as "the pinned rows, plus this board's project rows".
+    private static let pinnedRows = SidebarSelection.pinned.count
     private static let oneUngroupedProject = SidebarContent(rows: pinnedRows + 1, headers: 1)
     private static let twoUngroupedProjects = SidebarContent(rows: pinnedRows + 2, headers: 1)
     private static let oneCollapsedSection = SidebarContent(rows: pinnedRows, headers: 1)

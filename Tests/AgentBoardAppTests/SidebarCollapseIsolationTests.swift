@@ -33,8 +33,8 @@ final class SidebarCollapseIsolationTests: XCTestCase {
 
     private static let sidebar = 0..<230
 
-    /// Rows `MainWindow` lists outside every `Section`: At a Glance, then Roster.
-    private static let pinnedRows = 2
+    /// Rows `MainWindow` lists outside every `Section`: At a Glance, Roster, then Coordinator.
+    private static let pinnedRows = SidebarSelection.pinned.count
 
     /// One workspace holding one project, so the sidebar draws two rows expanded and one collapsed.
     private func board() throws -> (AppDatabase, String) {

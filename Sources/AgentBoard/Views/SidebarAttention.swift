@@ -49,6 +49,40 @@ struct ProjectRow: View {
     }
 }
 
+/// The Coordinator's pinned sidebar row: marked while replies wait in its queue unread (SPEC §9.4).
+struct CoordinatorRow: View {
+    let unreadReplies: Int
+    let openSettings: () -> Void
+
+    static func unreadReplies(_ queue: [Report]) -> Int {
+        queue.filter { $0.kind == .reply }.count
+    }
+
+    static func summary(unreadReplies: Int) -> String? {
+        switch unreadReplies {
+        case 0: nil
+        case 1: "1 reply the Coordinator has not read"
+        default: "\(unreadReplies) replies the Coordinator has not read"
+        }
+    }
+
+    var body: some View {
+        HStack {
+            Label("Coordinator", systemImage: "point.3.connected.trianglepath.dotted")
+                .layoutPriority(1)
+            Spacer(minLength: 4)
+            if let summary = Self.summary(unreadReplies: unreadReplies) {
+                AttentionBadge(reason: summary)
+            }
+            Button(action: openSettings) {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.borderless)
+            .help("Coordinator settings")
+        }
+    }
+}
+
 /// What a collapsed section's badge says: every waiting project inside it, one per line, so the
 /// tooltip answers "which one" as well as "why" without expanding the section.
 func collapsedSectionSummary(_ section: ProjectSection, attention: [String: ProjectAttention]) -> String? {

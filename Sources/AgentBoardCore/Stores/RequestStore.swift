@@ -143,24 +143,41 @@ public struct RequestStore: Sendable {
 
     /// Newest first. Closed requests stay listed until the sweep deletes them.
     public func ledger(includeClosed: Bool = true) throws -> [RequestLedgerEntry] {
-        try db.reader.read { db in
-            let requests = try CoordinatorRequest.fetchAll(
-                db,
-                sql: "SELECT * FROM coordinator_request\(includeClosed ? "" : " WHERE closed_at IS NULL") ORDER BY created_at DESC, id DESC"
-            )
-            return try requests.map { request in
-                let id = request.id ?? 0
-                return RequestLedgerEntry(
-                    request: request,
-                    projectName: try String.fetchOne(db, sql: "SELECT name FROM project WHERE id = ?", arguments: [request.projectId]) ?? "",
-                    history: try RequestEvent.fetchAll(
-                        db, sql: "SELECT * FROM request_event WHERE request_id = ? ORDER BY created_at, id", arguments: [id]
-                    ),
-                    epicIds: try String.fetchAll(
-                        db, sql: "SELECT epic_id FROM request_epic WHERE request_id = ? ORDER BY rowid", arguments: [id]
-                    )
+        try db.reader.read { db in try Self.ledger(db, includeClosed: includeClosed) }
+    }
+
+    /// The Coordinator page's Requests section, with each linked epic's title.
+    public func ledgerRows() throws -> [CoordinatorLedgerRow] {
+        try db.reader.read { db in try Self.ledgerRows(db) }
+    }
+
+    public func observeLedgerRows() -> ValueObservation<ValueReducers.Fetch<[CoordinatorLedgerRow]>> {
+        ValueObservation.tracking { db in try Self.ledgerRows(db) }
+    }
+
+    static func ledgerRows(_ db: Database) throws -> [CoordinatorLedgerRow] {
+        let entries = try ledger(db, includeClosed: true)
+        let epicIds = Array(Set(entries.flatMap(\.epicIds)))
+        return CoordinatorLedger.rows(entries, epics: try Epic.fetchAll(db, keys: epicIds))
+    }
+
+    static func ledger(_ db: Database, includeClosed: Bool) throws -> [RequestLedgerEntry] {
+        let requests = try CoordinatorRequest.fetchAll(
+            db,
+            sql: "SELECT * FROM coordinator_request\(includeClosed ? "" : " WHERE closed_at IS NULL") ORDER BY created_at DESC, id DESC"
+        )
+        return try requests.map { request in
+            let id = request.id ?? 0
+            return RequestLedgerEntry(
+                request: request,
+                projectName: try String.fetchOne(db, sql: "SELECT name FROM project WHERE id = ?", arguments: [request.projectId]) ?? "",
+                history: try RequestEvent.fetchAll(
+                    db, sql: "SELECT * FROM request_event WHERE request_id = ? ORDER BY created_at, id", arguments: [id]
+                ),
+                epicIds: try String.fetchAll(
+                    db, sql: "SELECT epic_id FROM request_epic WHERE request_id = ? ORDER BY rowid", arguments: [id]
                 )
-            }
+            )
         }
     }
 

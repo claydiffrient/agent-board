@@ -24,6 +24,7 @@ struct TaskBoardView: View {
     @State private var showArchived = false
     @State private var confirmArchive = false
     @State private var jumpTarget: String?
+    @State private var routedEpicId: String?
     @State private var query = ""
     @State private var rosterAgents = Observed<[RosterAgent]>([])
     @State private var searchIndex = TaskSearch.IndexCache()
@@ -208,6 +209,13 @@ struct TaskBoardView: View {
         .task {
             await rosterAgents.run(RosterStore(env.db).observe(), in: env.db.reader)
         }
+        .task(id: env.router.sequence) {
+            guard let route = env.router.route, route.projectId == project.id,
+                  case .epic(let epicId) = route.subject else { return }
+            routedEpicId = epicId
+            await jumpToRoutedEpic()
+        }
+        .onChange(of: epics.value) { _Concurrency.Task { await jumpToRoutedEpic() } }
         .toolbar {
             ToolbarItem {
                 Button {
@@ -332,6 +340,15 @@ struct TaskBoardView: View {
         }
         .frame(width: jumpRailWidth)
         .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
+    /// A Coordinator epic link (SPEC §10) can arrive before the epics do, so it waits for the lane
+    /// and then for one layout pass, since the scroll reader ignores a target set as it appears.
+    private func jumpToRoutedEpic() async {
+        guard let epicId = routedEpicId, epics.value.contains(where: { $0.id == epicId }) else { return }
+        routedEpicId = nil
+        try? await _Concurrency.Task.sleep(for: .milliseconds(100))
+        jumpTarget = EpicJumpRail.laneId(forEpicId: epicId)
     }
 
     private func jumpRailEntry(epic: Epic, lane: Lane) -> some View {

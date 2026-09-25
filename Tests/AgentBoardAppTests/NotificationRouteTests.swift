@@ -38,7 +38,7 @@ final class NotificationRouteTests: XCTestCase {
     func testEveryPayloadRoundTrips() throws {
         let subjects: [NotificationRoute.Subject] = [
             .approvals, .blockedTask("t-1"), .blockedTask(nil), .session("s-1"), .reports,
-            .shutdown, .project,
+            .shutdown, .epic("e-1"), .project,
         ]
         for subject in subjects {
             let original = NotificationRoute(projectId: "p-alpha", subject: subject)

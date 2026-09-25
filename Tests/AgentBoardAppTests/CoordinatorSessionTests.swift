@@ -105,6 +105,40 @@ final class CoordinatorSessionTests: XCTestCase {
         XCTAssertEqual(value(after: "--resume", in: afterRelaunch), forkId, "the next launch lost the session")
     }
 
+    /// Rita's FYI on d8010a36: a switched-away session kept a live grant and could still call tools.
+    func testSwitchingSessionsRefusesThePreviousSessionsToken() async throws {
+        let coordinator = CoordinatorStore(fixture.db)
+        fixture.supervisor.coordinatorSessionConsole().start()
+        _ = try await launch(1)
+        let firstToken = try XCTUnwrap(fixture.grants.forSession(XCTUnwrap(coordinator.activeSessionId())).first).token
+        let before = try await mcpStatus(token: firstToken)
+        XCTAssertEqual(before, 200)
+
+        try fixture.supervisor.newCoordinatorSession()
+        _ = try await launch(2)
+        let secondId = try XCTUnwrap(coordinator.activeSessionId())
+        let secondToken = try XCTUnwrap(fixture.grants.forSession(secondId).first { !$0.isRevoked }).token
+        let afterNew = try await mcpStatus(token: firstToken)
+        XCTAssertEqual(afterNew, 401, "New session left the previous session's token live")
+
+        let firstId = try XCTUnwrap(coordinator.history().first).sessionId
+        try fixture.supervisor.resumeCoordinatorSession(sessionId: firstId)
+        _ = try await launch(3)
+        let afterResume = try await mcpStatus(token: secondToken)
+        XCTAssertEqual(afterResume, 401, "resuming left the switched-away session's token live")
+    }
+
+    func testTheSettingsSheetsModelIsTheOneTheNextLaunchUses() async throws {
+        fixture.supervisor.coordinatorSessionConsole().start()
+        let first = try await launch(1)
+        XCTAssertNil(value(after: "--model", in: first), "the default is Claude Code's own")
+
+        try CoordinatorSettingsSheet.save(model: "claude-sonnet-5", db: fixture.db)
+        try fixture.supervisor.newCoordinatorSession()
+        let second = try await launch(2)
+        XCTAssertEqual(value(after: "--model", in: second), "claude-sonnet-5")
+    }
+
     func testALaunchStopsCoordinatorRowsACrashLeftLive() async throws {
         let orphan = UUID().uuidString.lowercased()
         try fixture.sessions.insert(AgentSession(
@@ -144,6 +178,20 @@ final class CoordinatorSessionTests: XCTestCase {
         ]
         try (String(decoding: try JSONSerialization.data(withJSONObject: line), as: UTF8.self) + "\n")
             .write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func mcpStatus(token: String) async throws -> Int {
+        let port = try XCTUnwrap(fixture.supervisor.serverPort)
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/mcp")))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": ["name": "list_projects", "arguments": [:] as [String: Any]],
+        ])
+        let (_, response) = try await URLSession.shared.data(for: request)
+        return try XCTUnwrap(response as? HTTPURLResponse).statusCode
     }
 
     private func hook(_ payload: [String: Any], token: String) async throws -> [String: Any] {

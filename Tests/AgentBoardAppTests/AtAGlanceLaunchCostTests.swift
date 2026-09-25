@@ -133,6 +133,9 @@ private final class ConsoleRecordingSupervisor: WorkerSupervising {
     }
 
     func shellConsole(projectId: String) throws -> ShellConsole { throw StubError.notWired }
+    func coordinatorSessionConsole() throws -> OrchestratorConsole { throw StubError.notWired }
+    func newCoordinatorSession() throws { throw StubError.notWired }
+    func resumeCoordinatorSession(sessionId: String) throws { throw StubError.notWired }
 
     var serverPort: Int? { nil }
     var lastError: String? { nil }

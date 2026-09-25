@@ -53,7 +53,35 @@ public struct CoordinatorStore: Sendable {
     /// The previous sessions a human can resume: every Coordinator session but the active one,
     /// most recent first, capped at `historyLength`.
     public func history() throws -> [AgentSession] {
-        let active = try activeSessionId()
-        return Array(try sessions().filter { $0.sessionId != active }.prefix(Self.historyLength))
+        try db.reader.read { db in try Self.snapshot(db).history }
     }
+
+    public func observe() -> ValueObservation<ValueReducers.Fetch<CoordinatorSnapshot>> {
+        ValueObservation.tracking { db in try Self.snapshot(db) }
+    }
+
+    static func snapshot(_ db: Database) throws -> CoordinatorSnapshot {
+        let activeId = try String.fetchOne(db, sql: "SELECT active_session_id FROM coordinator WHERE id = 1")
+        let all = try AgentSession.fetchAll(
+            db, sql: "SELECT * FROM agent_session WHERE role = 'coordinator' ORDER BY started_at DESC"
+        )
+        return CoordinatorSnapshot(
+            active: all.first { $0.sessionId == activeId },
+            history: Array(all.filter { $0.sessionId != activeId }.prefix(historyLength))
+        )
+    }
+}
+
+/// The active Coordinator session and the history offered for resuming, read together so the two
+/// never disagree about which one is active.
+public struct CoordinatorSnapshot: Sendable, Equatable {
+    public var active: AgentSession?
+    public var history: [AgentSession]
+
+    public init(active: AgentSession?, history: [AgentSession]) {
+        self.active = active
+        self.history = history
+    }
+
+    public static let empty = CoordinatorSnapshot(active: nil, history: [])
 }

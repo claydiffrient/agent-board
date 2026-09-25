@@ -88,6 +88,17 @@ public struct TokenGrantStore: Sendable {
         )
     }
 
+    /// Every live Coordinator grant, whichever session holds it: only one Coordinator session runs
+    /// at a time, and the next launch issues its own.
+    public func revokeCoordinatorGrants() throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE token_grant SET revoked_at = ? WHERE scope = ? AND revoked_at IS NULL",
+                arguments: [Int64.nowMillis, TokenScope.coordinator]
+            )
+        }
+    }
+
     public func forSession(_ sessionId: String) throws -> [TokenGrant] {
         try db.reader.read { db in
             try TokenGrant.fetchAll(

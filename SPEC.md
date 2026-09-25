@@ -1966,10 +1966,12 @@ the project's), under these rules:
   `orch_session_id`. **New session** clears the pin and restarts the console, so
   the running session ends and a fresh one starts; the old row stays. The
   history offers the 10 most recent sessions other than the active one; resuming
-  one pins it and restarts the console with `--resume`. A `/clear` fork moves the
+  one pins it and restarts the console with `--resume`. Both switches revoke every
+  live `coordinator` grant first, so the session switched away from can no longer
+  call Coordinator tools; the next launch is issued its own. A `/clear` fork moves the
   pin to the fork (§7).
-- **Model.** `coordinator.model`, NULL for Claude Code's default; the
-  Coordinator settings sheet is where it will be set.
+- **Model.** `coordinator.model`, NULL for Claude Code's default; set in the
+  Coordinator settings sheet (§10), and read by the next launch.
 - **Hooks and spend.** Its `agent_session` row has role `coordinator` and
   `project_id` NULL (read as `""`, like its `TokenIdentity`), so the hook sink
   binds its grant, adopts its forks and records its transcript like an
@@ -2350,6 +2352,14 @@ selects that project through the same write the sidebar uses, landing on Orchest
 its console (§9) — which is the only way a console ever starts, so this page
 itself costs nothing.
 
+A **Coordinator** card sits above the project sections, showing the estimated
+spend of every Coordinator session (§8.2) and the same unread-replies dot as its
+sidebar row; clicking it opens the Coordinator page. A project card whose sessions
+have spent anything shows its own total the same way, so the two read against
+each other. Both are all-time sums of `agent_session.est_cost_usd`, ended sessions
+included, and neither has a cap; the Coordinator total rides in the same
+statement as the working-session count, so the page still runs two.
+
 **Shut Down** — a button beside the At a Glance headline, for the wind-down
 that quitting does not do on its own: workers are detached `claude --bg`
 sessions that outlive the app, keep spending, and keep committing into
@@ -2641,6 +2651,25 @@ Enabled agents sort above disabled ones, then by name case-insensitively, then
 by id so the order is stable. "Working" means a live `agent_session` carrying
 that agent's `roster_agent_id` (`RosterStore.assignments`); a session that has
 ended does not count, or a finished pass would strand its agent undeletable.
+
+**Coordinator** — the Coordinator's page (§8.2), and the third pinned sidebar
+row, directly below `Roster` (`SidebarSelection.pinned`). The row carries a gear
+for the **Coordinator settings** sheet — one `ModelPicker`, defaulting to
+**Claude Code default**, saved through `CoordinatorStore.setModel` — and the
+attention dot while `reply` reports wait unread in the Coordinator's queue (§9.1).
+The page is laid out as a project's Orchestrator screen: the console, with the
+same header minus **Stop All**, started when the page opens, beside a sidebar of
+three sections:
+
+- **Requests** — the ledger (§9.4), newest first: target project, the request's
+  first line, its state (`sent`, `accepted`, `declined`, `done`, `withdrawn`), the
+  latest text an orchestrator replied with, and one link per linked epic. A link
+  selects that project on its Task Board and scrolls to the epic's lane, through
+  the same route a banner click uses (`NotificationRoute.Subject.epic`).
+- **Plans** — the Coordinator's notes (project NULL). Each opens read-only in a
+  sheet; the Coordinator writes them through its note tools.
+- **Sessions** — **New Session**, the active session, and the history; clicking
+  a history entry resumes it. Each shows its start and its spend.
 
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each

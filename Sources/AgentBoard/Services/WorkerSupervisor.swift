@@ -1860,17 +1860,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// Ends the running Coordinator session, which stays in the history and resumable, and starts
-    /// a fresh one.
+    /// a fresh one. The ended session's grant is revoked, so it can no longer call Coordinator tools.
     func newCoordinatorSession() throws {
+        try grants.revokeCoordinatorGrants()
         try coordinator.setActiveSession(nil)
         coordinatorSessionConsole().restart()
     }
 
-    /// Makes a previous Coordinator session the active one and resumes it in place of the current.
+    /// Makes a previous Coordinator session the active one and resumes it in place of the current,
+    /// revoking the current one's grant; the resumed launch is issued a fresh one.
     func resumeCoordinatorSession(sessionId: String) throws {
         guard let row = try sessions.get(sessionId), row.role == .coordinator else {
             throw SupervisorError.sessionNotFound(sessionId)
         }
+        try grants.revokeCoordinatorGrants()
         try coordinator.setActiveSession(sessionId)
         coordinatorSessionConsole().restart()
     }

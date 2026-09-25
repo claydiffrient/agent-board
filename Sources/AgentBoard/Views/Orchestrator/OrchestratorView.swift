@@ -76,7 +76,7 @@ struct OrchestratorView: View {
     private var consolePane: some View {
         if let console {
             VStack(spacing: 0) {
-                OrchestratorHeader(console: console, stopAll: { confirmingStopAll = true })
+                OrchestratorHeader(console: console, noun: "orchestrator", stopAll: { confirmingStopAll = true })
                 Divider()
                 OrchestratorTerminalHost(console: console)
             }
@@ -108,9 +108,11 @@ struct OrchestratorView: View {
     }
 }
 
-private struct OrchestratorHeader: View {
+/// Shared with the Coordinator's console, which has no workers to stop and so no Stop All.
+struct OrchestratorHeader: View {
     let console: OrchestratorConsole
-    let stopAll: () -> Void
+    let noun: String
+    let stopAll: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -158,14 +160,16 @@ private struct OrchestratorHeader: View {
                 }
             }
             Button("Nudge") { console.nudge() }
-                .help("Tell the orchestrator about pending reports now")
+                .help("Tell the \(noun) about pending reports now")
                 .disabled(!console.isProcessRunning)
             Button("Restart") { console.restart() }
-                .help("Stop the orchestrator and resume the same session")
+                .help("Stop the \(noun) and resume the same session")
             Button("Stop") { console.stop() }
                 .disabled(!console.isProcessRunning)
-            Button("Stop All") { stopAll() }
-                .help("Tell every worker to commit and stop, then quit")
+            if let stopAll {
+                Button("Stop All") { stopAll() }
+                    .help("Tell every worker to commit and stop, then quit")
+            }
         }
         .controlSize(.small)
         .font(.caption)
@@ -194,7 +198,7 @@ private struct OrchestratorHeader: View {
 }
 
 /// Hosts the console's long-lived terminal view; the console owns it, so nothing is torn down here.
-private struct OrchestratorTerminalHost: NSViewRepresentable {
+struct OrchestratorTerminalHost: NSViewRepresentable {
     let console: OrchestratorConsole
 
     func makeNSView(context: Context) -> OrchestratorTerminalView {

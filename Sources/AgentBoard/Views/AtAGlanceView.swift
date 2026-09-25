@@ -11,6 +11,7 @@ struct AtAGlanceView: View {
     let projects: [Project]
     let workspaces: [Workspace]
     let attention: [ProjectAttention]
+    var unreadReplies = 0
     let select: (SidebarSelection) -> Void
 
     @Environment(AppEnvironment.self) private var env
@@ -30,6 +31,7 @@ struct AtAGlanceView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 headline
+                coordinatorCard
                 ForEach(sections) { section in
                     sectionView(section)
                 }
@@ -94,6 +96,20 @@ struct AtAGlanceView: View {
             + "with a resume note. Agent Board quits once they have all acknowledged."
     }
 
+    /// Sits beside the project cards so its spend reads against theirs (SPEC §10). It has no cap.
+    private var coordinatorCard: some View {
+        LazyVGrid(columns: Self.columns, spacing: 12) {
+            Button {
+                select(.coordinator)
+            } label: {
+                CoordinatorGlanceCard(spendUSD: summary.value.coordinatorSpendUSD, unreadReplies: unreadReplies)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private static let columns = [GridItem(.adaptive(minimum: 220, maximum: 320), spacing: 12, alignment: .top)]
+
     private func sectionView(_ section: GlanceGrouping.Section) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if let title = section.title {
@@ -102,7 +118,7 @@ struct AtAGlanceView: View {
                     .fontWeight(.semibold)
                     .foregroundStyle(.secondary)
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 220, maximum: 320), spacing: 12, alignment: .top)], spacing: 12) {
+            LazyVGrid(columns: Self.columns, spacing: 12) {
                 ForEach(section.cards) { card in
                     Button {
                         select(.project(card.id))
@@ -143,6 +159,11 @@ struct ProjectGlanceCard: View {
                     count(glance.ready, "ready")
                 }
             }
+            if glance.spendUSD > 0 {
+                Text("\(Format.cost(glance.spendUSD)) spent")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -160,5 +181,30 @@ struct ProjectGlanceCard: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+struct CoordinatorGlanceCard: View {
+    let spendUSD: Double
+    let unreadReplies: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 4) {
+                Text("Coordinator")
+                    .font(.headline)
+                if let reason = CoordinatorRow.summary(unreadReplies: unreadReplies) {
+                    AttentionBadge(reason: reason)
+                }
+            }
+            Text("\(Format.cost(spendUSD)) spent")
+                .font(.callout)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }

@@ -129,6 +129,10 @@ public struct ReportStore: Sendable {
         }
     }
 
+    public func observeUnconsumedForCoordinator() -> ValueObservation<ValueReducers.Fetch<[Report]>> {
+        ValueObservation.tracking { db in try Self.unconsumedForCoordinator(db) }
+    }
+
     public func observeUnconsumed(projectId: String) -> ValueObservation<ValueReducers.Fetch<[Report]>> {
         ValueObservation.tracking { db in
             try Self.unconsumed(db, projectId: projectId)
