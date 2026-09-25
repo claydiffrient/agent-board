@@ -559,7 +559,7 @@ CREATE TABLE epic (
   title          TEXT NOT NULL,
   goal           TEXT,
   branch         TEXT NOT NULL,    -- agentboard/epic-<id>
-  state          TEXT NOT NULL,    -- planning | active | integrating | done | abandoned
+  state          TEXT NOT NULL,    -- planning | active | integrating | pull_request_open | done | abandoned
   created_at     INTEGER NOT NULL,
   review_level   TEXT              -- none|agent|task|epic for this epic's tasks; NULL inherits the project's
 );
@@ -795,15 +795,16 @@ that is not listed here:
 | State | Written by | When |
 |---|---|---|
 | `planning` | `EpicStore.insert` | The epic is created; `create_epic` and the New Epic sheet both land here |
-| `active` | `WorkerSupervisor.spawn`, `Board.accept` | The first task in the epic is spawned, or accepted, while the epic is still `planning` |
+| `active` | `WorkerSupervisor.spawn`, `Board.accept`, `Board.reopenEpicAfterClosedPullRequest` | The first task in the epic is spawned, or accepted, while the epic is still `planning`, **or** its pull request closed without merging (§5.2 step 5) |
 | `integrating` | `WorkerSupervisor.spawnIntegrator` | The integrator worker spawned successfully on the epic branch (§5.2 step 3) |
-| `done` | `Board.complete`, `Board.closeEpic` | The integrator reported and the epic merged, **or** a human closed the epic by hand (§10) |
+| `pull_request_open` | `Board.recordPublished` | An approved `open_pull_request(epic_id)` recorded its URL, from any state but `abandoned` (§5.2 step 5) |
+| `done` | `Board.complete`, `Board.landEpicPullRequest`, `Board.closeEpic` | The integrator reported on an `integrating` epic, **or** its pull request merged, **or** a human closed the epic by hand (§10) |
 | `abandoned` | `Board.closeEpic` | A human abandoned the epic by hand (§10) |
 
 `done` and `abandoned` are terminal: `Board.closeEpic` refuses an epic that is
 already in either, so one never silently becomes the other, and `create_task`
-and `set_epic` refuse a terminal epic as a destination. There is no reopen —
-a closed epic stays closed, and work left inside one is freed with
+and `set_epic` refuse a terminal epic as a destination. The one reopen is a
+pull request recorded for a `done` epic (§5.2 step 5); otherwise a closed epic stays closed, and work left inside one is freed with
 `set_epic(task_id)` and no `epic_id` rather than by reviving the epic.
 
 The token is issued before spawn (it has to be in the generated config files)
@@ -1105,19 +1106,20 @@ nobody reviewed.
   session id until its grant is bound. When that URL is recorded against a
   `done` task that has not landed, the task moves to `pull_request_open`. The
   merge check then asks
-  `gh pr view <url> --json state,mergedAt,mergeCommit`, off the main actor, on
-  the first metering tick after launch, every 10 minutes after that, and when
-  the inspector opens the task: `MERGED` makes it `landed` with the merge commit
-  in `landing_detail` — ancestry cannot settle this, since a squash merge puts a
-  new commit on the base branch — and `CLOSED` makes it `unlanded`, naming the
-  pull request, with a `decision` report. A `gh` that is missing, logged out or
-  failing leaves the landing as it was and puts the reason in its detail. The
-  same check adopts a `done`, `unlanded` task whose recorded pull request its
-  detail does not already name, which clears the tasks accepted before this
-  existed; for those, the `published_url` migration recovered the URL from the
-  progress row the publish wrote. A closed pull request's detail names it, so
-  each is checked once: one reopened and merged afterwards is not re-adopted,
-  and the human lands that task by hand or opens a new pull request.
+  `gh pr view <url> --json state,mergedAt,mergeCommit,headRefOid`, off the main
+  actor, on the first metering tick after launch, every 10 minutes after that,
+  and when the inspector opens the task: `MERGED` makes it `landed` with the
+  merge commit in `landing_detail` — ancestry cannot settle this, since a
+  squash merge puts a new commit on the base branch — and `CLOSED` makes it
+  `unlanded`, naming the pull request, with a `decision` report. A `gh` that
+  is missing, logged out or failing leaves the landing as it was and puts the
+  reason in its detail. The same check adopts a `done`, `unlanded` task whose
+  recorded pull request its detail does not already name, which clears the
+  tasks accepted before this existed; for those, the `published_url` migration
+  recovered the URL from the progress row the publish wrote. A closed pull
+  request's detail names it, so each is checked once: one reopened and merged
+  afterwards is not re-adopted, and the human lands that task by hand or opens
+  a new pull request.
 
   `pending`, `unlanded`, `awaiting_pull_request` and `pull_request_open` show as
   a badge on the card and in the inspector. All but `pull_request_open` queue a
@@ -1243,7 +1245,9 @@ than one that is finished; they merge nothing and are not part of this sequence.
    `agentboard/epic-<id>` and spawns an integrator worker. The epic moves to
    `integrating` in `WorkerSupervisor.spawnIntegrator`, after the integrator's
    session row is written and before its process is launched, so a spawn that
-   throws leaves the epic `active` rather than stranded mid-integration. The
+   throws leaves the epic `active` rather than stranded mid-integration. An
+   epic already `pull_request_open` (step 5) stays so: its pull request, not
+   the integrator, decides when it is done. The
    integrator's job is to merge
    each `agentboard/<task-id>` into the epic branch, resolve conflicts, and get
    the build green. The epic branch accumulates accepted work as it goes (§5),
@@ -1291,6 +1295,10 @@ than one that is finished; they merge nothing and are not part of this sequence.
    implementation detail: under the default policy, the integrator's own
    completion produces no review-queue entry. Every other archive policy
    leaves it in `review` for a human, exactly as before this feature existed.
+   `Board.complete` does this only for an epic still `integrating`; an
+   integrator finishing on a `pull_request_open` epic leaves the epic there and
+   its task in `review`, so approving integration never marks an epic `done`
+   while its pull request is unmerged.
 5. The PR from the epic branch → base is opened either **by you**, from
    the button on the epic, or by the orchestrator calling `open_pull_request`
    (§6) — which does not open one either. It creates an approval row, exactly
@@ -1299,6 +1307,36 @@ than one that is finished; they merge nothing and are not part of this sequence.
    The resulting URL is written to `progress` against the epic's integrator
    task, so the board records that the pull request exists without anyone
    reading a terminal, and reaches the orchestrator as a `decision` report.
+   It is also kept on the approval (`published_url`), and recording it moves
+   the epic to `pull_request_open` from any state but `abandoned` — whether or
+   not `request_integration` ran first, and including a `done` epic.
+
+   A `pull_request_open` epic is not closed. `create_task` and `set_epic`
+   accept it, its new tasks branch from the epic branch, and accepting one
+   merges into the epic branch as in `active`. `push_branch` on the epic
+   branch publishes under the same name the pull request's head has (§6.1
+   names are stable for the life of the board), so it updates the open pull
+   request; a second approved `open_pull_request` finds the open one and
+   records the same URL rather than opening another. The lane's state badge
+   reads "PR #N open".
+
+   The merge check that settles standalone tasks (§5) also reads each
+   `pull_request_open` epic's newest recorded pull request with `gh pr view`,
+   on launch, every 10 minutes, and never for a task-branch pull request inside
+   the epic. `MERGED` makes the epic `done`, marks `landed` with the merge
+   commit every `done` task whose branch or reaped tip is an ancestor of the
+   pull request's merged head (`headRefOid`), not of the local epic branch; a
+   task only the epic branch carries, accepted after the last push, is marked
+   `unlanded` and named in the report with "push the epic branch and open a
+   follow-up PR". A head the repository lacks, such as a suggestion applied on
+   GitHub, is fetched from `origin` first; if it still cannot be read, no task's
+   landing changes and the report says carriage could not be verified. A task
+   with neither branch nor reaped tip lands if a commit its `landing_detail`
+   names is in the head; one still marked `landed` otherwise becomes `pending`
+   and is named in the report as unverifiable. It archives under
+   `afterEpicMerge`, and queues a `decision` report naming any task that was
+   not done. `CLOSED` returns the epic to `active` and queues a `decision`
+   report with the reason. A `gh` failure changes nothing.
 
    The pull request's head is the **published** name (§6.1), not the local
    `agentboard/epic-<id>`, on both routes — the button's compare page and the

@@ -672,7 +672,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 )
             )
             assigned = placeholder
-            try epics.setState(epicId, .integrating)
+            // A PR-open epic stays so: its pull request, not this integrator, decides when it is done.
+            if epic.state != .pullRequestOpen { try epics.setState(epicId, .integrating) }
             beginSetup(
                 LaunchPlan(
                     project: project,
@@ -1030,7 +1031,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let epic = current.epicId.flatMap { try? epics.get($0) }
             let branch = Self.taskBranchPrefix + current.id
             switch state {
-            case .success(.merged(let commit)):
+            case .success(.merged(let commit, _)):
                 recordLanding(
                     task: current, epic: epic, landing: .landed,
                     detail: PullRequestLanding.mergedDetail(pr, commit: commit), advice: nil
@@ -1048,7 +1049,85 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 keepOpenLanding(current, detail: PullRequestLanding.openDetail(pr, uncheckedBecause: describe(error)))
             }
         }
+        if taskId == nil { touched.formUnion(await refreshEpicPullRequests(projectId: projectId)) }
         for projectId in touched { announceReports(projectId: projectId) }
+    }
+
+    /// SPEC §5.2: settles each PR-open epic against GitHub. Merged makes the epic `done`, lands the
+    /// done tasks the merged head carries, and unlands those only the local epic branch carries;
+    /// closed returns it to `active` with a `decision` report. Returns the projects that gained a report.
+    private func refreshEpicPullRequests(projectId: String?) async -> Set<String> {
+        guard let checks = try? board.epicPullRequestChecks(projectId: projectId) else { return [] }
+        let reader = pullRequestStates
+        var touched: Set<String> = []
+        for check in checks where !landingChecksInFlight.contains(check.epic.id) {
+            guard let project = try? projects.get(check.epic.projectId) else { continue }
+            landingChecksInFlight.insert(check.epic.id)
+            defer { landingChecksInFlight.remove(check.epic.id) }
+            let repo = URL(fileURLWithPath: project.repoPath)
+            let url = check.pullRequest.url
+            do {
+                switch try await offMain({ try reader.state(of: url, cwd: repo) }) {
+                case .merged(let commit, let head):
+                    let carried = await tasksCarried(by: check.epic, head: head, project: project)
+                    if try board.landEpicPullRequest(
+                        epicId: check.epic.id, pullRequest: check.pullRequest, commit: commit, carriage: carried
+                    ) {
+                        touched.insert(project.id)
+                    }
+                case .closed:
+                    if try board.reopenEpicAfterClosedPullRequest(epicId: check.epic.id, pullRequest: check.pullRequest) != nil {
+                        touched.insert(project.id)
+                    }
+                case .open:
+                    break
+                }
+            } catch {
+                report(["could not check pull request #\(check.pullRequest.number) for epic \(check.epic.id): \(describe(error))"])
+            }
+        }
+        return touched
+    }
+
+    /// Splits the epic's `done` tasks by their tip (branch, or reaped tip): `landed` when the merged
+    /// `head` contains it, `late` when only the local epic branch does, neither for a conflicted
+    /// merge the integrator never finished. A task with no tip is judged by a commit its landing
+    /// detail records, else is `unverified` if marked `.landed`. A `head` that cannot be fetched judges
+    /// no task.
+    private func tasksCarried(by epic: Epic, head: String?, project: Project) async -> EpicCarriage {
+        let members = ((try? tasks.list(projectId: project.id, epicId: epic.id, includeArchived: true)) ?? [])
+            .filter { $0.column == .done && $0.landing != .noBranch }
+        let manager = worktreeManager(for: project)
+        let epicBranch = epic.branch
+        do {
+            return try await offMain { () -> EpicCarriage in
+                guard let head else { return EpicCarriage(headUnresolved: "GitHub reported no head commit") }
+                guard try manager.fetchCommitIfMissing(head, from: "origin") else {
+                    return EpicCarriage(headUnresolved: "head \(head) could not be fetched from origin")
+                }
+                var carriage = EpicCarriage()
+                for task in members {
+                    let tip = try manager.refCommit("refs/heads/" + Self.taskBranchPrefix + task.id)
+                        ?? manager.refCommit(TaskBranchLedger.tipRef(taskId: task.id))
+                    if let tip {
+                        if try manager.isMerged(commit: tip, into: head) {
+                            carriage.landed.append(task.id)
+                        } else if try manager.isMerged(commit: tip, into: epicBranch) {
+                            carriage.late.append(task.id)
+                        }
+                    } else if try EpicCarriage.recordedCommits(in: task.landingDetail).contains(where: {
+                        try manager.commitExists($0) && manager.isMerged(commit: $0, into: head)
+                    }) {
+                        carriage.landed.append(task.id)
+                    } else if task.landing == .landed {
+                        carriage.unverified.append(task.id)
+                    }
+                }
+                return carriage
+            }
+        } catch {
+            return EpicCarriage(headUnresolved: describe(error))
+        }
     }
 
     private func keepOpenLanding(_ task: BoardTask, detail: String) {

@@ -342,7 +342,10 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "approval the pull request's URL is recorded against the epic or task and reaches you through "
                 + "list_reports. An epic whose tasks are not all `done` is allowed — the approval says so, and the "
                 + "human decides whether early review is what you meant. If this project names its remote branches, "
-                + "the pull request's head is the published name, not the local `agentboard/…` one.",
+                + "the pull request's head is the published name, not the local `agentboard/…` one. Once an epic's "
+                + "pull request is recorded the epic is `pull_request_open`: it still takes tasks, accepted ones merge "
+                + "into its branch, and `push_branch` on that branch updates the same pull request. It becomes `done` "
+                + "when the pull request merges, or `active` again if it is closed unmerged.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "epic_id": ToolSchema.string("Epic whose integration branch to open the pull request from."),

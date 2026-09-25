@@ -8,7 +8,8 @@ import GRDB
 public enum TaskLanding: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
     /// The accept ran but has not yet heard back from git. Written inside the acceptance
     /// transaction and overwritten moments later by the real outcome; it survives only when the
-    /// app died in between, which is exactly when the board must not claim the work landed.
+    /// app died in between, which is exactly when the board must not claim the work landed. An
+    /// epic's merge check also writes it for a task it cannot verify the pull request carried.
     case pending
 
     /// There was no branch to land — the task committed nothing. A non-code task finishes here and

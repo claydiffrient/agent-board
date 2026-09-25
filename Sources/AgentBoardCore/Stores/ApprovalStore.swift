@@ -137,6 +137,40 @@ public struct ApprovalStore: Sendable {
         ).flatMap(PullRequestReference.init(in:))
     }
 
+    /// The newest pull request an approved `open_pull_request(epic_id:)` opened from the epic branch.
+    /// A task-branch pull request inside the epic names its task and is not the epic's.
+    static func publishedEpicPullRequest(_ db: Database, epicId: String) throws -> PullRequestReference? {
+        try String.fetchOne(
+            db,
+            sql: """
+            SELECT published_url FROM approval
+            WHERE epic_id = ? AND task_id IS NULL AND kind = 'pull_request' AND published_url IS NOT NULL
+            ORDER BY resolved_at DESC, created_at DESC, rowid DESC LIMIT 1
+            """,
+            arguments: [epicId]
+        ).flatMap(PullRequestReference.init(in:))
+    }
+
+    public func publishedEpicPullRequest(epicId: String) throws -> PullRequestReference? {
+        try db.reader.read { db in try Self.publishedEpicPullRequest(db, epicId: epicId) }
+    }
+
+    /// Each PR-open epic's pull request, keyed by epic id, for the lane headers.
+    public func observeEpicPullRequests(projectId: String) -> ValueObservation<ValueReducers.Fetch<[String: PullRequestReference]>> {
+        ValueObservation.tracking { db in
+            let ids = try String.fetchAll(
+                db,
+                sql: "SELECT id FROM epic WHERE project_id = ? AND state = ?",
+                arguments: [projectId, EpicState.pullRequestOpen]
+            )
+            var byEpic: [String: PullRequestReference] = [:]
+            for id in ids {
+                byEpic[id] = try Self.publishedEpicPullRequest(db, epicId: id)
+            }
+            return byEpic
+        }
+    }
+
     /// Fills `published_url` for pull requests opened before it existed, from the first progress row
     /// the publish wrote after the approval resolved. That row leads with the summary
     /// `WorkerSupervisor.publish` gives; a worker's status rows lead with its state word instead.
