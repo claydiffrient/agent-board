@@ -95,13 +95,28 @@ struct ApprovalsSidebar: View {
                         proposalRow(task)
                     }
                 }
-                Section("Messages") {
+                Section {
                     if messages.value.isEmpty {
                         Text("No messages with other projects.")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(messages.value) { entry in
-                        MessageRow(entry: entry, projectName: project.name)
+                        MessageRow(entry: entry, projectName: project.name) {
+                            run { try MessageStore(env.db).delete(id: entry.id) }
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text("Messages")
+                        Spacer()
+                        if messages.value.contains(where: \.isConsumed) {
+                            Button("Clear read") {
+                                run { try MessageStore(env.db).deleteRead(projectId: project.id) }
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                            .help("Delete every read message for both projects. Unread ones stay.")
+                        }
                     }
                 }
             }

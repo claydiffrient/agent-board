@@ -25,7 +25,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "spawn_worker", "stop_worker", "archive_task", "unarchive_task", "get_report",
         "promote_proposal", "get_epic", "request_integration", "close_epic", "open_pull_request",
         "read_note", "append_section", "replace_section", "attach_note", "pin_note",
-        "assign_to_agent", "add_comment",
+        "assign_to_agent", "add_comment", "delete_message",
     ]
 
     /// The whole of the permitted crossing: queue text into another project's channel, and learn
@@ -64,7 +64,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
             "a tool was added to the orchestrator surface without a cross-project test in this file"
         )
         XCTAssertEqual(classified.subtracting(surface), [], "this audit names tools that no longer exist")
-        XCTAssertEqual(surface.count, 36)
+        XCTAssertEqual(surface.count, 37)
     }
 
     func testOnlySendMessageAcceptsAnotherProjectsId() async {
@@ -449,6 +449,21 @@ final class CrossProjectBoundaryTests: XCTestCase {
         await XCTAssertToolError(try await f.call("get_task", ["id": .string(theirTask.id)]), containing: "not in this project")
         let mine = try await f.callJSON("list_reports").arrayValue
         XCTAssertEqual(mine?.count, 0)
+    }
+
+    func testDeleteMessageRefusesAMessageThisProjectDidNotReceive() async throws {
+        _ = try await f.call("send_message", ["project_id": .string(other.id), "body": .string("hello")])
+        let theirs = try await f.callJSON("list_reports", as: orchestratorIdentity(for: other)).arrayValue ?? []
+        let messageId = try XCTUnwrap(theirs.first?["message_id"])
+
+        await XCTAssertToolError(
+            try await f.call("delete_message", ["message_id": messageId]),
+            containing: "not received by this project"
+        )
+        XCTAssertEqual(try MessageStore(f.db).inbox(projectId: other.id).count, 1)
+
+        _ = try await f.call("delete_message", ["message_id": messageId], as: orchestratorIdentity(for: other))
+        XCTAssertEqual(try MessageStore(f.db).inbox(projectId: other.id).count, 0)
     }
 
     // MARK: The worker surface

@@ -1505,6 +1505,7 @@ Everything in worker scope over any task in the project, plus:
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
 | `list_projects()` | Every project Agent Board knows about, as id, name, and whether the entry is the caller's own project. Nothing else about another project is exposed — no repository path, no settings, no board contents, no agent state |
 | `send_message(project_id, body)` | Queues a §9.2 message into that project's report queue. Confirms queueing, never delivery. Refused for the caller's own project, for an unknown id, for a blank body, and for a body over 4000 characters |
+| `delete_message(message_id)` | Deletes a §9.3 message this project received, and its report, for both projects. Refused for a message this project did not receive |
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Refused unless every task in the epic is `done` (names how many remain); otherwise creates a human approval row, or returns the one already pending |
 | `close_epic(epic_id, state)` | Ends the epic without integrating it. `state` is `done` or `abandoned`; both are terminal. Board state and a `decision` report and nothing else — no merge, no push, no branch or worktree deleted, no task deleted, archived or moved out. Refused while any session in the epic is active, and refused for an epic that is already terminal |
@@ -1841,7 +1842,9 @@ project's tasks, epics, notes, approvals, sessions, or reports; spawning,
 stopping, or otherwise acting on anything running there; mutating its board in
 any way. `send_message`'s own refusals — no addressing yourself, unknown
 project, blank or oversized body — narrow when the hole may be used without
-widening what using it is allowed to do.
+widening what using it is allowed to do. `delete_message` (§9.3) reaches only a
+message the caller's project received; the sender's panel loses the row
+because the two projects share it, not because the tool reaches the sender.
 
 ### 8.3 Sleep prevention
 
@@ -2124,9 +2127,21 @@ already reading — and it caps the body at 4000 characters, because the body is
 prompt fragment spent from the recipient's context budget rather than the
 sender's. The tool confirms only that the message was queued: the receiving
 orchestrator may not be running, nothing tells the sender when or whether it
-pulls, and there is no reply channel. These two tools are the whole
-cross-project surface; there is no way to read another project's messages, list
-its tasks, or spawn into it.
+pulls, and there is no reply channel. These tools are the whole cross-project
+surface; there is no way to read another project's messages, list its tasks, or
+spawn into it.
+
+Messages are ephemeral working traffic, not a record. Whoever acts on one keeps
+anything that must outlive it as a note or a task, then deletes the message.
+Deleting removes the one `message` row, so it goes from both projects' panels,
+and its delivered report goes in the same write transaction whether or not it
+was consumed — an unread report would announce a message that no longer
+exists. There is no per-project hiding. Three paths delete: the human, from the
+sidebar (§10); the recipient orchestrator, with `delete_message(message_id)`,
+which refuses any message its project did not receive and takes the id from
+the `message_id` field `list_reports` puts on a `message` report; and the
+archive sweep's tick, which deletes every message whose report was consumed
+more than 7 days ago (`MessageStore.retentionMillis`, wall clock).
 
 ---
 
@@ -2215,6 +2230,11 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
    Accepting now stops Rita's review."), because either one stops the reviewer
    (§5).
 4. **Proposals** — worker-proposed tasks awaiting promotion.
+5. **Messages** — every §9.3 message this project sent or received, newest
+   first, bold until the receiving orchestrator pulls it. Each row deletes on
+   hover or from its context menu, read or not; **Clear read** in the header
+   deletes every one whose report has been consumed. Deleting removes the
+   message for both projects.
 
 A blocked worker was previously invisible here: it sat in `running`, burned its
 idle cap, and died with the only evidence being a `last_tool` that had stopped
