@@ -151,6 +151,9 @@ struct SupervisorFixture {
     let worktreeBase: URL
     /// Stands in for `~`, so a test can assert nothing leaked into a real `~/.agentboard`.
     let fakeHome: URL
+    /// What `SupportPaths.coordinatorDir` resolves to when AGENTBOARD_SUPPORT_DIR points at `supportDir`.
+    let coordinatorDir: URL
+    let claude: ClaudeInvocation
 
     var epics: EpicStore { EpicStore(db) }
     var approvals: ApprovalStore { ApprovalStore(db) }
@@ -165,7 +168,8 @@ struct SupervisorFixture {
     /// `gitRepo` lays down a real git repository at `repoPath`, which every test that exercises
     /// spawning, worktrees, or branch teardown needs.
     static func make(
-        gitRepo: Bool = false, sleepLedger: SleepLedger = SleepLedger(), sleepGuard: SleepGuard? = nil
+        gitRepo: Bool = false, sleepLedger: SleepLedger = SleepLedger(), sleepGuard: SleepGuard? = nil,
+        claude: ClaudeInvocation = .installed()
     ) throws -> SupervisorFixture {
         let db = try AppDatabase.inMemory()
         let supportDir = FileManager.default.temporaryDirectory
@@ -195,10 +199,17 @@ struct SupervisorFixture {
             environment: [SupportPaths.supportDirEnvKey: supportDir.path],
             home: fakeHome
         )
+        let coordinatorDir = SupportPaths.coordinatorDir(
+            environment: [SupportPaths.supportDirEnvKey: supportDir.path],
+            home: fakeHome
+        )
         let supervisor = WorkerSupervisor(
             db: db, runtime: runtime, server: server, appSupportDir: supportDir,
             worktreeBase: worktreeBase,
             projectsRoot: supportDir.appendingPathComponent("claude-projects"),
+            coordinatorDir: coordinatorDir,
+            home: fakeHome,
+            claude: claude,
             sleepLedger: sleepLedger,
             sleepGuard: sleepGuard,
             gh: gh
@@ -207,7 +218,7 @@ struct SupervisorFixture {
         return SupervisorFixture(
             db: db, project: project, supervisor: supervisor, runtime: runtime, gh: gh,
             resolver: StoreTokenResolver(db: db), supportDir: supportDir, repo: repo,
-            worktreeBase: worktreeBase, fakeHome: fakeHome
+            worktreeBase: worktreeBase, fakeHome: fakeHome, coordinatorDir: coordinatorDir, claude: claude
         )
     }
 
@@ -239,6 +250,9 @@ struct SupervisorFixture {
             db: db, runtime: runtime, server: server, appSupportDir: supportDir,
             worktreeBase: worktreeBase,
             projectsRoot: supportDir.appendingPathComponent("claude-projects"),
+            coordinatorDir: coordinatorDir,
+            home: fakeHome,
+            claude: claude,
             gh: gh
         )
         sink.target = supervisor

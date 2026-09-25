@@ -22,10 +22,16 @@ public protocol BoardEventSink: Sendable {
     /// doing nothing is the supervisor's to do. Which of the two it was is carried by the report
     /// kind, the task's column and the session's stop reason, never by this signal.
     func workerCompleted(projectId: String, sessionId: String) async
+    /// The Coordinator's counterparts of `orchestratorTurnEnded` and `orchestratorCompacted`: its
+    /// session has no project to name.
+    func coordinatorTurnEnded(sessionId: String) async
+    func coordinatorCompacted(sessionId: String, manual: Bool) async
 }
 
 extension BoardEventSink {
     public func workerCompleted(projectId: String, sessionId: String) async {}
+    public func coordinatorTurnEnded(sessionId: String) async {}
+    public func coordinatorCompacted(sessionId: String, manual: Bool) async {}
 }
 
 extension BoardEventSink {

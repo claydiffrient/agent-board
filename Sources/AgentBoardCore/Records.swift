@@ -273,7 +273,9 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
 
     public var sessionId: String
     public var shortId: String?
-    public var projectId: String
+    /// NULL in the table for a `.coordinator` row; read here as `""`, the Coordinator's
+    /// `TokenIdentity.projectId`, so every project-scoped comparison on it matches nothing.
+    private var storedProjectId: String?
     public var taskId: String?
     public var role: SessionRole
     public var worktreePath: String?
@@ -313,7 +315,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
         case shortId = "short_id"
-        case projectId = "project_id"
+        case storedProjectId = "project_id"
         case taskId = "task_id"
         case role
         case worktreePath = "worktree_path"
@@ -352,7 +354,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
-        self.projectId = projectId
+        storedProjectId = projectId.isEmpty ? nil : projectId
         self.taskId = taskId
         self.role = role
         self.worktreePath = worktreePath
@@ -380,6 +382,10 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     }
 
     public var id: String { sessionId }
+    public var projectId: String {
+        get { storedProjectId ?? "" }
+        set { storedProjectId = newValue.isEmpty ? nil : newValue }
+    }
     /// Rostered sessions are exempt from the idle and wall-clock caps; see `WorkerSupervisor.capLimits`.
     public var isRostered: Bool { rosterAgentId != nil }
     public var startedDate: Date { startedAt.asDate }

@@ -89,6 +89,14 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         await target?.workerCompleted(projectId: projectId, sessionId: sessionId)
     }
 
+    func coordinatorTurnEnded(sessionId: String) async {
+        await target?.coordinatorTurnEnded(sessionId: sessionId)
+    }
+
+    func coordinatorCompacted(sessionId: String, manual: Bool) async {
+        await target?.coordinatorCompacted(sessionId: sessionId, manual: manual)
+    }
+
     func spawnWorker(taskId: String) async throws -> WorkerSpawn {
         guard let target else { throw SupervisorError.serverNotRunning }
         return try await target.spawnWorker(taskId: taskId)

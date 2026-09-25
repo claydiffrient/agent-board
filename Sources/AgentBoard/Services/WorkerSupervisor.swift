@@ -76,6 +76,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let appSupportDir: URL
     @ObservationIgnored private let worktreeBase: URL
     @ObservationIgnored private let projectsRoot: URL
+    @ObservationIgnored private let coordinatorDir: URL
+    @ObservationIgnored private let home: URL
+    /// The `claude` every PTY console runs; a test substitutes a script.
+    @ObservationIgnored private let claude: ClaudeInvocation
     /// Sampled once per metering tick. Every cap and grace deadline is measured against it so a
     /// suspended machine does not count against a worker.
     @ObservationIgnored private let sleepLedger: SleepLedger
@@ -121,6 +125,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// trailers have already been read back this run.
     @ObservationIgnored private var trailersBackfilled: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
+    @ObservationIgnored private var coordinatorConsoleInstance: OrchestratorConsole?
+    @ObservationIgnored private let coordinator: CoordinatorStore
     @ObservationIgnored private var shellConsoles: [String: ShellConsole] = [:]
     /// Keyed by setup session id, so a test — or a human stopping a worker mid-setup — can wait on
     /// or cancel the half of a spawn that outlives the call.
@@ -145,6 +151,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         appSupportDir: URL,
         worktreeBase: URL,
         projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
+        coordinatorDir: URL = SupportPaths.coordinatorDir(),
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        claude: ClaudeInvocation = .installed(),
         sleepLedger: SleepLedger = .shared,
         sleepGuard: SleepGuard? = nil,
         gh: any GhRunning = SystemGh()
@@ -155,6 +164,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         self.appSupportDir = appSupportDir
         self.worktreeBase = worktreeBase
         self.projectsRoot = projectsRoot
+        self.coordinatorDir = coordinatorDir
+        self.home = home
+        self.claude = claude
+        coordinator = CoordinatorStore(db)
         self.sleepLedger = sleepLedger
         self.sleepGuard = sleepGuard
         projects = ProjectStore(db)
@@ -1805,10 +1818,43 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             projectId: projectId,
             db: db,
             sessionConfigDir: sessionConfigDir,
+            projectsRoot: projectsRoot,
+            claude: claude,
             currentPort: { [weak self] in self?.serverPort }
         )
         consoles[projectId] = console
         return console
+    }
+
+    /// The one Coordinator console (SPEC §8.2), created on first call; does not start the process.
+    func coordinatorConsole() -> OrchestratorConsole {
+        if let existing = coordinatorConsoleInstance { return existing }
+        let console = OrchestratorConsole(
+            source: CoordinatorSource(
+                db: db, folder: coordinatorDir, home: home, sessionConfigDir: sessionConfigDir,
+                projectsRoot: projectsRoot, claude: claude
+            ),
+            db: db,
+            currentPort: { [weak self] in self?.serverPort }
+        )
+        coordinatorConsoleInstance = console
+        return console
+    }
+
+    /// Ends the running Coordinator session, which stays in the history and resumable, and starts
+    /// a fresh one.
+    func newCoordinatorSession() throws {
+        try coordinator.setActiveSession(nil)
+        coordinatorConsole().restart()
+    }
+
+    /// Makes a previous Coordinator session the active one and resumes it in place of the current.
+    func resumeCoordinatorSession(sessionId: String) throws {
+        guard let row = try sessions.get(sessionId), row.role == .coordinator else {
+            throw SupervisorError.sessionNotFound(sessionId)
+        }
+        try coordinator.setActiveSession(sessionId)
+        coordinatorConsole().restart()
     }
 
     /// The live shell pid per project, for anything that has to recognise a process the board
@@ -2082,6 +2128,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// active in a database the next launch reads.
     func stopOrchestratorConsoles() {
         for console in consoles.values { console.stop() }
+        coordinatorConsoleInstance?.stop()
     }
 
     func isShuttingDown(projectId: String) -> Bool {
@@ -2184,6 +2231,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     func orchestratorCompacted(projectId: String, sessionId: String, manual: Bool) async {
         consoles[projectId]?.compactionCompleted(manual: manual)
+    }
+
+    func coordinatorTurnEnded(sessionId: String) async {
+        coordinatorConsoleInstance?.turnEnded()
+    }
+
+    func coordinatorCompacted(sessionId: String, manual: Bool) async {
+        coordinatorConsoleInstance?.compactionCompleted(manual: manual)
     }
 
     /// The worker has committed and recorded its note; this is the orderly end of its session. The
@@ -2306,6 +2361,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             for session in projectSessions where Self.shouldMeter(session, now: now) {
                 await meter(session, limits: limits, stallSeconds: stallSeconds, awake: awake)
             }
+        }
+        // Metered like an orchestrator, with no cap: `meter` enforces caps on workers only.
+        for session in (try? coordinator.sessions()) ?? [] where Self.shouldMeter(session, now: now) {
+            await meter(session, limits: .default, stallSeconds: 0, awake: awake)
         }
         refreshSleepAssertion(all)
     }
@@ -2430,6 +2489,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         if current.role == .orchestrator, let context {
             consoles[current.projectId]?.contextPressureObserved(context)
+        }
+        if current.role == .coordinator, let context {
+            coordinatorConsoleInstance?.contextPressureObserved(context)
         }
         guard current.role == .worker else {
             stallNotified.remove(session.sessionId)

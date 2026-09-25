@@ -85,6 +85,8 @@ public enum SessionState: String, Codable, Sendable, CaseIterable, Equatable, Da
 public enum SessionRole: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
     case orchestrator
     case worker
+    /// The Coordinator's session (SPEC §8.2), the only row with no project.
+    case coordinator
 }
 
 public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
