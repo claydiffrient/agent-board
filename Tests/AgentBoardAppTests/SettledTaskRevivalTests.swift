@@ -45,4 +45,30 @@ final class SettledTaskRevivalTests: XCTestCase {
         )
         XCTAssertEqual(try fixture.sessions.get(sessionId)?.state, .stopped, "SessionStart revived a done task's session")
     }
+
+    func testAnActiveRowOnASettledTaskEndsWithADecisionReportNotAFailedOne() async throws {
+        let (done, doneSession, _) = try fixture.workerAtWork("Accepted already")
+        try fixture.tasks.move(done.id, to: .done)
+        let (ready, readySession, _) = try fixture.workerAtWork("Back in ready")
+        let listing = try [doneSession, readySession].map { sessionId in
+            AgentInfo(
+                id: try XCTUnwrap(fixture.sessions.get(sessionId)?.shortId), cwd: fixture.repo.path,
+                kind: "bg", sessionId: sessionId, status: "running"
+            )
+        }
+        await fixture.runtime.listing(listing)
+
+        await fixture.supervisor.reconcile(projectId: fixture.project.id)
+
+        let reports = try fixture.reports.unconsumed(projectId: fixture.project.id)
+        XCTAssertEqual(reports.filter { $0.kind == .failed }.map(\.body), [])
+        for (task, sessionId) in [(done, doneSession), (ready, readySession)] {
+            let settled = reports.filter {
+                $0.taskId == task.id && $0.kind == .decision && $0.body.hasPrefix("Session ended after its task was settled")
+            }
+            XCTAssertEqual(settled.count, 1, "\(task.title): \(reports.map(\.body))")
+            XCTAssertEqual(try fixture.sessions.get(sessionId)?.state, .stopped)
+            XCTAssertEqual(try fixture.tasks.get(task.id)?.failed, false)
+        }
+    }
 }

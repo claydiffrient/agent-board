@@ -1040,7 +1040,8 @@ nobody reviewed.
   it was the last one still owed: every task that ever ran on the branch must
   be accepted. No member's worker can still be standing in the checkout by
   then, because each accept stopped its own task's sessions and nothing sets a
-  session on a task in `done` running again (§7, §10 Status). Short of that,
+  session on a task in `done` running again (§7, §10 Status), so a reviewer's
+  own accept on the last member no longer waits for its own session to end. Short of that,
   acceptance queues a `decision` report naming
   what the branch is still waiting on and merges nothing. Once it holds, the
   branch's attribution is written to `task_commit` for every member (backfilling
