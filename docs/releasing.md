@@ -107,7 +107,8 @@ What it does, in order:
   so its shutdown sheet settles running workers first, then install.
 - **Backs up the database** with `sqlite3 .backup` to
   `backups/agentboard-<timestamp>-<version>[+<build>].sqlite` beside it, and
-  keeps the newest five.
+  keeps the newest three. Each backup is a full copy of the database, about
+  288 MB today, so three take under 1 GB.
 - **Refuses a downgrade** — an older version, or an older build of the same
   version (a build number that can't be compared as an integer on either
   side counts as older too) — unless you pass `--allow-downgrade`. With that

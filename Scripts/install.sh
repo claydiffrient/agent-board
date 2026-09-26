@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
+keep_backups=3
 
 usage() {
-  cat <<'USAGE'
+  cat <<USAGE
 Usage: Scripts/install.sh [--allow-downgrade] [--open] [--dest DIR] [<Agent Board.app | AgentBoard-<version>.zip>]
 
 Installs a release artifact from Scripts/release.sh as /Applications/Agent Board.app.
@@ -13,13 +14,13 @@ With no artifact named, installs the newest dist/AgentBoard-*.zip.
     app, so its shutdown sheet decides what happens to running workers.
   - Checks the incoming bundle with release.sh --check-structure.
   - Backs up the database with sqlite3 .backup into backups/ beside it, named with the
-    installed version and a timestamp, and keeps the newest five.
+    installed version and a timestamp, and keeps the newest $keep_backups.
   - Refuses to install an older version than the installed one, or an older build of
     the same version. Within one version, a build number that is missing or not an
     integer on either side cannot be ordered, so that install is refused too.
   - Copies into a temporary name beside the destination, then renames it into place.
 
-The database is $AGENTBOARD_DB if set, else agentboard.sqlite in $AGENTBOARD_SUPPORT_DIR
+The database is \$AGENTBOARD_DB if set, else agentboard.sqlite in \$AGENTBOARD_SUPPORT_DIR
 if set, else in ~/Library/Application Support/AgentBoard, as the app resolves it.
 
   --allow-downgrade  install even when the incoming version or build is older
@@ -246,7 +247,7 @@ if [ -f "$db" ]; then
   mv "$partial" "$backup"
   partial=""
   list_backups
-  for (( i = 0; i < ${#existing_backups[@]} - 5; i++ )); do
+  for (( i = 0; i < ${#existing_backups[@]} - keep_backups; i++ )); do
     rm -f "${existing_backups[i]}"
   done
 fi
