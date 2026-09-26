@@ -40,9 +40,13 @@ final class OrchestratorPTYIsolationTests: XCTestCase {
             .map { $0.trimmingCharacters(in: .whitespaces) }
 
         XCTAssertEqual(writes, [
-            #"terminal.send(txt: line)"#,
+            #"terminal.send(txt: burst)"#,
             #"terminal.send(txt: "\r")"#,
         ], "a write bypassed inject(_:), which is what keeps the terminator a separate burst")
+        XCTAssertTrue(
+            console.contains("for burst in PromptBursts.split(line)"),
+            "inject(_:) no longer writes in bursts, so a long line arrives as pasted content"
+        )
 
         for constant in ["OrchestratorCompaction.command", "OrchestratorCompaction.reorientation"] {
             XCTAssertTrue(console.contains("inject(\(constant))"), "\(constant) is not what gets injected")

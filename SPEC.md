@@ -204,6 +204,19 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   slash-command autocomplete consumes the Enter. The existing report notice
   (§9.1) has no leading slash and is unaffected, but `OrchestratorConsole`
   splits every injection the same way so nothing depends on remembering this.
+- **A long injected line arrives as pasted content, and a pasted `/compact`
+  runs no command.** Measured 2026-09-26 on 2.1.283 with `spike/compact-probe/`.
+  Claude Code treats any single stdin read over 800 characters as a paste: an
+  800-character burst submitted as typed text, 801 arrived wrapped in
+  `<pasted_content>`. The macOS PTY hands the reader about 1 KiB per read, so
+  the 1,839-byte `/compact <instructions>` written in one burst reached it as
+  two reads — two pasted blocks split at byte 1022 — and no `PreCompact` fired.
+  Chunks under 800 with a pause of 20 ms or more between them were typed; with
+  no pause they queue in the PTY and re-merge into ~1 KiB reads. `inject` writes
+  `PromptBursts` of at most 256 characters, 50 ms apart, then the `\r`; the same
+  command then fired `PreCompact {"trigger":"manual"}` with `custom_instructions`
+  equal to `OrchestratorCompaction.instructions`, followed by
+  `SessionStart {"source":"compact"}`.
 - **Context pressure = `input_tokens + cache_read_input_tokens +
   cache_creation_input_tokens` of the last assistant message.** Calibrated
   against the TUI's own `N% until auto-compact` readout on a session started
