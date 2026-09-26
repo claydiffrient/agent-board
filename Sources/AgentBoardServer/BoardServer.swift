@@ -66,7 +66,9 @@ public final class BoardServer: Sendable {
             router: buildRouter(),
             configuration: .init(address: .hostname("127.0.0.1", port: requestedPort), serverName: "agent-board"),
             onServerRunning: { channel in
-                portSink.yield(channel.localAddress?.port ?? 0)
+                let port = channel.localAddress?.port ?? 0
+                ListenerCloseOnExec.mark(port: port)
+                portSink.yield(port)
                 portSink.finish()
             },
             logger: logger
