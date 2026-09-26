@@ -93,8 +93,12 @@ final class PortsPanelCeilingTests: XCTestCase {
         )
     }
 
+    /// One project row ("Alpha", from `board()`) beside the pinned rows.
     private func capture(_ mount: OffscreenMount) throws -> Capture {
-        try mount.capture(points: Self.sidebarPoints, showing: SidebarContent(rows: 3, headers: 1))
+        try mount.capture(
+            points: Self.sidebarPoints,
+            showing: SidebarContent(rows: SidebarSelection.pinned.count + 1, headers: 1)
+        )
     }
 
     /// The panel's painted band, in points, as the difference between a sidebar with it and without.
