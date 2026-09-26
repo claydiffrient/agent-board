@@ -86,8 +86,14 @@ actor FakeRuntime: AgentRuntime {
     /// `claude stop` on this short id fails the way it does for a job that is no longer running.
     func failStop(shortId: String, _ error: Error) { stopFailures[shortId] = error }
 
+    private var hosts: [String: pid_t] = [:]
+
+    /// A real process standing in for this short id's `claude` host, killed by `stop` as `claude stop` kills one.
+    func host(_ pid: pid_t, shortId: String) { hosts[shortId] = pid }
+
     func stop(shortId: String) async throws {
         if let failure = stopFailures[shortId] { throw failure }
+        if let host = hosts[shortId] { kill(host, SIGKILL) }
         stopped.append(shortId)
         if let watchedPath { watchedPathExistedAtStop.append(FileManager.default.fileExists(atPath: watchedPath)) }
     }
