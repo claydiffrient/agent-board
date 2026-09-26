@@ -30,6 +30,12 @@ Release notes live in `RELEASES.md` at the repo root, newest first, one
 `.build/debug/AgentBoard` has neither an `Info.plist` nor that resource, so it
 reports no release notes rather than an empty list.
 
+Pushing a tag `v<version>` runs `.github/workflows/release.yml`: it refuses a
+tag that is not `v` plus `RELEASES.md`'s newest heading, or one that already has
+a release, then runs `Scripts/release.sh` and attaches the zip to a draft GitHub
+Release whose body is that version's section (`Scripts/release-notes.sh <tag>`
+prints it locally).
+
 Environment overrides: `AGENTBOARD_DB` (sqlite path), `AGENTBOARD_SUPPORT_DIR`
 (session configs, server port file, and worktrees). Default support dir is
 `~/Library/Application Support/AgentBoard`; worktrees default to
