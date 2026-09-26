@@ -7,6 +7,7 @@ usage() {
   cat <<'USAGE'
 Usage: Scripts/release.sh [--allow-dirty]
        Scripts/release.sh --check <path/to/Agent Board.app>
+       Scripts/release.sh --check-structure <path/to/Agent Board.app>
 
 Builds a release-configuration Agent Board.app and packages it as
 dist/AgentBoard-<version>.zip, with the unzipped .app beside it.
@@ -23,6 +24,10 @@ dist/AgentBoard-<version>.zip, with the unzipped .app beside it.
   --allow-dirty   build even when tracked files have uncommitted changes
   --check APP     run only the bundle checks against APP, expecting the version,
                   build number and commit of the current checkout
+  --check-structure APP
+                  run the bundle checks against APP without comparing it to the
+                  checkout: the plist keys must be present, and the version
+                  checked against the bundled RELEASES.md is APP's own
 USAGE
 }
 
@@ -38,6 +43,7 @@ newest_version() {
 
 plist_value() { plutil -extract "$2" raw -o - "$1/Contents/Info.plist" 2>/dev/null || true; }
 
+# An empty build or commit means "any non-empty value", for --check-structure.
 check_bundle() {
   local app="$1" version="$2" build="$3" commit="$4"
   local resources="$app/Contents/Resources" binary="$app/Contents/MacOS/AgentBoard"
@@ -55,9 +61,17 @@ check_bundle() {
   actual=$(plist_value "$app" CFBundleShortVersionString)
   [ "$actual" = "$version" ] || problems+=("Info.plist CFBundleShortVersionString is '$actual', expected '$version'")
   actual=$(plist_value "$app" CFBundleVersion)
-  [ "$actual" = "$build" ] || problems+=("Info.plist CFBundleVersion is '$actual', expected '$build'")
+  if [ -z "$build" ]; then
+    [ -n "$actual" ] || problems+=("Info.plist CFBundleVersion is missing")
+  else
+    [ "$actual" = "$build" ] || problems+=("Info.plist CFBundleVersion is '$actual', expected '$build'")
+  fi
   actual=$(plist_value "$app" AgentBoardCommit)
-  [ "$actual" = "$commit" ] || problems+=("Info.plist AgentBoardCommit is '$actual', expected '$commit'")
+  if [ -z "$commit" ]; then
+    [[ "$actual" =~ ^[0-9a-f]{40}(-dirty)?$ ]] || problems+=("Info.plist AgentBoardCommit is '$actual', expected a commit sha")
+  else
+    [ "$actual" = "$commit" ] || problems+=("Info.plist AgentBoardCommit is '$actual', expected '$commit'")
+  fi
 
   if [ ! -f "$resources/RELEASES.md" ]; then
     problems+=("missing from Contents/Resources: RELEASES.md")
@@ -66,8 +80,10 @@ check_bundle() {
     [ "$actual" = "$version" ] || problems+=("bundled RELEASES.md's newest heading is '$actual', expected '$version'")
   fi
   [ -f "$resources/AppIcon.icns" ] || problems+=("missing from Contents/Resources: AppIcon.icns")
+  # Structure mode leaves missing resources to codesign's seal below: which bundles the checkout
+  # builds today says nothing about an artifact built from another commit.
   for bundle in .build/release/*.bundle; do
-    [ -e "$bundle" ] || continue
+    [ -e "$bundle" ] && [ -n "$build" ] || continue
     name=$(basename "$bundle")
     [ -d "$resources/$name" ] || problems+=("missing from Contents/Resources: $name")
   done
@@ -86,15 +102,24 @@ check_bundle() {
 
 allow_dirty=false
 check_only=""
+check_structure=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --allow-dirty) allow_dirty=true ;;
     --check) [ $# -ge 2 ] || fail "--check needs an app path"; check_only="$2"; shift ;;
+    --check-structure) [ $# -ge 2 ] || fail "--check-structure needs an app path"; check_structure="$2"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
   shift
 done
+
+if [ -n "$check_structure" ]; then
+  version=$(plist_value "$check_structure" CFBundleShortVersionString)
+  [[ "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || fail "$check_structure: Info.plist CFBundleShortVersionString is '$version', expected a version"
+  check_bundle "$check_structure" "$version" "" ""
+  exit
+fi
 
 version=$(newest_version RELEASES.md) || fail "RELEASES.md's first '## ' heading is not '## <version>'"
 build=$(git rev-list --count HEAD)
