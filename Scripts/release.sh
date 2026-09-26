@@ -10,7 +10,8 @@ Usage: Scripts/release.sh [--allow-dirty]
        Scripts/release.sh --check-structure <path/to/Agent Board.app>
 
 Builds a release-configuration Agent Board.app and packages it as
-dist/AgentBoard-<version>.zip, with the unzipped .app beside it.
+dist/AgentBoard-<version>.dmg, a disk image holding the app and an Applications
+symlink to drag it onto. The .app is left beside it in dist/.
 
   - The version is the newest "## <version>" heading in RELEASES.md, stamped into
     the bundle's CFBundleShortVersionString. CFBundleVersion is the number of
@@ -18,7 +19,7 @@ dist/AgentBoard-<version>.zip, with the unzipped .app beside it.
     when built with --allow-dirty from a tree with uncommitted changes.
   - arm64 only: the host architecture swift build produces. Not universal.
   - Signed ad hoc unless AGENTBOARD_SIGN_IDENTITY names a codesign identity.
-  - The bundle is verified after assembly and again after unzipping the artifact;
+  - The bundle is verified after assembly and again inside the mounted disk image;
     any failed check fails the release.
 
   --allow-dirty   build even when tracked files have uncommitted changes
@@ -39,6 +40,17 @@ newest_version() {
   heading=$(grep -m1 -E '^## ' "$1" | sed -E 's/^## +//; s/ (—|–|-) .*$//; s/[[:space:]]+$//; s/^[vV]//') || true
   [[ "$heading" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || return 1
   echo "$heading"
+}
+
+# GitHub's macOS runners intermittently fail hdiutil with "Resource busy" (actions/runner-images#7522).
+hdiutil_retry() {
+  local attempt
+  for attempt in 1 2 3 4; do
+    hdiutil "$@" && return
+    [ "$attempt" -lt 4 ] || return 1
+    echo "release.sh: hdiutil $1 failed; retrying in $((attempt * 5))s" >&2
+    sleep $((attempt * 5))
+  done
 }
 
 plist_value() { plutil -extract "$2" raw -o - "$1/Contents/Info.plist" 2>/dev/null || true; }
@@ -141,11 +153,13 @@ fi
 
 identity="${AGENTBOARD_SIGN_IDENTITY:--}"
 app="dist/Agent Board.app"
-zip="dist/AgentBoard-$version.zip"
+dmg="dist/AgentBoard-$version.dmg"
 
 swift build -c release --product AgentBoard
 mkdir -p dist
 assemble_app release "$app"
+# SwiftPM's resource files are read-only, and xattr -dr com.apple.quarantine fails on those after a download.
+chmod -R u+w "$app"
 
 plist="$app/Contents/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$version" "$plist"
@@ -155,16 +169,30 @@ plutil -replace AgentBoardCommit -string "$commit" "$plist"
 codesign --force --sign "$identity" "$app" || fail "codesign --sign '$identity' failed"
 check_bundle "$app" "$version" "$build" "$commit"
 
-rm -f "$zip"
-ditto -c -k --keepParent "$app" "$zip"
+staging=$(mktemp -d)
+mountpoint=$(mktemp -d)
+mounted=false
+cleanup() {
+  if $mounted; then hdiutil detach -quiet -force "$mountpoint" || true; fi
+  rm -rf "$staging"
+  rmdir "$mountpoint" 2>/dev/null || true
+}
+trap cleanup EXIT
 
-unzipped=$(mktemp -d)
-trap 'rm -rf "$unzipped"' EXIT
-ditto -x -k "$zip" "$unzipped"
-check_bundle "$unzipped/$(basename "$app")" "$version" "$build" "$commit"
+ditto "$app" "$staging/$(basename "$app")"
+ln -s /Applications "$staging/Applications"
+hdiutil_retry create -volname "Agent Board" -srcfolder "$staging" -format UDZO -ov "$dmg"
+
+hdiutil_retry attach -nobrowse -readonly -mountpoint "$mountpoint" "$dmg" >/dev/null
+mounted=true
+check_bundle "$mountpoint/$(basename "$app")" "$version" "$build" "$commit"
+[ "$(readlink "$mountpoint/Applications")" = /Applications ] ||
+  fail "$dmg: Applications is not a symlink to /Applications"
+hdiutil_retry detach "$mountpoint" >/dev/null
+mounted=false
 
 echo
 echo "version  $version (build $build, commit $commit)"
 if [ "$identity" = - ]; then echo "signed   ad hoc"; else echo "signed   $identity"; fi
 echo "app      $app"
-echo "artifact $zip ($(du -h "$zip" | cut -f1 | tr -d ' '))"
+echo "artifact $dmg ($(du -h "$dmg" | cut -f1 | tr -d ' '))"
