@@ -47,17 +47,18 @@ heading, `CFBundleVersion` from `git rev-list --count HEAD`, and
 with `--allow-dirty` over a dirty tree). It signs ad hoc unless
 `AGENTBOARD_SIGN_IDENTITY` names a codesign identity — there isn't one
 installed on this Mac today. It verifies the assembled bundle, then verifies
-it again after round-tripping through the zip; either failing fails the
-release.
+it again inside the mounted DMG; either failing fails the release.
 
-The artifact lands at `dist/Agent Board.app` (unzipped, for local install)
-and `dist/AgentBoard-<version>.zip` (for the GitHub Release).
+The artifact lands at `dist/Agent Board.app` and `dist/AgentBoard-<version>.dmg`
+— a disk image holding the app and an `Applications` symlink to drag it onto.
+`release.sh` mounts the DMG read-only and re-runs the bundle check against the
+copy inside it before deleting the mountpoint; either the assembled app or the
+mounted one failing the check deletes the DMG and fails the release.
 
 `--check <app>` and `--check-structure <app>` run the same bundle checks
 against an existing app without rebuilding — `--check` also compares it to
 the current checkout's version/build/commit, `--check-structure` only checks
-the bundle is internally consistent. `Scripts/install.sh` uses
-`--check-structure` on whatever it's about to install.
+the bundle is internally consistent.
 
 ## 3. Publish
 
@@ -71,54 +72,67 @@ git push origin v<version>
 `.github/workflows/release.yml` runs on every `v*` tag push. The workflow:
 
 1. Checks the tag against `RELEASES.md` with `Scripts/release-notes.sh` and
-   uses that version's section, verbatim, as the release body (with a line
-   up top noting the build is ad hoc signed).
+   uses that version's section, verbatim, as the release body (with a notice
+   up top giving the Gatekeeper step below).
 2. Refuses if a release for that tag already exists — draft or published,
    checked against the releases listing rather than the by-tag endpoint,
    because the latter doesn't see drafts.
-3. Runs `Scripts/release.sh` and attaches `dist/AgentBoard-<version>.zip` to a
+3. Runs `Scripts/release.sh` and attaches `dist/AgentBoard-<version>.dmg` to a
    **draft** GitHub Release.
 
 Review the draft on GitHub, edit if needed, and publish it by hand — the
 workflow never does that step.
 
-Because the build is ad hoc signed, Gatekeeper blocks the zip on any other
-Mac until its quarantine flag is cleared. Tell anyone downloading it to run
-`Scripts/install.sh` rather than unzipping and opening the `.app` directly.
+The release notice gives this Gatekeeper wording verbatim:
+
+> Install by opening the DMG and dragging Agent Board into Applications. This
+> build is ad-hoc signed, so on macOS 15 and later Gatekeeper blocks the first
+> open of a downloaded copy. Allow it under System Settings > Privacy &
+> Security > Open Anyway (the button appears for about an hour after the
+> blocked open), or clear the flag with
+> `xattr -dr com.apple.quarantine "/Applications/Agent Board.app"`.
 
 ## 4. Install
 
+Quit Agent Board first if it's running, through **Agent Board > Quit** — that
+lets its shutdown sheet settle any running workers before you replace the
+bundle. There's no installer standing guard over this the way there used to
+be, so quitting first is on you.
+
+Then open `dist/AgentBoard-<version>.dmg` (or, for a published release,
+`gh release download v<version> --pattern '*.dmg' --dir <dir>` and open the
+downloaded one), drag **Agent Board** onto the **Applications** shortcut
+inside it, and relaunch from `/Applications`.
+
+Because the build is ad hoc signed, macOS 15 and later blocks the first open
+of a downloaded copy with Gatekeeper. Allow it under System Settings >
+Privacy & Security > Open Anyway (the button appears for about an hour after
+the blocked open), or clear the flag yourself:
+
 ```
-Scripts/install.sh [--allow-downgrade] [--open] [--dest DIR] [<Agent Board.app | AgentBoard-<version>.zip>]
+xattr -dr com.apple.quarantine "/Applications/Agent Board.app"
 ```
 
-With no artifact named, installs the newest `dist/AgentBoard-*.zip`. To
-install a published release instead of a local build:
+The database is protected on launch now, not by the install step. Every
+launch, before migrating an existing database, the app checks it for
+migrations this build doesn't recognize:
 
-```
-gh release download v<version> --pattern '*.zip' --dir <dir>
-Scripts/install.sh <dir>/AgentBoard-<version>.zip
-```
+- **A build newer than the one you just installed wrote the database.** The
+  app refuses to open it, shows a blocking alert saying so, names the newest
+  file under `backups/` (beside the database) if one fits, gives the
+  `sqlite3 ... .restore` command below to restore it, and quits without
+  writing anything. This is what used to happen silently — an older build
+  opening a newer database and skipping migrations it didn't know — now it
+  stops you instead.
+- **Otherwise**, if this build differs from the last one to open the
+  database, the app backs it up first: a full copy in
+  `backups/agentboard-<timestamp>-<version>[+<build>].sqlite`, verified
+  page-for-page against the source before it gets that name, keeping the
+  newest three. Each backup is about 290 MB today, so three take under 1 GB.
+  A normal upgrade needs nothing from you here — this happens on the next
+  launch, automatically.
 
-What it does, in order:
-
-- **Refuses while any process named `AgentBoard` is running**, from any path.
-  It never quits or kills one — quit from inside the app (Agent Board > Quit)
-  so its shutdown sheet settles running workers first, then install.
-- **Backs up the database** with `sqlite3 .backup` to
-  `backups/agentboard-<timestamp>-<version>[+<build>].sqlite` beside it, and
-  keeps the newest three. Each backup is a full copy of the database, about
-  288 MB today, so three take under 1 GB.
-- **Refuses a downgrade** — an older version, or an older build of the same
-  version (a build number that can't be compared as an integer on either
-  side counts as older too) — unless you pass `--allow-downgrade`. With that
-  flag it explains the consequence (GRDB silently skips migrations the older
-  build doesn't know, rather than refusing the newer schema) and names the
-  newest backup known to fit the build you're installing.
-- **Clears quarantine** from the extracted bundle and moves it into place.
-  Launches the app only if you pass `--open`.
-
-To restore a backup after an intentional downgrade:
+To restore a backup by hand:
 
 ```
 sqlite3 '<db>' ".restore '<backup>'"
