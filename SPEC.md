@@ -916,6 +916,45 @@ commits from different tasks interleave on one ref, to say afterwards which
 task made which commit, since the branch name can no longer carry that the way
 `agentboard/<task-id>` does.
 
+### 4.1 Opening the database: newer-build refusal and launch backups
+
+The database is `agentboard.sqlite` in the app support directory, or
+`$AGENTBOARD_DB`. `AppDatabase.open` does two things before it migrates an
+existing file, so they hold however the app was installed (DMG, hand copy,
+`bundle.sh`):
+
+- **Refuse a database from a newer build.** GRDB's migrator skips applied
+  identifiers it does not register, so an older build would otherwise open a
+  newer database silently and run against a schema it does not understand. If
+  `grdb_migrations` holds any identifier this build does not register, open
+  throws `AppDatabaseError.writtenByNewerBuild` before anything writes. The app
+  shows a blocking alert saying the database was last used by a newer Agent
+  Board, names the newest file in `backups/` if there is one, gives
+  `sqlite3 '<db>' ".restore '<backup>'"` to restore it by hand, and quits.
+- **Back up before a new build migrates.** The build is
+  `CFBundleShortVersionString`, `CFBundleVersion` and `AgentBoardCommit` from the
+  main bundle. A missing key is nil and equals only another nil, so relaunching
+  one `bundle.sh` build (no commit) is not a new build, and `swift run` (no keys)
+  is one build. When the build differs from the last one to open the database,
+  or any registered migration is still pending, open copies the database with
+  SQLite's online backup API into
+  `backups/agentboard-<yyyyMMdd-HHmmss>-<version>[+<build>].sqlite` beside it.
+  The label is the *previous* build's, the schema the copy fits, as
+  `Scripts/install.sh` labeled its backups; `unknown` when no build is recorded.
+  The copy is written under a `.partial` name and renamed only once its page
+  count matches the source, so an interrupted backup never carries a real name.
+  The newest three are kept. A backup that fails or does not match stops the
+  launch rather than migrating without one.
+
+The last build to open the database is recorded in
+`backups/last-opened-build.json` after migration succeeds, not in a table: a
+migration list is pinned by tests and shared across branches, and the backup
+name cannot hold it (it carries the previous build, and no commit). Nothing is
+backed up when the file does not exist yet, for the in-memory database, or when
+the caller passes no build — only the app passes one, so tests that open a
+database under a temp path never write backups. A backup of the 293 MB board
+took 1.3–1.5 s on this Mac, and it stays on the launch path.
+
 ---
 
 ## 5. Task lifecycle

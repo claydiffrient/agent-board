@@ -1,5 +1,6 @@
 import AgentBoardCore
 import AgentBoardRuntime
+import AppKit
 import Foundation
 
 @MainActor
@@ -9,7 +10,7 @@ enum AppComposition {
         let url = ProcessInfo.processInfo.environment["AGENTBOARD_DB"].map { URL(fileURLWithPath: $0) }
             ?? Wiring.appSupportDir.appendingPathComponent("agentboard.sqlite")
         do {
-            let db = try AppDatabase.open(at: url)
+            let db = try AppDatabase.open(at: url, build: BuildIdentity(infoDictionary: Bundle.main.infoDictionary))
             let sleepGuard = SleepGuard()
             sleepGuard.releaseOnTermination()
             let supervisor = Wiring.makeSupervisor(db: db, sleepGuard: sleepGuard)
@@ -26,9 +27,44 @@ enum AppComposition {
             )
             MacNotifier.shared.start(router: environment.router)
             return environment
+        } catch let refusal as AppDatabaseError {
+            guard case .writtenByNewerBuild = refusal else {
+                fatalError("Agent Board could not open its database at \(url.path): \(refusal)")
+            }
+            refuseNewerDatabase(refusal)
         } catch {
             fatalError("Agent Board could not open its database at \(url.path): \(error)")
         }
+    }
+
+    /// Nothing has written to the database yet, and quitting here keeps it that way (SPEC §4.1).
+    private static func refuseNewerDatabase(_ refusal: AppDatabaseError) -> Never {
+        guard case let .writtenByNewerBuild(database, _, backup) = refusal else { exit(1) }
+        let recovery = if let command = refusal.restoreCommand, let backup {
+            """
+            Install the newer build again, or restore the newest backup, \(backup.lastPathComponent), by hand before relaunching:
+
+            \(command)
+
+            Restoring discards everything the board recorded since that backup.
+            """
+        } else {
+            "Install the newer build again. There is no backup in "
+                + "\(database.deletingLastPathComponent().appendingPathComponent("backups").path) to restore."
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "This database was last used by a newer Agent Board"
+        alert.informativeText = """
+            \(refusal.localizedDescription) Agent Board did not open it and has changed nothing.
+
+            \(recovery)
+            """
+        alert.addButton(withTitle: "Quit")
+        NSApplication.shared.setActivationPolicy(.regular)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        alert.runModal()
+        exit(1)
     }
 }
 
