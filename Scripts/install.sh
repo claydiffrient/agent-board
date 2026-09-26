@@ -14,13 +14,15 @@ With no artifact named, installs the newest dist/AgentBoard-*.zip.
   - Checks the incoming bundle with release.sh --check-structure.
   - Backs up the database with sqlite3 .backup into backups/ beside it, named with the
     installed version and a timestamp, and keeps the newest five.
-  - Refuses to install an older version than the installed one.
+  - Refuses to install an older version than the installed one, or an older build of
+    the same version. Within one version, a build number that is missing or not an
+    integer on either side cannot be ordered, so that install is refused too.
   - Copies into a temporary name beside the destination, then renames it into place.
 
 The database is $AGENTBOARD_DB if set, else agentboard.sqlite in $AGENTBOARD_SUPPORT_DIR
 if set, else in ~/Library/Application Support/AgentBoard, as the app resolves it.
 
-  --allow-downgrade  install even when the incoming version is older
+  --allow-downgrade  install even when the incoming version or build is older
   --open             launch the app after installing
   --dest DIR         install into DIR instead of /Applications, for testing; requires
                      AGENTBOARD_SUPPORT_DIR or AGENTBOARD_DB, and narrows the running
@@ -44,6 +46,17 @@ version_older() {
   done
   return 1
 }
+
+# Exit status 0 when build $1 of version $2 is older than build $3 of version $4. Within one
+# version, a build that is missing or not an integer cannot be ordered and counts as older.
+release_older() {
+  version_older "$2" "$4" && return 0
+  version_older "$4" "$2" && return 1
+  [[ "$1" =~ ^[0-9]+$ && "$3" =~ ^[0-9]+$ ]] || return 0
+  (( 10#$1 < 10#$3 ))
+}
+
+release_label() { echo "$1 (build ${2:-missing})"; }
 
 # Every process named AgentBoard is an instance: the release bundle, the dev bundle and
 # `swift run` all run an executable of that name. pgrep, ps and lsof read the process
@@ -78,7 +91,7 @@ refuse_if_running() {
 downgrade_consequence() {
   cat <<EOF
 An older build does not refuse a newer database. GRDB's DatabaseMigrator skips
-migration ids it does not know and runs nothing, so $incoming_version starts against a
+migration ids it does not know and runs nothing, so $incoming_label starts against a
 schema it was never written for. Tables and columns added after it are ignored, and a
 change it cannot work with (a new NOT NULL column without a default, a renamed or
 rebuilt table) fails only when a query reaches it. Nothing warns first, and reinstalling
@@ -86,15 +99,14 @@ the newer build later does not rerun its migrations over what the older one wrot
 EOF
 }
 
-# The newest backup taken while a version no newer than $1 was installed: the last state of
-# the board that build's schema is known to fit.
+# The newest backup taken while a release no newer than build $1 of version $2 was installed:
+# the last state of the board that build's schema is known to fit. A backup labeled with a
+# version alone has no known build, so it never fits a build of that same version.
 restorable_backup() {
-  local i label
+  local i
   for (( i = ${#existing_backups[@]} - 1; i >= 0; i-- )); do
-    [[ "${existing_backups[i]}" =~ /agentboard-[0-9]{8}-[0-9]{6}-(.+)\.sqlite$ ]] || continue
-    label="${BASH_REMATCH[1]}"
-    [ "$label" = none ] && continue
-    version_older "$1" "$label" || { echo "${existing_backups[i]}"; return 0; }
+    [[ "${existing_backups[i]}" =~ /agentboard-[0-9]{8}-[0-9]{6}-([0-9.]+)(\+([0-9]+))?\.sqlite$ ]] || continue
+    release_older "$1" "$2" "${BASH_REMATCH[3]}" "${BASH_REMATCH[1]}" || { echo "${existing_backups[i]}"; return 0; }
   done
   return 0
 }
@@ -188,6 +200,7 @@ clear_quarantine "$incoming"
 incoming_version=$(plist_value "$incoming" CFBundleShortVersionString)
 incoming_build=$(plist_value "$incoming" CFBundleVersion)
 incoming_commit=$(plist_value "$incoming" AgentBoardCommit)
+incoming_label=$(release_label "$incoming_version" "$incoming_build")
 installed_version=""
 installed_build=""
 if [ -d "$target" ]; then
@@ -197,11 +210,14 @@ if [ -d "$target" ]; then
 fi
 
 downgrade=false
-if [ -n "$installed_version" ] && version_older "$incoming_version" "$installed_version"; then
+if [ -n "$installed_version" ] && release_older "$incoming_build" "$incoming_version" "$installed_build" "$installed_version"; then
   downgrade=true
   if ! $allow_downgrade; then
     {
-      echo "install.sh: refusing to downgrade $installed_version to $incoming_version (pass --allow-downgrade to override)."
+      echo "install.sh: refusing to downgrade $(release_label "$installed_version" "$installed_build") to $incoming_label (pass --allow-downgrade to override)."
+      if [ "$incoming_version" = "$installed_version" ] && ! [[ "$incoming_build" =~ ^[0-9]+$ && "$installed_build" =~ ^[0-9]+$ ]]; then
+        echo "The build numbers cannot be ordered, so this counts as a downgrade."
+      fi
       echo
       downgrade_consequence
     } >&2
@@ -217,7 +233,9 @@ if [ -f "$db" ]; then
     compgen -G "$backups/agentboard-$stamp-*.sqlite" >/dev/null || break
     sleep 1
   done
-  backup="$backups/agentboard-$stamp-${installed_version:-none}.sqlite"
+  backup_label="${installed_version:-none}"
+  if [[ -n "$installed_version" && "$installed_build" =~ ^[0-9]+$ ]]; then backup_label+="+$installed_build"; fi
+  backup="$backups/agentboard-$stamp-$backup_label.sqlite"
   # An interrupted .backup leaves a file that opens as a valid, empty database; only a finished
   # one gets the name that pruning and restoring look for.
   rm -f "$backups"/.agentboard-*.partial "$backups"/.agentboard-*.partial-journal
@@ -257,14 +275,14 @@ if [ -n "$backup" ]; then echo "backup    $backup"; else echo "backup    none: n
 if $downgrade; then
   echo
   downgrade_consequence
-  restore=$(restorable_backup "$incoming_version")
+  restore=$(restorable_backup "$incoming_build" "$incoming_version")
   echo
   if [ -n "$restore" ]; then
-    echo "The newest backup taken under $incoming_version or older is $restore. To go back to it,"
+    echo "The newest backup taken under $incoming_label or older is $restore. To go back to it,"
     echo "before launching: sqlite3 '$db' \".restore '$restore'\""
     echo "That discards everything the board recorded since that backup."
   else
-    echo "No backup here was taken under $incoming_version or older, so there is no known-good"
+    echo "No backup here was taken under $incoming_label or older, so there is no known-good"
     echo "database for it."
   fi
 fi
