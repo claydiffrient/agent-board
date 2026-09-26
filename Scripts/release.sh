@@ -172,8 +172,10 @@ check_bundle "$app" "$version" "$build" "$commit"
 staging=$(mktemp -d)
 mountpoint=$(mktemp -d)
 mounted=false
+verified=false
 cleanup() {
   if $mounted; then hdiutil detach -quiet -force "$mountpoint" || true; fi
+  $verified || rm -f "$dmg"
   rm -rf "$staging"
   rmdir "$mountpoint" 2>/dev/null || true
 }
@@ -190,6 +192,7 @@ check_bundle "$mountpoint/$(basename "$app")" "$version" "$build" "$commit"
   fail "$dmg: Applications is not a symlink to /Applications"
 hdiutil_retry detach "$mountpoint" >/dev/null
 mounted=false
+verified=true
 
 echo
 echo "version  $version (build $build, commit $commit)"
