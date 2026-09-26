@@ -939,8 +939,8 @@ existing file, so they hold however the app was installed (DMG, hand copy,
   or any registered migration is still pending, open copies the database with
   SQLite's online backup API into
   `backups/agentboard-<yyyyMMdd-HHmmss>-<version>[+<build>].sqlite` beside it.
-  The label is the *previous* build's, the schema the copy fits, as
-  `Scripts/install.sh` labeled its backups; `unknown` when no build is recorded.
+  The label is the *previous* build's, the schema the copy fits;
+  `unknown` when no build is recorded.
   The copy is written under a `.partial` name and renamed only once its page
   count matches the source, so an interrupted backup never carries a real name.
   Three are kept: the one just taken and the two newest others by name, so a
