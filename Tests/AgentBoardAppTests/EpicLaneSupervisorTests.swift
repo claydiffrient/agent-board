@@ -6,7 +6,7 @@ import XCTest
 final class EpicLaneSupervisorTests: XCTestCase {
     func testRequestIntegrationQueuesOneApprovalAndSpawnsNothing() async throws {
         let f = try SupervisorFixture.make()
-        defer { f.cleanUp() }
+        defer { _Concurrency.Task { await f.cleanUp() } }
         let (epic, _) = try Board(f.db).createEpic(
             projectId: f.project.id, title: "Ship it", goal: nil, tasks: [NewEpicTask(title: "One")]
         )
@@ -23,7 +23,7 @@ final class EpicLaneSupervisorTests: XCTestCase {
 
     func testRequestIntegrationOnAnUnknownEpicFails() async throws {
         let f = try SupervisorFixture.make()
-        defer { f.cleanUp() }
+        defer { _Concurrency.Task { await f.cleanUp() } }
         do {
             try await f.supervisor.requestIntegration(epicId: "nope")
             XCTFail("expected a failure for an unknown epic")

@@ -40,7 +40,7 @@ final class TerminalScreenMountTests: XCTestCase {
         window.contentView = nil
         window = nil
         supervisor = nil
-        fixture.cleanUp()
+        await fixture.cleanUp()
         fixture = nil
     }
 

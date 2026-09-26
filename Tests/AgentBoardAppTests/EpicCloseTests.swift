@@ -8,7 +8,7 @@ import XCTest
 final class EpicCloseTests: XCTestCase {
     func testClosingAsDoneKeepsTheEpicBranchAndEveryTaskBranch() async throws {
         let f = try SupervisorFixture.make(gitRepo: true)
-        defer { f.cleanUp() }
+        defer { _Concurrency.Task { await f.cleanUp() } }
         let ready = try f.epicReadyForIntegration(["One", "Two"])
         let branches = [ready.epic.branch] + ready.tasks.map { "agentboard/\($0.id)" }
         let headsBefore = try branches.map { try f.git(["rev-parse", $0]) }
@@ -21,7 +21,7 @@ final class EpicCloseTests: XCTestCase {
 
     func testAbandoningKeepsEveryBranchToo() async throws {
         let f = try SupervisorFixture.make(gitRepo: true)
-        defer { f.cleanUp() }
+        defer { _Concurrency.Task { await f.cleanUp() } }
         let ready = try f.epicReadyForIntegration(["One"])
         let taskBranch = "agentboard/\(ready.tasks[0].id)"
 
@@ -35,7 +35,7 @@ final class EpicCloseTests: XCTestCase {
     /// An unfinished task's worktree is what would be lost if closing tore anything down.
     func testAnUnfinishedTasksWorktreeSurvivesTheClose() async throws {
         let f = try SupervisorFixture.make(gitRepo: true)
-        defer { f.cleanUp() }
+        defer { _Concurrency.Task { await f.cleanUp() } }
         let (epic, created) = try Board(f.db).createEpic(
             projectId: f.project.id, title: "Ship it", goal: nil,
             tasks: [NewEpicTask(title: "One"), NewEpicTask(title: "Two")]
@@ -55,7 +55,7 @@ final class EpicCloseTests: XCTestCase {
 
     func testRefusedWhileAWorkerIsRunningAndTheWorkerIsLeftAlone() async throws {
         let f = try SupervisorFixture.make(gitRepo: true)
-        defer { f.cleanUp() }
+        defer { _Concurrency.Task { await f.cleanUp() } }
         let (epic, created) = try Board(f.db).createEpic(
             projectId: f.project.id, title: "Ship it", goal: nil, tasks: [NewEpicTask(title: "One")]
         )
@@ -76,7 +76,7 @@ final class EpicCloseTests: XCTestCase {
 
     func testTheHumanCanCloseOnceTheWorkerIsStopped() async throws {
         let f = try SupervisorFixture.make(gitRepo: true)
-        defer { f.cleanUp() }
+        defer { _Concurrency.Task { await f.cleanUp() } }
         let (epic, created) = try Board(f.db).createEpic(
             projectId: f.project.id, title: "Ship it", goal: nil, tasks: [NewEpicTask(title: "One")]
         )
@@ -90,7 +90,7 @@ final class EpicCloseTests: XCTestCase {
 
     func testClosingTwiceIntoDifferentStatesIsRefused() async throws {
         let f = try SupervisorFixture.make(gitRepo: true)
-        defer { f.cleanUp() }
+        defer { _Concurrency.Task { await f.cleanUp() } }
         let (epic, _) = try Board(f.db).createEpic(
             projectId: f.project.id, title: "Ship it", goal: nil, tasks: []
         )
@@ -106,7 +106,7 @@ final class EpicCloseTests: XCTestCase {
 
     func testTheClosureDialogPreflightNamesTheLeftoversAndTheGuarantees() async throws {
         let f = try SupervisorFixture.make(gitRepo: true)
-        defer { f.cleanUp() }
+        defer { _Concurrency.Task { await f.cleanUp() } }
         let (epic, created) = try Board(f.db).createEpic(
             projectId: f.project.id, title: "Ship it", goal: nil,
             tasks: [NewEpicTask(title: "One"), NewEpicTask(title: "Two")]

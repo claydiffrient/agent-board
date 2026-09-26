@@ -21,6 +21,13 @@ public struct AgentRuntimeError: Error, CustomStringConvertible, Sendable {
 }
 
 enum ProcessRunner {
+    /// However long a subprocess legitimately runs, its stderr pipe must drain in this long once
+    /// stdout has. Past it the drain never scheduling is worth failing loudly for, rather than the
+    /// semaphore below waiting forever with no signal to say why: measured cause of a `swift test`
+    /// run that outlived its own watchdog by hours (2026-09-26), once enough leaked background
+    /// `Task`s elsewhere had exhausted libdispatch's worker-thread pool.
+    static let pipeDrainTimeout: TimeInterval = 60
+
     static func run(
         executable: URL,
         arguments: [String],
@@ -65,7 +72,13 @@ enum ProcessRunner {
             stderrDone.signal()
         }
         let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        stderrDone.wait()
+        guard stderrDone.wait(timeout: .now() + pipeDrainTimeout) == .success else {
+            process.terminate()
+            throw AgentRuntimeError(
+                "\(executable.lastPathComponent) \(arguments.joined(separator: " ")) did not finish "
+                    + "within \(Int(pipeDrainTimeout))s"
+            )
+        }
         process.waitUntilExit()
 
         return CommandResult(

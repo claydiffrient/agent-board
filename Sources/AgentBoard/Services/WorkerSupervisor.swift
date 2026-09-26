@@ -197,6 +197,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         startMetering()
     }
 
+    /// The other half of `start()`: releases the real port `server` bound and cancels the metering
+    /// loop. Every test fixture that calls `start()` must call this in teardown, or the Hummingbird
+    /// event loop and the 5-second metering `Task` outlive the test and pile up across a run — this
+    /// is what left dozens of listening ports and metering loops running behind a hung `swift test`.
+    func stop() async {
+        meteringTask?.cancel()
+        meteringTask = nil
+        await server.stop()
+    }
+
     /// Idempotent: a project whose root is already space-free is left alone, so the second launch
     /// is a no-op.
     @discardableResult

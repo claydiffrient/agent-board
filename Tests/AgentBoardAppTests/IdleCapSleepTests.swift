@@ -38,7 +38,7 @@ final class IdleCapSleepTests: XCTestCase {
     private var clock: FakeSystemClock!
 
     override func tearDown() async throws {
-        fixture?.cleanUp()
+        await fixture?.cleanUp()
         fixture = nil
         clock = nil
     }

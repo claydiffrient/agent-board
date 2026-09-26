@@ -25,7 +25,7 @@ final class GlobalShutdownSupervisorTests: XCTestCase {
     override func tearDown() async throws {
         await fixture.runtime.releaseSpawn()
         await fixture.supervisor.waitForSetup()
-        fixture.cleanUp()
+        await fixture.cleanUp()
         fixture = nil
     }
 
@@ -210,5 +210,8 @@ final class GlobalShutdownSupervisorTests: XCTestCase {
         )
         sink.target = restarted
         await restarted.start()
+        // Nothing after this reads `restarted` again — only the database effects `start()` already
+        // applied — so its port and metering loop can go now rather than for the rest of the process.
+        await restarted.stop()
     }
 }

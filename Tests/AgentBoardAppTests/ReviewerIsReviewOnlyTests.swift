@@ -20,7 +20,7 @@ final class ReviewerIsReviewOnlyTests: XCTestCase {
 
     override func tearDown() async throws {
         await fixture.supervisor.waitForSetup()
-        fixture.cleanUp()
+        await fixture.cleanUp()
         fixture = nil
     }
 

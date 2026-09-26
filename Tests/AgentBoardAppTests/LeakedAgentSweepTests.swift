@@ -19,7 +19,7 @@ final class CompletionStopsTheAgentTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        fixture.cleanUp()
+        await fixture.cleanUp()
         fixture = nil
     }
 
@@ -106,7 +106,7 @@ final class LaunchSweepTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        fixture.cleanUp()
+        await fixture.cleanUp()
         fixture = nil
     }
 
@@ -272,7 +272,7 @@ final class SweepDryRunTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        fixture.cleanUp()
+        await fixture.cleanUp()
         fixture = nil
     }
 
