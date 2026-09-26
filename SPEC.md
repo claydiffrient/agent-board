@@ -217,6 +217,16 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   command then fired `PreCompact {"trigger":"manual"}` with `custom_instructions`
   equal to `OrchestratorCompaction.instructions`, followed by
   `SessionStart {"source":"compact"}`.
+  At that pace the compaction command takes about 400 ms to write, and a report
+  notice or a Nudge can be requested inside that window (§9.2), so `inject`
+  serializes lines: each waits for the previous line's `\r` before its first
+  burst. Interleaved, the notice's `\r` would submit
+  `/compact <partial instructions>[agent-board]…` and the rest of the
+  instructions would go in as a plain message. A notice requested
+  mid-compaction is written right after the command's `\r` rather than held
+  until `SessionStart {"source":"compact"}`, because a compaction that fails
+  sends no `SessionStart` and would strand it; the re-orientation line names
+  `list_reports` either way.
 - **Context pressure = `input_tokens + cache_read_input_tokens +
   cache_creation_input_tokens` of the last assistant message.** Calibrated
   against the TUI's own `N% until auto-compact` readout on a session started
@@ -2086,6 +2096,9 @@ human types into (§9.1). The gate holds at most one notice and at most one of
 each app-authored line, so a held compaction and a held report notice both
 survive; it writes **at most one line per pass**, compaction first, and whatever
 is left waits out the turn that line started.
+A report notice is not held for a turn, so one can be requested while the
+compaction command is still being typed; `inject` writes it after the command's
+`\r`, never inside it (§2).
 
 **Never mid-turn.** `Stop` clears the gate's in-flight flag; the human's Enter
 and every line the gate writes set it. A compaction is refused while it is set

@@ -65,6 +65,7 @@ final class OrchestratorConsole {
     @ObservationIgnored private let processObserver = ProcessObserver()
     @ObservationIgnored private var restartAfterExit = false
     @ObservationIgnored private var noticeGate: ReportNoticeGate!
+    @ObservationIgnored private var lastInjection: _Concurrency.Task<Void, Never>?
 
     init(projectId: String, db: AppDatabase, sessionConfigDir: URL, currentPort: @escaping @MainActor () -> Int?) {
         self.projectId = projectId
@@ -267,9 +268,12 @@ final class OrchestratorConsole {
     /// Written as short bursts a pause apart, then the carriage return as its own write (SPEC §2).
     /// One long write reaches Claude Code as pasted content, which runs no slash command; a `\r` in
     /// the same burst as a slash command is eaten by its autocomplete. Every injection takes this
-    /// path so nothing depends on remembering which lines are long or start with a slash.
+    /// path so nothing depends on remembering which lines are long or start with a slash. Each
+    /// injection waits for the one before it, so no line's bursts land inside another's.
     private func inject(_ line: String) {
-        _Concurrency.Task { [terminal] in
+        let previous = lastInjection
+        lastInjection = _Concurrency.Task { [terminal] in
+            await previous?.value
             for burst in PromptBursts.split(line) {
                 terminal.isInjecting = true
                 terminal.send(txt: burst)
