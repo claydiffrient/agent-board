@@ -61,7 +61,7 @@ final class SpawnNoteIndexTests: XCTestCase {
         let foreign = try f.note("Theirs", sections: [("H", "secret")], in: try f.otherProject().id)
         XCTAssertTrue(try index().isEmpty)
 
-        let uri = NoteResourceURI.uri(projectId: foreign.projectId, noteId: foreign.id)
+        let uri = NoteResourceURI.uri(projectId: foreign.projectId!, noteId: foreign.id)
         do {
             _ = try await resources.read(uri, identity: worker)
             XCTFail("a foreign note was readable at \(uri)")

@@ -6,11 +6,14 @@ public enum TokenScope: String, Sendable, Codable {
     /// A rostered reviewer under agent review. Narrower than `worker`: it may only move the one task
     /// it was given out of `review`, and cannot spawn, reassign, or reach any other task.
     case reviewer
+    /// Belongs to no project: reads every project's board and writes to none.
+    case coordinator
 }
 
 public struct TokenIdentity: Sendable, Equatable {
     public var token: String
     public var scope: TokenScope
+    /// Empty for `.coordinator`, which has no project, so a project-scoped lookup on it matches nothing.
     public var projectId: String
     public var sessionId: String?
     public var taskId: String?

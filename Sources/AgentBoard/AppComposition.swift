@@ -68,6 +68,9 @@ final class StubSupervisor: WorkerSupervising {
     func worktreeDiffSummary(taskId: String) async -> DiffSummary? { nil }
     func orchestratorConsole(projectId: String) throws -> OrchestratorConsole { throw StubError.notWired }
     func shellConsole(projectId: String) throws -> ShellConsole { throw StubError.notWired }
+    func coordinatorSessionConsole() throws -> OrchestratorConsole { throw StubError.notWired }
+    func newCoordinatorSession() throws { throw StubError.notWired }
+    func resumeCoordinatorSession(sessionId: String) throws { throw StubError.notWired }
     func approve(approvalId: String) async throws { throw StubError.notWired }
     func deny(approvalId: String, reason: String?) async throws { throw StubError.notWired }
     func promote(taskId: String) async throws { throw StubError.notWired }

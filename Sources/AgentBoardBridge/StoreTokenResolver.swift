@@ -16,7 +16,7 @@ public struct StoreTokenResolver: TokenResolver {
         return TokenIdentity(
             token: grant.token,
             scope: scope,
-            projectId: grant.projectId,
+            projectId: grant.projectId ?? "",
             sessionId: grant.sessionId,
             taskId: grant.taskId
         )

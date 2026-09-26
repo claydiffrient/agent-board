@@ -85,6 +85,8 @@ public enum SessionState: String, Codable, Sendable, CaseIterable, Equatable, Da
 public enum SessionRole: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
     case orchestrator
     case worker
+    /// The Coordinator's session (SPEC §8.2), the only row with no project.
+    case coordinator
 }
 
 public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
@@ -108,6 +110,25 @@ public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, Data
     case message
     /// The human commented on a task; the body quotes it. An agent's comment queues nothing (SPEC §9.1).
     case comment
+    /// The Coordinator asked this project for something, or withdrew what it asked (SPEC §9.4).
+    case request
+    /// A project's orchestrator answered a request; queued for the Coordinator only.
+    case reply
+}
+
+/// Where a Coordinator request stands in the ledger (SPEC §9.4). `sent` and `accepted` are open;
+/// the rest are closed, and a closed request is swept 7 days after it closed.
+public enum RequestState: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case sent
+    case accepted
+    case declined
+    case done
+    case withdrawn
+
+    public var isClosed: Bool { self == .declined || self == .done || self == .withdrawn }
+
+    /// What an orchestrator may answer with; `sent` and `withdrawn` are the Coordinator's.
+    public static let replies: [RequestState] = [.accepted, .declined, .done]
 }
 
 public enum ApprovalKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
@@ -134,6 +155,9 @@ public enum TokenScope: String, Codable, Sendable, CaseIterable, Equatable, Data
     case worker
     /// A rostered reviewer under agent review: it may move its one task out of `review` and nothing else.
     case reviewer
+    /// The Coordinator (SPEC §8.2): belongs to no project, so its grant has no `project_id`. It reads
+    /// every project's board and writes to none.
+    case coordinator
 }
 
 /// How much human acceptance a finished task needs before it reaches `done`.

@@ -40,7 +40,7 @@ final class OpeningPromptNoteTests: XCTestCase {
     }
 
     private func uri(_ note: Note) -> String {
-        NoteResourceURI.uri(projectId: note.projectId, noteId: note.id)
+        NoteResourceURI.uri(projectId: note.projectId!, noteId: note.id)
     }
 
     // MARK: Attached notes arrive in full

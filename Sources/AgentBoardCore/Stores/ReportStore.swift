@@ -94,6 +94,45 @@ public struct ReportStore: Sendable {
         }
     }
 
+    // MARK: The Coordinator's queue (SPEC §9.1): reports with no project
+
+    @discardableResult
+    public func insertForCoordinator(sessionId: String?, kind: ReportKind, body: String) throws -> Report {
+        try db.writer.write { db in
+            var report = Report(projectId: nil, taskId: nil, sessionId: sessionId, kind: kind, body: body, createdAt: .nowMillis)
+            try report.insert(db)
+            return report
+        }
+    }
+
+    public func unconsumedForCoordinator() throws -> [Report] {
+        try db.reader.read { db in try Self.unconsumedForCoordinator(db) }
+    }
+
+    static func unconsumedForCoordinator(_ db: Database) throws -> [Report] {
+        try Report.fetchAll(
+            db,
+            sql: "SELECT * FROM report WHERE project_id IS NULL AND consumed_at IS NULL ORDER BY created_at, id"
+        )
+    }
+
+    @discardableResult
+    public func consumeAllForCoordinator() throws -> [Report] {
+        try db.writer.write { db in
+            let pending = try Self.unconsumedForCoordinator(db)
+            guard !pending.isEmpty else { return [] }
+            try db.execute(
+                sql: "UPDATE report SET consumed_at = ? WHERE project_id IS NULL AND consumed_at IS NULL",
+                arguments: [Int64.nowMillis]
+            )
+            return pending
+        }
+    }
+
+    public func observeUnconsumedForCoordinator() -> ValueObservation<ValueReducers.Fetch<[Report]>> {
+        ValueObservation.tracking { db in try Self.unconsumedForCoordinator(db) }
+    }
+
     public func observeUnconsumed(projectId: String) -> ValueObservation<ValueReducers.Fetch<[Report]>> {
         ValueObservation.tracking { db in
             try Self.unconsumed(db, projectId: projectId)

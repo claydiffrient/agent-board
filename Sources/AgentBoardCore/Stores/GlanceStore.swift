@@ -9,13 +9,16 @@ public struct ProjectGlance: Codable, FetchableRecord, Identifiable, Sendable, E
     public var running: Int
     public var review: Int
     public var ready: Int
+    /// Every session's estimated spend on this project, ended ones included.
+    public var spendUSD: Double
 
-    public init(id: String, name: String, running: Int, review: Int, ready: Int) {
+    public init(id: String, name: String, running: Int, review: Int, ready: Int, spendUSD: Double = 0) {
         self.id = id
         self.name = name
         self.running = running
         self.review = review
         self.ready = ready
+        self.spendUSD = spendUSD
     }
 }
 
@@ -35,10 +38,14 @@ public struct GlanceSummary: Sendable, Equatable {
 
     public var tasksInReview: Int
 
-    public init(projects: [ProjectGlance], workingSessions: Int, tasksInReview: Int) {
+    /// Every Coordinator session's estimated spend (SPEC §8.2); it has no cap.
+    public var coordinatorSpendUSD: Double
+
+    public init(projects: [ProjectGlance], workingSessions: Int, tasksInReview: Int, coordinatorSpendUSD: Double = 0) {
         self.projects = projects
         self.workingSessions = workingSessions
         self.tasksInReview = tasksInReview
+        self.coordinatorSpendUSD = coordinatorSpendUSD
     }
 
     public static let empty = GlanceSummary(projects: [], workingSessions: 0, tasksInReview: 0)
@@ -59,11 +66,12 @@ public struct GlanceStore: Sendable {
 
     static func summary(_ db: Database) throws -> GlanceSummary {
         let projects = try ProjectGlance.fetchAll(db, sql: projectCountsSQL)
-        let working = try Int.fetchOne(db, sql: workingSessionsSQL) ?? 0
+        let totals = try Row.fetchOne(db, sql: totalsSQL)
         return GlanceSummary(
             projects: projects,
-            workingSessions: working,
-            tasksInReview: projects.reduce(0) { $0 + $1.review }
+            workingSessions: totals?["working"] ?? 0,
+            tasksInReview: projects.reduce(0) { $0 + $1.review },
+            coordinatorSpendUSD: totals?["coordinator_spend"] ?? 0
         )
     }
 
@@ -76,16 +84,19 @@ public struct GlanceStore: Sendable {
                p.name AS name,
                \(countOf(.running)) AS running,
                \(countOf(.review)) AS review,
-               \(countOf(.ready)) AS ready
+               \(countOf(.ready)) AS ready,
+               (SELECT COALESCE(SUM(s.est_cost_usd), 0) FROM agent_session s WHERE s.project_id = p.id) AS spendUSD
         FROM project p
         LEFT JOIN task t ON t.project_id = p.id AND t.archived_at IS NULL
         GROUP BY p.id
         ORDER BY p.name COLLATE NOCASE, p.created_at
         """
 
-    static let workingSessionsSQL = """
-        SELECT COUNT(*) FROM agent_session
-        WHERE role = '\(SessionRole.worker.rawValue)' AND state IN (\(SessionStore.activeStatesSQL))
+    static let totalsSQL = """
+        SELECT (SELECT COUNT(*) FROM agent_session
+                WHERE role = '\(SessionRole.worker.rawValue)' AND state IN (\(SessionStore.activeStatesSQL))) AS working,
+               (SELECT COALESCE(SUM(est_cost_usd), 0) FROM agent_session
+                WHERE role = '\(SessionRole.coordinator.rawValue)') AS coordinator_spend
         """
 
     /// A project with no matching rows sums to NULL through the outer join, not 0.

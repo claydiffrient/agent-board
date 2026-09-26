@@ -111,6 +111,18 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("comment_delivery") { db in
             try db.execute(sql: Schema.commentDelivery)
         }
+        migrator.registerMigration("coordinator") { db in
+            try db.execute(sql: Schema.coordinator)
+        }
+        migrator.registerMigration("coordinator_notes") { db in
+            try db.execute(sql: Schema.coordinatorNotes)
+        }
+        migrator.registerMigration("coordinator_session") { db in
+            try db.execute(sql: Schema.coordinatorSession)
+        }
+        migrator.registerMigration("coordinator_request") { db in
+            try db.execute(sql: Schema.coordinatorRequest)
+        }
         return migrator
     }
 }

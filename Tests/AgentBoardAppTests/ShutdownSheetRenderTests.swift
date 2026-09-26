@@ -235,6 +235,9 @@ final class RenderStubSupervisor: WorkerSupervising {
     func orchestratorConsole(projectId: String) throws -> OrchestratorConsole { throw StubError.notWired }
 
     func shellConsole(projectId: String) throws -> ShellConsole { throw StubError.notWired }
+    func coordinatorSessionConsole() throws -> OrchestratorConsole { throw StubError.notWired }
+    func newCoordinatorSession() throws { throw StubError.notWired }
+    func resumeCoordinatorSession(sessionId: String) throws { throw StubError.notWired }
     func approve(approvalId: String) async throws {}
     func deny(approvalId: String, reason: String?) async throws {}
     func promote(taskId: String) async throws {}
