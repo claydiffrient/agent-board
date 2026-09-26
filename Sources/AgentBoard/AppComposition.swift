@@ -28,16 +28,15 @@ enum AppComposition {
             MacNotifier.shared.start(router: environment.router)
             return environment
         } catch let refusal as AppDatabaseError {
-            guard case .writtenByNewerBuild = refusal else {
-                fatalError("Agent Board could not open its database at \(url.path): \(refusal)")
+            switch refusal {
+            case .writtenByNewerBuild: refuseNewerDatabase(refusal)
+            case .backupFailed: refuseWithoutBackup(refusal)
             }
-            refuseNewerDatabase(refusal)
         } catch {
             fatalError("Agent Board could not open its database at \(url.path): \(error)")
         }
     }
 
-    /// Nothing has written to the database yet, and quitting here keeps it that way (SPEC §4.1).
     private static func refuseNewerDatabase(_ refusal: AppDatabaseError) -> Never {
         guard case let .writtenByNewerBuild(database, _, backup) = refusal else { exit(1) }
         let recovery = if let command = refusal.restoreCommand, let backup {
@@ -52,14 +51,36 @@ enum AppComposition {
             "Install the newer build again. There is no backup in "
                 + "\(database.deletingLastPathComponent().appendingPathComponent("backups").path) to restore."
         }
+        quit(
+            title: "This database was last used by a newer Agent Board",
+            text: """
+                \(refusal.localizedDescription) Agent Board did not open it and has changed nothing.
+
+                \(recovery)
+                """
+        )
+    }
+
+    private static func refuseWithoutBackup(_ refusal: AppDatabaseError) -> Never {
+        guard case let .backupFailed(database, backups, reason) = refusal else { exit(1) }
+        quit(
+            title: "Agent Board couldn't back up the board",
+            text: """
+                Agent Board didn't open the board because it couldn't take a safe backup of \(database.path) first:
+
+                \(reason)
+
+                Nothing was written to the database. Backups are kept in \(backups.path). Fix the problem above, such as a full disk, and relaunch.
+                """
+        )
+    }
+
+    /// Nothing has written to the database yet, and quitting here keeps it that way (SPEC §4.1).
+    private static func quit(title: String, text: String) -> Never {
         let alert = NSAlert()
         alert.alertStyle = .critical
-        alert.messageText = "This database was last used by a newer Agent Board"
-        alert.informativeText = """
-            \(refusal.localizedDescription) Agent Board did not open it and has changed nothing.
-
-            \(recovery)
-            """
+        alert.messageText = title
+        alert.informativeText = text
         alert.addButton(withTitle: "Quit")
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)

@@ -943,8 +943,13 @@ existing file, so they hold however the app was installed (DMG, hand copy,
   `Scripts/install.sh` labeled its backups; `unknown` when no build is recorded.
   The copy is written under a `.partial` name and renamed only once its page
   count matches the source, so an interrupted backup never carries a real name.
-  The newest three are kept. A backup that fails or does not match stops the
-  launch rather than migrating without one.
+  Three are kept: the one just taken and the two newest others by name, so a
+  clock set earlier than the existing stamps never prunes the new copy. A
+  backup that fails or does not match stops the launch rather than migrating
+  without one: open throws `AppDatabaseError.backupFailed`, and the app shows a
+  blocking alert saying it did not open the board because it could not take a
+  safe backup first, with the underlying error (a full disk, say) and the
+  `backups/` path, and quits without writing to the database.
 
 The last build to open the database is recorded in
 `backups/last-opened-build.json` after migration succeeds, not in a table: a

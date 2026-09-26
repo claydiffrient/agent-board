@@ -72,4 +72,18 @@ final class DatabaseBackupTests: XCTestCase {
         _ = try AppDatabase.open(at: url, build: build)
         XCTAssertEqual(try backupNames(), after)
     }
+
+    func testBackupStampedBeforeExistingOnesIsNotPruned() throws {
+        try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
+        let seeded = ["agentboard-29990101-000001-0.1.0.sqlite", "agentboard-29990101-000002-0.1.0.sqlite", "agentboard-29990101-000003-0.1.0.sqlite"]
+        for name in seeded {
+            FileManager.default.createFile(atPath: backups.appendingPathComponent(name).path, contents: Data())
+        }
+
+        _ = try AppDatabase.open(at: url, build: BuildIdentity(version: "0.2.0", build: "7", commit: "abc"))
+        let after = try backupNames().filter { $0.hasSuffix(".sqlite") }
+        XCTAssertEqual(after.count, 3)
+        XCTAssertEqual(Array(after.suffix(2)), Array(seeded.suffix(2)))
+        XCTAssertTrue(after[0].hasSuffix("-unknown.sqlite"))
+    }
 }

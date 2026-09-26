@@ -52,7 +52,13 @@ public final class AppDatabase: Sendable {
         guard let build else { return }
         let last = backups.lastOpenedBuild()
         if last != build || !complete {
-            try backups.take(from: source, label: last?.backupLabel ?? "unknown")
+            do {
+                try backups.take(from: source, label: last?.backupLabel ?? "unknown")
+            } catch {
+                throw AppDatabaseError.backupFailed(
+                    database: url, backups: backups.directory, reason: error.localizedDescription
+                )
+            }
         }
     }
 

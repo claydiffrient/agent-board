@@ -32,14 +32,15 @@ public struct BuildIdentity: Codable, Equatable, Sendable {
 public enum AppDatabaseError: Error, Equatable, LocalizedError {
     /// The database has applied migrations this build does not register (SPEC §4.1).
     case writtenByNewerBuild(database: URL, unknownMigrations: [String], newestBackup: URL?)
-    case backupIncomplete(database: URL, expectedPages: Int, copiedPages: Int)
+    /// The launch backup failed, so the database was not migrated or written (SPEC §4.1).
+    case backupFailed(database: URL, backups: URL, reason: String)
 
     public var errorDescription: String? {
         switch self {
         case let .writtenByNewerBuild(database, unknown, _):
             "\(database.path) was last used by a newer Agent Board: it has migrations this build does not know (\(unknown.joined(separator: ", ")))."
-        case let .backupIncomplete(database, expected, copied):
-            "The backup of \(database.path) copied \(copied) of \(expected) pages, so it was discarded and the database was not migrated."
+        case let .backupFailed(database, _, reason):
+            "Agent Board could not back up \(database.path): \(reason)"
         }
     }
 
@@ -51,6 +52,15 @@ public enum AppDatabaseError: Error, Equatable, LocalizedError {
 
 /// `backups/` beside the database: timestamped copies plus a record of the last build that opened it (SPEC §4.1).
 struct DatabaseBackups {
+    struct Incomplete: LocalizedError {
+        let expectedPages: Int
+        let copiedPages: Int
+
+        var errorDescription: String? {
+            "The copy has \(copiedPages) of \(expectedPages) pages, so it was discarded."
+        }
+    }
+
     static let kept = 3
 
     let database: URL
@@ -81,7 +91,8 @@ struct DatabaseBackups {
     }
 
     /// Copies `source` under a temporary name and renames it only once its page count matches, so an
-    /// interrupted backup never carries the name that pruning and restoring look for.
+    /// interrupted backup never carries the name that pruning and restoring look for. Pruning spares
+    /// the new copy even when a clock set back makes its stamp sort oldest.
     @discardableResult
     func take(from source: some DatabaseReader, label: String, now: Date = Date()) throws -> URL {
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -102,7 +113,7 @@ struct DatabaseBackups {
             let copied = try destination.read { try Int.fetchOne($0, sql: "PRAGMA page_count") } ?? 0
             try destination.close()
             guard copied == expected else {
-                throw AppDatabaseError.backupIncomplete(database: database, expectedPages: expected, copiedPages: copied)
+                throw Incomplete(expectedPages: expected, copiedPages: copied)
             }
             try fileManager.moveItem(at: partial, to: target)
             removePartials()
@@ -110,7 +121,7 @@ struct DatabaseBackups {
             removePartials()
             throw error
         }
-        for old in list().dropLast(Self.kept) {
+        for old in list().filter({ $0.lastPathComponent != target.lastPathComponent }).dropLast(Self.kept - 1) {
             try? fileManager.removeItem(at: old)
         }
         return target
