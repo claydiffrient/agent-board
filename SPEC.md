@@ -2623,7 +2623,12 @@ release, optionally ` — YYYY-MM-DD`, free Markdown beneath, newest first, with
 everything above the first heading a preamble `ReleaseNotesParser` skips.
 `Scripts/bundle.sh` copies it byte for byte into `Contents/Resources` alongside
 `Info.plist` and the icon — nothing about the file is generated or rewritten at
-build time. `AppBundle.isAppBundle` (a bundle identifier and a `.app` path
+build time. `Scripts/release.sh` copies it the same way and stamps the bundle's
+`CFBundleShortVersionString` from the file's newest heading (with the commit count
+as `CFBundleVersion` and the sha as `AgentBoardCommit`), then checks the stamped
+plist against the bundled file before it packages anything, so a release cannot
+ship notes that disagree with its own version. A `bundle.sh` dev build still
+reports whatever `Resources/Info.plist` hard-codes. `AppBundle.isAppBundle` (a bundle identifier and a `.app` path
 extension) gates every read: the `.build/debug/AgentBoard` binary `README.md`
 documents for E2E runs has neither, so `ReleaseNotesLoader` returns
 `.unavailable` before it looks for a version or a file at all. That is a

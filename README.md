@@ -21,6 +21,7 @@ swift build
 swift test
 Scripts/bundle.sh            # wraps the binary in .build/AgentBoard.app (bundle id needed for notifications)
 open .build/AgentBoard.app
+Scripts/release.sh           # release build, versioned from RELEASES.md, into dist/AgentBoard-<version>.zip
 ```
 
 Release notes live in `RELEASES.md` at the repo root, newest first, one
