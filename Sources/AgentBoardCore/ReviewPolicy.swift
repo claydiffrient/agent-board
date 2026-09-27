@@ -2,8 +2,8 @@ import Foundation
 import GRDB
 
 extension RosterAgent {
-    /// A guess from free-text `role` ("reviewer", "Code Reviewer"), used only when a project names
-    /// no `reviewAgent`. Any rostered agent can review when named, whatever its role says.
+    /// A guess from free-text `role` ("reviewer", "Code Reviewer"), used only by an Any reviewer row.
+    /// Any rostered agent can review when named, whatever its role says.
     public var isReviewer: Bool {
         role.lowercased().contains("review")
     }
@@ -53,7 +53,7 @@ public enum ReviewPolicy {
             }
             return .autoAccept
         case .agent:
-            return try agentRouting(db, projectId: task.projectId)
+            return try agentRouting(db, projectId: task.projectId, type: task.type)
         }
     }
 
@@ -70,11 +70,19 @@ public enum ReviewPolicy {
             + "workers' commits and edits share its branch, so a reviewer cannot isolate its diff. It needs a person.")
     }
 
-    /// Where agent review sends this project's tasks: the named reviewer, else the first usable
-    /// agent whose role marks it a reviewer. Status shows this under the `agent` level (SPEC §10).
-    public static func agentRouting(_ db: Database, projectId: String) throws -> ReviewRouting {
-        if let named = try Project.fetchOne(db, key: projectId)?.settings.reviewAgent {
+    /// Where agent review sends this project's tasks of `type`, by its row in the review routing
+    /// table, else the Default row (SPEC §4). Status shows the Default row's (SPEC §10).
+    public static func agentRouting(_ db: Database, projectId: String, type: TaskType?) throws -> ReviewRouting {
+        let table = try Project.fetchOne(db, key: projectId)?.settings.reviewRouting ?? ReviewRoutingTable()
+        switch table.assignee(for: type) {
+        case .named(let named):
             return try namedReviewerRouting(db, named: named, projectId: projectId)
+        case .anyReviewer:
+            break
+        case .person:
+            return .humanReview(reason: nil)
+        case .acceptWithoutReview:
+            return .autoAccept
         }
         let reviewers = try RosterStore.agents(db, forProject: projectId, enabledOnly: true)
             .filter(\.isReviewer)

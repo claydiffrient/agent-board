@@ -63,7 +63,7 @@ public struct StatusSnapshot: Sendable, Equatable {
         return StatusSnapshot(
             sessions: try SessionStore.all(db, projectId: projectId),
             agents: agents,
-            review: level == .agent ? try ReviewPolicy.agentRouting(db, projectId: projectId) : nil
+            review: level == .agent ? try ReviewPolicy.agentRouting(db, projectId: projectId, type: nil) : nil
         )
     }
 }

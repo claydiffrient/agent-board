@@ -136,7 +136,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
                 try roster.enable(agentId: ada.id, forProject: projectId)
                 let agent = [ada, roscoe].first { $0.name == named }
                 var settings = try XCTUnwrap(ProjectStore(db).get(projectId)).settings
-                settings.reviewAgent = agent.map { ReviewAgentChoice(id: $0.id, name: $0.name) }
+                settings.reviewRouting.defaultAssignee = agent.map { .named(ReviewAgentChoice(id: $0.id, name: $0.name)) } ?? .anyReviewer
                 try ProjectStore(db).updateSettings(projectId, settings)
             }
 
@@ -150,7 +150,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
             let ada = try roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
             try roster.enable(agentId: ada.id, forProject: projectId)
             var settings = try XCTUnwrap(ProjectStore(db).get(projectId)).settings
-            settings.reviewAgent = ReviewAgentChoice(id: "deleted-agent", name: "Roscoe")
+            settings.reviewRouting.defaultAssignee = .named(ReviewAgentChoice(id: "deleted-agent", name: "Roscoe"))
             try ProjectStore(db).updateSettings(projectId, settings)
         }
 

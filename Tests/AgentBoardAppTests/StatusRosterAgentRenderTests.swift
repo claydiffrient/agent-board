@@ -19,7 +19,7 @@ final class StatusRosterAgentRenderTests: XCTestCase {
         try RosterStore(db).enable(agentId: rita.id, forProject: project.id)
         var settings = project.settings
         settings.reviewLevel = .agent
-        settings.reviewAgent = ReviewAgentChoice(id: rita.id, name: rita.name)
+        settings.reviewRouting.defaultAssignee = .named(ReviewAgentChoice(id: rita.id, name: rita.name))
         try ProjectStore(db).updateSettings(project.id, settings)
 
         // Ended inside the grace window, so both rows show and no Elapsed clock keeps repainting.

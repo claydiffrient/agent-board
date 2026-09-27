@@ -302,7 +302,8 @@ struct ReviewRoutingBanner: View {
                     .lineLimit(2)
                     .help(reason ?? "")
             case .autoAccept:
-                EmptyView()
+                Image(systemName: "checkmark.circle")
+                Text("Agent review: finished tasks are accepted without review")
             }
             Spacer()
         }

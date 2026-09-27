@@ -228,10 +228,16 @@ struct ProjectSettingsSheet: View {
                 }
             }
             Picker("Reviewer", selection: Binding(
-                get: { settings.reviewAgent?.id },
-                set: { id in settings.reviewAgent = Self.reviewAgentChoice(id, from: projectAgents, current: settings.reviewAgent) }
+                get: { settings.reviewRouting.defaultAssignee.namedChoice?.id },
+                set: { id in
+                    let current = settings.reviewRouting.defaultAssignee.namedChoice
+                    settings.reviewRouting.defaultAssignee = Self.reviewAgentChoice(id, from: projectAgents, current: current)
+                        .map(ReviewAssignee.named) ?? .anyReviewer
+                }
             )) {
-                ForEach(Self.reviewerOptions(projectAgents: projectAgents, current: settings.reviewAgent)) { option in
+                ForEach(Self.reviewerOptions(
+                    projectAgents: projectAgents, current: settings.reviewRouting.defaultAssignee.namedChoice
+                )) { option in
                     Text(option.title).tag(option.agentId)
                 }
             }

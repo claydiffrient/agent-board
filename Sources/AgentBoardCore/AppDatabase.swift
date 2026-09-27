@@ -163,6 +163,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("coordinator_request") { db in
             try db.execute(sql: Schema.coordinatorRequest)
         }
+        migrator.registerMigration("task_type") { db in
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN type TEXT")
+        }
         return migrator
     }
 }
