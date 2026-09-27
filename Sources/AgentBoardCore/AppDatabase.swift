@@ -12,14 +12,54 @@ public final class AppDatabase: Sendable {
     }
 
     public static func open(at url: URL) throws -> AppDatabase {
+        try open(at: url, build: nil)
+    }
+
+    /// Refuses a database written by a newer build before anything writes to it. With `build`, also
+    /// backs the database up before a build other than the last one to open it migrates it (SPEC §4.1).
+    public static func open(at url: URL, build: BuildIdentity?) throws -> AppDatabase {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
+        let backups = DatabaseBackups(database: url)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try prepareExisting(url, build: build, backups: backups)
+        }
         var configuration = Configuration()
         configuration.foreignKeysEnabled = true
         configuration.journalMode = .wal
-        return try AppDatabase(DatabasePool(path: url.path, configuration: configuration))
+        let database = try AppDatabase(DatabasePool(path: url.path, configuration: configuration))
+        if let build { try backups.record(build) }
+        return database
+    }
+
+    private static func prepareExisting(_ url: URL, build: BuildIdentity?, backups: DatabaseBackups) throws {
+        // Not `readonly`: SQLite cannot open a WAL database read-only when its -shm is missing, as it is
+        // after a copy or a restore. This connection only reads.
+        let source = try DatabaseQueue(path: url.path)
+        defer { try? source.close() }
+        let migrator = Self.migrator
+        let (applied, complete) = try source.read { db in
+            (try migrator.appliedIdentifiers(db), try migrator.hasCompletedMigrations(db))
+        }
+        let unknown = applied.subtracting(migrator.migrations).sorted()
+        guard unknown.isEmpty else {
+            throw AppDatabaseError.writtenByNewerBuild(
+                database: url, unknownMigrations: unknown, newestBackup: backups.newest()
+            )
+        }
+        guard let build else { return }
+        let last = backups.lastOpenedBuild()
+        if last != build || !complete {
+            do {
+                try backups.take(from: source, label: last?.backupLabel ?? "unknown")
+            } catch {
+                throw AppDatabaseError.backupFailed(
+                    database: url, backups: backups.directory, reason: error.localizedDescription
+                )
+            }
+        }
     }
 
     public static func inMemory() throws -> AppDatabase {
