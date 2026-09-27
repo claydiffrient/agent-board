@@ -28,7 +28,7 @@ final class CoordinatorRequestTests: XCTestCase {
 
     override func tearDown() async throws {
         fixture.supervisor.stopOrchestratorConsoles()
-        fixture.cleanUp()
+        await fixture.cleanUp()
         try? FileManager.default.removeItem(at: fakeClaudeDir)
         fixture = nil
     }
