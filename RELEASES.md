@@ -59,7 +59,11 @@ to decide what a user has already seen.
   reports the settled state instead of a false failure. Stopping a session
   now reaps its whole process tree, including anything it started with
   `run_in_background`, so a build or watcher a worker kicked off doesn't keep
-  running after the session ends.
+  running after the session ends. Terminal consoles opened from the app — the
+  orchestrator's console, a shell console, a task's terminal window — no
+  longer hold on to Agent Board's own listening port after you quit; they used
+  to inherit that socket without meaning to, which could keep the port bound
+  until you closed those windows too.
 - **Orchestrator.** The automatic `/compact` Agent Board sends between turns
   now actually runs — it used to arrive fast enough that Claude Code read it
   as one pasted block and dropped it.
