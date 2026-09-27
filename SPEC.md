@@ -2959,6 +2959,19 @@ is the last row of that section, in every tab. Limits keeps a tab of its own: it
 six caps fit one page, while Agents and Workflow already scroll at the sheet's
 minimum height.
 
+Agents' **Review** section holds review level (§5), captioned with what each
+option does to a finished task, and below it — disabled outside `agent` — the
+review routing table (§4): a Default row, then one for each of Code, Docs,
+Tests, Plan and Review. Every row is a picker of the project's own roster
+agents in roster order (one disabled roster-wide is still pickable, suffixed
+`(disabled)`, since routing only checks at completion time, §4), then Any
+reviewer, A person and Accept without review; a type row lists Same as Default
+first. A row's currently-named agent that has left the project entirely —
+deleted from the roster or opted out — stays listed anyway, suffixed
+`(not available)`, so the picker shows what routing will actually do rather
+than silently dropping the choice. A caption beneath the table repeats that it
+takes effect only while Review level is Agent.
+
 **What's New in Agent Board** — the release notes, opened from the Help menu and
 once on their own after an update installs. A `Window` scene rather than a
 `WindowGroup`, so choosing the menu item again — or a second launch that decides
