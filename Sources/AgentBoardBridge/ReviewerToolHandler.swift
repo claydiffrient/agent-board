@@ -29,9 +29,9 @@ public final class ReviewerToolHandler: ToolHandler {
     public static let descriptors: [ToolDescriptor] = [
         ToolDescriptor(
             name: "get_my_task",
-            description: "Return the task you are reviewing: id, title, body, acceptance criteria, the worker's "
-                + "report, the progress recorded against it, and its comment thread oldest first. Call it first. "
-                + CommentTools.authority,
+            description: "Return the task you are reviewing: id, title, body, acceptance criteria and its comment "
+                + "thread oldest first. It carries no worker report or progress: judge the work from the task and "
+                + "the diff alone. Call it first. " + CommentTools.authority,
             inputSchema: ToolSchema.object(properties: [:], required: [])
         ),
         ToolDescriptor(
@@ -192,22 +192,16 @@ public final class ReviewerToolHandler: ToolHandler {
         return CommentAuthor(kind: .reviewer, sessionId: identity.sessionId, rosterAgentId: agent.id, name: agent.name)
     }
 
+    /// SPEC §5.1: the task and its comments only. Progress carries the worker's own account of the
+    /// work (its notes, a hand-off summary), which the reviewer checks against the code instead.
     private func getMyTask(_ task: BoardTask) throws -> ToolResult {
-        let rows: [JSONValue] = try progress.list(taskId: task.id).map { row in
-            .object([
-                "at": .number(Double(row.at)),
-                "kind": .string(row.kind.rawValue),
-                "text": .string(row.text),
-            ])
-        }
-        return .json(.object([
+        .json(.object([
             "id": .string(task.id),
             "title": .string(task.title),
             "body": .optional(task.body),
             "acceptance": .optional(task.acceptance),
             "priority": .optional(task.priority),
             "column": .string(task.column.rawValue),
-            "progress": .array(rows),
             "comments": try comments.thread(taskId: task.id),
         ]))
     }

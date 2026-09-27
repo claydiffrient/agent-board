@@ -23,6 +23,34 @@ public struct SpawnRequest: Sendable {
         "Bash(rm *)", "Bash(mv *)",
     ]
 
+    /// Layered onto `reviewerDisallowedTools`: a reviewer's inputs are the task and its diff, never the
+    /// board database or anything else in Agent Board's support directory (SPEC §5.1). The directory is
+    /// denied under its absolute, symlink-resolved and `~` spellings, each with its spaces escaped too.
+    public static func reviewerBoardDeny(
+        supportDir: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [String] {
+        var rules = ["Read(//**/agentboard.sqlite*)", "Bash(*agentboard.sqlite*)"]
+        let homePath = home.standardizedFileURL.path
+        var absolute: [String] = []
+        for path in [supportDir.standardizedFileURL.path, supportDir.resolvingSymlinksInPath().path]
+        where !absolute.contains(path) {
+            absolute.append(path)
+        }
+        var spelled: [String] = []
+        for path in absolute {
+            rules.append("Read(/\(path)/**)")
+            spelled.append(path)
+            if path.hasPrefix(homePath + "/") { spelled.append("~" + path.dropFirst(homePath.count)) }
+        }
+        for spelling in spelled {
+            for variant in [spelling, spelling.replacingOccurrences(of: " ", with: "\\ ")] {
+                let rule = "Bash(*\(variant)*)"
+                if !rules.contains(rule) { rules.append(rule) }
+            }
+        }
+        return rules
+    }
+
     public init(
         cwd: URL,
         name: String,

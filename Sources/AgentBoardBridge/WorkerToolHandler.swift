@@ -513,6 +513,12 @@ public final class WorkerToolHandler: ToolHandler {
                 text: "\(recorded) The task is now in Review, held by rostered reviewer \(agentName), "
                     + "which is starting in your worktree on your branch. Stop here; do not start further work."
             )
+        } catch let declined as NothingToReview {
+            try? board.leaveReviewToPerson(taskId: task.id, reason: declined.reason)
+            return ToolResult(
+                text: "\(recorded) The task is now in Review for a person, not \(agentName): \(declined.reason) "
+                    + "Stop here; do not start further work."
+            )
         } catch {
             try? progress.append(
                 taskId: task.id, sessionId: nil, kind: .error,

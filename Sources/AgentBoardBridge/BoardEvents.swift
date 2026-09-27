@@ -93,6 +93,18 @@ public protocol WorkerControl: Sendable {
     func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String?
 }
 
+/// `assignAgent(scope: .reviewer)` refusing a task whose branch has no diff against its base: a
+/// reviewer judges the diff, so there is nothing for it to decide and the task goes to a person (SPEC §5.1).
+public struct NothingToReview: LocalizedError, Sendable, Equatable {
+    public var reason: String
+
+    public init(reason: String) {
+        self.reason = reason
+    }
+
+    public var errorDescription: String? { reason }
+}
+
 public struct ClosureBoardEventSink: BoardEventSink {
     private let onNotify: @Sendable (String, String, String) async -> Void
     private let onOrchestratorTurnEnded: @Sendable (String, String) async -> Void

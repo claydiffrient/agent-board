@@ -162,6 +162,7 @@ final class RosteredSpawnTests: XCTestCase {
         try await fixture.supervisor.assign(taskId: task.id)
         await fixture.supervisor.waitForSetup()
         let worker = try XCTUnwrap(fixture.sessions.forTask(task.id).last)
+        try fixture.commitInto(worker.cwd, file: "parser.txt")
         _ = try fixture.board.complete(
             taskId: task.id, sessionId: worker.sessionId, summary: "done"
         )

@@ -420,16 +420,30 @@ public struct Board: Sendable {
                     text: "Handed to rostered reviewer \(agentName) for agent review."
                 )
             case .humanReview(let reason):
-                try TaskStore.setReviewer(db, taskId, nil)
-                if let reason {
-                    _ = try ProgressStore.append(
-                        db, taskId: taskId, sessionId: nil, kind: .status, text: reason
-                    )
-                }
+                try Self.leaveReviewToPerson(db, taskId: taskId, reason: reason)
             }
             return CompletionOutcome(
                 report: report, level: level, routing: routing, column: column, wasAlreadyComplete: false
             )
+        }
+    }
+
+    /// A task in `review` that its rostered reviewer will not take: it stays in `review` for a person,
+    /// with the reason on its card, exactly as `humanReview` routing parks it.
+    public func leaveReviewToPerson(taskId: String, reason: String) throws {
+        try db.writer.write { db in
+            let task = try Self.requireTask(db, taskId)
+            guard task.column == .review else {
+                throw BoardError.taskNotInReview(taskId: taskId, column: task.column)
+            }
+            try Self.leaveReviewToPerson(db, taskId: taskId, reason: reason)
+        }
+    }
+
+    static func leaveReviewToPerson(_ db: Database, taskId: String, reason: String?) throws {
+        try TaskStore.setReviewer(db, taskId, nil)
+        if let reason {
+            _ = try ProgressStore.append(db, taskId: taskId, sessionId: nil, kind: .status, text: reason)
         }
     }
 
