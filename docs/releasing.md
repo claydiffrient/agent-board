@@ -84,20 +84,28 @@ the bundle is internally consistent.
 
 Merging the cut is the whole step. `.github/workflows/release.yml` runs on
 every push to `main` that changes `RELEASES.md`. It reads the newest heading's
-version and, if `origin` has no tag `v<version>` and no release (draft or
-published) exists for it, in that one run:
+version and releases it only when that push added it: the version must not
+appear as any heading in `RELEASES.md` at the push's previous commit
+(`github.event.before`). If it passes that, and `origin` has no tag
+`v<version>` and no release (draft or published) exists for it, in that one
+run:
 
 1. Checks the version's section with `Scripts/release-notes.sh` and uses it,
    verbatim, as the release body (with a notice up top giving the Gatekeeper
    step below).
 2. Runs `Scripts/release.sh`.
-3. Tags the pushed commit `v<version>` (annotated) and pushes the tag.
+3. Tags the pushed commit `v<version>` (annotated) and pushes the tag, unless
+   that tag already points at the pushed commit. A `v<version>` tag on any
+   other commit fails the run.
 4. Attaches `dist/AgentBoard-<version>.dmg` to a **draft** GitHub Release.
 
-If the tag or a release already exists it logs why and does nothing, so an
-ordinary edit to `RELEASES.md` releases nothing. Releases are checked against
-the releases listing rather than the by-tag endpoint, because the latter
-doesn't see drafts.
+Otherwise it logs why and does nothing: an edit that leaves the newest version
+alone, a revert that brings back a version the file already listed, a push
+whose previous commit is all zeros or can't be fetched, or a version already
+tagged or released. That matters because 0.1.0 and 0.2.0 were never tagged —
+without the first check, fixing a typo in `RELEASES.md` would tag that commit
+`v0.2.0`. Releases are checked against the releases listing rather than the
+by-tag endpoint, because the latter doesn't see drafts.
 
 The fallback, when that run didn't happen or failed before creating the
 release, is pushing the tag yourself:
@@ -109,8 +117,15 @@ git push origin v<version>
 
 `<version>` must be exactly `RELEASES.md`'s newest heading. A `v*` tag push
 runs the same job, minus the tagging, and fails rather than skips if a release
-for the tag already exists. If the merge run failed after pushing its tag,
-delete the tag on `origin` first and push it again.
+for the tag already exists.
+
+If the merge run failed after pushing its tag — `gh release create` failing,
+say — use **Re-run failed jobs** on that run. The tag step finds `v<version>`
+already at the pushed commit, skips creating it, and goes on to create the
+release. Don't use **Re-run all jobs**: the first job sees the tag on `origin`
+and skips the whole release. If the tag points at some other commit, the tag
+step fails; delete the tag on `origin`, then either re-run failed jobs or push
+the tag yourself as above.
 
 Review the draft on GitHub, edit if needed, and publish it by hand — the
 workflow never does that step.

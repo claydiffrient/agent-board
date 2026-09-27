@@ -1,7 +1,8 @@
 name: Release
 
-# A push to main that changes RELEASES.md releases its newest version unless that version is already
-# tagged or released. A v* tag push is the manual fallback. Path filters don't apply to tag pushes.
+# A push to main releases RELEASES.md's newest version only when that push added it: the version must
+# not appear anywhere in RELEASES.md at the push's `before` commit, and must not already be tagged or
+# released. A v* tag push is the manual fallback. Path filters don't apply to tag pushes.
 on:
   push:
     branches: [main]
@@ -24,6 +25,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       REF_TYPE: ${{ github.ref_type }}
       REF_NAME: ${{ github.ref_name }}
+      BEFORE: ${{ github.event.before }}
     outputs:
       release: ${{ steps.target.outputs.release }}
       tag: ${{ steps.target.outputs.tag }}
@@ -42,7 +44,30 @@ jobs:
           if [ "$REF_TYPE" = tag ]; then
             tag="$REF_NAME"
           else
-            tag="v$(Scripts/release-notes.sh --newest)"
+            newest=$(Scripts/release-notes.sh --newest)
+            tag="v$newest"
+
+            if [[ "$BEFORE" =~ ^0*$ ]]; then
+              skip "This push has no previous commit (before=${BEFORE:-empty}), so it can't have added $newest; nothing to release. Push tag $tag to release it."
+            fi
+            if ! git cat-file -e "$BEFORE^{commit}" 2> /dev/null &&
+              ! git fetch --quiet --depth=1 origin "$BEFORE" 2> /dev/null; then
+              skip "The push's previous commit $BEFORE is unreachable, so whether it added $newest is unknown; nothing to release. Push tag $tag to release it."
+            fi
+            before_notes="$RUNNER_TEMP/RELEASES.before.md"
+            if ! git show "$BEFORE:RELEASES.md" > "$before_notes" 2> /dev/null; then
+              skip "RELEASES.md did not exist at $BEFORE; nothing to release. Push tag $tag to release $newest."
+            fi
+            before_versions=$(Scripts/release-notes.sh --versions "$before_notes")
+            before_newest=$(head -n1 <<< "$before_versions")
+            if [ "$before_newest" = "$newest" ]; then
+              skip "RELEASES.md changed but its newest version is still $newest; nothing to release."
+            fi
+            if grep -qxF "$newest" <<< "$before_versions"; then
+              skip "RELEASES.md's newest version went from ${before_newest:-none} back to $newest, which it already listed; nothing to release."
+            fi
+            echo "This push added version $newest (newest before: ${before_newest:-none})."
+
             status=0
             git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null || status=$?
             case "$status" in
@@ -105,10 +130,20 @@ jobs:
         run: Scripts/release.sh
 
       # After the build, so a failed build leaves no tag that would make the next run skip. A tag pushed
-      # with GITHUB_TOKEN triggers no workflow, so this run is the only one for it.
+      # with GITHUB_TOKEN triggers no workflow, so this run is the only one for it. A re-run after a
+      # failed release finds its own tag already at this commit and goes straight to the release.
       - name: Tag the pushed commit
         if: github.ref_type == 'branch'
         run: |
+          git fetch --quiet origin "+refs/tags/$TAG:refs/tags/$TAG" 2> /dev/null || true
+          if tagged=$(git rev-parse -q --verify "refs/tags/$TAG^{commit}"); then
+            if [ "$tagged" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $TAG already exists at $tagged, not at this push's commit $GITHUB_SHA. If that tag is wrong, delete it on origin and re-run failed jobs (docs/releasing.md §3)."
+              exit 1
+            fi
+            echo "Tag $TAG already points at $GITHUB_SHA; not creating it again."
+            exit 0
+          fi
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             tag -a "$TAG" -m "Agent Board $VERSION" "$GITHUB_SHA"
           git push origin "refs/tags/$TAG"
