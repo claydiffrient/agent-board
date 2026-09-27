@@ -1549,7 +1549,7 @@ is reached by neither.
 
 | Tool | Effect |
 |---|---|
-| `get_my_task()` | The task bound to this token, plus its `epic_id`, dependency summaries and comment thread |
+| `get_my_task()` | The task bound to this token, plus its `type` (null for Default), `epic_id`, dependency summaries and comment thread |
 | `update_status(state, detail)` | Appends to `progress`; sets `blocked`/`failed` flags |
 | `log_progress(text)` | Appends to `progress` |
 | `add_comment(body, task_id?)` | Appends to the task's `task_comment` thread as `worker`, named after the session's rostered agent or `Worker <short id>`. A `task_id` other than the token's own is refused |
@@ -1619,15 +1619,15 @@ Everything in worker scope over any task in the project, plus:
 
 | Tool | Effect |
 |---|---|
-| `list_tasks(column, epic_id, include_archived)` | Board query; archived tasks are hidden unless `include_archived` is true |
-| `create_task(..., epic_id)`, `update_task(...)`, `move_task(id, column)` | Board mutation; moving an archived task out of `done` unarchives it. `create_task`'s `epic_id` is optional and creates the task inside that epic; an unknown id, one belonging to another project, or one whose epic is `done` is refused |
-| `get_task(id)` | Full detail, archived or not; an archived task carries `archived: true` and `archived_at`. Includes the comment thread |
+| `list_tasks(column, epic_id, include_archived)` | Board query; archived tasks are hidden unless `include_archived` is true. Each entry carries `type`, null for Default |
+| `create_task(..., type, epic_id)`, `update_task(..., type)`, `move_task(id, column)` | Board mutation; moving an archived task out of `done` unarchives it. `create_task`'s `epic_id` is optional and creates the task inside that epic; an unknown id, one belonging to another project, or one whose epic is `done` is refused. `type` is optional and one of `code`, `docs`, `tests`, `plan`, `review` (§4); any other value is refused with the valid list. Omitted is Default, and `update_task`'s `type: ""` or `null` clears it back to Default |
+| `get_task(id)` | Full detail, archived or not; an archived task carries `archived: true` and `archived_at`. Includes `type` (null for Default) and the comment thread |
 | `add_comment(task_id, body)` | Appends to any project task's comment thread as `orchestrator`, named `Orchestrator` |
 | `archive_task(task_id)` | Hides a `done` task from the board; refused for any other column |
 | `unarchive_task(task_id)` | Returns the task to the visible board in the column it was archived from |
 | `set_deps(task_id, depends_on[])` | Dependency graph |
 | `set_epic(task_id, epic_id)` | Moves an existing task into an epic, between epics, or — with `epic_id` omitted — out of its epic. Refused for a task that has ever been spawned, and for a `done` destination epic. Dependencies are left alone |
-| `create_epic(title, goal, tasks[])` | One transaction: the epic (state `planning`) plus every task in `tasks`. Each task's `depends_on` is a zero-based index into this same array, validated before anything is written |
+| `create_epic(title, goal, tasks[])` | One transaction: the epic (state `planning`) plus every task in `tasks`. Each task's `depends_on` is a zero-based index into this same array, validated before anything is written. Each task takes an optional `type`, validated as `create_task`'s |
 | `list_epics()` | Every epic on the project with its state, branch, newest pull request opened from the branch (or null), and done/total task count |
 | `get_epic(id)` | One epic in full: goal, branch, newest pull request, its tasks grouped by column, and whether it is ready for integration |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
@@ -2226,8 +2226,9 @@ cannot be used to find them.
 - Its job description is injected with `--append-system-prompt`: the board
   vocabulary (project, epic, task, column), the rule that only `ready` is
   assignable, the completion and integration protocols, the instruction to
-  call `list_reports` when told to, and the project's `modelGuidance` text so
-  it can set `model` on the tasks it creates. The orchestrator itself runs on
+  call `list_reports` when told to, the instruction to set `type` on every
+  task it creates so agent review routes by it (§4), and the project's
+  `modelGuidance` text so it can set `model` on the tasks it creates. The orchestrator itself runs on
   `settings.defaultModel` when set.
 - **Restart** signals the child with SIGTERM and relaunches on its exit. It
   does not call SwiftTerm's `terminate()`, which cancels the exit monitor, so
