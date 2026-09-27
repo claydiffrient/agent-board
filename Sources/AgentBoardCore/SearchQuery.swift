@@ -60,8 +60,8 @@ public struct SearchQuery: Sendable, Equatable {
 /// board already observes. Folding the largest real board's text, 235 tasks and 793 KB, costs 17ms
 /// in a debug build, so `IndexCache` does it once per change to its inputs; matching costs 2.5ms.
 public enum TaskSearch {
-    /// Title, body, acceptance criteria, the epic's title, the model (id and display name), and the
-    /// rostered agents that last worked and reviewed it. Not the task id: a hex id turns short
+    /// Title, body, acceptance criteria, the epic's title, the model (id and display name), the
+    /// type's name, and the rostered agents that last worked and reviewed it. Not the task id: a hex id turns short
     /// words like "bad" or "face" into spurious matches.
     public static func fields(
         of task: BoardTask, epicTitles: [String: String], agentNames: [String: String]
@@ -73,6 +73,7 @@ public enum TaskSearch {
             task.epicId.flatMap { epicTitles[$0] },
             task.model,
             task.model.flatMap { ModelCatalog.option(for: $0)?.name },
+            task.type?.label,
             task.rosterAgentId.flatMap { agentNames[$0] },
             task.reviewerAgentId.flatMap { agentNames[$0] },
         ]
