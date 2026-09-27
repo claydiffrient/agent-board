@@ -102,3 +102,31 @@ public enum PromptInputClassifier {
         return bytes.endIndex
     }
 }
+
+/// Claude Code reads any single stdin read over 800 characters as a paste, and a pasted `/compact`
+/// runs no command; the macOS PTY hands the reader about 1 KiB at a time, so one long write arrives
+/// as several pastes (measured 2026-09-26, SPEC §2). Bursts this short, a pause apart, stay under
+/// the limit even if a few coalesce into one read.
+public enum PromptBursts {
+    public static let maximumLength = 256
+    public static let pause: Duration = .milliseconds(50)
+
+    /// Splits on character boundaries, measuring in UTF-16 units as Claude Code does.
+    public static func split(_ line: String) -> [String] {
+        var bursts: [String] = []
+        var current = ""
+        var length = 0
+        for character in line {
+            let units = character.utf16.count
+            if length + units > maximumLength, !current.isEmpty {
+                bursts.append(current)
+                current = ""
+                length = 0
+            }
+            current.append(character)
+            length += units
+        }
+        if !current.isEmpty { bursts.append(current) }
+        return bursts
+    }
+}

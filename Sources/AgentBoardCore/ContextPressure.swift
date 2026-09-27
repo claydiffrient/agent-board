@@ -68,7 +68,8 @@ public enum OrchestratorCompaction {
         "[agent-board] This session was compacted. The board is in SQLite and survived: "
         + "call list_tasks, list_agents and list_reports to re-read it before doing anything else."
 
-    /// What Agent Board types to start a compaction. Its carriage return is deliberately absent —
-    /// see `TerminalPromptInput`'s note on slash commands.
+    /// What Agent Board types to start a compaction. It is far past Claude Code's paste threshold, so
+    /// it only runs as a command when written in `PromptBursts`; its carriage return is deliberately
+    /// absent because the console sends that separately (SPEC §2).
     public static var command: String { "/compact " + instructions }
 }

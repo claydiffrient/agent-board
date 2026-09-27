@@ -74,6 +74,7 @@ final class OrchestratorConsole: ReportAnnouncing {
     @ObservationIgnored private let processObserver = ProcessObserver()
     @ObservationIgnored private var restartAfterExit = false
     @ObservationIgnored private var noticeGate: ReportNoticeGate!
+    @ObservationIgnored private var lastInjection: _Concurrency.Task<Void, Never>?
 
     convenience init(
         projectId: String, db: AppDatabase, sessionConfigDir: URL, projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
@@ -242,15 +243,25 @@ final class OrchestratorConsole: ReportAnnouncing {
         inject(OrchestratorCompaction.reorientation)
     }
 
-    /// The carriage return is a **separate** write. Claude Code's slash-command autocomplete eats a
-    /// `\r` that arrives in the same burst as the text, leaving a literal `^M` in the prompt and the
-    /// command unsubmitted; measured 2026-09-15 (SPEC §2). Splitting it costs nothing for the plain
-    /// notice, so every injection takes the same path.
+    /// Written as short bursts a pause apart, then the carriage return as its own write (SPEC §2).
+    /// One long write reaches Claude Code as pasted content, which runs no slash command; a `\r` in
+    /// the same burst as a slash command is eaten by its autocomplete. Every injection takes this
+    /// path so nothing depends on remembering which lines are long or start with a slash. Each
+    /// injection waits for the one before it, so no line's bursts land inside another's.
     private func inject(_ line: String) {
-        terminal.isInjecting = true
-        terminal.send(txt: line)
-        terminal.send(txt: "\r")
-        terminal.isInjecting = false
+        let previous = lastInjection
+        lastInjection = _Concurrency.Task { [terminal] in
+            await previous?.value
+            for burst in PromptBursts.split(line) {
+                terminal.isInjecting = true
+                terminal.send(txt: burst)
+                terminal.isInjecting = false
+                try? await _Concurrency.Task.sleep(for: PromptBursts.pause)
+            }
+            terminal.isInjecting = true
+            terminal.send(txt: "\r")
+            terminal.isInjecting = false
+        }
     }
 
     private final class ProcessObserver: NSObject, LocalProcessTerminalViewDelegate {
