@@ -1,8 +1,8 @@
 import Foundation
 
 /// The prompt a rostered reviewer is spawned with, and the `briefing://reviewer` resource it reads
-/// back after a compaction (SPEC §5.1). A reviewer changes nothing: its deny list and the checkout
-/// check on its verdict tools enforce what this text asks.
+/// back after a compaction (SPEC §5.1). A reviewer changes nothing and reads only the task and its
+/// diff: its deny list and the checkout check on its verdict tools enforce what this text asks.
 public enum ReviewPrompt {
     public static func compose(
         task: BoardTask,
@@ -65,6 +65,10 @@ public enum ReviewPrompt {
         let here = workingDirectory.map { "`\($0)`" } ?? "this directory"
         var lines = [
             "## How to review",
+            "- Your inputs are the task above and the diff, nothing else. You do not read the worker's report, "
+                + "project notes or the Agent Board database; Agent Board withholds the first two and denies "
+                + "this session reads of the database. Whatever the worker claims, check it by reading and "
+                + "running the code.",
             "- You are in \(here), on branch `\(branch)`, where the work was done. The work under review is "
                 + "`git diff \(base)...HEAD`; `git log \(base)..HEAD` lists its commits.",
             "- You review and change nothing. Do not edit or create files, do not commit, and do not change "
@@ -76,8 +80,8 @@ public enum ReviewPrompt {
         if let build = verification.build { lines.append("- This project builds with `\(build)`.") }
         if let test = verification.test { lines.append("- This project tests with `\(test)`.") }
         lines.append(
-            "- `get_my_task` returns the task, the worker's report and the progress recorded against it. "
-                + "`log_progress` puts anything on the record that is not your verdict."
+            "- `get_my_task` returns the task and its comments again. `log_progress` puts anything on the "
+                + "record that is not your verdict."
         )
         return lines.joined(separator: "\n")
     }

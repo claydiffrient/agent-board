@@ -171,17 +171,27 @@ final class ReviewScopeTests: XCTestCase {
         XCTAssertTrue(try f.progress.list(taskId: task.id).contains { $0.text.contains("Sources/Search.swift:41") })
     }
 
-    func testGetMyTaskGivesTheReviewerTheWorkAndItsProgressAndNothingElse() async throws {
+    /// SPEC §5.1: the reviewer's inputs are the task and the diff — no worker report, no progress, no notes.
+    func testTheReviewerGetsTheTaskButNoWorkerReportProgressOrNotes() async throws {
         try f.setReviewLevel(.agent)
         try f.rosterReviewer("Rowan")
+        _ = try await f.call("log_progress", ["text": .string("Worker aside: the cache is safe.")], as: worker)
         _ = try await reportComplete()
         let reviewer = try await reviewerOnTask()
+        let note = try f.note("Search internals", sections: [(heading: "Cache", body: "Invalidated on write.")])
 
-        let json = try await f.callJSON("get_my_task", as: reviewer)
+        let result = try await f.call("get_my_task", as: reviewer)
 
-        XCTAssertEqual(json["id"]?.stringValue, task.id)
-        XCTAssertEqual(json["column"]?.stringValue, "review")
-        XCTAssertNotNil(json["progress"]?.arrayValue)
+        XCTAssertTrue(result.text.contains(task.id), result.text)
+        for leaked in ["Wrote the query layer.", "Worker aside"] {
+            XCTAssertFalse(result.text.contains(leaked), leaked)
+        }
+        let resources = NoteResourceHandler(db: f.db)
+        let listed = try await resources.resources(for: reviewer)
+        XCTAssertEqual(listed.map(\.uri), [])
+        await XCTAssertThrowsErrorAsync(
+            try await resources.read(NoteResourceHandler.uri(projectId: self.f.project.id, noteId: note.id), identity: reviewer)
+        )
     }
 
     // MARK: report_complete under each level

@@ -12,6 +12,19 @@ public enum ReviewCheckout {
         return "\(head) \(dirt)"
     }
 
+    /// Whether `git diff <base>...HEAD` has anything in it: what a reviewer would read.
+    public static func hasDiff(against base: String, in directory: URL) throws -> Bool {
+        let result = try ProcessRunner.run(
+            executable: URL(fileURLWithPath: WorktreeManager.gitPath),
+            arguments: ["diff", "--quiet", "\(base)...HEAD"], cwd: directory, environment: gitEnvironment
+        )
+        switch result.status {
+        case 0: return false
+        case 1: return true
+        default: throw AgentRuntimeError("git diff --quiet \(base)...HEAD exited \(result.status): \(result.stderr)")
+        }
+    }
+
     private static func head(in directory: URL) throws -> String {
         try git(["rev-parse", "HEAD"], in: directory).trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -48,12 +61,16 @@ public enum ReviewCheckout {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func git(_ args: [String], in directory: URL) throws -> String {
+    private static var gitEnvironment: [String: String] {
         var env = ProcessInfo.processInfo.environment
         env["GIT_TERMINAL_PROMPT"] = "0"
+        return env
+    }
+
+    private static func git(_ args: [String], in directory: URL) throws -> String {
         let result = try ProcessRunner.run(
             executable: URL(fileURLWithPath: WorktreeManager.gitPath), arguments: args, cwd: directory,
-            environment: env
+            environment: gitEnvironment
         )
         guard result.status == 0 else {
             throw AgentRuntimeError("git \(args.joined(separator: " ")) exited \(result.status): \(result.stderr)")

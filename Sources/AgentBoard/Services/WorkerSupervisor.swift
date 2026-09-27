@@ -354,6 +354,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if let path = site.worktreePath, let holder = try sessions.activeHolder(worktreePath: path) {
             throw SupervisorError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
         }
+        // SPEC §5.1: a reviewer judges the diff and nothing else, so an empty one — a task whose
+        // deliverable is a note, say — goes to a person rather than to a reviewer that could only reopen it.
+        if scope == .reviewer {
+            let cwd = site.cwd
+            guard try await offMain({ try ReviewCheckout.hasDiff(against: base, in: cwd) }) else {
+                throw NothingToReview(reason: "Branch `\(branch)` has no diff against `\(base)`, so there is no "
+                    + "code for a rostered reviewer to judge. A task whose deliverable is not code, such as an "
+                    + "Agent Board note, needs a person to review it.")
+            }
+        }
 
         do {
             let reviewHead = scope == .reviewer
@@ -626,7 +636,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 // A deny-list, layered on: a rostered agent can only ever have less authority than a
                 // plain worker, and an empty list is exactly a plain worker's.
                 disallowedTools: SpawnRequest.defaultDisallowedTools
-                    + (plan.scope == .reviewer ? SpawnRequest.reviewerDisallowedTools : [])
+                    + (plan.scope == .reviewer
+                        ? SpawnRequest.reviewerDisallowedTools
+                            + SpawnRequest.reviewerBoardDeny(supportDir: appSupportDir, home: home)
+                        : [])
                     + (plan.rosterAgent?.disallowedTools ?? []),
                 model: plan.model
             )
@@ -2231,7 +2244,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func assignAgent(
         taskId: String, rosterAgentId: String, scope: AgentBoardCore.TokenScope
     ) async throws -> WorkerSpawn {
-        try await recording { try await spawn(taskId: taskId, rosterAgentId: rosterAgentId, scope: scope) }
+        do {
+            return try await spawn(taskId: taskId, rosterAgentId: rosterAgentId, scope: scope)
+        } catch let declined as NothingToReview {
+            throw declined
+        } catch {
+            lastError = describe(error)
+            throw error
+        }
     }
 
     /// Only the orchestrator's `stop_worker` reaches this; a human's Stop calls `stop(sessionId:)`.

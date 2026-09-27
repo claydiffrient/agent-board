@@ -74,7 +74,12 @@ final class ReviewerIsReviewOnlyTests: XCTestCase {
         XCTAssertFalse(spawned.prompt.contains("Commit on the current branch"), "the reviewer was told to commit")
         XCTAssertFalse(spawned.prompt.contains("report_complete"))
         XCTAssertTrue(spawned.prompt.contains("`reopen_task(findings)`"))
-        for denied in ["Edit", "Write", "NotebookEdit", "Bash(git commit*)"] {
+        let supportDir = fixture.supportDir.path
+        for denied in [
+            "Edit", "Write", "NotebookEdit", "Bash(git commit*)",
+            "Read(//**/agentboard.sqlite*)", "Bash(*agentboard.sqlite*)",
+            "Read(/\(supportDir)/**)", "Bash(*\(supportDir)*)",
+        ] {
             XCTAssertTrue(spawned.disallowedTools.contains(denied), denied)
         }
         let briefing = try await BriefingResourceHandler(db: fixture.db)
@@ -92,6 +97,37 @@ final class ReviewerIsReviewOnlyTests: XCTestCase {
         XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .review)
         let notes = try ProgressStore(fixture.db).list(taskId: task.id).map(\.text)
         XCTAssertFalse(notes.contains { $0.hasPrefix(Board.reviewPassedLead) })
+    }
+
+    func testATaskWithNoDiffGoesToAPersonAndNoReviewerStarts() async throws {
+        var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
+        settings.reviewLevel = .agent
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+        _ = try enableRita()
+        let task = try makeTask()
+        try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
+        let worker = try XCTUnwrap(fixture.sessions.forTask(task.id).last)
+        let token = try XCTUnwrap(fixture.grants.forSession(worker.sessionId).first).token
+        let sink = LateBoundSink()
+        sink.target = fixture.supervisor
+
+        let result = try await WorkerToolHandler(db: fixture.db, control: sink, events: sink).call(
+            "report_complete",
+            arguments: .object([
+                "summary": .string("Wrote the release notes as an Agent Board note."),
+                "files_changed": .array([]), "tests_run": .string("none"), "caveats": .string("none"),
+            ]),
+            identity: try await fixture.identity(token: token)
+        )
+        await fixture.supervisor.waitForSetup()
+
+        XCTAssertTrue(result.text.contains("for a person"), result.text)
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .review)
+        XCTAssertNil(try fixture.tasks.get(task.id)?.reviewerAgentId)
+        XCTAssertEqual(try fixture.sessions.forTask(task.id).map(\.sessionId), [worker.sessionId], "a reviewer started")
+        let status = try ProgressStore(fixture.db).list(taskId: task.id).filter { $0.kind == .status }.map(\.text)
+        XCTAssertTrue(status.contains { $0.contains("has no diff against") }, "\(status)")
     }
 
     func testReopenedFindingsReachTheNextWorkersOpeningPromptVerbatim() async throws {

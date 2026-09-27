@@ -438,7 +438,10 @@ the *worker's own* worktree rather than cutting one, since it is keyed on the
 same task id. It records the checkout's baseline in `agent_session.review_head`, opens
 with `ReviewPrompt.compose` in place of the worker prompt, and step 7 adds
 `SpawnRequest.reviewerDisallowedTools` (file edits and every git command that
-changes a branch or the index, plus `rm` and `mv`) after the push/PR block.
+changes a branch or the index, plus `rm` and `mv`) and
+`SpawnRequest.reviewerBoardDeny` (reads of the board database and the support
+directory, §5.1) after the push/PR block. It refuses a branch with no diff
+against its base before any of that runs (§5.1).
 
 Steps 1-2 are synchronous; `spawn_worker` answers between step 2 and step 3,
 with a row in `agent_session` under a placeholder id and state `setup`, and the
@@ -1382,6 +1385,39 @@ task gets the reviewer's `progress` note verbatim in its opening prompt, and in
 its post-compaction brief, until a later review passes, a human reopens the task,
 or it is accepted (`Board.closeReviewFindings`).
 
+A reviewer's inputs are the task — title, body, acceptance criteria and its
+comment thread — and the diff on the task's branch. Nothing else: not the
+worker's report, not the task's `progress` rows (the worker's own notes and any
+hand-off summary), not project notes, not the board database. It checks the
+worker's claims by reading and running the code. `ReviewPrompt` says so; its
+`get_my_task` returns the task and its comments and nothing from `report` or
+`progress`; its scope has no note tools, and `NoteResourceHandler` lists no
+`note://` resource to a `reviewer` token and refuses to read one.
+
+The database is denied through the same `--disallowedTools` list as its writes,
+by `SpawnRequest.reviewerBoardDeny`: `Read(//**/agentboard.sqlite*)` and
+`Bash(*agentboard.sqlite*)` for the database file and its `-wal`/`-shm` wherever
+it is spelled from, and, for the support directory itself, `Read(/<dir>/**)`
+plus `Bash(*<dir>*)` under its absolute, symlink-resolved and `~` spellings,
+each also with its spaces backslash-escaped. Measured against Claude Code
+2.1.283 on 2026-09-26: those rules denied the Read tool, `cat` (absolute, after
+`cd`, quoted and escaped), `cp … && cat`, `sqlite3` and a `python3 -c` naming
+the file. The gap, like the Coordinator's (§8.2), is a command that never names
+the path: a recursive search from an ancestor directory (the Grep tool, or
+`grep -r` from `~` or `~/Library`), or a path assembled at run time. It stops
+accident, not an adversarial reviewer, and a database moved by `AGENTBOARD_DB`
+to another filename outside the support directory is not covered at all.
+
+A reviewer judges a diff, so a task whose branch has no diff against its base —
+one whose whole deliverable is an Agent Board note, such as release notes — has
+nothing for it to decide, and `reopen_task` would send correct work back.
+`assignAgent(scope: .reviewer)` runs `git diff --quiet <base>...HEAD` in the
+worktree before it writes a session row and throws `NothingToReview` when it
+is empty. `report_complete` then leaves the task in `review` for a person
+(`Board.leaveReviewToPerson`: `reviewer_agent_id` cleared, the reason in a
+`status` row, exactly as `humanReview` routing parks it) and tells the worker
+so. No reviewer starts and nothing is flagged as an error.
+
 ### 5.2 Epic integration
 
 Integration is gated on your approval regardless of the autonomy setting, and
@@ -1516,8 +1552,9 @@ Served at `http://127.0.0.1:<port>/mcp`. Scope comes from the bearer token, not
 from the request. A worker calling an orchestrator tool gets a tool-not-found
 error, because the tool list is rendered per scope. Resources and prompts are
 not scoped this way — any valid token in the project sees the full resource
-and prompt lists, worker and orchestrator alike. `initialize`'s advertised
-`capabilities` includes `resources` and `prompts` only when a handler for it is
+and prompt lists, worker and orchestrator alike — with one exception: a
+`reviewer` token sees no `note://` resource and is refused a read of one
+(§5.1). `initialize`'s advertised `capabilities` includes `resources` and `prompts` only when a handler for it is
 wired, so `tools: {}` alone still means what it used to.
 
 ### Resources
@@ -1612,7 +1649,7 @@ of orchestrator scope: it is the authority to move one named task out of
 
 | Tool | Effect |
 |---|---|
-| `get_my_task()` | The task under review, its `progress` rows and its comment thread |
+| `get_my_task()` | The task under review and its comment thread. No report and no `progress` rows (§5.1) |
 | `log_progress(text)` | Appends to `progress` |
 | `add_comment(body)` | Appends to the task's comment thread as `reviewer`, named from the roster. Touches no file, so it never trips the checkout check |
 | `accept_task(verdict)` | Writes the verdict to `progress`, then runs the ordinary acceptance (§5.1). Refused, with the task left in `review`, if the reviewer changed its checkout |
