@@ -5,10 +5,19 @@ signing, notarization, or public distribution.
 
 ## 1. Write the RELEASES.md entry
 
-Add a new `## <version> — YYYY-MM-DD` heading at the top of `RELEASES.md`
-(newest first — the app's Help-menu window renders the whole file in that
-order). Write it for whoever is running the app, not the commit log: what
-changed, in plain language, grouped however reads best.
+Run `/cut-release [version]` in a Claude Code session in this repo, connected
+to the `agent-board` MCP server (`.claude/skills/cut-release/SKILL.md`). It
+checks you're on `origin/main`, gathers every `Release notes: <epic>` note not
+yet compiled and every user-visible merge since the last cut, writes the new
+entry, verifies it, commits `RELEASES.md` alone, and marks each note it used
+with a `Compiled` section. It never pushes, tags or opens a pull request;
+merging the cut tags it (§3). With
+no version it bumps the minor version.
+
+To do it by hand instead: add a new `## <version> — YYYY-MM-DD` heading at the
+top of `RELEASES.md` (newest first — the app's Help-menu window renders the
+whole file in that order). Write it for whoever is running the app, not the
+commit log: what changed, in plain language, grouped however reads best.
 
 There is deliberately no `Unreleased` section. Every heading is compared
 against the running version — both to decide what to show in the Help menu
@@ -18,14 +27,25 @@ to be a real, already-decided version the moment it's written.
 Per-epic release notes are **not** kept in `RELEASES.md` as epics land. Each
 epic writes its own note on the `agent-board` project instead, titled
 `Release notes: <epic>`. Find the ones written since the last cut with
-`search_notes("Release notes:")` on that project; none of them are marked
-"already compiled," so check each one against what the current top heading in
-`RELEASES.md` already says before folding it in — an epic's note sometimes
-describes work that a still-open earlier entry already covered in different
-words. Once you've gathered the notes for everything not yet reflected, write
-the new heading and commit `RELEASES.md`.
+`search_notes("Release notes:")` on that project and skip every note that has
+a `Compiled` section — that section, "Compiled into <version> (<sha>).", is the
+only record that a note already went into a release. Check the rest against
+the code on `main`, fold them in, commit `RELEASES.md`, then `append_section`
+a `Compiled` section onto each note you used.
 
 ## 2. Build
+
+Once the cut has merged and your checkout is on it, run `/cut-release --build`
+(`Scripts/cut-release.sh build`). It refuses unless `origin/main` has the
+commit that added `RELEASES.md`'s newest heading and HEAD contains it, so an
+unmerged cut branch can't be built. It also refuses unless that version is
+newer than the installed `/Applications/Agent Board.app`, so an
+already-installed version can't be rebuilt and reinstalled with nothing new
+for What's New to show. Then it prints which app it will replace, runs
+`release.sh`, and prints the DMG path. Instead of building, you can download
+the draft release's DMG (§3, §4).
+
+By hand:
 
 ```
 Scripts/release.sh [--allow-dirty]
@@ -62,23 +82,50 @@ the bundle is internally consistent.
 
 ## 3. Publish
 
+Merging the cut is the whole step. `.github/workflows/release.yml` runs on
+every push to `main` that changes `RELEASES.md`. It reads the newest heading's
+version and releases it only when that push added it: the version must not
+appear as any heading in `RELEASES.md` at the push's previous commit
+(`github.event.before`). If it passes that, and `origin` has no tag
+`v<version>` and no release (draft or published) exists for it, in that one
+run:
+
+1. Checks the version's section with `Scripts/release-notes.sh` and uses it,
+   verbatim, as the release body (with a notice up top giving the Gatekeeper
+   step below).
+2. Runs `Scripts/release.sh`.
+3. Tags the pushed commit `v<version>` (annotated) and pushes the tag, unless
+   that tag already points at the pushed commit. A `v<version>` tag on any
+   other commit fails the run.
+4. Attaches `dist/AgentBoard-<version>.dmg` to a **draft** GitHub Release.
+
+Otherwise it logs why and does nothing: an edit that leaves the newest version
+alone, a revert that brings back a version the file already listed, a push
+whose previous commit is all zeros or can't be fetched, or a version already
+tagged or released. That matters because 0.1.0 and 0.2.0 were never tagged —
+without the first check, fixing a typo in `RELEASES.md` would tag that commit
+`v0.2.0`. Releases are checked against the releases listing rather than the
+by-tag endpoint, because the latter doesn't see drafts.
+
+The fallback, when that run didn't happen or failed before creating the
+release, is pushing the tag yourself:
+
 ```
-git tag -a v<version> -m "..."
+git tag -a v<version> -m "Agent Board <version>" <merge commit>
 git push origin v<version>
 ```
 
-`<version>` must be exactly `RELEASES.md`'s newest heading — that's what
-`Scripts/release-notes.sh v<version>` checks, and it's what
-`.github/workflows/release.yml` runs on every `v*` tag push. The workflow:
+`<version>` must be exactly `RELEASES.md`'s newest heading. A `v*` tag push
+runs the same job, minus the tagging, and fails rather than skips if a release
+for the tag already exists.
 
-1. Checks the tag against `RELEASES.md` with `Scripts/release-notes.sh` and
-   uses that version's section, verbatim, as the release body (with a notice
-   up top giving the Gatekeeper step below).
-2. Refuses if a release for that tag already exists — draft or published,
-   checked against the releases listing rather than the by-tag endpoint,
-   because the latter doesn't see drafts.
-3. Runs `Scripts/release.sh` and attaches `dist/AgentBoard-<version>.dmg` to a
-   **draft** GitHub Release.
+If the merge run failed after pushing its tag — `gh release create` failing,
+say — use **Re-run failed jobs** on that run. The tag step finds `v<version>`
+already at the pushed commit, skips creating it, and goes on to create the
+release. Don't use **Re-run all jobs**: the first job sees the tag on `origin`
+and skips the whole release. If the tag points at some other commit, the tag
+step fails; delete the tag on `origin`, then either re-run failed jobs or push
+the tag yourself as above.
 
 Review the draft on GitHub, edit if needed, and publish it by hand — the
 workflow never does that step.
@@ -99,7 +146,7 @@ lets its shutdown sheet settle any running workers before you replace the
 bundle. There's no installer standing guard over this the way there used to
 be, so quitting first is on you.
 
-Then open `dist/AgentBoard-<version>.dmg` (or, for a published release,
+Then open `dist/AgentBoard-<version>.dmg` (or, for a draft or published release,
 `gh release download v<version> --pattern '*.dmg' --dir <dir>` and open the
 downloaded one), drag **Agent Board** onto the **Applications** shortcut
 inside it, and relaunch from `/Applications`.

@@ -1,18 +1,104 @@
 name: Release
 
+# A push to main releases RELEASES.md's newest version only when that push added it: the version must
+# not appear anywhere in RELEASES.md at the push's `before` commit, and must not already be tagged or
+# released. A v* tag push is the manual fallback. Path filters don't apply to tag pushes.
 on:
   push:
+    branches: [main]
+    paths: [RELEASES.md]
     tags: ['v*']
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  target:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REF_TYPE: ${{ github.ref_type }}
+      REF_NAME: ${{ github.ref_name }}
+      BEFORE: ${{ github.event.before }}
+    outputs:
+      release: ${{ steps.target.outputs.release }}
+      tag: ${{ steps.target.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Decide which version to release
+        id: target
+        run: |
+          skip() {
+            echo "$1"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [ "$REF_TYPE" = tag ]; then
+            tag="$REF_NAME"
+          else
+            newest=$(Scripts/release-notes.sh --newest)
+            tag="v$newest"
+
+            if [[ "$BEFORE" =~ ^0*$ ]]; then
+              skip "This push has no previous commit (before=${BEFORE:-empty}), so it can't have added $newest; nothing to release. Push tag $tag to release it."
+            fi
+            if ! git cat-file -e "$BEFORE^{commit}" 2> /dev/null &&
+              ! git fetch --quiet --depth=1 origin "$BEFORE" 2> /dev/null; then
+              skip "The push's previous commit $BEFORE is unreachable, so whether it added $newest is unknown; nothing to release. Push tag $tag to release it."
+            fi
+            before_notes="$RUNNER_TEMP/RELEASES.before.md"
+            if ! git show "$BEFORE:RELEASES.md" > "$before_notes" 2> /dev/null; then
+              skip "RELEASES.md did not exist at $BEFORE; nothing to release. Push tag $tag to release $newest."
+            fi
+            before_versions=$(Scripts/release-notes.sh --versions "$before_notes")
+            before_newest=$(head -n1 <<< "$before_versions")
+            if [ "$before_newest" = "$newest" ]; then
+              skip "RELEASES.md changed but its newest version is still $newest; nothing to release."
+            fi
+            if grep -qxF "$newest" <<< "$before_versions"; then
+              skip "RELEASES.md's newest version went from ${before_newest:-none} back to $newest, which it already listed; nothing to release."
+            fi
+            echo "This push added version $newest (newest before: ${before_newest:-none})."
+
+            status=0
+            git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null || status=$?
+            case "$status" in
+              0) skip "Tag $tag already exists on origin; nothing to release." ;;
+              2) ;;
+              *) echo "::error::git ls-remote origin failed with status $status"; exit 1 ;;
+            esac
+          fi
+          Scripts/release-notes.sh "$tag" > /dev/null
+
+          # The releases list, unlike the by-tag endpoint, includes drafts.
+          existing=$(gh api --paginate "repos/$GH_REPO/releases" --jq ".[] | select(.tag_name == \"$tag\") | .html_url")
+          if [ -n "$existing" ]; then
+            if [ "$REF_TYPE" = tag ]; then
+              echo "::error::A release for $tag already exists and will not be overwritten: $existing"
+              exit 1
+            fi
+            skip "A release for $tag already exists; nothing to release: $existing"
+          fi
+
+          echo "Releasing $tag from $GITHUB_SHA ($REF_TYPE push)."
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   draft-release:
+    needs: target
+    if: needs.target.outputs.release == 'true'
     runs-on: macos-26
     timeout-minutes: 60
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.target.outputs.tag }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
@@ -26,7 +112,7 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - name: Check the tag against RELEASES.md and extract its notes
+      - name: Extract the release notes
         run: |
           notes="$RUNNER_TEMP/release-notes.md"
           body=$(Scripts/release-notes.sh "$TAG")
@@ -40,17 +126,27 @@ jobs:
           echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
           echo "NOTES_FILE=$notes" >> "$GITHUB_ENV"
 
-      # The releases list, unlike the by-tag endpoint, includes drafts.
-      - name: Refuse a tag that already has a release
-        run: |
-          existing=$(gh api --paginate "repos/$GH_REPO/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .html_url")
-          if [ -n "$existing" ]; then
-            echo "::error::A release for $TAG already exists and will not be overwritten: $existing"
-            exit 1
-          fi
-
       - name: Build
         run: Scripts/release.sh
+
+      # After the build, so a failed build leaves no tag that would make the next run skip. A tag pushed
+      # with GITHUB_TOKEN triggers no workflow, so this run is the only one for it. A re-run after a
+      # failed release finds its own tag already at this commit and goes straight to the release.
+      - name: Tag the pushed commit
+        if: github.ref_type == 'branch'
+        run: |
+          git fetch --quiet origin "+refs/tags/$TAG:refs/tags/$TAG" 2> /dev/null || true
+          if tagged=$(git rev-parse -q --verify "refs/tags/$TAG^{commit}"); then
+            if [ "$tagged" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $TAG already exists at $tagged, not at this push's commit $GITHUB_SHA. If that tag is wrong, delete it on origin and re-run failed jobs (docs/releasing.md §3)."
+              exit 1
+            fi
+            echo "Tag $TAG already points at $GITHUB_SHA; not creating it again."
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            tag -a "$TAG" -m "Agent Board $VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
 
       - name: Create draft release
         run: |

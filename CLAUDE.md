@@ -18,6 +18,10 @@ Run both unpiped. `swift build | tail` reports the pipeline's exit status rather
 
 `--filter` takes a regex matched against the fully-qualified test identifier, so a target name or a suite (XCTestCase subclass) name both work as shown above.
 
+## Release
+
+Cut a version with the project skill `/cut-release [version]` (`.claude/skills/cut-release/SKILL.md`), and build the merged cut's DMG with `/cut-release --build`. `docs/releasing.md` has the manual steps.
+
 ## Module layout
 
 Dependency direction, from `Package.swift` and each target's actual `import` lines (verified — no target imports beyond its declared dependencies):
