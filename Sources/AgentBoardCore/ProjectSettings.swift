@@ -178,12 +178,24 @@ public struct ReviewRoutingTable: Codable, Sendable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        defaultAssignee = try c.decodeIfPresent(ReviewAssignee.self, forKey: .defaultAssignee) ?? .anyReviewer
-        // A row for a type this build doesn't know is dropped rather than failing every setting.
-        let rows = try c.decodeIfPresent([String: ReviewAssignee].self, forKey: .typeAssignees) ?? [:]
+        // A kind or type this build doesn't know drops its row rather than failing every setting.
+        defaultAssignee = try c.decodeIfPresent(KnownKind.self, forKey: .defaultAssignee)?.assignee ?? .anyReviewer
+        let rows = try c.decodeIfPresent([String: KnownKind].self, forKey: .typeAssignees) ?? [:]
         typeAssignees = Dictionary(uniqueKeysWithValues: rows.compactMap { key, value in
-            TaskType(rawValue: key).map { ($0, value) }
+            guard let type = TaskType(rawValue: key), let assignee = value.assignee else { return nil }
+            return (type, assignee)
         })
+    }
+
+    /// An assignee, or nil when its `kind` is one this build doesn't know.
+    private struct KnownKind: Decodable {
+        let assignee: ReviewAssignee?
+
+        init(from decoder: Decoder) throws {
+            let kind = try decoder.container(keyedBy: ReviewAssignee.CodingKeys.self)
+                .decode(String.self, forKey: .kind)
+            assignee = ReviewAssignee.Kind(rawValue: kind) == nil ? nil : try ReviewAssignee(from: decoder)
+        }
     }
 
     public func assignee(for type: TaskType?) -> ReviewAssignee {

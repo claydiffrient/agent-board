@@ -916,7 +916,8 @@ with no row is **Same as Default**, and so is a task with no type.
 Any agent the project uses can be named, whatever its role says; the name is a
 snapshot taken when it was chosen. If a named agent has since been deleted from
 the roster, disabled, or dropped from the project, the task goes to a person
-with a `progress` row naming the agent and what happened to it — **never to
+with a `progress` row naming the agent, the type row that named it (or the
+project, for Default), and what happened to it — **never to
 another agent**, since a silent substitute is what naming one exists to
 prevent. The row is kept, not cleared, when the agent goes away, so the next
 completion says the same thing.
@@ -929,6 +930,9 @@ reviewer" all qualify), and `reviewers.first` — the first in
 a single `reviewAgent`; decoding puts it in the Default row (named stays named,
 absent becomes Any reviewer) and every type row starts as Same as Default, so
 no project routes differently on upgrade. `reviewAgent` is never written again.
+A type row whose type or `kind` this build doesn't know is dropped, so that type
+is Same as Default, and a Default row with an unknown `kind` reads as Any
+reviewer; neither fails the rest of `settings_json`.
 The table is read only under `agent`; the integration-task and shared-checkout
 overrides (§5, §5.1) still apply over it, and there are no per-epic rows.
 

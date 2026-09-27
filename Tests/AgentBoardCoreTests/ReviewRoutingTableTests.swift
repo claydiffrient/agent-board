@@ -110,4 +110,37 @@ final class ReviewRoutingTableTests: XCTestCase {
             try routing(task(.plan, origin: .integration, epicId: epic.id)), .humanReview(reason: nil)
         )
     }
+
+    func testAnUnknownKindDropsItsTypeRowAndMakesTheDefaultRowAnyReviewer() throws {
+        let json = #"""
+        {"reviewLevel":"agent","buildCommand":"make","reviewRouting":{
+          "defaultAssignee":{"kind":"panel"},
+          "typeAssignees":{"docs":{"kind":"panel"},"plan":{"kind":"acceptWithoutReview"}}}}
+        """#
+        let settings = ProjectSettings.decode(json)
+        XCTAssertEqual(
+            settings.reviewRouting,
+            ReviewRoutingTable(defaultAssignee: .anyReviewer, typeAssignees: [.plan: .acceptWithoutReview])
+        )
+        XCTAssertEqual(settings.reviewLevel, .agent)
+        XCTAssertEqual(settings.buildCommand, "make")
+    }
+
+    func testAnUnavailableTypeRowReviewerIsNamedWithItsType() throws {
+        let rita = try agent("Rita", role: "reviewer")
+        try RosterStore(f.db).setEnabled(rita.id, false)
+        try setSettings {
+            $0.reviewLevel = .agent
+            $0.reviewRouting = ReviewRoutingTable(
+                defaultAssignee: .named(ReviewAgentChoice(id: rita.id, name: rita.name)),
+                typeAssignees: [.docs: .named(ReviewAgentChoice(id: rita.id, name: rita.name))]
+            )
+        }
+
+        guard case .humanReview(let typed?) = try routing(task(.docs)),
+              case .humanReview(let fallback?) = try routing(task(.code))
+        else { return XCTFail("a disabled named reviewer did not go to a person with a reason") }
+        XCTAssertTrue(typed.hasPrefix("Agent review names Rita for Docs tasks, but Rita is disabled"), typed)
+        XCTAssertTrue(fallback.hasPrefix("Agent review names Rita as this project's reviewer, but"), fallback)
+    }
 }

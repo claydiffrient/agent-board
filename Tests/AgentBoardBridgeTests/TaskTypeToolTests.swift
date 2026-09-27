@@ -42,6 +42,15 @@ final class TaskTypeToolTests: XCTestCase {
         XCTAssertTrue(refused.text.contains("code, docs, tests, plan, review"), refused.text)
     }
 
+    func testCreateEpicSetsEachTasksType() async throws {
+        let created = try await callJSON("create_epic", [
+            "title": "Docs pass", "tasks": [["title": "Write the guide", "type": "docs"]],
+        ])
+        let id = try XCTUnwrap((created["task_ids"] as? [String])?.first)
+        let detail = try await callJSON("get_task", ["id": id])
+        XCTAssertEqual(detail["type"] as? String, "docs")
+    }
+
     // MARK: Helpers
 
     private func callJSON(_ name: String, _ arguments: [String: Any]) async throws -> [String: Any] {
