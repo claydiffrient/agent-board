@@ -479,10 +479,12 @@ the socket walk and the attribution walk below reuse, so a sweep is linear in
 processes rather than in sockets, and a socket is never dropped because its
 own `proc_pidinfo` lookup failed — it is reported unattributed instead.
 
-**One port is one row.** A descriptor inherited across `fork` stays open in
-every process below the one that bound it: a board's own server socket was
-seen under `AgentBoard`, three `claude` hosts and a shell console — six rows
-for one port. The sweep groups holders by port and gives the row to the holder
+**One port is one row.** A descriptor that is not close-on-exec stays open in
+every process below the one that bound it, and SwiftTerm's `forkpty` closes
+nothing before `execve`. The board marks its own listener close-on-exec, which
+keeps it out of the orchestrator and shell consoles; before that it was seen
+under `AgentBoard`, three `claude` hosts and a shell console — six rows for one
+port — and a dev server a worker starts has no such guarantee. The sweep groups holders by port and gives the row to the holder
 that started first, which is the binder, since nothing can inherit a
 descriptor before the process holding it exists; a pid whose start time could
 not be read sorts last, and the lower pid breaks a tie. The binder's

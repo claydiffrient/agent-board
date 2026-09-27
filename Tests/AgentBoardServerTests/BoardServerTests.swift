@@ -36,6 +36,34 @@ final class BoardServerTests: XCTestCase {
         XCTAssertEqual(reported, port)
     }
 
+    /// SwiftTerm starts the orchestrator and shell consoles this way, closing nothing before `execve`.
+    func testListeningSocketIsNotInheritedByAPtyChild() async throws {
+        XCTAssertTrue(try listening(pid: getpid()).contains("127.0.0.1:\(port) (LISTEN)"))
+
+        var argv: [UnsafeMutablePointer<CChar>?] = [strdup("/bin/sleep"), strdup("10"), nil]
+        defer { argv.forEach { free($0) } }
+        var master: Int32 = -1
+        let child = forkpty(&master, nil, nil, nil)
+        if child == 0 {
+            execv("/bin/sleep", &argv)
+            _exit(127)
+        }
+        XCTAssertGreaterThan(child, 0)
+        defer {
+            kill(child, SIGKILL)
+            waitpid(child, nil, 0)
+            close(master)
+        }
+        var name = [CChar](repeating: 0, count: 64)
+        for _ in 0..<100 {
+            if proc_name(child, &name, UInt32(name.count)) > 0, String(cString: name) == "sleep" { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(String(cString: name), "sleep")
+
+        XCTAssertEqual(try listening(pid: child), "")
+    }
+
     // MARK: Auth
 
     func testMCPWithoutTokenIsUnauthorized() async throws {
@@ -383,6 +411,18 @@ final class BoardServerTests: XCTestCase {
     }
 
     // MARK: Helpers
+
+    private func listening(pid: pid_t) throws -> String {
+        let lsof = Process()
+        lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        lsof.arguments = ["-nP", "-a", "-p", "\(pid)", "-iTCP:\(port)", "-sTCP:LISTEN"]
+        let pipe = Pipe()
+        lsof.standardOutput = pipe
+        try lsof.run()
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        lsof.waitUntilExit()
+        return String(decoding: output, as: UTF8.self)
+    }
 
     private func url(_ path: String) -> URL {
         URL(string: "http://127.0.0.1:\(port)\(path)")!
