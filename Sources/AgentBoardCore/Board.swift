@@ -972,7 +972,7 @@ public struct Board: Sendable {
                 created.append(try TaskStore.insert(
                     db, projectId: projectId, title: spec.title, body: spec.body,
                     acceptance: spec.acceptance, priority: spec.priority, column: .backlog,
-                    origin: spec.origin, epicId: epic.id, model: spec.model
+                    origin: spec.origin, epicId: epic.id, model: spec.model, type: spec.type
                 ))
             }
             for (index, spec) in tasks.enumerated() {
@@ -1275,18 +1275,20 @@ public struct NewEpicTask: Sendable, Equatable {
     public var acceptance: String?
     public var priority: String?
     public var model: String?
+    public var type: TaskType?
     public var origin: TaskOrigin
     public var dependsOn: [Int]
 
     public init(
         title: String, body: String? = nil, acceptance: String? = nil, priority: String? = nil,
-        model: String? = nil, origin: TaskOrigin = .orchestrator, dependsOn: [Int] = []
+        model: String? = nil, type: TaskType? = nil, origin: TaskOrigin = .orchestrator, dependsOn: [Int] = []
     ) {
         self.title = title
         self.body = body
         self.acceptance = acceptance
         self.priority = priority
         self.model = model
+        self.type = type
         self.origin = origin
         self.dependsOn = dependsOn
     }

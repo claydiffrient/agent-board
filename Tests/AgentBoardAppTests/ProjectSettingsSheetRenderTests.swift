@@ -81,13 +81,13 @@ final class ProjectSettingsSheetRenderTests: XCTestCase {
     }
 
     /// Only the selected tab is mounted, so pickers are counted per tab: Workspace, Archive, Default
-    /// model, Review level, Worktree strategy, standalone integration, Mute.
+    /// model, Review level, the six review routing rows, Worktree strategy, standalone integration, Mute.
     func testEachTabMountsOnlyItsOwnPickers() throws {
         let expected: [ProjectSettingsTab: Int] = [
-            .general: 2, .agents: 2, .limits: 0, .workflow: 2, .notifications: 1, .advanced: 0,
+            .general: 2, .agents: 8, .limits: 0, .workflow: 2, .notifications: 1, .advanced: 0,
         ]
         XCTAssertEqual(Set(expected.keys), Set(ProjectSettingsTab.allCases))
-        XCTAssertEqual(expected.values.reduce(0, +), 7)
+        XCTAssertEqual(expected.values.reduce(0, +), 13)
 
         for tab in ProjectSettingsTab.allCases {
             let mounted = try mount(tab: tab)
