@@ -38,7 +38,7 @@ final class NotificationRouteTests: XCTestCase {
     func testEveryPayloadRoundTrips() throws {
         let subjects: [NotificationRoute.Subject] = [
             .approvals, .blockedTask("t-1"), .blockedTask(nil), .session("s-1"), .reports,
-            .shutdown, .project,
+            .shutdown, .epic("e-1"), .project,
         ]
         for subject in subjects {
             let original = NotificationRoute(projectId: "p-alpha", subject: subject)
@@ -175,5 +175,22 @@ final class NotificationRouterTests: XCTestCase {
         XCTAssertEqual(router.sequence, 1)
         router.open(route)
         XCTAssertEqual(router.sequence, 2, "an identical second click must be a second route")
+    }
+
+    /// A view's `task(id: router.sequence)` reruns every time the view appears, so the router, not
+    /// the view, remembers which route each consumer already acted on.
+    func testEachConsumerTakesARouteOnceAndTakesTheNextOne() {
+        let router = NotificationRouter()
+        let first = NotificationRoute(projectId: "p-alpha", subject: .epic("e-1"))
+        router.open(first)
+
+        XCTAssertNil(router.take(.epicLane, projectId: "p-beta"))
+        XCTAssertEqual(router.take(.epicLane, projectId: "p-alpha"), first)
+        XCTAssertNil(router.take(.epicLane, projectId: "p-alpha"), "the board reappearing scrolled again")
+        XCTAssertEqual(router.take(.screen, projectId: "p-alpha"), first, "one consumer starved another")
+
+        let second = NotificationRoute(projectId: "p-alpha", subject: .epic("e-2"))
+        router.open(second)
+        XCTAssertEqual(router.take(.epicLane, projectId: "p-alpha"), second)
     }
 }

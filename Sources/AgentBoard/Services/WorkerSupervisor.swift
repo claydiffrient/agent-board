@@ -76,6 +76,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let appSupportDir: URL
     @ObservationIgnored private let worktreeBase: URL
     @ObservationIgnored private let projectsRoot: URL
+    @ObservationIgnored private let coordinatorDir: URL
+    @ObservationIgnored private let home: URL
+    /// The `claude` every PTY console runs; a test substitutes a script.
+    @ObservationIgnored private let claude: ClaudeInvocation
     /// Sampled once per metering tick. Every cap and grace deadline is measured against it so a
     /// suspended machine does not count against a worker.
     @ObservationIgnored private let sleepLedger: SleepLedger
@@ -95,6 +99,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let board: Board
     @ObservationIgnored private let archives: ArchiveSweep
     @ObservationIgnored private let messages: MessageStore
+    @ObservationIgnored private let requests: RequestStore
     @ObservationIgnored private let fileLocks: FileLockStore
     @ObservationIgnored private let attention: ProjectAttentionStore
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
@@ -121,6 +126,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// trailers have already been read back this run.
     @ObservationIgnored private var trailersBackfilled: Set<String> = []
     @ObservationIgnored private var consoles: [String: OrchestratorConsole] = [:]
+    /// The active Coordinator session's console, if one is running (SPEC §9.4). Replies queued while
+    /// it is nil wait in the Coordinator's queue and are announced after the next session's first turn.
+    @ObservationIgnored var coordinatorConsole: (any ReportAnnouncing)?
+    @ObservationIgnored private var coordinatorConsoleInstance: OrchestratorConsole?
+    @ObservationIgnored private let coordinator: CoordinatorStore
     @ObservationIgnored private var shellConsoles: [String: ShellConsole] = [:]
     /// Keyed by setup session id, so a test — or a human stopping a worker mid-setup — can wait on
     /// or cancel the half of a spawn that outlives the call.
@@ -145,6 +155,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         appSupportDir: URL,
         worktreeBase: URL,
         projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
+        coordinatorDir: URL = SupportPaths.coordinatorDir(),
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        claude: ClaudeInvocation = .installed(),
         sleepLedger: SleepLedger = .shared,
         sleepGuard: SleepGuard? = nil,
         gh: any GhRunning = SystemGh()
@@ -155,6 +168,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         self.appSupportDir = appSupportDir
         self.worktreeBase = worktreeBase
         self.projectsRoot = projectsRoot
+        self.coordinatorDir = coordinatorDir
+        self.home = home
+        self.claude = claude
+        coordinator = CoordinatorStore(db)
         self.sleepLedger = sleepLedger
         self.sleepGuard = sleepGuard
         projects = ProjectStore(db)
@@ -171,6 +188,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         board = Board(db)
         archives = ArchiveSweep(db)
         messages = MessageStore(db)
+        requests = RequestStore(db)
         fileLocks = FileLockStore(db)
         attention = ProjectAttentionStore(db)
         pullRequestStates = PullRequestStateReader(gh: gh)
@@ -190,6 +208,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             lastError = describe(error)
         }
         failInterruptedSetups()
+        stopOrphanedCoordinatorSessions()
         sweepStaleFileLocks()
         await sweepLeakedAgents()
         await migrateWorktreeRoots()
@@ -536,6 +555,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return swept
     }
 
+    /// SPEC §8.2: a crash leaves the Coordinator's row live with no PTY behind it, where it would be
+    /// metered every tick and read as running.
+    private func stopOrphanedCoordinatorSessions() {
+        guard coordinatorConsoleInstance?.isProcessRunning != true else { return }
+        for session in (try? coordinator.sessions()) ?? [] where session.state.isActive {
+            _ = try? board.terminate(sessionId: session.sessionId, cause: .vanished)
+        }
+    }
+
     /// A setup that was still running when Agent Board quit has no process behind it any more, and
     /// its task would otherwise sit in `running` forever behind a session that will never start.
     private func failInterruptedSetups() {
@@ -727,7 +755,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func stopSession(_ sessionId: String, by actor: BoardActor) async throws {
         let session = try requireSession(sessionId)
         if let shortId = session.shortId {
-            try await runtime.stop(shortId: shortId)
+            try await stopAgent(session, shortId: shortId)
         } else if session.state == .setup {
             // No agent to stop yet; `launch` finds the row gone and stops whatever it started.
             setupTasks[sessionId]?.cancel()
@@ -739,6 +767,53 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try grants.revokeAll(sessionId: sessionId)
         announceReports(projectId: session.projectId)
         refreshSleepAssertion()
+    }
+
+    /// SPEC §8.5: no process a session started outlives it. The host's tree is read before
+    /// `claude stop`, which leaves a `run_in_background` command running under launchd.
+    private func stopAgent(_ session: AgentSession, shortId: String, listing: [AgentInfo]? = nil) async throws {
+        let listed = await listingOrFetch(listing)
+        var tree: Set<PIDIdentity> = []
+        if let host = Self.hostPID(of: session, in: listed) { tree = await SessionProcessReaper.tree(ofHost: host) }
+        do {
+            try await runtime.stop(shortId: shortId)
+        } catch {
+            await reapProcesses(of: session, tree: tree, listing: listed)
+            throw error
+        }
+        await reapProcesses(of: session, tree: tree, listing: listed)
+    }
+
+    /// SPEC §8.5. The worktree rule is off for a shared checkout, and while another live session
+    /// shares the worktree, since an orphan there could be that session's.
+    private func reapProcesses(
+        of session: AgentSession, tree: Set<PIDIdentity> = [], listing: [AgentInfo]? = nil
+    ) async {
+        let listed = await listingOrFetch(listing)
+        let host = Self.hostPID(of: session, in: listed)
+        let shared = session.worktreePath.map { path in
+            ((try? sessions.all(projectId: session.projectId)) ?? []).contains {
+                $0.sessionId != session.sessionId && $0.state.isActive && $0.worktreePath == path
+            }
+        } ?? true
+        let scope = SessionProcessScope(
+            tree: tree,
+            worktree: shared ? nil : session.worktreePath,
+            startedAtMicros: session.startedAt * 1000,
+            otherHosts: Set(listed.compactMap { $0.pid.map { pid_t($0) } }.filter { $0 != host })
+        )
+        await SessionProcessReaper.reap(scope)
+    }
+
+    private func listingOrFetch(_ listing: [AgentInfo]?) async -> [AgentInfo] {
+        if let listing { return listing }
+        return (try? await runtime.listSessions()) ?? []
+    }
+
+    private static func hostPID(of session: AgentSession, in listing: [AgentInfo]) -> pid_t? {
+        listing.first { info in
+            info.sessionId == session.sessionId || (session.shortId != nil && info.id == session.shortId)
+        }?.pid.map { pid_t($0) }
     }
 
     func resume(sessionId: String) async throws {
@@ -805,7 +880,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             for session in try sessions.active(projectId: projectId) where session.role == .worker {
                 do {
                     if let shortId = session.shortId {
-                        try await runtime.stop(shortId: shortId)
+                        try await stopAgent(session, shortId: shortId)
                     } else if session.state == .setup {
                         setupTasks[session.sessionId]?.cancel()
                     } else {
@@ -863,6 +938,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 guard let info = Self.liveListing(of: session, in: listing ?? []) else {
                     let salvage = await branchSalvage(taskId: session.taskId)
                     try board.terminate(sessionId: session.sessionId, cause: .vanished, salvage: salvage)
+                    await reapProcesses(of: session, listing: listing)
                     try grants.revokeAll(sessionId: session.sessionId)
                     announceReports(projectId: session.projectId)
                     refreshSleepAssertion()
@@ -1335,7 +1411,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording {
             try await stopLiveSessions(onTask: taskId, by: .human)
             let report = try board.reopen(taskId: taskId)
-            announceReports(projectId: report.projectId)
+            report.projectId.map { announceReports(projectId: $0) }
         }
     }
 
@@ -1348,7 +1424,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let taskSessions = try sessions.forTask(taskId)
             for session in taskSessions where session.state.isActive {
                 if let shortId = session.shortId {
-                    try? await runtime.stop(shortId: shortId)
+                    try? await stopAgent(session, shortId: shortId)
                 }
                 try sessions.setState(session.sessionId, .stopped, endedAt: .nowMillis)
             }
@@ -1392,6 +1468,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         sessionId: session.sessionId, cause: .vanished, salvage: salvage
                     )) ?? nil
                     queuedReport = queuedReport || report != nil
+                    await reapProcesses(of: session, listing: listed)
                 }
                 continue
             }
@@ -1407,12 +1484,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         sessionId: session.sessionId, cause: .vanished, salvage: salvage
                     )) ?? nil
                     queuedReport = queuedReport || report != nil
+                    await reapProcesses(of: session, listing: listed)
                 }
             } else if status == "running" {
                 if session.state == .stopped || session.state.isActive, let taskId = session.taskId,
                    !resuming.contains(session.sessionId),
                    (try? board.isSettled(taskId: taskId, apartFrom: session.sessionId)) == true {
-                    let queued = await stopOnSettledTask(session, listed: info)
+                    let queued = await stopOnSettledTask(session, listed: info, in: listed)
                     queuedReport = queuedReport || queued
                 } else if [.starting, .idle, .stopped].contains(session.state) {
                     try? sessions.setState(session.sessionId, .running)
@@ -1431,9 +1509,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §10, Status: nothing belongs running on a settled task, so its process is stopped and
     /// its row is not revived. True when that queued a report.
-    private func stopOnSettledTask(_ session: AgentSession, listed info: AgentInfo) async -> Bool {
+    private func stopOnSettledTask(_ session: AgentSession, listed info: AgentInfo, in listing: [AgentInfo]) async -> Bool {
         guard let shortId = session.shortId ?? info.id,
-              (try? await runtime.stop(shortId: shortId)) != nil,
+              (try? await stopAgent(session, shortId: shortId, listing: listing)) != nil,
               session.state.isActive
         else { return false }
         let report = (try? board.terminate(sessionId: session.sessionId, cause: .taskSettled)) ?? nil
@@ -1815,10 +1893,49 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             projectId: projectId,
             db: db,
             sessionConfigDir: sessionConfigDir,
+            projectsRoot: projectsRoot,
+            claude: claude,
             currentPort: { [weak self] in self?.serverPort }
         )
         consoles[projectId] = console
         return console
+    }
+
+    /// The one Coordinator console (SPEC §8.2), created on first call; does not start the process.
+    func coordinatorSessionConsole() -> OrchestratorConsole {
+        if let existing = coordinatorConsoleInstance { return existing }
+        let console = OrchestratorConsole(
+            source: CoordinatorSource(
+                db: db, folder: coordinatorDir, home: home, sessionConfigDir: sessionConfigDir,
+                projectsRoot: projectsRoot, claude: claude
+            ),
+            db: db,
+            currentPort: { [weak self] in self?.serverPort }
+        )
+        console.liveChanged = { [weak self, weak console] live in
+            self?.coordinatorConsole = live ? console : nil
+        }
+        coordinatorConsoleInstance = console
+        return console
+    }
+
+    /// Ends the running Coordinator session, which stays in the history and resumable, and starts
+    /// a fresh one. The ended session's grant is revoked, so it can no longer call Coordinator tools.
+    func newCoordinatorSession() throws {
+        try grants.revokeCoordinatorGrants()
+        try coordinator.setActiveSession(nil)
+        coordinatorSessionConsole().restart()
+    }
+
+    /// Makes a previous Coordinator session the active one and resumes it in place of the current,
+    /// revoking the current one's grant; the resumed launch is issued a fresh one.
+    func resumeCoordinatorSession(sessionId: String) throws {
+        guard let row = try sessions.get(sessionId), row.role == .coordinator else {
+            throw SupervisorError.sessionNotFound(sessionId)
+        }
+        try grants.revokeCoordinatorGrants()
+        try coordinator.setActiveSession(sessionId)
+        coordinatorSessionConsole().restart()
     }
 
     /// The live shell pid per project, for anything that has to recognise a process the board
@@ -1937,7 +2054,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let plan = try board.epicClosurePlan(epicId: epicId, as: closure)
             if plan.isRefused { throw SupervisorError.epicCloseRefused(plan.message) }
             let report = try board.closeEpic(epicId: epicId, as: closure, by: .human)
-            announceReports(projectId: report.projectId)
+            report.projectId.map { announceReports(projectId: $0) }
         }
     }
 
@@ -2092,6 +2209,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// active in a database the next launch reads.
     func stopOrchestratorConsoles() {
         for console in consoles.values { console.stop() }
+        coordinatorConsoleInstance?.stop()
     }
 
     func isShuttingDown(projectId: String) -> Bool {
@@ -2196,6 +2314,25 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         consoles[projectId]?.compactionCompleted(manual: manual)
     }
 
+    func coordinatorReportQueued() async {
+        coordinatorConsole?.reportsChanged()
+    }
+
+    /// A stale Coordinator session's hooks still reach the board; only the active one's are heard.
+    func coordinatorTurnEnded(sessionId: String) async {
+        guard isActiveCoordinatorSession(sessionId) else { return }
+        coordinatorConsole?.turnEnded()
+    }
+
+    func coordinatorCompacted(sessionId: String, manual: Bool) async {
+        guard isActiveCoordinatorSession(sessionId) else { return }
+        coordinatorConsoleInstance?.compactionCompleted(manual: manual)
+    }
+
+    private func isActiveCoordinatorSession(_ sessionId: String) -> Bool {
+        (try? coordinator.activeSessionId()) == sessionId
+    }
+
     /// The worker has committed and recorded its note; this is the orderly end of its session. The
     /// cause is neither a human kill nor a cap kill, and `terminate` puts the unfinished task back
     /// in `ready` with the note attached to the report.
@@ -2204,7 +2341,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let note = try? shutdowns.outstanding(projectId: projectId)
             .flatMap { try deliveries.get(orderId: $0.id, sessionId: sessionId)?.note }
         if let shortId = session.shortId {
-            try? await runtime.stop(shortId: shortId)
+            try? await stopAgent(session, shortId: shortId)
         }
         _ = try? board.terminate(sessionId: sessionId, cause: .shutdownAcknowledged(note: note ?? nil))
         try? grants.revokeAll(sessionId: sessionId)
@@ -2221,7 +2358,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// and attached to.
     func workerCompleted(projectId: String, sessionId: String) async {
         guard let session = try? sessions.get(sessionId), let shortId = session.shortId else { return }
-        try? await runtime.stop(shortId: shortId)
+        try? await stopAgent(session, shortId: shortId)
     }
 
     /// Stops the agent of every session this board's own rows say is finished — the backlog left by
@@ -2257,7 +2394,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 continue
             }
             do {
-                try await runtime.stop(shortId: shortId)
+                if let session = rows.first(where: { $0.sessionId == decision.sessionId }) {
+                    try await stopAgent(session, shortId: shortId, listing: listed)
+                } else {
+                    try await runtime.stop(shortId: shortId)
+                }
                 report.stopped.append(decision)
             } catch {
                 report.failed.append(LeakedAgentSweep.Decision(
@@ -2316,6 +2457,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             for session in projectSessions where Self.shouldMeter(session, now: now) {
                 await meter(session, limits: limits, stallSeconds: stallSeconds, awake: awake)
             }
+        }
+        // Metered like an orchestrator, with no cap: `meter` enforces caps on workers only.
+        for session in (try? coordinator.sessions()) ?? [] where Self.shouldMeter(session, now: now) {
+            await meter(session, limits: .default, stallSeconds: 0, awake: awake)
         }
         refreshSleepAssertion(all)
     }
@@ -2386,6 +2531,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @discardableResult
     func sweepArchives(_ all: [Project], now: Int64 = .nowMillis) -> [String] {
         _ = try? messages.deleteExpired(now: now)
+        _ = try? requests.deleteExpired(now: now)
         return all.flatMap { (try? archives.run(projectId: $0.id, now: now)) ?? [] }
     }
 
@@ -2441,6 +2587,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if current.role == .orchestrator, let context {
             consoles[current.projectId]?.contextPressureObserved(context)
         }
+        if current.role == .coordinator, let context {
+            coordinatorConsoleInstance?.contextPressureObserved(context)
+        }
         guard current.role == .worker else {
             stallNotified.remove(session.sessionId)
             return
@@ -2487,7 +2636,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func enforce(_ breach: CapBreach, on session: AgentSession, awake: AwakeElapsed) async {
         let description = Self.describe(breach, awake: awake)
         if let shortId = session.shortId {
-            try? await runtime.stop(shortId: shortId)
+            try? await stopAgent(session, shortId: shortId)
         }
         let salvage = await branchSalvage(taskId: session.taskId)
         _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description), salvage: salvage)

@@ -34,6 +34,12 @@ protocol WorkerSupervising: AnyObject {
     func orchestratorConsole(projectId: String) throws -> OrchestratorConsole
     /// Creates the project's plain shell on first call and keeps it alive; does not start the shell.
     func shellConsole(projectId: String) throws -> ShellConsole
+    /// The one Coordinator console (SPEC §8.2), created on first call; does not start the process.
+    func coordinatorSessionConsole() throws -> OrchestratorConsole
+    /// Ends the running Coordinator session, revoking its grant, and starts a fresh one.
+    func newCoordinatorSession() throws
+    /// Resumes a previous Coordinator session in place of the current one, revoking its grant.
+    func resumeCoordinatorSession(sessionId: String) throws
     /// Resolves the approval; a spawn approval then runs the spawn path for its task.
     func approve(approvalId: String) async throws
     func deny(approvalId: String, reason: String?) async throws

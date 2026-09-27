@@ -34,10 +34,8 @@ final class AtAGlanceRowRenderTests: XCTestCase {
         let headers: Int
     }
 
-    /// Rows `MainWindow` lists outside every `Section`: At a Glance, then Roster. Asserted as a
-    /// named count rather than inline, so adding a third is one edit here and not a puzzle about
-    /// which magic number meant what.
-    private let pinnedRows = 2
+    /// Rows `MainWindow` lists outside every `Section`: At a Glance, Roster, then Coordinator.
+    private let pinnedRows = SidebarSelection.pinned.count
 
     private func mountSidebar(collapsingEverything: Bool) throws -> Sidebar {
         let db = try AppDatabase.inMemory()
@@ -131,6 +129,9 @@ private final class RowStubSupervisor: WorkerSupervising {
     func orchestratorConsole(projectId: String) throws -> OrchestratorConsole { throw StubError.notWired }
 
     func shellConsole(projectId: String) throws -> ShellConsole { throw StubError.notWired }
+    func coordinatorSessionConsole() throws -> OrchestratorConsole { throw StubError.notWired }
+    func newCoordinatorSession() throws { throw StubError.notWired }
+    func resumeCoordinatorSession(sessionId: String) throws { throw StubError.notWired }
     func approve(approvalId: String) async throws {}
     func deny(approvalId: String, reason: String?) async throws {}
     func promote(taskId: String) async throws {}

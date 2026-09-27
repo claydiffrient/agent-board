@@ -204,6 +204,29 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   slash-command autocomplete consumes the Enter. The existing report notice
   (§9.1) has no leading slash and is unaffected, but `OrchestratorConsole`
   splits every injection the same way so nothing depends on remembering this.
+- **A long injected line arrives as pasted content, and a pasted `/compact`
+  runs no command.** Measured 2026-09-26 on 2.1.283 with `spike/compact-probe/`.
+  Claude Code treats any single stdin read over 800 characters as a paste: an
+  800-character burst submitted as typed text, 801 arrived wrapped in
+  `<pasted_content>`. The macOS PTY hands the reader about 1 KiB per read, so
+  the 1,839-byte `/compact <instructions>` written in one burst reached it as
+  two reads — two pasted blocks split at byte 1022 — and no `PreCompact` fired.
+  Chunks under 800 with a pause of 20 ms or more between them were typed; with
+  no pause they queue in the PTY and re-merge into ~1 KiB reads. `inject` writes
+  `PromptBursts` of at most 256 characters, 50 ms apart, then the `\r`; the same
+  command then fired `PreCompact {"trigger":"manual"}` with `custom_instructions`
+  equal to `OrchestratorCompaction.instructions`, followed by
+  `SessionStart {"source":"compact"}`.
+  At that pace the compaction command takes about 400 ms to write, and a report
+  notice or a Nudge can be requested inside that window (§9.2), so `inject`
+  serializes lines: each waits for the previous line's `\r` before its first
+  burst. Interleaved, the notice's `\r` would submit
+  `/compact <partial instructions>[agent-board]…` and the rest of the
+  instructions would go in as a plain message. A notice requested
+  mid-compaction is written right after the command's `\r` rather than held
+  until `SessionStart {"source":"compact"}`, because a compaction that fails
+  sends no `SessionStart` and would strand it; the re-orientation line names
+  `list_reports` either way.
 - **Context pressure = `input_tokens + cache_read_input_tokens +
   cache_creation_input_tokens` of the last assistant message.** Calibrated
   against the TUI's own `N% until auto-compact` readout on a session started
@@ -600,9 +623,9 @@ CREATE TABLE task_dep (
 CREATE TABLE agent_session (
   session_id     TEXT PRIMARY KEY,   -- the pinned uuid
   short_id       TEXT,               -- claude --bg short id
-  project_id     TEXT NOT NULL REFERENCES project(id),
+  project_id     TEXT REFERENCES project(id),  -- NULL for a Coordinator session only (§8.2)
   task_id        TEXT REFERENCES task(id),
-  role           TEXT NOT NULL,      -- orchestrator | worker
+  role           TEXT NOT NULL,      -- orchestrator | worker | coordinator
   worktree_path  TEXT,
   branch         TEXT,
   cwd            TEXT NOT NULL,
@@ -625,17 +648,25 @@ CREATE TABLE agent_session (
   tools_in_flight INTEGER NOT NULL DEFAULT 0,
   blocked_on_path TEXT,               -- §8.4: the shared-checkout file lock this session is waiting on
   roster_agent_id TEXT REFERENCES roster_agent(id),  -- §10: the rostered identity this session runs as
-  review_head    TEXT                -- §5.1: HEAD (and uncommitted-change fingerprint) a rostered reviewer was spawned on
+  review_head    TEXT,               -- §5.1: HEAD (and uncommitted-change fingerprint) a rostered reviewer was spawned on
+  CHECK ((role = 'coordinator') = (project_id IS NULL))
+);
+
+CREATE TABLE coordinator (           -- one row (§8.2)
+  id                INTEGER PRIMARY KEY CHECK (id = 1),
+  active_session_id TEXT REFERENCES agent_session(session_id),  -- resumed on the next launch; NULL starts a fresh one
+  model             TEXT             -- Coordinator settings; NULL = Claude Code's default
 );
 
 CREATE TABLE token_grant (
   token       TEXT PRIMARY KEY,      -- random, per session
   session_id  TEXT REFERENCES agent_session(session_id),  -- NULL until `claude --bg` returns the id
-  project_id  TEXT NOT NULL REFERENCES project(id),
-  scope       TEXT NOT NULL,         -- orchestrator | worker
+  project_id  TEXT REFERENCES project(id),  -- NULL for the Coordinator's grant only (§8.2)
+  scope       TEXT NOT NULL,         -- orchestrator | worker | reviewer | coordinator
   task_id     TEXT,                  -- worker: the only task it may mutate
   created_at  INTEGER NOT NULL,
-  revoked_at  INTEGER
+  revoked_at  INTEGER,
+  CHECK ((scope = 'coordinator') = (project_id IS NULL))
 );
 
 -- §8.4: one file in a project's own checkout, claimed by the session editing it. Only a
@@ -673,14 +704,15 @@ CREATE TABLE progress (
 
 CREATE TABLE report (
   id          INTEGER PRIMARY KEY,
-  project_id  TEXT NOT NULL REFERENCES project(id),
+  project_id  TEXT REFERENCES project(id),  -- NULL: the Coordinator's queue (§9.1)
   task_id     TEXT REFERENCES task(id),
   session_id  TEXT REFERENCES agent_session(session_id),
-  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision | message
+  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision | message | comment | request | reply
   body        TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
   consumed_at INTEGER               -- set when the orchestrator pulls it
 );
+CREATE INDEX report_project_consumed ON report(project_id, consumed_at);
 
 -- Text one project's orchestrator sent to another (§9.2). The recipient never sees this row:
 -- delivery writes a framed `message` report into its queue, which it pulls like any other.
@@ -695,6 +727,35 @@ CREATE TABLE message (
   report_id       INTEGER REFERENCES report(id)
 );
 CREATE INDEX message_to_project_delivered ON message(to_project_id, delivered_at);
+
+-- §9.4: the Coordinator's request ledger. plan_note_id has no foreign key: the plan
+-- lives in the Coordinator's own notes and need not exist yet.
+CREATE TABLE coordinator_request (
+  id           INTEGER PRIMARY KEY,
+  project_id   TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,  -- the target
+  body         TEXT NOT NULL,     -- the Coordinator's text, unframed
+  plan_note_id TEXT,
+  state        TEXT NOT NULL,     -- sent | accepted | declined | done | withdrawn
+  created_at   INTEGER NOT NULL,
+  closed_at    INTEGER            -- set on declined | done | withdrawn; the sweep counts from it
+);
+CREATE INDEX coordinator_request_closed ON coordinator_request(closed_at);
+CREATE TABLE request_event (      -- history: the send, each reply, a withdrawal
+  id         INTEGER PRIMARY KEY,
+  request_id INTEGER NOT NULL REFERENCES coordinator_request(id) ON DELETE CASCADE,
+  state      TEXT NOT NULL,
+  author     TEXT NOT NULL,       -- coordinator | orchestrator
+  body       TEXT NOT NULL,
+  report_id  INTEGER REFERENCES report(id) ON DELETE SET NULL,  -- the report this step queued
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX request_event_request ON request_event(request_id);
+CREATE INDEX request_event_report ON request_event(report_id);
+CREATE TABLE request_epic (
+  request_id INTEGER NOT NULL REFERENCES coordinator_request(id) ON DELETE CASCADE,
+  epic_id    TEXT NOT NULL REFERENCES epic(id) ON DELETE CASCADE,
+  PRIMARY KEY (request_id, epic_id)
+);
 
 CREATE TABLE approval (
   id           TEXT PRIMARY KEY,
@@ -712,7 +773,7 @@ CREATE INDEX approval_pending ON approval(project_id, resolved_at);
 
 CREATE TABLE note (
   id          TEXT PRIMARY KEY,
-  project_id  TEXT NOT NULL REFERENCES project(id),
+  project_id  TEXT REFERENCES project(id),  -- NULL: one of the Coordinator's plans (§8.2)
   title       TEXT NOT NULL,
   pinned      INTEGER NOT NULL DEFAULT 0,
   version     INTEGER NOT NULL DEFAULT 1,
@@ -734,7 +795,7 @@ CREATE TABLE note_link (
   epic_id  TEXT REFERENCES epic(id)
 );
 
-CREATE VIRTUAL TABLE note_fts USING fts5(title, body, content='');
+CREATE VIRTUAL TABLE note_fts USING fts5(title, body, content='');  -- keyed to note.rowid
 
 CREATE TABLE hook_event (
   id          INTEGER PRIMARY KEY,
@@ -915,6 +976,50 @@ companion ledger for a branch several tasks commit to — the only way, once
 commits from different tasks interleave on one ref, to say afterwards which
 task made which commit, since the branch name can no longer carry that the way
 `agentboard/<task-id>` does.
+
+### 4.1 Opening the database: newer-build refusal and launch backups
+
+The database is `agentboard.sqlite` in the app support directory, or
+`$AGENTBOARD_DB`. `AppDatabase.open` does two things before it migrates an
+existing file, so they hold however the app was installed (DMG, hand copy,
+`bundle.sh`):
+
+- **Refuse a database from a newer build.** GRDB's migrator skips applied
+  identifiers it does not register, so an older build would otherwise open a
+  newer database silently and run against a schema it does not understand. If
+  `grdb_migrations` holds any identifier this build does not register, open
+  throws `AppDatabaseError.writtenByNewerBuild` before anything writes. The app
+  shows a blocking alert saying the database was last used by a newer Agent
+  Board, names the newest file in `backups/` if there is one, gives
+  `sqlite3 '<db>' ".restore '<backup>'"` to restore it by hand, and quits.
+- **Back up before a new build migrates.** The build is
+  `CFBundleShortVersionString`, `CFBundleVersion` and `AgentBoardCommit` from the
+  main bundle. A missing key is nil and equals only another nil, so relaunching
+  one `bundle.sh` build (no commit) is not a new build, and `swift run` (no keys)
+  is one build. When the build differs from the last one to open the database,
+  or any registered migration is still pending, open copies the database with
+  SQLite's online backup API into
+  `backups/agentboard-<yyyyMMdd-HHmmss>-<version>[+<build>].sqlite` beside it.
+  The label is the *previous* build's, the schema the copy fits;
+  `unknown` when no build is recorded.
+  The copy is written under a `.partial` name and renamed only once its page
+  count matches the source, so an interrupted backup never carries a real name.
+  Three are kept: the one just taken and the two newest others by name, so a
+  clock set earlier than the existing stamps never prunes the new copy. A
+  backup that fails or does not match stops the launch rather than migrating
+  without one: open throws `AppDatabaseError.backupFailed`, and the app shows a
+  blocking alert saying it did not open the board because it could not take a
+  safe backup first, with the underlying error (a full disk, say) and the
+  `backups/` path, and quits without writing to the database.
+
+The last build to open the database is recorded in
+`backups/last-opened-build.json` after migration succeeds, not in a table: a
+migration list is pinned by tests and shared across branches, and the backup
+name cannot hold it (it carries the previous build, and no commit). Nothing is
+backed up when the file does not exist yet, for the in-memory database, or when
+the caller passes no build — only the app passes one, so tests that open a
+database under a temp path never write backups. A backup of the 293 MB board
+took 1.3–1.5 s on this Mac, and it stays on the launch path.
 
 ---
 
@@ -1506,24 +1611,53 @@ Everything in worker scope over any task in the project, plus:
 | `set_deps(task_id, depends_on[])` | Dependency graph |
 | `set_epic(task_id, epic_id)` | Moves an existing task into an epic, between epics, or — with `epic_id` omitted — out of its epic. Refused for a task that has ever been spawned, and for a `done` destination epic. Dependencies are left alone |
 | `create_epic(title, goal, tasks[])` | One transaction: the epic (state `planning`) plus every task in `tasks`. Each task's `depends_on` is a zero-based index into this same array, validated before anything is written |
-| `list_epics()` | Every epic on the project with its state, branch, and done/total task count |
-| `get_epic(id)` | One epic in full: goal, branch, its tasks grouped by column, and whether it is ready for integration |
+| `list_epics()` | Every epic on the project with its state, branch, newest pull request opened from the branch (or null), and done/total task count |
+| `get_epic(id)` | One epic in full: goal, branch, newest pull request, its tasks grouped by column, and whether it is ready for integration |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
 | `pin_note(note_id, pinned)` | Every future agent sees it in its note index and can fetch it |
 | `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting |
 | `list_roster_agents()` | The rostered agents this project has enabled, in its own preference order |
 | `assign_to_agent(task_id, roster_agent_id)` | `spawn_worker` carrying a rostered identity: the same caps, shutdown and autonomy gates, worker scope, and the agent's own deny list layered on. An agent outside the project's usable set is refused |
-| `stop_worker(session_id)` | `claude stop` |
+| `stop_worker(session_id)` | `claude stop`, then the session's process tree is reaped (§8.5) |
 | `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
 | `list_projects()` | Every project Agent Board knows about, as id, name, and whether the entry is the caller's own project. Nothing else about another project is exposed — no repository path, no settings, no board contents, no agent state |
 | `send_message(project_id, body)` | Queues a §9.2 message into that project's report queue. Confirms queueing, never delivery. Refused for the caller's own project, for an unknown id, for a blank body, and for a body over 4000 characters |
 | `delete_message(message_id)` | Deletes a §9.3 message this project received, and its report, for both projects. Refused for a message this project did not receive |
+| `reply_to_request(request_id, state, body, epic_ids?)` | Answers a §9.4 request addressed to this project: `accepted`, `declined` or `done`, with this project's epics linked. Queues a `reply` report for the Coordinator. Refused for a request sent elsewhere or unknown (the same answer), for a closed or withdrawn one, for another project's epic, and for a body over 4000 characters |
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Refused unless every task in the epic is `done` (names how many remain); otherwise creates a human approval row, or returns the one already pending |
 | `close_epic(epic_id, state)` | Ends the epic without integrating it. `state` is `done` or `abandoned`; both are terminal. Board state and a `decision` report and nothing else — no merge, no push, no branch or worktree deleted, no task deleted, archived or moved out. Refused while any session in the epic is active, and refused for an epic that is already terminal |
 | `push_branch(branch)` | Always creates a human approval row. Refused for any branch that is not `agentboard/<something>` or the project's base branch. The approval carries both the local branch and the name it takes on the remote (§6.1) |
 | `open_pull_request(epic_id \| branch, title, body, base?)` | Always creates a human approval row. Same branch rule; `base` defaults to the project's base branch. On approval the branch is pushed if the remote lacks it, the pull request is opened from the **published** name (§6.1), and its URL lands in `progress` and in a `decision` report |
+
+### Coordinator scope
+
+Held by the Coordinator, which belongs to no project (§8.2). Every board read
+takes a `project_id` naming the board to read, and answers through the
+orchestrator's own handler for that tool as if asked from that board — so a
+by-id read still refuses an id the named project does not own. The note tools
+also reach the Coordinator's own plans, notes with no project: a note read
+without `project_id` reads the plans, and a note write reaches only the plans.
+
+| Tool | Effect |
+|---|---|
+| `list_projects()` | Every project, as id and name |
+| `list_tasks(project_id, column, epic_id, include_archived)` | As the orchestrator's |
+| `get_task(project_id, id)` | As the orchestrator's: full detail, latest report and comment thread |
+| `list_epics(project_id)`, `get_epic(project_id, id)` | As the orchestrator's, including the newest pull request |
+| `list_agents(project_id, include_ended)` | As the orchestrator's: state and spend |
+| `list_approvals(project_id)` | As the orchestrator's |
+| `list_notes(project_id?)` | Every note on that project, or every plan without `project_id`, as id, title and version |
+| `search_notes(project_id?, query)`, `read_note(project_id?, id)` | As the orchestrator's; without `project_id`, over the plans |
+| `create_note(title, sections)`, `append_section(note_id, …)`, `replace_section(note_id, …)` | As the worker's, on a plan only. Refused when `project_id` is passed or `note_id` is a project's note |
+| `list_reports()`, `get_report(id)` | The Coordinator's own queue (§9.1), never a project's; no `project_id` |
+| `send_request(project_id, body, plan_note_id?)` | Sends a §9.4 request into that project's queue. Refused for an unknown project, a blank body, and a body over 4000 characters |
+| `withdraw_request(request_id, reason?)` | Closes an open request as `withdrawn` and tells its orchestrator |
+| `list_requests(include_closed?)` | The §9.4 ledger, newest first: target, text, plan note, state, replies, linked epics |
+
+Every other tool name is refused: `delete_message` as that orchestrator's
+inbox, everything else as not a Coordinator tool. It is offered no note or briefing resources.
 
 ### 6.1 Remote branch naming
 
@@ -1859,6 +1993,69 @@ widening what using it is allowed to do. `delete_message` (§9.3) reaches only a
 message the caller's project received; the sender's panel loses the row
 because the two projects share it, not because the tool reaches the sender.
 
+The Coordinator is the one grant D4 does not bind to a project: scope
+`coordinator` with `project_id` NULL, a pairing the `token_grant` CHECK holds
+both ways. It is not a project row, so it is absent from `list_projects`, the
+project list and every project-scoped query. Its authority is read everywhere, write
+nowhere: board state in any project — tasks with their latest report and
+comments, epics with their pull request, notes, agent sessions with spend, and
+pending approvals (§6, Coordinator scope) — and no project's report queue or
+messages, which are that orchestrator's inbox. Every tool that writes a board
+refuses it; a §9.4 request queues a report rather than writing a board. What
+it writes is its own plans: `note` rows with `project_id` NULL, which `note_fts`
+indexes like any note. Every note query matches `project_id IS ?`, so a
+project's list, search or by-id read never reaches a plan, and a plan query
+never reaches a project's note. `CrossProjectBoundaryTests` classifies every
+tool on every scope as a Coordinator read, the Coordinator's own queue and
+ledger, a plan write, an inbox refusal, a write refusal, or not offered, and
+fails on a tool it has not classified.
+
+**The Coordinator's session.** It runs in the same console machinery as an
+orchestrator (§9 — `OrchestratorConsole`, with a `CoordinatorSource` in place of
+the project's), under these rules:
+
+- **Folder.** cwd is `~/.agentboard/coordinator` (`<AGENTBOARD_SUPPORT_DIR>/coordinator`
+  under the override), created on first start and seeded with a `CLAUDE.md`
+  saying what the Coordinator is and is not. The file is written only when
+  missing, so one the human has edited is never overwritten. Its memory is
+  Claude Code's own for that folder.
+- **File reach.** The launch adds `--add-dir ~`, so the home directory is
+  writable, and `--disallowedTools` carries one `Edit(//<path>/**)` rule per
+  registered project's repo path and worktree root (both spellings when a path
+  resolves through a symlink). The list is rebuilt from the project list on
+  every launch, so a project registered since takes effect at the next session
+  start. Reads stay allowed. Claude Code applies an `Edit` deny to Write,
+  MultiEdit and NotebookEdit, to the file commands it recognizes in Bash
+  (`sed`, `tee`) and to redirection targets (`> file`). **What still gets
+  through:** any Bash command that writes by other means — `git commit` or
+  `git checkout` run in a repo, `mv`, `cp`, `rm`, an interpreter (`python -c`,
+  `node -e`), a build tool, or a script. Claude Code's sandbox could close that
+  gap but also isolates the network, which an ordinary session doing one-off
+  jobs should not lose, so it is not enabled. The gap is accepted rather than
+  closed: the seeded `CLAUDE.md` and the session's system prompt both instruct
+  the Coordinator to never use those commands inside a registered repo or its
+  worktree either, and to send that project's orchestrator a request instead.
+- **Sessions.** One active session, pinned in `coordinator.active_session_id`
+  and resumed by the next launch, including after the app restarts, the way a project pins
+  `orch_session_id`. **New session** clears the pin and restarts the console, so
+  the running session ends and a fresh one starts; the old row stays. The
+  history offers the 10 most recent sessions other than the active one; resuming
+  one pins it and restarts the console with `--resume`. Both switches revoke every
+  live `coordinator` grant first, so the session switched away from can no longer
+  call Coordinator tools; the next launch is issued its own. A `/clear` fork moves the
+  pin to the fork (§7).
+- **Model.** `coordinator.model`, NULL for Claude Code's default; set in the
+  Coordinator settings sheet (§10), and read by the next launch.
+- **Hooks and spend.** Its `agent_session` row has role `coordinator` and
+  `project_id` NULL (read as `""`, like its `TokenIdentity`), so the hook sink
+  binds its grant, adopts its forks and records its transcript like an
+  orchestrator's, and every project-scoped query still misses it. The metering
+  tick reads its spend after the projects', with no cap. Its `Stop` and
+  compaction hooks reach its own console only from the session pinned in
+  `active_session_id`; a stale session's are ignored. At launch, while no
+  Coordinator console is running, every active `coordinator` row is marked
+  stopped, as `reconcile` does for an orchestrator row with no console.
+
 ### 8.3 Sleep prevention
 
 A Mac that sleeps with workers running kills them, and the idle cap counts the
@@ -1949,6 +2146,53 @@ records the commit's task in `task_commit` (§4) — the ledger that makes a
 task's work on a shared branch reviewable on its own, and that acceptance
 reads to decide whether every member is in (§5).
 
+### 8.5 Session end reaps the process tree
+
+**No process a worker session started outlives the session.** This holds for
+every way Agent Board ends one: the caps, `stop_worker` and a human's Stop,
+Pause All, discard, a vanished or failed session found by `reconcile`, a task
+settled under a live session, an acknowledged shutdown, `report_complete`, and
+the leaked-agent sweep. `claude stop` alone does not give it. Each Bash tool
+command runs in a `zsh -c` that leads its own session and process group
+(measured: sid = pgid = the shell's pid, while the host is in a session of its
+own). A `run_in_background` command survives `claude stop` reparented to
+launchd, with its children under it. A foreground command does not survive.
+An idle-capped worker's `swift test` did survive and was found four hours
+later, holding `.build/.lock` and more than fifty listening ports.
+
+`SessionProcessReaper` picks the processes to signal from two rules:
+
+1. **The host's tree.** The `claude` host's descendants are read from the
+   process table before `claude stop`, while it still parents them.
+2. **Orphans in the worktree.** These catch the paths where the host is
+   already dead. A process qualifies when it is reparented to launchd, has no
+   controlling terminal, has its cwd inside the session's own worktree, and
+   started after the session did.
+
+The rules also take in every current descendant of each process they
+select. Everything selected gets SIGTERM, and whatever remains after 2s gets
+SIGKILL. Each round re-reads the table and matches a pid only together with
+its start time, so a reused pid is never signalled.
+
+Nothing outside the session's own tree is signalled:
+
+- Every process is matched to the session by one of those two rules. None is
+  matched by name.
+- The worktree rule is off for a shared checkout, which is the human's own
+  repository. It is also off while another live session shares the worktree,
+  as a rostered reviewer does.
+- The following are never signalled: the app and its ancestors, every other
+  live `claude` host listed by `claude agents` together with its ancestors
+  and descendants, and any process whose executable is `claude` (the
+  daemon).
+- A human's terminal keeps its controlling tty. An app launched by launchd
+  runs in `/`.
+
+Another process's environment is not readable on this macOS:
+`KERN_PROCARGS2` returns argv but no environment for any pid but the caller's.
+So the `CLAUDE_CODE_SESSION_ID` that Claude exports to every Bash command
+cannot be used to find them.
+
 ---
 
 ## 9. Orchestrator
@@ -1968,6 +2212,9 @@ reads to decide whether every member is in (§5).
   call `list_reports` when told to, and the project's `modelGuidance` text so
   it can set `model` on the tasks it creates. The orchestrator itself runs on
   `settings.defaultModel` when set.
+- **Restart** signals the child with SIGTERM and relaunches on its exit. It
+  does not call SwiftTerm's `terminate()`, which cancels the exit monitor, so
+  the relaunch would never fire.
 - Resume sends a fixed app-authored first turn ("Agent Board resumed this
   session; continue from where you left off") because a resumed background
   session otherwise waits for input until the idle cap stops it.
@@ -1986,6 +2233,12 @@ reads to decide whether every member is in (§5).
    a carriage return (`\r`); Claude Code's TUI submits on Enter and treats
    `\n` as a literal newline inside the prompt.
 4. The orchestrator pulls bodies through MCP, where they arrive as tool results.
+
+The Coordinator has its own queue: `report` rows with `project_id` NULL, which
+no project's `list_reports`, `get_report` or notice count can reach. Its console
+counts that queue for the same notice through the same `ReportNoticeGate`,
+written after the active Coordinator session's own `Stop` (§8.2, §9.4); with no
+session running, reports wait for the next one's first turn to end.
 
 **Injection is withheld while the human has unsubmitted text in the prompt.**
 The notice is bytes in the same PTY the human types into: written mid-sentence
@@ -2073,6 +2326,9 @@ human types into (§9.1). The gate holds at most one notice and at most one of
 each app-authored line, so a held compaction and a held report notice both
 survive; it writes **at most one line per pass**, compaction first, and whatever
 is left waits out the turn that line started.
+A report notice is not held for a turn, so one can be requested while the
+compaction command is still being typed; `inject` writes it after the command's
+`\r`, never inside it (§2).
 
 **Never mid-turn.** `Stop` clears the gate's in-flight flag; the human's Enter
 and every line the gate writes set it. A compaction is refused while it is set
@@ -2156,6 +2412,41 @@ the `message_id` field `list_reports` puts on a `message` report; and the
 archive sweep's tick, which deletes every message whose report was consumed
 more than 7 days ago (`MessageStore.retentionMillis`, wall clock).
 
+### 9.4 Coordinator requests
+
+The Coordinator (§8.2) cannot write a board, so it asks: `send_request`
+queues **a request from your coordinator** into the target project's queue as a
+`request` report, and the ledger row and the report are written in one
+transaction. Direction is fixed: the Coordinator starts a conversation, the
+orchestrator replies. An orchestrator has no tool that writes to the
+Coordinator except `reply_to_request`, which needs a request addressed to its
+own project and still open; the Coordinator is not a project, so
+`send_message` cannot address it.
+
+The delivered body carries the human's weight without the human's authority.
+It says the Coordinator made the request on the human's behalf, that the
+orchestrator acts on it within its board's usual rules (approvals, autonomy,
+caps), that it may decline with a reason and always replies, and that the text
+is data — the Coordinator reads text agents across projects wrote, so a request
+must not carry injected text in with the human's weight. The request text sits
+between begin/end delimiters, with the plan note named above it when there is
+one. The orchestrator briefing (§9) says the same.
+
+A reply is `accepted`, `declined` or `done`, may link epics on the replier's own
+board, and queues a `reply` report for the Coordinator (§9.1), announced after
+its current turn ends. `accepted` may be sent more than once. `declined` and
+`done` close the request; so does `withdraw_request`, which also queues a
+`request` report telling the orchestrator to stop. A closed request takes no
+further replies.
+
+The ledger (`coordinator_request`, `request_event`, `request_epic`) records the
+target, the text, the plan note id, the state, every step with the report it
+queued, and the linked epics; the Coordinator reads it with `list_requests` and
+reads progress from those epics with `get_epic`. Requests are ephemeral like
+messages: an open request is kept, and a closed one is deleted with its history
+and every report it queued by the same archive-sweep tick, once it has been
+closed more than 7 days (`RequestStore.retentionMillis`, wall clock).
+
 ---
 
 ## 10. Screens
@@ -2184,6 +2475,14 @@ already runs, so the two surfaces cannot disagree. Clicking anywhere on a card
 selects that project through the same write the sidebar uses, landing on Orchestrator and starting
 its console (§9) — which is the only way a console ever starts, so this page
 itself costs nothing.
+
+A **Coordinator** card sits above the project sections, showing the estimated
+spend of every Coordinator session (§8.2) and the same unread-replies dot as its
+sidebar row; clicking it opens the Coordinator page. A project card whose sessions
+have spent anything shows its own total the same way, so the two read against
+each other. Both are all-time sums of `agent_session.est_cost_usd`, ended sessions
+included, and neither has a cap; the Coordinator total rides in the same
+statement as the working-session count, so the page still runs two.
 
 **Shut Down** — a button beside the At a Glance headline, for the wind-down
 that quitting does not do on its own: workers are detached `claude --bg`
@@ -2477,6 +2776,26 @@ by id so the order is stable. "Working" means a live `agent_session` carrying
 that agent's `roster_agent_id` (`RosterStore.assignments`); a session that has
 ended does not count, or a finished pass would strand its agent undeletable.
 
+**Coordinator** — the Coordinator's page (§8.2), and the third pinned sidebar
+row, directly below `Roster` (`SidebarSelection.pinned`). The row carries a gear
+for the **Coordinator settings** sheet — one `ModelPicker`, defaulting to
+**Claude Code default**, saved through `CoordinatorStore.setModel` — and the
+attention dot while `reply` reports wait unread in the Coordinator's queue (§9.1).
+The page is laid out as a project's Orchestrator screen: the console, with the
+same header minus **Stop All**, started when the page opens, beside a sidebar of
+three sections:
+
+- **Requests** — the ledger (§9.4), newest first: target project, the request's
+  first line, its state (`sent`, `accepted`, `declined`, `done`, `withdrawn`), the
+  latest text an orchestrator replied with, and one link per linked epic. A link
+  selects that project on its Task Board and scrolls to the epic's lane, through
+  the same route a banner click uses (`NotificationRoute.Subject.epic`). Each
+  click routes once: the board returning to view later does not scroll again.
+- **Plans** — the Coordinator's notes (project NULL). Each opens read-only in a
+  sheet; the Coordinator writes them through its note tools.
+- **Sessions** — **New Session**, the active session, and the history; clicking
+  a history entry resumes it. Each shows its start and its spend.
+
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
 section. Each section header carries a copy button that puts that section on the
@@ -2623,7 +2942,12 @@ release, optionally ` — YYYY-MM-DD`, free Markdown beneath, newest first, with
 everything above the first heading a preamble `ReleaseNotesParser` skips.
 `Scripts/bundle.sh` copies it byte for byte into `Contents/Resources` alongside
 `Info.plist` and the icon — nothing about the file is generated or rewritten at
-build time. `AppBundle.isAppBundle` (a bundle identifier and a `.app` path
+build time. `Scripts/release.sh` copies it the same way and stamps the bundle's
+`CFBundleShortVersionString` from the file's newest heading (with the commit count
+as `CFBundleVersion` and the sha as `AgentBoardCommit`), then checks the stamped
+plist against the bundled file before it packages anything, so a release cannot
+ship notes that disagree with its own version. A `bundle.sh` dev build still
+reports whatever `Resources/Info.plist` hard-codes. `AppBundle.isAppBundle` (a bundle identifier and a `.app` path
 extension) gates every read: the `.build/debug/AgentBoard` binary `README.md`
 documents for E2E runs has neither, so `ReleaseNotesLoader` returns
 `.unavailable` before it looks for a version or a file at all. That is a

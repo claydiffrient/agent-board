@@ -267,6 +267,112 @@ enum Schema {
     CREATE INDEX message_to_project_delivered ON message(to_project_id, delivered_at);
     """
 
+    /// `project_id` becomes nullable on both tables (SQLite cannot drop NOT NULL in place, so each is
+    /// rebuilt). A NULL grant is the Coordinator's and nothing else's; a NULL report is in its queue.
+    static let coordinator = """
+    CREATE TABLE token_grant_new (
+      token       TEXT PRIMARY KEY,
+      session_id  TEXT REFERENCES agent_session(session_id),
+      project_id  TEXT REFERENCES project(id),
+      scope       TEXT NOT NULL,
+      task_id     TEXT,
+      created_at  INTEGER NOT NULL,
+      revoked_at  INTEGER,
+      CHECK ((scope = 'coordinator') = (project_id IS NULL))
+    );
+    INSERT INTO token_grant_new (token, session_id, project_id, scope, task_id, created_at, revoked_at)
+      SELECT token, session_id, project_id, scope, task_id, created_at, revoked_at FROM token_grant;
+    DROP TABLE token_grant;
+    ALTER TABLE token_grant_new RENAME TO token_grant;
+    CREATE INDEX token_grant_session ON token_grant(session_id);
+
+    CREATE TABLE report_new (
+      id          INTEGER PRIMARY KEY,
+      project_id  TEXT REFERENCES project(id),
+      task_id     TEXT REFERENCES task(id),
+      session_id  TEXT REFERENCES agent_session(session_id),
+      kind        TEXT NOT NULL,
+      body        TEXT NOT NULL,
+      created_at  INTEGER NOT NULL,
+      consumed_at INTEGER
+    );
+    INSERT INTO report_new (id, project_id, task_id, session_id, kind, body, created_at, consumed_at)
+      SELECT id, project_id, task_id, session_id, kind, body, created_at, consumed_at FROM report;
+    DROP TABLE report;
+    ALTER TABLE report_new RENAME TO report;
+    CREATE INDEX report_project_consumed ON report(project_id, consumed_at);
+    """
+
+    /// `note.project_id` becomes nullable: a NULL note is one of the Coordinator's plans (SPEC §8.2).
+    /// Rowids are copied, not reassigned, because `note_fts` is keyed to them and holds no text of its own.
+    static let coordinatorNotes = """
+    CREATE TABLE note_new (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT REFERENCES project(id),
+      title       TEXT NOT NULL,
+      pinned      INTEGER NOT NULL DEFAULT 0,
+      version     INTEGER NOT NULL DEFAULT 1,
+      updated_at  INTEGER NOT NULL
+    );
+    INSERT INTO note_new (rowid, id, project_id, title, pinned, version, updated_at)
+      SELECT rowid, id, project_id, title, pinned, version, updated_at FROM note;
+    DROP TABLE note;
+    ALTER TABLE note_new RENAME TO note;
+    """
+
+    /// The Coordinator's session gets a row with no project, so hooks can bind its grant and the
+    /// metering tick can read its spend (SPEC §8.2). `coordinator` is its one row of state: the
+    /// session it resumes and the model it runs on, NULL for Claude Code's default.
+    static let coordinatorSession = """
+    CREATE TABLE agent_session_new (
+      session_id      TEXT PRIMARY KEY,
+      short_id        TEXT,
+      project_id      TEXT REFERENCES project(id),
+      task_id         TEXT REFERENCES task(id),
+      role            TEXT NOT NULL,
+      worktree_path   TEXT,
+      branch          TEXT,
+      cwd             TEXT NOT NULL,
+      state           TEXT NOT NULL,
+      started_at      INTEGER NOT NULL,
+      ended_at        INTEGER,
+      last_activity   INTEGER,
+      transcript_path TEXT,
+      tokens_in       INTEGER NOT NULL DEFAULT 0,
+      tokens_out      INTEGER NOT NULL DEFAULT 0,
+      cache_read      INTEGER NOT NULL DEFAULT 0,
+      cache_write     INTEGER NOT NULL DEFAULT 0,
+      est_cost_usd    REAL NOT NULL DEFAULT 0,
+      attempt         INTEGER NOT NULL DEFAULT 1,
+      model           TEXT,
+      last_tool       TEXT,
+      stop_reason     TEXT,
+      roster_agent_id TEXT REFERENCES roster_agent(id),
+      blocked_on_path TEXT,
+      tool_started_at INTEGER,
+      tools_in_flight INTEGER NOT NULL DEFAULT 0,
+      review_head     TEXT,
+      CHECK ((role = 'coordinator') = (project_id IS NULL))
+    );
+    INSERT INTO agent_session_new
+      SELECT session_id, short_id, project_id, task_id, role, worktree_path, branch, cwd, state,
+             started_at, ended_at, last_activity, transcript_path, tokens_in, tokens_out, cache_read,
+             cache_write, est_cost_usd, attempt, model, last_tool, stop_reason, roster_agent_id,
+             blocked_on_path, tool_started_at, tools_in_flight, review_head
+      FROM agent_session;
+    DROP TABLE agent_session;
+    ALTER TABLE agent_session_new RENAME TO agent_session;
+    CREATE INDEX agent_session_project_state ON agent_session(project_id, state);
+    CREATE INDEX agent_session_task ON agent_session(task_id);
+
+    CREATE TABLE coordinator (
+      id                INTEGER PRIMARY KEY CHECK (id = 1),
+      active_session_id TEXT REFERENCES agent_session(session_id),
+      model             TEXT
+    );
+    INSERT INTO coordinator (id) VALUES (1);
+    """
+
     static let taskCommit = """
     CREATE TABLE task_commit (
       task_id TEXT NOT NULL,
@@ -303,11 +409,46 @@ enum Schema {
     );
     """
 
+    /// The Coordinator's request ledger (SPEC §9.4). `plan_note_id` has no foreign key: a plan note
+    /// lives in the Coordinator's own note space and need not exist yet. `request_event` is the
+    /// history — the send, each reply, a withdrawal — with the report each one queued.
+    static let coordinatorRequest = """
+    CREATE TABLE coordinator_request (
+      id           INTEGER PRIMARY KEY,
+      project_id   TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+      body         TEXT NOT NULL,
+      plan_note_id TEXT,
+      state        TEXT NOT NULL,
+      created_at   INTEGER NOT NULL,
+      closed_at    INTEGER
+    );
+    CREATE INDEX coordinator_request_closed ON coordinator_request(closed_at);
+
+    CREATE TABLE request_event (
+      id         INTEGER PRIMARY KEY,
+      request_id INTEGER NOT NULL REFERENCES coordinator_request(id) ON DELETE CASCADE,
+      state      TEXT NOT NULL,
+      author     TEXT NOT NULL,
+      body       TEXT NOT NULL,
+      report_id  INTEGER REFERENCES report(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX request_event_request ON request_event(request_id);
+    CREATE INDEX request_event_report ON request_event(report_id);
+
+    CREATE TABLE request_epic (
+      request_id INTEGER NOT NULL REFERENCES coordinator_request(id) ON DELETE CASCADE,
+      epic_id    TEXT NOT NULL REFERENCES epic(id) ON DELETE CASCADE,
+      PRIMARY KEY (request_id, epic_id)
+    );
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
         "approval", "shutdown_order", "shutdown_delivery", "workspace", "file_lock", "message",
         "task_commit",
-        "roster_agent", "project_roster_agent", "task_comment", "comment_delivery",
+        "roster_agent", "project_roster_agent", "task_comment", "comment_delivery", "coordinator",
+        "coordinator_request", "request_event", "request_epic",
     ]
 }

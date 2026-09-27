@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  draft-release:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # Full history: release.sh stamps CFBundleVersion with the commit count, which a shallow clone makes 1.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Report toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Check the tag against RELEASES.md and extract its notes
+        run: |
+          notes="$RUNNER_TEMP/release-notes.md"
+          body=$(Scripts/release-notes.sh "$TAG")
+          {
+            cat <<'NOTICE'
+          > Install by opening the DMG and dragging Agent Board into Applications. This build is ad-hoc signed, so on macOS 15 and later Gatekeeper blocks the first open of a downloaded copy. Allow it under System Settings > Privacy & Security > Open Anyway (the button appears for about an hour after the blocked open), or clear the flag with `xattr -dr com.apple.quarantine "/Applications/Agent Board.app"`.
+
+          NOTICE
+            printf '%s\n' "$body"
+          } > "$notes"
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+          echo "NOTES_FILE=$notes" >> "$GITHUB_ENV"
+
+      # The releases list, unlike the by-tag endpoint, includes drafts.
+      - name: Refuse a tag that already has a release
+        run: |
+          existing=$(gh api --paginate "repos/$GH_REPO/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .html_url")
+          if [ -n "$existing" ]; then
+            echo "::error::A release for $TAG already exists and will not be overwritten: $existing"
+            exit 1
+          fi
+
+      - name: Build
+        run: Scripts/release.sh
+
+      - name: Create draft release
+        run: |
+          gh release create "$TAG" "dist/AgentBoard-$VERSION.dmg" \
+            --draft \
+            --verify-tag \
+            --title "Agent Board $VERSION" \
+            --notes-file "$NOTES_FILE"

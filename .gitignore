@@ -1,3 +1,4 @@
 spike/.build/
 .DS_Store
 .build/
+dist/

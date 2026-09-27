@@ -72,3 +72,20 @@ disables transcript persistence — the TUI banner says so, no JSONL is written,
 and the hook payload's `transcript_path` points at a file that never appears.
 `drive.py` scrubs the marker and sets
 `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`.
+
+## Paste detection (2026-09-26, Claude Code 2.1.283)
+
+`drive_bursts.py` takes the script as a JSON file and adds `{"sendfile": path}`
+(one write, optionally `"limit": n` characters) and
+`{"sendfile": path, "chunk": n, "pause": secs}` (character-boundary chunks).
+Read `UserPromptSubmit.prompt`: a paste arrives wrapped in `<pasted_content>`.
+
+```
+python3 drive_bursts.py <cwd> <settings.json> <ptylog> <script.json> '["--model","claude-sonnet-5"]'
+```
+
+A one-burst read of 800 characters is typed; 801 is a paste. The full
+`/compact` command in one write arrived as two pastes and fired no
+`PreCompact`; in 256-character chunks 50 ms apart it fired
+`PreCompact {"trigger":"manual"}` with the exact instructions, then
+`SessionStart {"source":"compact"}`.

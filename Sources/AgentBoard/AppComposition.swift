@@ -1,5 +1,6 @@
 import AgentBoardCore
 import AgentBoardRuntime
+import AppKit
 import Foundation
 
 @MainActor
@@ -9,7 +10,7 @@ enum AppComposition {
         let url = ProcessInfo.processInfo.environment["AGENTBOARD_DB"].map { URL(fileURLWithPath: $0) }
             ?? Wiring.appSupportDir.appendingPathComponent("agentboard.sqlite")
         do {
-            let db = try AppDatabase.open(at: url)
+            let db = try AppDatabase.open(at: url, build: BuildIdentity(infoDictionary: Bundle.main.infoDictionary))
             let sleepGuard = SleepGuard()
             sleepGuard.releaseOnTermination()
             let supervisor = Wiring.makeSupervisor(db: db, sleepGuard: sleepGuard)
@@ -26,9 +27,65 @@ enum AppComposition {
             )
             MacNotifier.shared.start(router: environment.router)
             return environment
+        } catch let refusal as AppDatabaseError {
+            switch refusal {
+            case .writtenByNewerBuild: refuseNewerDatabase(refusal)
+            case .backupFailed: refuseWithoutBackup(refusal)
+            }
         } catch {
             fatalError("Agent Board could not open its database at \(url.path): \(error)")
         }
+    }
+
+    private static func refuseNewerDatabase(_ refusal: AppDatabaseError) -> Never {
+        guard case let .writtenByNewerBuild(database, _, backup) = refusal else { exit(1) }
+        let recovery = if let command = refusal.restoreCommand, let backup {
+            """
+            Install the newer build again, or restore the newest backup, \(backup.lastPathComponent), by hand before relaunching:
+
+            \(command)
+
+            Restoring discards everything the board recorded since that backup.
+            """
+        } else {
+            "Install the newer build again. There is no backup in "
+                + "\(database.deletingLastPathComponent().appendingPathComponent("backups").path) to restore."
+        }
+        quit(
+            title: "This database was last used by a newer Agent Board",
+            text: """
+                \(refusal.localizedDescription) Agent Board did not open it and has changed nothing.
+
+                \(recovery)
+                """
+        )
+    }
+
+    private static func refuseWithoutBackup(_ refusal: AppDatabaseError) -> Never {
+        guard case let .backupFailed(database, backups, reason) = refusal else { exit(1) }
+        quit(
+            title: "Agent Board couldn't back up the board",
+            text: """
+                Agent Board didn't open the board because it couldn't take a safe backup of \(database.path) first:
+
+                \(reason)
+
+                Nothing was written to the database. Backups are kept in \(backups.path). Fix the problem above, such as a full disk, and relaunch.
+                """
+        )
+    }
+
+    /// Nothing has written to the database yet, and quitting here keeps it that way (SPEC §4.1).
+    private static func quit(title: String, text: String) -> Never {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = title
+        alert.informativeText = text
+        alert.addButton(withTitle: "Quit")
+        NSApplication.shared.setActivationPolicy(.regular)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        alert.runModal()
+        exit(1)
     }
 }
 
@@ -68,6 +125,9 @@ final class StubSupervisor: WorkerSupervising {
     func worktreeDiffSummary(taskId: String) async -> DiffSummary? { nil }
     func orchestratorConsole(projectId: String) throws -> OrchestratorConsole { throw StubError.notWired }
     func shellConsole(projectId: String) throws -> ShellConsole { throw StubError.notWired }
+    func coordinatorSessionConsole() throws -> OrchestratorConsole { throw StubError.notWired }
+    func newCoordinatorSession() throws { throw StubError.notWired }
+    func resumeCoordinatorSession(sessionId: String) throws { throw StubError.notWired }
     func approve(approvalId: String) async throws { throw StubError.notWired }
     func deny(approvalId: String, reason: String?) async throws { throw StubError.notWired }
     func promote(taskId: String) async throws { throw StubError.notWired }

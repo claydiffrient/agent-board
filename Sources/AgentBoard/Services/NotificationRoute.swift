@@ -3,7 +3,8 @@ import Foundation
 
 /// Where a banner click lands. Every notification carries one of these in its `userInfo`, so the
 /// click can open the project the banner is about on the screen that shows the thing it names,
-/// rather than dismissing and leaving the human to find it.
+/// rather than dismissing and leaving the human to find it. The Coordinator page's epic links
+/// travel the same way.
 struct NotificationRoute: Equatable, Hashable {
     /// What the banner is about, and the identifier that pins it down when there is one.
     enum Subject: Equatable, Hashable {
@@ -16,6 +17,8 @@ struct NotificationRoute: Equatable, Hashable {
         case shutdown
         /// The project's shell console — a human's own `npm run dev`, not an agent's.
         case terminal
+        /// An epic on the project's Task Board, which scrolls to its lane.
+        case epic(String)
         /// The banner names no subject beyond its project.
         case project
     }
@@ -49,6 +52,7 @@ struct NotificationRoute: Equatable, Hashable {
         switch subject {
         case .session: .status
         case .terminal: .terminal
+        case .epic: .board
         case .approvals, .blockedTask, .reports, .shutdown, .project: .orchestrator
         }
     }
@@ -86,6 +90,7 @@ extension NotificationRoute.Subject {
         case .reports: "reports"
         case .shutdown: "shutdown"
         case .terminal: "terminal"
+        case .epic: "epic"
         case .project: "project"
         }
     }
@@ -94,6 +99,7 @@ extension NotificationRoute.Subject {
         switch self {
         case .blockedTask(let id): id
         case .session(let id): id
+        case .epic(let id): id
         case .approvals, .reports, .shutdown, .terminal, .project: nil
         }
     }
@@ -106,6 +112,7 @@ extension NotificationRoute.Subject {
         case "reports": self = .reports
         case "shutdown": self = .shutdown
         case "terminal": self = .terminal
+        case "epic": self = id.map(Self.epic) ?? .project
         default: self = .project
         }
     }

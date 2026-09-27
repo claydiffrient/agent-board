@@ -121,6 +121,10 @@ struct BridgeFixture {
         TokenIdentity(token: "orch", scope: .orchestrator, projectId: project.id, sessionId: "orch-session")
     }
 
+    var coordinatorIdentity: TokenIdentity {
+        TokenIdentity(token: "coord", scope: .coordinator, projectId: "", sessionId: "coord-session")
+    }
+
     static func make(
         lockWait: FileLockWaitPolicy = .default,
         scopedCommits: RecordingScopedCommits? = nil,
@@ -147,7 +151,10 @@ struct BridgeFixture {
             orchestrator: orchestrator,
             worker: worker,
             reviewer: reviewer,
-            scoped: ScopedToolHandler(worker: worker, orchestrator: orchestrator, reviewer: reviewer),
+            scoped: ScopedToolHandler(
+                worker: worker, orchestrator: orchestrator, reviewer: reviewer,
+                coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: events)
+            ),
             hooks: StoreHookSink(db: db, events: events, lockWait: lockWait),
             commits: scopedCommits
         )

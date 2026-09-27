@@ -273,7 +273,9 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
 
     public var sessionId: String
     public var shortId: String?
-    public var projectId: String
+    /// NULL in the table for a `.coordinator` row; read here as `""`, the Coordinator's
+    /// `TokenIdentity.projectId`, so every project-scoped comparison on it matches nothing.
+    private var storedProjectId: String?
     public var taskId: String?
     public var role: SessionRole
     public var worktreePath: String?
@@ -313,7 +315,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
         case shortId = "short_id"
-        case projectId = "project_id"
+        case storedProjectId = "project_id"
         case taskId = "task_id"
         case role
         case worktreePath = "worktree_path"
@@ -352,7 +354,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
-        self.projectId = projectId
+        storedProjectId = projectId.isEmpty ? nil : projectId
         self.taskId = taskId
         self.role = role
         self.worktreePath = worktreePath
@@ -380,6 +382,10 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     }
 
     public var id: String { sessionId }
+    public var projectId: String {
+        get { storedProjectId ?? "" }
+        set { storedProjectId = newValue.isEmpty ? nil : newValue }
+    }
     /// Rostered sessions are exempt from the idle and wall-clock caps; see `WorkerSupervisor.capLimits`.
     public var isRostered: Bool { rosterAgentId != nil }
     public var startedDate: Date { startedAt.asDate }
@@ -396,7 +402,8 @@ public struct TokenGrant: Codable, FetchableRecord, PersistableRecord, Identifia
 
     public var token: String
     public var sessionId: String?
-    public var projectId: String
+    /// nil only for a `.coordinator` grant; the table's CHECK holds the two together.
+    public var projectId: String?
     public var scope: TokenScope
     public var taskId: String?
     public var createdAt: Int64
@@ -412,7 +419,7 @@ public struct TokenGrant: Codable, FetchableRecord, PersistableRecord, Identifia
         case revokedAt = "revoked_at"
     }
 
-    public init(token: String, sessionId: String?, projectId: String, scope: TokenScope, taskId: String?, createdAt: Int64, revokedAt: Int64? = nil) {
+    public init(token: String, sessionId: String?, projectId: String?, scope: TokenScope, taskId: String?, createdAt: Int64, revokedAt: Int64? = nil) {
         self.token = token
         self.sessionId = sessionId
         self.projectId = projectId
@@ -465,7 +472,8 @@ public struct Report: Codable, FetchableRecord, MutablePersistableRecord, Identi
     public static let databaseTableName = "report"
 
     public var id: Int64?
-    public var projectId: String
+    /// nil for a report in the Coordinator's queue, which belongs to no project (SPEC §9.1).
+    public var projectId: String?
     public var taskId: String?
     public var sessionId: String?
     public var kind: ReportKind
@@ -484,7 +492,7 @@ public struct Report: Codable, FetchableRecord, MutablePersistableRecord, Identi
         case consumedAt = "consumed_at"
     }
 
-    public init(id: Int64? = nil, projectId: String, taskId: String?, sessionId: String?, kind: ReportKind, body: String, createdAt: Int64, consumedAt: Int64? = nil) {
+    public init(id: Int64? = nil, projectId: String?, taskId: String?, sessionId: String?, kind: ReportKind, body: String, createdAt: Int64, consumedAt: Int64? = nil) {
         self.id = id
         self.projectId = projectId
         self.taskId = taskId
@@ -613,7 +621,8 @@ public struct Note: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public static let databaseTableName = "note"
 
     public var id: String
-    public var projectId: String
+    /// nil for one of the Coordinator's plans, which belong to no project (SPEC §8.2).
+    public var projectId: String?
     public var title: String
     public var pinned: Bool
     public var version: Int64
@@ -628,7 +637,7 @@ public struct Note: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case updatedAt = "updated_at"
     }
 
-    public init(id: String, projectId: String, title: String, pinned: Bool = false, version: Int64 = 1, updatedAt: Int64) {
+    public init(id: String, projectId: String?, title: String, pinned: Bool = false, version: Int64 = 1, updatedAt: Int64) {
         self.id = id
         self.projectId = projectId
         self.title = title

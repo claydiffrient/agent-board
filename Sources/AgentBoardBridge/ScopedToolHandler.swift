@@ -5,11 +5,17 @@ public struct ScopedToolHandler: ToolHandler {
     private let worker: any ToolHandler
     private let orchestrator: any ToolHandler
     private let reviewer: any ToolHandler
+    private let coordinator: any ToolHandler
 
-    public init(worker: any ToolHandler, orchestrator: any ToolHandler, reviewer: any ToolHandler) {
+    /// With no `coordinator` handler wired, a Coordinator grant is offered no tools and refused every call.
+    public init(
+        worker: any ToolHandler, orchestrator: any ToolHandler, reviewer: any ToolHandler,
+        coordinator: (any ToolHandler)? = nil
+    ) {
         self.worker = worker
         self.orchestrator = orchestrator
         self.reviewer = reviewer
+        self.coordinator = coordinator ?? NoToolHandler()
     }
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
@@ -25,6 +31,15 @@ public struct ScopedToolHandler: ToolHandler {
         case .worker: return worker
         case .orchestrator: return orchestrator
         case .reviewer: return reviewer
+        case .coordinator: return coordinator
         }
+    }
+}
+
+private struct NoToolHandler: ToolHandler {
+    func tools(for identity: TokenIdentity) async -> [ToolDescriptor] { [] }
+
+    func call(_ name: String, arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+        throw ToolError("Unknown tool: \(name)")
     }
 }

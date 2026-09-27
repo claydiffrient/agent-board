@@ -89,6 +89,17 @@ final class ContextPressureTests: XCTestCase {
         XCTAssertFalse(OrchestratorCompaction.command.contains("\n"))
     }
 
+    /// Claude Code reads a single read over 800 characters as pasted content, which runs no command
+    /// (measured, SPEC §2). A burst a third of that survives a few bursts coalescing in one read.
+    func testTheCompactionCommandIsWrittenInBurstsTooShortToReadAsAPaste() {
+        let bursts = PromptBursts.split(OrchestratorCompaction.command)
+        XCTAssertEqual(bursts.joined(), OrchestratorCompaction.command)
+        XCTAssertGreaterThan(bursts.count, 1)
+        for burst in bursts {
+            XCTAssertLessThanOrEqual(burst.utf16.count * 3, 800, burst)
+        }
+    }
+
     func testTheReorientationLineIsOneLineAndNamesTheBoardTools() {
         let line = OrchestratorCompaction.reorientation
         XCTAssertFalse(line.contains("\r"))

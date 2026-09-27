@@ -33,4 +33,16 @@ public enum SupportPaths {
     ) -> URL {
         worktreeBase(environment: environment, home: home).appendingPathComponent(projectId)
     }
+
+    /// The Coordinator's own folder (SPEC §8.2). Under the override it sits beside the worktrees, so
+    /// a test or the E2E harness never touches the real `~/.agentboard`.
+    public static func coordinatorDir(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        if let override = environment[supportDirEnvKey], !override.isEmpty {
+            return URL(fileURLWithPath: override).appendingPathComponent("coordinator")
+        }
+        return home.appendingPathComponent(".agentboard/coordinator")
+    }
 }

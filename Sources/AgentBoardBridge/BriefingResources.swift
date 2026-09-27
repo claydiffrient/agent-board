@@ -51,6 +51,8 @@ public struct BriefingResourceHandler: ResourceHandler {
                     + "Read it after a resume or a compaction, when those instructions are no longer in context.",
                 mimeType: Self.mimeType
             )]
+        case .coordinator:
+            return []
         }
     }
 
@@ -107,11 +109,13 @@ public struct BriefingResourceHandler: ResourceHandler {
     /// Names only the briefing this caller is allowed to read, so an orchestrator asking for the
     /// worker protocol is refused the same way an unknown uri is.
     static func refusal(for identity: TokenIdentity) -> String {
-        let mine = switch identity.scope {
+        let mine: String? = switch identity.scope {
         case .worker: BriefingResourceURI.worker
         case .orchestrator: BriefingResourceURI.orchestrator
         case .reviewer: BriefingResourceURI.reviewer
+        case .coordinator: nil
         }
+        guard let mine else { return "Not a briefing you can read. None is addressed to the Coordinator." }
         return "Not a briefing you can read. The one addressed to you is \(mine)."
     }
 }

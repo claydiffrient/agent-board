@@ -21,6 +21,7 @@ swift build
 swift test
 Scripts/bundle.sh            # wraps the binary in .build/AgentBoard.app (bundle id needed for notifications)
 open .build/AgentBoard.app
+Scripts/release.sh           # release build, versioned from RELEASES.md, into dist/AgentBoard-<version>.dmg
 ```
 
 Release notes live in `RELEASES.md` at the repo root, newest first, one
@@ -28,6 +29,12 @@ Release notes live in `RELEASES.md` at the repo root, newest first, one
 `Scripts/bundle.sh` copies it into `Contents/Resources`; the unbundled
 `.build/debug/AgentBoard` has neither an `Info.plist` nor that resource, so it
 reports no release notes rather than an empty list.
+
+See `docs/releasing.md` for the full release procedure: writing the
+`RELEASES.md` entry from the epics' release-notes notes, building with
+`Scripts/release.sh`, tagging and publishing the draft GitHub Release that
+`.github/workflows/release.yml` creates, installing by dragging the app from
+the DMG into Applications, restoring a backup, and versioning.
 
 Environment overrides: `AGENTBOARD_DB` (sqlite path), `AGENTBOARD_SUPPORT_DIR`
 (session configs, server port file, and worktrees). Default support dir is

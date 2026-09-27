@@ -8,6 +8,8 @@ struct MainWindow: View {
     @State private var projects = Observed<[Project]>([])
     @State private var workspaces = Observed<[Workspace]>([])
     @State private var attention = Observed<[ProjectAttention]>([])
+    @State private var coordinatorQueue = Observed<[Report]>([])
+    @State private var showCoordinatorSettings = false
     @State private var selection: SidebarSelection = .atAGlance
     @State private var settingsProject: Project?
     @State private var workspaceEdit: WorkspaceEdit?
@@ -30,6 +32,8 @@ struct MainWindow: View {
             switch selection {
             case .roster:
                 RosterView(activity: LiveRosterActivity(db: env.db))
+            case .coordinator:
+                CoordinatorView()
             case .atAGlance, .project:
                 if let project = projects.value.first(where: { $0.id == selection.projectId }) {
                     ProjectDetailView(project: project)
@@ -37,7 +41,8 @@ struct MainWindow: View {
                 } else {
                     AtAGlanceView(
                         projects: projects.value, workspaces: workspaces.value,
-                        attention: attention.value, select: select
+                        attention: attention.value, unreadReplies: CoordinatorRow.unreadReplies(coordinatorQueue.value),
+                        select: select
                     )
                 }
             }
@@ -51,11 +56,17 @@ struct MainWindow: View {
         .task {
             await attention.run(ProjectAttentionStore(env.db).observeAll(), in: env.db.reader)
         }
+        .task {
+            await coordinatorQueue.run(ReportStore(env.db).observeUnconsumedForCoordinator(), in: env.db.reader)
+        }
         .task { await announceReleaseNotes() }
         .sheet(item: $settingsProject) { project in
             ProjectSettingsSheet(project: project, workspaces: workspaces.value) {
                 if selection == .project(project.id) { select(.atAGlance) }
             }
+        }
+        .sheet(isPresented: $showCoordinatorSettings) {
+            CoordinatorSettingsSheet()
         }
         .sheet(item: $workspaceEdit) { edit in
             WorkspaceNameSheet(edit: edit) { name in commit(edit, name: name) }
@@ -118,10 +129,10 @@ struct MainWindow: View {
 
     private var sidebar: some View {
         List(selection: sidebarSelection) {
-            Label("At a Glance", systemImage: "square.grid.2x2")
-                .tag(SidebarSelection.atAGlance)
-            Label("Roster", systemImage: "person.2")
-                .tag(SidebarSelection.roster)
+            ForEach(SidebarSelection.pinned, id: \.self) { item in
+                pinnedRow(item)
+                    .tag(item)
+            }
             ForEach(sections) { section in
                 sectionView(section)
             }
@@ -150,6 +161,20 @@ struct MainWindow: View {
                 Text("No projects yet")
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func pinnedRow(_ item: SidebarSelection) -> some View {
+        switch item {
+        case .atAGlance: Label("At a Glance", systemImage: "square.grid.2x2")
+        case .roster: Label("Roster", systemImage: "person.2")
+        case .coordinator:
+            CoordinatorRow(
+                unreadReplies: CoordinatorRow.unreadReplies(coordinatorQueue.value),
+                openSettings: { showCoordinatorSettings = true }
+            )
+        case .project: EmptyView()
         }
     }
 
@@ -344,7 +369,7 @@ struct ProjectDetailView: View {
         }
         .navigationTitle(project.name)
         .task(id: env.router.sequence) {
-            if let route = env.router.route, route.projectId == project.id { screen = route.screen }
+            if let route = env.router.take(.screen, projectId: project.id) { screen = route.screen }
         }
         .toolbar {
             ToolbarItem(placement: .principal) {
