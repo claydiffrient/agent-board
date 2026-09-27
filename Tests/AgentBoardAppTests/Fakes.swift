@@ -16,16 +16,12 @@ actor FakeRuntime: AgentRuntime {
     private(set) var isSettingUp = false
     private var failure: Error?
     private var gate: CheckedContinuation<Void, Never>?
-    private var delay: Duration?
     private var holdNextSpawn = false
     private var entered: [CheckedContinuation<Void, Never>] = []
     private var listed: [AgentInfo] = []
 
     /// The next spawn blocks inside `spawn` until `releaseSpawn()` — a setup that outlives the call.
     func holdSpawn() { holdNextSpawn = true }
-
-    /// A setup that simply takes a long time, the way `yarn install` does.
-    func delaySpawn(_ duration: Duration) { delay = duration }
 
     func failNextSpawn(_ error: Error) { failure = error }
 
@@ -47,10 +43,6 @@ actor FakeRuntime: AgentRuntime {
         entered = []
         if holdNextSpawn {
             await withCheckedContinuation { gate = $0 }
-        }
-        if let delay {
-            self.delay = nil
-            try? await _Concurrency.Task.sleep(for: delay)
         }
         isSettingUp = false
         if let failure {
