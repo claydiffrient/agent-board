@@ -2,8 +2,8 @@ import Foundation
 import GRDB
 
 extension RosterAgent {
-    /// A guess from free-text `role` ("reviewer", "Code Reviewer"), used only when a project names
-    /// no `reviewAgent`. Any rostered agent can review when named, whatever its role says.
+    /// A guess from free-text `role` ("reviewer", "Code Reviewer"), used only by an Any reviewer row.
+    /// Any rostered agent can review when named, whatever its role says.
     public var isReviewer: Bool {
         role.lowercased().contains("review")
     }
@@ -53,7 +53,7 @@ public enum ReviewPolicy {
             }
             return .autoAccept
         case .agent:
-            return try agentRouting(db, projectId: task.projectId)
+            return try agentRouting(db, projectId: task.projectId, type: task.type)
         }
     }
 
@@ -70,11 +70,20 @@ public enum ReviewPolicy {
             + "workers' commits and edits share its branch, so a reviewer cannot isolate its diff. It needs a person.")
     }
 
-    /// Where agent review sends this project's tasks: the named reviewer, else the first usable
-    /// agent whose role marks it a reviewer. Status shows this under the `agent` level (SPEC §10).
-    public static func agentRouting(_ db: Database, projectId: String) throws -> ReviewRouting {
-        if let named = try Project.fetchOne(db, key: projectId)?.settings.reviewAgent {
-            return try namedReviewerRouting(db, named: named, projectId: projectId)
+    /// Where agent review sends this project's tasks of `type`, by its row in the review routing
+    /// table, else the Default row (SPEC §4). Status shows the Default row's (SPEC §10).
+    public static func agentRouting(_ db: Database, projectId: String, type: TaskType?) throws -> ReviewRouting {
+        let table = try Project.fetchOne(db, key: projectId)?.settings.reviewRouting ?? ReviewRoutingTable()
+        switch table.assignee(for: type) {
+        case .named(let named):
+            let row = type.flatMap { table.typeAssignees[$0] == nil ? nil : $0 }
+            return try namedReviewerRouting(db, named: named, row: row, projectId: projectId)
+        case .anyReviewer:
+            break
+        case .person:
+            return .humanReview(reason: nil)
+        case .acceptWithoutReview:
+            return .autoAccept
         }
         let reviewers = try RosterStore.agents(db, forProject: projectId, enabledOnly: true)
             .filter(\.isReviewer)
@@ -88,22 +97,23 @@ public enum ReviewPolicy {
     /// A named reviewer that cannot take the task sends it to a person, never to another agent
     /// (SPEC §4, §5): the project chose this one, and a silent substitute is what naming it prevents.
     private static func namedReviewerRouting(
-        _ db: Database, named: ReviewAgentChoice, projectId: String
+        _ db: Database, named: ReviewAgentChoice, row: TaskType?, projectId: String
     ) throws -> ReviewRouting {
+        let role = row.map { "for \($0.label) tasks" } ?? "as this project's reviewer"
         guard let agent = try RosterAgent.fetchOne(db, key: named.id) else {
-            return .humanReview(reason: "Agent review names \(named.name) as this project's reviewer, but "
+            return .humanReview(reason: "Agent review names \(named.name) \(role), but "
                 + "\(named.name) is no longer on the roster, so it needs a person. Choose another reviewer "
                 + "in Project Settings.")
         }
         let optedIn = try RosterStore.agents(db, forProject: projectId, enabledOnly: false)
             .contains { $0.id == agent.id }
         guard optedIn else {
-            return .humanReview(reason: "Agent review names \(agent.name) as this project's reviewer, but "
+            return .humanReview(reason: "Agent review names \(agent.name) \(role), but "
                 + "this project no longer uses \(agent.name), so it needs a person. Turn \(agent.name) back "
                 + "on in the project's roster, or choose another reviewer.")
         }
         guard agent.enabled else {
-            return .humanReview(reason: "Agent review names \(agent.name) as this project's reviewer, but "
+            return .humanReview(reason: "Agent review names \(agent.name) \(role), but "
                 + "\(agent.name) is disabled in the roster, so it needs a person. Enable \(agent.name), or "
                 + "choose another reviewer in Project Settings.")
         }

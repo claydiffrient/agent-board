@@ -112,6 +112,97 @@ public struct ReviewAgentChoice: Codable, Sendable, Equatable {
     }
 }
 
+/// Who reviews one row's tasks under `agent` review (SPEC §4). Encoded as `{"kind":...}`, with the
+/// choice's `id` and `name` alongside for `named`.
+public enum ReviewAssignee: Codable, Sendable, Equatable {
+    case named(ReviewAgentChoice)
+    /// The first usable project agent whose role marks it a reviewer.
+    case anyReviewer
+    case person
+    case acceptWithoutReview
+
+    public var namedChoice: ReviewAgentChoice? {
+        guard case .named(let choice) = self else { return nil }
+        return choice
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case id
+        case name
+    }
+
+    enum Kind: String, Codable {
+        case named
+        case anyReviewer
+        case person
+        case acceptWithoutReview
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(Kind.self, forKey: .kind) {
+        case .named:
+            self = .named(ReviewAgentChoice(
+                id: try c.decode(String.self, forKey: .id), name: try c.decode(String.self, forKey: .name)
+            ))
+        case .anyReviewer: self = .anyReviewer
+        case .person: self = .person
+        case .acceptWithoutReview: self = .acceptWithoutReview
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .named(let choice):
+            try c.encode(Kind.named, forKey: .kind)
+            try c.encode(choice.id, forKey: .id)
+            try c.encode(choice.name, forKey: .name)
+        case .anyReviewer: try c.encode(Kind.anyReviewer, forKey: .kind)
+        case .person: try c.encode(Kind.person, forKey: .kind)
+        case .acceptWithoutReview: try c.encode(Kind.acceptWithoutReview, forKey: .kind)
+        }
+    }
+}
+
+/// Per-type review routing under `agent` review (SPEC §4). A type with no row is Same as Default.
+public struct ReviewRoutingTable: Codable, Sendable, Equatable {
+    public var defaultAssignee: ReviewAssignee = .anyReviewer
+    public var typeAssignees: [TaskType: ReviewAssignee] = [:]
+
+    public init(defaultAssignee: ReviewAssignee = .anyReviewer, typeAssignees: [TaskType: ReviewAssignee] = [:]) {
+        self.defaultAssignee = defaultAssignee
+        self.typeAssignees = typeAssignees
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // A kind or type this build doesn't know drops its row rather than failing every setting.
+        defaultAssignee = try c.decodeIfPresent(KnownKind.self, forKey: .defaultAssignee)?.assignee ?? .anyReviewer
+        let rows = try c.decodeIfPresent([String: KnownKind].self, forKey: .typeAssignees) ?? [:]
+        typeAssignees = Dictionary(uniqueKeysWithValues: rows.compactMap { key, value in
+            guard let type = TaskType(rawValue: key), let assignee = value.assignee else { return nil }
+            return (type, assignee)
+        })
+    }
+
+    /// An assignee, or nil when its `kind` is one this build doesn't know.
+    private struct KnownKind: Decodable {
+        let assignee: ReviewAssignee?
+
+        init(from decoder: Decoder) throws {
+            let kind = try decoder.container(keyedBy: ReviewAssignee.CodingKeys.self)
+                .decode(String.self, forKey: .kind)
+            assignee = ReviewAssignee.Kind(rawValue: kind) == nil ? nil : try ReviewAssignee(from: decoder)
+        }
+    }
+
+    public func assignee(for type: TaskType?) -> ReviewAssignee {
+        type.flatMap { typeAssignees[$0] } ?? defaultAssignee
+    }
+}
+
 public struct ProjectSettings: Codable, Sendable, Equatable {
     public var caps: Caps = Caps()
     public var autonomyEnabled: Bool = false
@@ -123,9 +214,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var modelGuidance: String? = nil
     /// How much human acceptance a finished task needs. An epic may override it for its own tasks.
     public var reviewLevel: ReviewLevel = .task
-    /// Who reviews under `agent` review (SPEC §4). Nil picks by role and roster order, as every
-    /// project did before this existed.
-    public var reviewAgent: ReviewAgentChoice? = nil
+    /// Who reviews each task type under `agent` review (SPEC §4).
+    public var reviewRouting: ReviewRoutingTable = ReviewRoutingTable()
     /// Shell command that builds this project, e.g. `swift build` or `pnpm build`. Empty leaves the
     /// agent to work it out from the repo.
     public var buildCommand: String? = nil
@@ -156,7 +246,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         defaultModel: String? = nil,
         modelGuidance: String? = nil,
         reviewLevel: ReviewLevel = .task,
-        reviewAgent: ReviewAgentChoice? = nil,
+        reviewRouting: ReviewRoutingTable = ReviewRoutingTable(),
         buildCommand: String? = nil,
         testCommand: String? = nil,
         archivePolicy: ArchivePolicy = .afterEpicMerge,
@@ -173,7 +263,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.defaultModel = defaultModel
         self.modelGuidance = modelGuidance
         self.reviewLevel = reviewLevel
-        self.reviewAgent = reviewAgent
+        self.reviewRouting = reviewRouting
         self.buildCommand = buildCommand
         self.testCommand = testCommand
         self.archivePolicy = archivePolicy
@@ -193,7 +283,13 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
         modelGuidance = try c.decodeIfPresent(String.self, forKey: .modelGuidance)
         reviewLevel = try c.decodeIfPresent(ReviewLevel.self, forKey: .reviewLevel) ?? .task
-        reviewAgent = try c.decodeIfPresent(ReviewAgentChoice.self, forKey: .reviewAgent)
+        if let table = try c.decodeIfPresent(ReviewRoutingTable.self, forKey: .reviewRouting) {
+            reviewRouting = table
+        } else {
+            let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            let named = try legacy.decodeIfPresent(ReviewAgentChoice.self, forKey: .reviewAgent)
+            reviewRouting = ReviewRoutingTable(defaultAssignee: named.map(ReviewAssignee.named) ?? .anyReviewer)
+        }
         buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
         archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge
@@ -204,6 +300,12 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
             ?? NotificationPreferences()
         remoteBranchTemplate = try c.decodeIfPresent(String.self, forKey: .remoteBranchTemplate)
         standaloneIntegration = try c.decodeIfPresent(StandaloneIntegration.self, forKey: .standaloneIntegration)
+    }
+
+    /// Settings written before the routing table named a single reviewer here; it decodes into the
+    /// Default row and is never written again.
+    private enum LegacyCodingKeys: String, CodingKey {
+        case reviewAgent
     }
 
     public static func decode(_ json: String) -> ProjectSettings {

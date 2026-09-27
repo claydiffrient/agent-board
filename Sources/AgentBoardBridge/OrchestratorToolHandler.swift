@@ -73,7 +73,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             description: "Create a task on the board. It lands in `backlog` by default and moves to `ready` automatically "
                 + "once every dependency is done (immediately if it has none). Write the acceptance criteria as the "
                 + "check a reviewer will run. Set `model` from the project's model guidance when the task warrants "
-                + "something other than the default. You cannot create a task directly in `running` or `done`.",
+                + "something other than the default. Set `type` on every task, so agent review routes by it. You "
+                + "cannot create a task directly in `running` or `done`.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "title": ToolSchema.string("Short imperative title."),
@@ -82,6 +83,7 @@ public final class OrchestratorToolHandler: ToolHandler {
                     "priority": ToolSchema.string("Free text, e.g. high, normal, low."),
                     "column": ToolSchema.enumeration(["proposed", "backlog", "ready"], "Defaults to backlog."),
                     "model": ToolSchema.string("Claude model id for the worker on this task; omit for the project default."),
+                    "type": OrchestratorToolHandler.typeSchema,
                     "depends_on": ToolSchema.stringArray("Task ids that must be done before this one is ready."),
                     "epic_id": ToolSchema.string(
                         "Put the task in this existing epic, so it branches from the epic's integration branch rather "
@@ -103,6 +105,10 @@ public final class OrchestratorToolHandler: ToolHandler {
                     "acceptance": ToolSchema.string(),
                     "priority": ToolSchema.string(),
                     "model": ToolSchema.string(),
+                    "type": ToolSchema.enumeration(
+                        [""] + OrchestratorToolHandler.typeNames,
+                        "What kind of work this is; \"\" clears it back to Default."
+                    ),
                 ],
                 required: ["id"]
             )
@@ -268,6 +274,7 @@ public final class OrchestratorToolHandler: ToolHandler {
                             "acceptance": ToolSchema.string("How the reviewer will know it is done."),
                             "priority": ToolSchema.string("Free text, e.g. high, normal, low."),
                             "model": ToolSchema.string("Claude model id for the worker on this task; omit for the project default."),
+                            "type": OrchestratorToolHandler.typeSchema,
                             "depends_on": ToolSchema.integerArray(
                                 "Zero-based indices of earlier tasks in this same array that must be done first."
                             ),
@@ -530,6 +537,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "priority": .optional(task.priority),
             "column": .string(task.column.rawValue),
             "model": .optional(task.model),
+            "type": .optional(task.type?.rawValue),
             "epic_id": .optional(task.epicId),
             "roster_agent": try renderRosterAgent(task.rosterAgentId),
             "origin": .string(task.origin.rawValue),
@@ -561,6 +569,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             _ = try projectTask(dep, identity: identity)
         }
         let epic = try destinationEpic(arguments, identity: identity)
+        let type = try Self.parseType(in: arguments, label: "type")
         let task = try tasks.create(
             projectId: identity.projectId,
             title: title,
@@ -570,7 +579,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             column: column,
             origin: .orchestrator,
             epicId: epic?.id,
-            model: ToolArguments.optionalString("model", in: arguments)
+            model: ToolArguments.optionalString("model", in: arguments),
+            type: type
         )
         if !dependsOn.isEmpty {
             try tasks.setDeps(task.id, dependsOn: dependsOn)
@@ -591,6 +601,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         if let acceptance = ToolArguments.optionalString("acceptance", in: arguments) { task.acceptance = acceptance }
         if let priority = ToolArguments.optionalString("priority", in: arguments) { task.priority = priority }
         if let model = ToolArguments.optionalString("model", in: arguments) { task.model = model.isEmpty ? nil : model }
+        if arguments["type"] != nil { task.type = try Self.parseType(in: arguments, label: "type") }
         try tasks.update(task)
         return ToolResult(text: "Updated task \(task.id).")
     }
@@ -980,6 +991,7 @@ public final class OrchestratorToolHandler: ToolHandler {
                 acceptance: ToolArguments.optionalString("acceptance", in: raw),
                 priority: ToolArguments.optionalString("priority", in: raw),
                 model: ToolArguments.optionalString("model", in: raw),
+                type: try Self.parseType(in: raw, label: "tasks[\(index)].type"),
                 origin: .orchestrator,
                 dependsOn: dependsOn
             )
@@ -1221,6 +1233,27 @@ public final class OrchestratorToolHandler: ToolHandler {
         return column
     }
 
+    private static let typeNames = TaskType.allCases.map(\.rawValue)
+
+    private static let typeSchema = ToolSchema.enumeration(
+        typeNames, "What kind of work this is; agent review routes by it. Omit for Default."
+    )
+
+    /// Absent, `null` and `""` all mean Default.
+    private static func parseType(in arguments: JSONValue, label: String) throws -> TaskType? {
+        guard let value = arguments["type"], value != .null else { return nil }
+        guard let raw = value.stringValue else {
+            throw ToolError("\(label) must be a string: one of \(typeNames.joined(separator: ", ")), or \"\" for Default.")
+        }
+        if raw.isEmpty { return nil }
+        guard let type = TaskType(rawValue: raw) else {
+            throw ToolError(
+                "Unknown \(label) '\(raw)'. Use one of: \(typeNames.joined(separator: ", ")); omit it for Default."
+            )
+        }
+        return type
+    }
+
     private func refuseTerminalColumns(_ column: TaskColumn, verb: String) throws {
         switch column {
         case .running:
@@ -1248,6 +1281,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "column": .string(task.column.rawValue),
             "priority": .optional(task.priority),
             "model": .optional(task.model),
+            "type": .optional(task.type?.rawValue),
             "blocked": .bool(task.blocked),
             "failed": .bool(task.failed),
             "archived": .bool(task.isArchived),

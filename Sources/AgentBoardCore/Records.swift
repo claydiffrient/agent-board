@@ -165,6 +165,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var landing: TaskLanding?
     /// Why `landing` is what it is, for the cases a human has to act on.
     public var landingDetail: String?
+    public var type: TaskType?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -191,6 +192,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case unarchivedAt = "unarchived_at"
         case landing
         case landingDetail = "landing_detail"
+        case type
     }
 
     public init(
@@ -199,8 +201,10 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         failed: Bool = false, failureReason: String? = nil, ordering: Double, origin: TaskOrigin,
         createdAt: Int64, updatedAt: Int64, model: String? = nil, reviewerAgentId: String? = nil,
         rosterAgentId: String? = nil, archivedAt: Int64? = nil, doneAt: Int64? = nil,
-        unarchivedAt: Int64? = nil, landing: TaskLanding? = nil, landingDetail: String? = nil
+        unarchivedAt: Int64? = nil, landing: TaskLanding? = nil, landingDetail: String? = nil,
+        type: TaskType? = nil
     ) {
+        self.type = type
         self.landing = landing
         self.landingDetail = landingDetail
         self.model = model

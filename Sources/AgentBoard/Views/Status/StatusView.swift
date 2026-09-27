@@ -77,7 +77,7 @@ struct StatusView: View {
             .padding(.vertical, 8)
             Divider()
             if let review = status.value.review {
-                ReviewRoutingBanner(routing: review)
+                ReviewRoutingBanner(routing: review, typeReviews: status.value.typeReviews)
                 Divider()
             }
             table(layout)
@@ -284,12 +284,42 @@ struct SleepFooterItem: View {
     }
 }
 
-/// Under agent review, which rostered agent this project's finished tasks go to, or why they go to a
-/// person instead. SPEC §10.
+/// Under agent review, where the Default row sends this project's finished tasks, or why they go to a
+/// person instead, and the type rows that route differently. SPEC §10.
 struct ReviewRoutingBanner: View {
     let routing: ReviewRouting
+    var typeReviews: [StatusSnapshot.TypeReview] = []
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            defaultRow
+            if !typeReviews.isEmpty {
+                Text(typeReviews.map { "\($0.type.label): \(Self.shortLabel($0.routing))" }.joined(separator: " · "))
+                    .lineLimit(2)
+                    .padding(.leading, 22)
+                    .help(typeReviews.compactMap(Self.reason).joined(separator: "\n"))
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    private static func shortLabel(_ routing: ReviewRouting) -> String {
+        switch routing {
+        case .agentReview(_, let name): return name
+        case .humanReview: return "a person"
+        case .autoAccept: return "no review"
+        }
+    }
+
+    private static func reason(_ review: StatusSnapshot.TypeReview) -> String? {
+        guard case .humanReview(let reason?) = review.routing else { return nil }
+        return "\(review.type.label): \(reason)"
+    }
+
+    private var defaultRow: some View {
         HStack(spacing: 6) {
             switch routing {
             case .agentReview(_, let name):
@@ -302,14 +332,11 @@ struct ReviewRoutingBanner: View {
                     .lineLimit(2)
                     .help(reason ?? "")
             case .autoAccept:
-                EmptyView()
+                Image(systemName: "checkmark.circle")
+                Text("Agent review: finished tasks are accepted without review")
             }
             Spacer()
         }
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
     }
 }
 

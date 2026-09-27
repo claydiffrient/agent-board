@@ -97,6 +97,27 @@ public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, Data
     case integration
 }
 
+/// What kind of work a task is. Under `agent` review it picks the task's row in the project's
+/// review routing table (SPEC §4); nil is Default. Nothing else reads it.
+public enum TaskType: String, Codable, CodingKeyRepresentable, Sendable, CaseIterable, Equatable,
+    DatabaseValueConvertible {
+    case code
+    case docs
+    case tests
+    case plan
+    case review
+
+    public var label: String {
+        switch self {
+        case .code: return "Code"
+        case .docs: return "Docs"
+        case .tests: return "Tests"
+        case .plan: return "Plan"
+        case .review: return "Review"
+        }
+    }
+}
+
 public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
     case complete
     case failed
@@ -164,7 +185,7 @@ public enum TokenScope: String, Codable, Sendable, CaseIterable, Equatable, Data
 public enum ReviewLevel: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
     /// Completion goes straight to `done`, running the same side effects a human accept runs.
     case none
-    /// A rostered agent whose role marks it a reviewer holds the review column.
+    /// The task type's row in the project's review routing table decides (SPEC §4).
     case agent
     /// A human accepts every task. The default, and the behaviour before this setting existed.
     case task

@@ -4,12 +4,12 @@ import XCTest
 final class TaskSearchTests: XCTestCase {
     private func task(
         _ id: String, title: String, body: String? = nil, acceptance: String? = nil, epicId: String? = nil,
-        model: String? = nil, rosterAgentId: String? = nil, reviewerAgentId: String? = nil
+        model: String? = nil, rosterAgentId: String? = nil, reviewerAgentId: String? = nil, type: TaskType? = nil
     ) -> BoardTask {
         BoardTask(
             id: id, projectId: "p", epicId: epicId, title: title, body: body, acceptance: acceptance,
             priority: nil, column: .ready, ordering: 0, origin: .human, createdAt: 0, updatedAt: 0,
-            model: model, reviewerAgentId: reviewerAgentId, rosterAgentId: rosterAgentId
+            model: model, reviewerAgentId: reviewerAgentId, rosterAgentId: rosterAgentId, type: type
         )
     }
 
@@ -37,6 +37,7 @@ final class TaskSearchTests: XCTestCase {
             task("model-id", title: "x", model: "claude-haiku-4-5-20251001"),
             task("agent", title: "x", rosterAgentId: "a-fran"),
             task("reviewer", title: "x", reviewerAgentId: "a-rita"),
+            task("type", title: "x", type: .docs),
             task("none", title: "Unrelated", body: "Nothing here"),
         ]
         XCTAssertEqual(matching("idle cap", in: tasks), ["title", "body", "acceptance"])
@@ -45,6 +46,7 @@ final class TaskSearchTests: XCTestCase {
         XCTAssertEqual(matching("20251001", in: tasks), ["model-id"], "the raw model id")
         XCTAssertEqual(matching("fran", in: tasks), ["agent"])
         XCTAssertEqual(matching("rita", in: tasks), ["reviewer"])
+        XCTAssertEqual(matching("docs", in: tasks), ["type"])
     }
 
     func testTermsMayMatchDifferentFieldsButAllMustMatch() {

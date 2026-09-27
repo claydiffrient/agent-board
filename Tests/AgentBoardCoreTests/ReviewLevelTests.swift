@@ -181,7 +181,7 @@ final class ReviewLevelTests: XCTestCase {
 
     private func nameReviewer(_ agent: RosterAgent) throws {
         var settings = try XCTUnwrap(f.projects.get(f.project.id)).settings
-        settings.reviewAgent = ReviewAgentChoice(id: agent.id, name: agent.name)
+        settings.reviewRouting.defaultAssignee = .named(ReviewAgentChoice(id: agent.id, name: agent.name))
         try f.projects.updateSettings(f.project.id, settings)
     }
 
@@ -255,7 +255,7 @@ final class ReviewLevelTests: XCTestCase {
                 arguments: [#"{"reviewLevel":"agent"}"#, f.project.id]
             )
         }
-        XCTAssertNil(try XCTUnwrap(f.projects.get(f.project.id)).settings.reviewAgent)
+        XCTAssertEqual(try XCTUnwrap(f.projects.get(f.project.id)).settings.reviewRouting, ReviewRoutingTable())
         try reviewer("Dana", role: "frontend")
         let rowan = try reviewer("Rowan", role: "Code Reviewer")
         try reviewer("Reese", role: "reviewer")
@@ -264,13 +264,6 @@ final class ReviewLevelTests: XCTestCase {
         let outcome = try complete(task)
 
         XCTAssertEqual(outcome.routing, .agentReview(agentId: rowan.id, agentName: "Rowan"))
-    }
-
-    func testTheNamedReviewerSurvivesAnEncodeDecodeRoundTrip() throws {
-        let choice = ReviewAgentChoice(id: "agent-1", name: "Roscoe")
-        let decoded = ProjectSettings.decode(ProjectSettings(reviewAgent: choice).encoded())
-        XCTAssertEqual(decoded.reviewAgent, choice)
-        XCTAssertNil(ProjectSettings.decode("{}").reviewAgent)
     }
 
     // MARK: Epic override

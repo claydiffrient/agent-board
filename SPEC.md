@@ -572,7 +572,7 @@ CREATE TABLE project (
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
-                                   -- reviewLevel, reviewAgent, buildCommand, testCommand, archivePolicy,
+                                   -- reviewLevel, reviewRouting, buildCommand, testCommand, archivePolicy,
                                    -- worktreeStrategy, sharedCheckoutMaxAgents, rosterAgentIds
   created_at      INTEGER NOT NULL,
   workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
@@ -611,7 +611,8 @@ CREATE TABLE task (
   roster_agent_id TEXT REFERENCES roster_agent(id),    -- the rostered agent that last worked it
   archived_at    INTEGER,          -- non-null = archived: hidden from the board, never deleted
   done_at        INTEGER,          -- entered done; cleared on leaving. The afterDays clock
-  unarchived_at  INTEGER           -- a human pulled it back; no automatic policy touches it again
+  unarchived_at  INTEGER,          -- a human pulled it back; no automatic policy touches it again
+  type           TEXT              -- code|docs|tests|plan|review; NULL = Default. Picks its review row (§4)
 );
 CREATE INDEX task_project_archived ON task(project_id, archived_at);
 CREATE INDEX task_project_done_at ON task(project_id, done_at);
@@ -900,22 +901,42 @@ in the same delete, and `author_name` still names the agent. The
 store refuses (`BoardError.rosterAgentWorking`) while a live session still runs as
 the agent, independently of the Roster screen's own guard (§10).
 
-There is no `is_reviewer` flag. A project names its reviewer outright in
-`settings_json.reviewAgent` — `{"id": …, "name": …}`, the name a snapshot taken
-when it was chosen — and any agent the project uses can be named, whatever its
-role says. Under `agent` review (§5), `ReviewPolicy.routing` hands the task to
-that agent. If it has since been deleted from the roster, disabled, or dropped
-from the project, the task goes to a person with a `progress` row naming the
-agent and what happened to it — **never to another agent**, since a silent
-substitute is what naming one exists to prevent. The key is kept, not cleared,
-when the agent goes away, so the next completion says the same thing.
+There is no `is_reviewer` flag. Under `agent` review (§5), who reviews a task
+is its row in the project's review routing table, `settings_json.reviewRouting`
+(`ReviewRoutingTable`): a Default row, plus an optional row for each
+`task.type` (`TaskType`: `code`, `docs`, `tests`, `plan`, `review`). A type
+with no row is **Same as Default**, and so is a task with no type.
+`ReviewPolicy.agentRouting` resolves the row and routes by its value:
 
-With no `reviewAgent`, routing falls back to the pick every project had before
-the key existed, so none changes on upgrade: the project's usable reviewers by
-`RosterAgent.isReviewer` (`role.lowercased().contains("review")`, so
-"reviewer", "Reviewer" and "code reviewer" all qualify), and `reviewers.first` —
-the first in `project_roster_agent`'s own `ordering`. There is still no way to
-route different tasks to different reviewers.
+| Row value | A completed task |
+|---|---|
+| a named agent, `{"kind":"named","id":…,"name":…}` | `review`, held by that agent |
+| Any reviewer, `anyReviewer` | `review`, held by the first usable role-matching reviewer |
+| A person, `person` | `review`, waiting on a person, with no reason given |
+| Accept without review, `acceptWithoutReview` | straight to `done`, as under `none` |
+
+Any agent the project uses can be named, whatever its role says; the name is a
+snapshot taken when it was chosen. If a named agent has since been deleted from
+the roster, disabled, or dropped from the project, the task goes to a person
+with a `progress` row naming the agent, the type row that named it (or the
+project, for Default), and what happened to it — **never to
+another agent**, since a silent substitute is what naming one exists to
+prevent. The row is kept, not cleared, when the agent goes away, so the next
+completion says the same thing.
+
+Any reviewer is the pick every project had before the table existed: the
+project's usable reviewers by `RosterAgent.isReviewer`
+(`role.lowercased().contains("review")`, so "reviewer", "Reviewer" and "code
+reviewer" all qualify), and `reviewers.first` — the first in
+`project_roster_agent`'s own `ordering`. Settings written before the table held
+a single `reviewAgent`; decoding puts it in the Default row (named stays named,
+absent becomes Any reviewer) and every type row starts as Same as Default, so
+no project routes differently on upgrade. `reviewAgent` is never written again.
+A type row whose type or `kind` this build doesn't know is dropped, so that type
+is Same as Default, and a Default row with an unknown `kind` reads as Any
+reviewer; neither fails the rest of `settings_json`.
+The table is read only under `agent`; the integration-task and shared-checkout
+overrides (§5, §5.1) still apply over it, and there are no per-epic rows.
 
 `settings_json.reviewLevel` is one of `none`, `agent`, `task` or `epic` and
 defaults to **`task`**, so a project that predates the setting behaves exactly as
@@ -1049,7 +1070,7 @@ project setting an epic may override for its own tasks:
 | Level | A completed task | Who decides |
 |---|---|---|
 | `none` | goes straight to `done` | nobody looks |
-| `agent` | waits in `review`, assigned to a rostered reviewer | that agent |
+| `agent` | goes where its type's row in the routing table (§4) says: to a rostered reviewer, a person, or `done` | that row |
 | `task` | waits in `review` | you (**the default**) |
 | `epic` | inside an epic, goes straight to `done`; standalone, waits in `review` | you, at the epic's integration gate |
 
@@ -1057,7 +1078,7 @@ The level is resolved on completion: the task's epic's `review_level` if it has
 one, otherwise the project's. Two rules override it unconditionally. An epic's
 integration task (`origin = integration`) always waits for a person, at every
 level — §5.2's gate is not weakened by this setting. And `agent` with no usable
-rostered reviewer — or with a named `reviewAgent` (§4) that is no longer usable —
+rostered reviewer — or with a routing row naming an agent (§4) that is no longer usable —
 falls back to `task` and says so in a `progress` row, rather than accepting work
 nobody reviewed.
 
@@ -1537,7 +1558,7 @@ is reached by neither.
 
 | Tool | Effect |
 |---|---|
-| `get_my_task()` | The task bound to this token, plus its `epic_id`, dependency summaries and comment thread |
+| `get_my_task()` | The task bound to this token, plus its `type` (null for Default), `epic_id`, dependency summaries and comment thread |
 | `update_status(state, detail)` | Appends to `progress`; sets `blocked`/`failed` flags |
 | `log_progress(text)` | Appends to `progress` |
 | `add_comment(body, task_id?)` | Appends to the task's `task_comment` thread as `worker`, named after the session's rostered agent or `Worker <short id>`. A `task_id` other than the token's own is refused |
@@ -1607,15 +1628,15 @@ Everything in worker scope over any task in the project, plus:
 
 | Tool | Effect |
 |---|---|
-| `list_tasks(column, epic_id, include_archived)` | Board query; archived tasks are hidden unless `include_archived` is true |
-| `create_task(..., epic_id)`, `update_task(...)`, `move_task(id, column)` | Board mutation; moving an archived task out of `done` unarchives it. `create_task`'s `epic_id` is optional and creates the task inside that epic; an unknown id, one belonging to another project, or one whose epic is `done` is refused |
-| `get_task(id)` | Full detail, archived or not; an archived task carries `archived: true` and `archived_at`. Includes the comment thread |
+| `list_tasks(column, epic_id, include_archived)` | Board query; archived tasks are hidden unless `include_archived` is true. Each entry carries `type`, null for Default |
+| `create_task(..., type, epic_id)`, `update_task(..., type)`, `move_task(id, column)` | Board mutation; moving an archived task out of `done` unarchives it. `create_task`'s `epic_id` is optional and creates the task inside that epic; an unknown id, one belonging to another project, or one whose epic is `done` is refused. `type` is optional and one of `code`, `docs`, `tests`, `plan`, `review` (§4); any other value is refused with the valid list. Omitted is Default, and `update_task`'s `type: ""` or `null` clears it back to Default |
+| `get_task(id)` | Full detail, archived or not; an archived task carries `archived: true` and `archived_at`. Includes `type` (null for Default) and the comment thread |
 | `add_comment(task_id, body)` | Appends to any project task's comment thread as `orchestrator`, named `Orchestrator` |
 | `archive_task(task_id)` | Hides a `done` task from the board; refused for any other column |
 | `unarchive_task(task_id)` | Returns the task to the visible board in the column it was archived from |
 | `set_deps(task_id, depends_on[])` | Dependency graph |
 | `set_epic(task_id, epic_id)` | Moves an existing task into an epic, between epics, or — with `epic_id` omitted — out of its epic. Refused for a task that has ever been spawned, and for a `done` destination epic. Dependencies are left alone |
-| `create_epic(title, goal, tasks[])` | One transaction: the epic (state `planning`) plus every task in `tasks`. Each task's `depends_on` is a zero-based index into this same array, validated before anything is written |
+| `create_epic(title, goal, tasks[])` | One transaction: the epic (state `planning`) plus every task in `tasks`. Each task's `depends_on` is a zero-based index into this same array, validated before anything is written. Each task takes an optional `type`, validated as `create_task`'s |
 | `list_epics()` | Every epic on the project with its state, branch, newest pull request opened from the branch (or null), and done/total task count |
 | `get_epic(id)` | One epic in full: goal, branch, newest pull request, its tasks grouped by column, and whether it is ready for integration |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
@@ -2214,8 +2235,9 @@ cannot be used to find them.
 - Its job description is injected with `--append-system-prompt`: the board
   vocabulary (project, epic, task, column), the rule that only `ready` is
   assignable, the completion and integration protocols, the instruction to
-  call `list_reports` when told to, and the project's `modelGuidance` text so
-  it can set `model` on the tasks it creates. The orchestrator itself runs on
+  call `list_reports` when told to, the instruction to set `type` on every
+  task it creates so agent review routes by it (§4), and the project's
+  `modelGuidance` text so it can set `model` on the tasks it creates. The orchestrator itself runs on
   `settings.defaultModel` when set.
 - **Restart** signals the child with SIGTERM and relaunches on its exit. It
   does not call SwiftTerm's `terminate()`, which cancels the exit monitor, so
@@ -2542,7 +2564,8 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
    Each row says who holds the review: `<reviewer> reviewing · <elapsed>` while
    a rostered reviewer's session is working, `<reviewer> stopped without a
    verdict` when its turn or session ended without one (§5.1), and `Waiting on you` otherwise, with the routing
-   reason `Board.complete` wrote to `progress` when there is one. While a
+   reason `Board.complete` wrote to `progress` when there is one. A typed task
+   shows its type pill beside that line. While a
    reviewer is live, Accept and Reopen ask first ("Rita is reviewing this task.
    Accepting now stops Rita's review."), because either one stops the reviewer
    (§5).
@@ -2628,7 +2651,11 @@ per card. A `done` card whose landing (§5) asks for attention shows it as a pil
 "not landed", "landing unknown", "PR pending", or "PR #N open" once a pull request
 is recorded — with the landing detail, including why a merge check could not run,
 as its tooltip. Drag between columns. Cards in `review` show the branch, worktree
-path, and a diffstat.
+path, and a diffstat. A typed task (§4) shows its type — Code, Docs, Tests, Plan,
+Review — as a small pill beside its priority and model; a Default task shows none.
+The inspector's **Type** picker (Default plus the five types) saves through the
+same task update as its body and model. Changing it doesn't touch a review
+already under way; the task's next completion routes by the new type.
 
 The task inspector shows a **Comments** thread above the Progress log, oldest
 first. Each comment names its author in words — `You`, `Orchestrator`,
@@ -2677,8 +2704,8 @@ epic in one click.
 a matching card stays in its own column and lane, and nothing is regrouped
 into a results list. Every whitespace-separated term must appear, case- and
 diacritic-insensitively, in one of the task's title, body, acceptance criteria,
-epic title, model (id or display name), or the name of the rostered agent that
-last worked or reviewed it; the task id is not searched. While a query is
+epic title, model (id or display name), type name (§4), or the name of the
+rostered agent that last worked or reviewed it; the task id is not searched. While a query is
 active an epic lane with no match vanishes, header and rail entry included,
 and a collapsed lane with a match is drawn open without changing its saved
 state. The lane header's done/total tally and actions still count the whole
@@ -2740,12 +2767,17 @@ against cap, last tool used. A blocked agent's row opens its terminal, which is
 how permission prompts get answered (D15).
 
 The role names the roster agent a session runs as: `reviewer · Rita`,
-`worker · Rita`, or plain `worker` with no roster agent. Reviewing is read from
+`worker · Rita`, or plain `worker` with no roster agent. A reviewer on a typed
+task carries the type too: `reviewer · Rita · Code`. Reviewing is read from
 the scope of the first grant bound to the session — the scope it launched
 under, which a resume does not erase — or, before any grant is bound, from the
 task naming that agent as its reviewer. Under review level `agent`, a line
-above the roster says which agent `ReviewPolicy` sends finished tasks to, or
-the reason it sends them to a person; under any other level there is no line.
+above the roster says where `ReviewPolicy` sends finished tasks by the routing
+table's Default row (§4): the agent, a person (with the reason when there is
+one), or accepted without review. Beneath it, one compact line lists each type
+row whose value differs from Default's, e.g. `Plan: no review · Review: Roscoe`,
+with any person-routing reason as its tooltip; a row set to the same value as
+Default is not listed. Under any other level there is no line.
 
 Below the roster, the ports **this project** holds — the same rows the sidebar
 panel draws, in the same `PortRow`, filtered to this project rather than swept
@@ -2947,6 +2979,19 @@ dashes and text replacement off so typed JSON parses. Every section's help text
 is the last row of that section, in every tab. Limits keeps a tab of its own: its
 six caps fit one page, while Agents and Workflow already scroll at the sheet's
 minimum height.
+
+Agents' **Review** section holds review level (§5), captioned with what each
+option does to a finished task, and below it — disabled outside `agent` — the
+review routing table (§4): a Default row, then one for each of Code, Docs,
+Tests, Plan and Review. Every row is a picker of the project's own roster
+agents in roster order (one disabled roster-wide is still pickable, suffixed
+`(disabled)`, since routing only checks at completion time, §4), then Any
+reviewer, A person and Accept without review; a type row lists Same as Default
+first. A row's currently-named agent that has left the project entirely —
+deleted from the roster or opted out — stays listed anyway, suffixed
+`(not available)`, so the picker shows what routing will actually do rather
+than silently dropping the choice. A caption beneath the table repeats that it
+takes effect only while Review level is Agent.
 
 **What's New in Agent Board** — the release notes, opened from the Help menu and
 once on their own after an update installs. A `Window` scene rather than a

@@ -319,6 +319,7 @@ public final class WorkerToolHandler: ToolHandler {
             "body": .optional(task.body),
             "acceptance": .optional(task.acceptance),
             "priority": .optional(task.priority),
+            "type": .optional(task.type?.rawValue),
             "column": .string(task.column.rawValue),
             "epic_id": .optional(task.epicId),
             "epic_goal": .null,
@@ -470,18 +471,23 @@ public final class WorkerToolHandler: ToolHandler {
             }
             return Self.completionResult(outcome)
         }
+        let noReview = switch outcome.level {
+        case .agent: "This project's review routing accepts \(task.type?.label ?? "Default") tasks without review"
+        case .epic: "Epic review accepts this task now and reviews it at its epic's integration"
+        default: "This project needs no review"
+        }
         // Not a second accept path: this is the call the Accept button makes, so the newly-ready
         // announcement, the grant revocation and the worktree removal all run exactly once, here.
         do {
             try await control.accept(taskId: task.id, acceptedBy: .policy(outcome.level))
         } catch {
             return ToolResult(
-                text: "\(recorded) This project needs no review, but the task could not be accepted "
+                text: "\(recorded) \(noReview), but the task could not be accepted "
                     + "automatically and is waiting in Review: \(error). Stop here; do not start further work."
             )
         }
         return ToolResult(
-            text: "\(recorded) This project needs no review, so the task went straight to Done and its "
+            text: "\(recorded) \(noReview), so the task went straight to Done and its "
                 + "worktree has been removed. Stop here; do not start further work."
         )
     }

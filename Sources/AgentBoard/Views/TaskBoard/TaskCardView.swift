@@ -24,6 +24,7 @@ struct TaskCardView: View {
                 if let priority = task.priority, !priority.isEmpty {
                     PriorityChip(priority: priority)
                 }
+                if let type = task.type { TaskTypeChip(type: type) }
                 if let model = task.model { ModelChip(model: model) }
                 if commentCount > 0 {
                     Label("\(commentCount)", systemImage: "text.bubble")
@@ -168,6 +169,21 @@ struct PriorityChip: View {
             .padding(.vertical, 2)
             .background(Capsule().fill(color.opacity(0.15)))
             .foregroundStyle(color)
+    }
+}
+
+/// A typed task's pill on its card, in the inspector and in Pending reviews. SPEC §10.
+struct TaskTypeChip: View {
+    let type: TaskType
+
+    var body: some View {
+        Text(type.label)
+            .font(.caption2.weight(.medium))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color.teal.opacity(0.18)))
+            .foregroundStyle(.teal)
+            .help("Task type: \(type.label)")
     }
 }
 
