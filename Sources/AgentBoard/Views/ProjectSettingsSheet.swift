@@ -227,22 +227,17 @@ struct ProjectSettingsSheet: View {
                     Text(level.label).tag(level)
                 }
             }
-            Picker("Reviewer", selection: Binding(
-                get: { settings.reviewRouting.defaultAssignee.namedChoice?.id },
-                set: { id in
-                    let current = settings.reviewRouting.defaultAssignee.namedChoice
-                    settings.reviewRouting.defaultAssignee = Self.reviewAgentChoice(id, from: projectAgents, current: current)
-                        .map(ReviewAssignee.named) ?? .anyReviewer
-                }
-            )) {
-                ForEach(Self.reviewerOptions(
-                    projectAgents: projectAgents, current: settings.reviewRouting.defaultAssignee.namedChoice
-                )) { option in
-                    Text(option.title).tag(option.agentId)
+            Text(Self.reviewLevelBlurb(settings.reviewLevel))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Group {
+                routingRow(nil)
+                ForEach(TaskType.allCases, id: \.self) { type in
+                    routingRow(type)
                 }
             }
-            .pickerStyle(.radioGroup)
-            Text(Self.reviewLevelBlurb(settings.reviewLevel))
+            .disabled(settings.reviewLevel != .agent)
+            Text("Who reviews each type of task. Applies only while Review level is Agent.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .verification:
@@ -334,6 +329,23 @@ struct ProjectSettingsSheet: View {
                 .foregroundStyle(.secondary)
         case .roster:
             rosterSelection
+        }
+    }
+
+    /// One row of the review routing table; `nil` is the Default row.
+    private func routingRow(_ type: TaskType?) -> some View {
+        let current = Self.routingAssignee(settings.reviewRouting, type: type)
+        return Picker(type?.label ?? "Default", selection: Binding(
+            get: { Self.reviewerChoice(current) },
+            set: { choice in
+                Self.setRouting(&settings.reviewRouting, type: type, to: choice, projectAgents: projectAgents)
+            }
+        )) {
+            ForEach(Self.reviewerOptions(
+                projectAgents: projectAgents, current: current?.namedChoice, sameAsDefault: type != nil
+            )) { option in
+                Text(option.title).tag(option.choice)
+            }
         }
     }
 
@@ -435,36 +447,93 @@ struct ProjectSettingsSheet: View {
         }
     }
 
-    struct ReviewerOption: Identifiable, Equatable {
-        let agentId: String?
-        let title: String
-
-        var id: String { agentId ?? "" }
+    /// A routing row's picker value. A named reviewer is tagged by id alone, so a rename or a departure
+    /// from the roster still matches the stored choice.
+    enum ReviewerChoice: Hashable {
+        case sameAsDefault
+        case named(agentId: String)
+        case anyReviewer
+        case person
+        case acceptWithoutReview
     }
 
-    static let defaultReviewerTitle = "First agent with a reviewer role"
+    struct ReviewerOption: Identifiable, Equatable {
+        let choice: ReviewerChoice
+        let title: String
 
-    /// The project's own agents in its roster order. A named reviewer the project no longer has stays
-    /// listed, marked, so the picker shows what routing will act on rather than a blank.
-    static func reviewerOptions(projectAgents: [RosterAgent], current: ReviewAgentChoice?) -> [ReviewerOption] {
-        var options = [ReviewerOption(agentId: nil, title: defaultReviewerTitle)]
+        var id: ReviewerChoice { choice }
+    }
+
+    static let sameAsDefaultTitle = "Same as Default"
+    static let anyReviewerTitle = "Any reviewer"
+    static let personTitle = "A person"
+    static let acceptWithoutReviewTitle = "Accept without review"
+
+    /// The project's own agents in its roster order, then the fixed choices. A named reviewer the
+    /// project no longer has stays listed, marked, so the picker shows what routing will act on
+    /// rather than a blank.
+    static func reviewerOptions(
+        projectAgents: [RosterAgent], current: ReviewAgentChoice?, sameAsDefault: Bool
+    ) -> [ReviewerOption] {
+        var options = sameAsDefault ? [ReviewerOption(choice: .sameAsDefault, title: sameAsDefaultTitle)] : []
         options += projectAgents.map {
-            ReviewerOption(agentId: $0.id, title: $0.enabled ? $0.name : "\($0.name) (disabled)")
+            ReviewerOption(choice: .named(agentId: $0.id), title: $0.enabled ? $0.name : "\($0.name) (disabled)")
         }
         if let current, !projectAgents.contains(where: { $0.id == current.id }) {
-            options.append(ReviewerOption(agentId: current.id, title: "\(current.name) (not available)"))
+            options.append(ReviewerOption(choice: .named(agentId: current.id), title: "\(current.name) (not available)"))
         }
+        options += [
+            ReviewerOption(choice: .anyReviewer, title: anyReviewerTitle),
+            ReviewerOption(choice: .person, title: personTitle),
+            ReviewerOption(choice: .acceptWithoutReview, title: acceptWithoutReviewTitle),
+        ]
         return options
     }
 
-    static func reviewAgentChoice(
-        _ id: String?, from projectAgents: [RosterAgent], current: ReviewAgentChoice?
-    ) -> ReviewAgentChoice? {
-        guard let id else { return nil }
-        if let agent = projectAgents.first(where: { $0.id == id }) {
-            return ReviewAgentChoice(id: agent.id, name: agent.name)
+    /// A row's stored assignee; nil for a type row that is Same as Default.
+    static func routingAssignee(_ table: ReviewRoutingTable, type: TaskType?) -> ReviewAssignee? {
+        guard let type else { return table.defaultAssignee }
+        return table.typeAssignees[type]
+    }
+
+    static func reviewerChoice(_ assignee: ReviewAssignee?) -> ReviewerChoice {
+        switch assignee {
+        case nil: .sameAsDefault
+        case .named(let choice): .named(agentId: choice.id)
+        case .anyReviewer: .anyReviewer
+        case .person: .person
+        case .acceptWithoutReview: .acceptWithoutReview
         }
-        return current?.id == id ? current : nil
+    }
+
+    static func setRouting(
+        _ table: inout ReviewRoutingTable, type: TaskType?, to choice: ReviewerChoice, projectAgents: [RosterAgent]
+    ) {
+        let current = routingAssignee(table, type: type)?.namedChoice
+        let assignee: ReviewAssignee?
+        switch choice {
+        case .sameAsDefault:
+            assignee = nil
+        case .named(let id):
+            if let agent = projectAgents.first(where: { $0.id == id }) {
+                assignee = .named(ReviewAgentChoice(id: agent.id, name: agent.name))
+            } else if let current, current.id == id {
+                assignee = .named(current)
+            } else {
+                return
+            }
+        case .anyReviewer:
+            assignee = .anyReviewer
+        case .person:
+            assignee = .person
+        case .acceptWithoutReview:
+            assignee = .acceptWithoutReview
+        }
+        if let type {
+            table.typeAssignees[type] = assignee
+        } else if let assignee {
+            table.defaultAssignee = assignee
+        }
     }
 
     static func reviewLevelBlurb(_ level: ReviewLevel) -> String {
@@ -472,10 +541,11 @@ struct ProjectSettingsSheet: View {
         case .none:
             return "A finished task goes straight to Done. Nobody reviews it."
         case .agent:
-            return "The reviewer picks the task up from Review and either accepts it or sends it back "
-                + "with findings. Any agent this project uses can be named, whatever its role; left on "
-                + "the default, it is the first whose role reads as reviewer. If the reviewer is missing, "
-                + "disabled or turned off here, the task waits for you and its card says why."
+            return "A finished task goes where its type's row below sends it. A reviewer picks it up from "
+                + "Review and either accepts it or sends it back with findings. Any agent this project uses "
+                + "can be named, whatever its role; Any reviewer is the first whose role reads as reviewer. "
+                + "If a named reviewer is missing, disabled or turned off here, the task waits for you and "
+                + "its card says why."
         case .task:
             return "You accept every task. The default; leaving it here changes nothing."
         case .epic:

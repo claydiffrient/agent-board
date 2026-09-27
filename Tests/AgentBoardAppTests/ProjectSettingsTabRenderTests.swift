@@ -107,26 +107,15 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
 
         XCTAssertEqual(
             mounted.collect(NSPopUpButton.self).map(\.title),
-            ["Claude Code default", ReviewLevel.epic.label]
+            ["Claude Code default", ReviewLevel.epic.label, ProjectSettingsSheet.anyReviewerTitle]
+                + Array(repeating: ProjectSettingsSheet.sameAsDefaultTitle, count: TaskType.allCases.count)
         )
         XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off], "autonomy, then the one rostered agent")
     }
 
-    /// The reviewer picker is a radio group because a pop-up's options are unreadable offscreen; a
-    /// radio's label is too, so each agent is identified by its position and moved selection.
-    private func reviewerRadios(_ mounted: Mounted) -> [NSControl.StateValue] {
-        mounted.collect(NSButton.self).filter { !($0 is NSPopUpButton) }.map(\.state)
-    }
-
-    /// Roster order puts Ada first; the project's own order puts Roscoe first. Elsewhere is on the
-    /// roster but not this project's, so it must not be offered.
-    func testAgentsReviewerPickerOffersThisProjectsAgentsInItsOrderAndShowsTheNamedOne() throws {
-        let cases: [(named: String?, expected: [NSControl.StateValue])] = [
-            (nil, [.on, .off, .off]),
-            ("Roscoe", [.off, .on, .off]),
-            ("Ada", [.off, .off, .on]),
-        ]
-        for (named, expected) in cases {
+    /// Rex left the roster after being named; the Default row still shows him rather than a blank.
+    func testAgentsRoutingTableShowsEachRowsChoiceAndIsDisabledOutsideAgentReview() throws {
+        for level in [ReviewLevel.agent, .epic] {
             let mounted = try mount(tab: .agents) { db, projectId in
                 let roster = RosterStore(db)
                 let ada = try roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
@@ -134,39 +123,66 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
                 try roster.create(name: "Elsewhere", role: "reviewer", systemPrompt: "p")
                 try roster.enable(agentId: roscoe.id, forProject: projectId)
                 try roster.enable(agentId: ada.id, forProject: projectId)
-                let agent = [ada, roscoe].first { $0.name == named }
                 var settings = try XCTUnwrap(ProjectStore(db).get(projectId)).settings
-                settings.reviewRouting.defaultAssignee = agent.map { .named(ReviewAgentChoice(id: $0.id, name: $0.name)) } ?? .anyReviewer
+                settings.reviewLevel = level
+                settings.reviewRouting = ReviewRoutingTable(
+                    defaultAssignee: .named(ReviewAgentChoice(id: "deleted-agent", name: "Rex")),
+                    typeAssignees: [
+                        .code: .named(ReviewAgentChoice(id: ada.id, name: ada.name)),
+                        .plan: .acceptWithoutReview,
+                        .review: .person,
+                    ]
+                )
                 try ProjectStore(db).updateSettings(projectId, settings)
             }
 
-            XCTAssertEqual(reviewerRadios(mounted), expected, "named \(named ?? "nobody")")
+            let rows = Array(mounted.collect(NSPopUpButton.self).dropFirst(2))
+            XCTAssertEqual(
+                rows.map(\.title),
+                ["Rex (not available)", "Ada", "Same as Default", "Same as Default", "Accept without review", "A person"],
+                "\(level)"
+            )
+            XCTAssertEqual(rows.map(\.isEnabled), Array(repeating: level == .agent, count: 6), "\(level)")
         }
     }
 
-    func testAReviewerTheProjectNoLongerHasStaysOfferedAndSelectedLast() throws {
-        let mounted = try mount(tab: .agents) { db, projectId in
-            let roster = RosterStore(db)
-            let ada = try roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
-            try roster.enable(agentId: ada.id, forProject: projectId)
-            var settings = try XCTUnwrap(ProjectStore(db).get(projectId)).settings
-            settings.reviewRouting.defaultAssignee = .named(ReviewAgentChoice(id: "deleted-agent", name: "Roscoe"))
-            try ProjectStore(db).updateSettings(projectId, settings)
-        }
-
-        XCTAssertEqual(reviewerRadios(mounted), [.off, .off, .on])
-    }
-
-    func testTheReviewerOptionsNameTheDefaultThenTheProjectsAgentsThenAMissingChoice() {
+    func testTheReviewerOptionsListTheProjectsAgentsThenAMissingChoiceThenTheFixedChoices() {
         let ada = RosterAgent(id: "a", name: "Ada", role: "frontend", systemPrompt: "p", createdAt: 0, updatedAt: 0)
         let off = RosterAgent(id: "o", name: "Otto", role: "go", systemPrompt: "p", enabled: false, createdAt: 0, updatedAt: 0)
-        let options = ProjectSettingsSheet.reviewerOptions(
-            projectAgents: [ada, off], current: ReviewAgentChoice(id: "gone", name: "Roscoe")
+        let fixed = [
+            ProjectSettingsSheet.anyReviewerTitle, ProjectSettingsSheet.personTitle,
+            ProjectSettingsSheet.acceptWithoutReviewTitle,
+        ]
+        let typeRow = ProjectSettingsSheet.reviewerOptions(
+            projectAgents: [ada, off], current: ReviewAgentChoice(id: "gone", name: "Roscoe"), sameAsDefault: true
         )
-        XCTAssertEqual(options.map(\.agentId), [nil, "a", "o", "gone"])
         XCTAssertEqual(
-            options.map(\.title),
-            [ProjectSettingsSheet.defaultReviewerTitle, "Ada", "Otto (disabled)", "Roscoe (not available)"]
+            typeRow.map(\.title),
+            [ProjectSettingsSheet.sameAsDefaultTitle, "Ada", "Otto (disabled)", "Roscoe (not available)"] + fixed
+        )
+        let defaultRow = ProjectSettingsSheet.reviewerOptions(projectAgents: [ada], current: nil, sameAsDefault: false)
+        XCTAssertEqual(defaultRow.map(\.title), ["Ada"] + fixed)
+    }
+
+    func testEditingARoutingRowRoundTripsThroughSettingsEncoding() {
+        let ada = RosterAgent(id: "a", name: "Ada", role: "frontend", systemPrompt: "p", createdAt: 0, updatedAt: 0)
+        var settings = ProjectSettings()
+        settings.reviewRouting.typeAssignees[.code] = .person
+        ProjectSettingsSheet.setRouting(&settings.reviewRouting, type: .docs, to: .named(agentId: "a"), projectAgents: [ada])
+        ProjectSettingsSheet.setRouting(&settings.reviewRouting, type: .code, to: .sameAsDefault, projectAgents: [ada])
+        ProjectSettingsSheet.setRouting(&settings.reviewRouting, type: nil, to: .acceptWithoutReview, projectAgents: [ada])
+
+        let decoded = ProjectSettings.decode(settings.encoded()).reviewRouting
+        XCTAssertEqual(
+            decoded,
+            ReviewRoutingTable(
+                defaultAssignee: .acceptWithoutReview,
+                typeAssignees: [.docs: .named(ReviewAgentChoice(id: "a", name: "Ada"))]
+            )
+        )
+        XCTAssertEqual(
+            [nil, TaskType.code, .docs].map { ProjectSettingsSheet.reviewerChoice(ProjectSettingsSheet.routingAssignee(decoded, type: $0)) },
+            [.acceptWithoutReview, .sameAsDefault, .named(agentId: "a")]
         )
     }
 
