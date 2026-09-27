@@ -20,7 +20,7 @@ final class SessionEndReapsProcessTreeTests: XCTestCase {
     override func tearDown() async throws {
         for pid in leftovers { kill(pid, SIGKILL) }
         host?.terminate()
-        fixture.cleanUp()
+        await fixture.cleanUp()
         fixture = nil
     }
 

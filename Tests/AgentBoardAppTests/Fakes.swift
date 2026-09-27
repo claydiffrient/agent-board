@@ -406,7 +406,11 @@ struct SupervisorFixture {
         }
     }
 
-    func cleanUp() {
+    /// Stops the supervisor before touching disk: `start()` binds a real port and a metering `Task`
+    /// that otherwise outlive this fixture for the rest of the process, piling up across a run until
+    /// the thread pool a leftover `git` call needs to drain stderr can never be scheduled.
+    func cleanUp() async {
+        await supervisor.stop()
         let worktreeRoot = URL(fileURLWithPath: project.worktreeRoot)
         let names = (try? FileManager.default.contentsOfDirectory(atPath: worktreeRoot.path)) ?? []
         for name in names {

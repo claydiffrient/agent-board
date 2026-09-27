@@ -23,7 +23,7 @@ final class SetupHandoffTests: XCTestCase {
     override func tearDown() async throws {
         await fixture.runtime.releaseSpawn()
         await fixture.supervisor.waitForSetup()
-        fixture.cleanUp()
+        await fixture.cleanUp()
         fixture = nil
     }
 

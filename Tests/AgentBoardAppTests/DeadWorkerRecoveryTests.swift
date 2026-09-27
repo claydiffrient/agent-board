@@ -18,7 +18,7 @@ final class DeadWorkerRecoveryTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        f.cleanUp()
+        await f.cleanUp()
         f = nil
     }
 

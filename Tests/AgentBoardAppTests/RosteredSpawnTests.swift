@@ -17,7 +17,7 @@ final class RosteredSpawnTests: XCTestCase {
 
     override func tearDown() async throws {
         await fixture.supervisor.waitForSetup()
-        fixture.cleanUp()
+        await fixture.cleanUp()
         fixture = nil
     }
 

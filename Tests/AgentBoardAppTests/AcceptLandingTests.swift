@@ -17,7 +17,7 @@ final class AcceptLandingTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        fixture.cleanUp()
+        await fixture.cleanUp()
         fixture = nil
     }
 
