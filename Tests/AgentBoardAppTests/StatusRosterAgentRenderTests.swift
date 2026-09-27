@@ -20,14 +20,18 @@ final class StatusRosterAgentRenderTests: XCTestCase {
         var settings = project.settings
         settings.reviewLevel = .agent
         settings.reviewRouting.defaultAssignee = .named(ReviewAgentChoice(id: rita.id, name: rita.name))
+        settings.reviewRouting.typeAssignees = [
+            .code: .named(ReviewAgentChoice(id: rita.id, name: rita.name)),
+            .plan: .acceptWithoutReview,
+        ]
         try ProjectStore(db).updateSettings(project.id, settings)
 
         // Ended inside the grace window, so both rows show and no Elapsed clock keeps repainting.
         let endedAt = Int64.nowMillis - 60_000
-        func session(_ id: String, title: String, agent: String?, scope: TokenScope) throws {
+        func session(_ id: String, title: String, agent: String?, scope: TokenScope, type: TaskType? = nil) throws {
             let task = try TaskStore(db).create(
                 projectId: project.id, title: title, body: nil, acceptance: nil, priority: nil,
-                column: .review, origin: .human, epicId: nil
+                column: .review, origin: .human, epicId: nil, type: type
             )
             try SessionStore(db).insert(AgentSession(
                 sessionId: id, projectId: project.id, taskId: task.id, role: .worker, cwd: "/tmp",
@@ -36,7 +40,7 @@ final class StatusRosterAgentRenderTests: XCTestCase {
             let grant = try TokenGrantStore(db).issue(projectId: project.id, scope: scope, taskId: task.id)
             try TokenGrantStore(db).bind(token: grant.token, sessionId: id)
         }
-        try session("s-review", title: "Parser checks", agent: rita.id, scope: .reviewer)
+        try session("s-review", title: "Parser checks", agent: rita.id, scope: .reviewer, type: .code)
         try session("s-plain", title: "Lint cleanup", agent: nil, scope: .worker)
 
         let mount = OffscreenMount(StatusView(project: project).environment(renderEnvironment(db: db)))
@@ -61,6 +65,9 @@ final class StatusRosterAgentRenderTests: XCTestCase {
         // directly instead — the same call observeStatus's ValueObservation makes on every change.
         let snapshot = try db.reader.read { try StatusSnapshot.fetch($0, projectId: project.id) }
         XCTAssertEqual(snapshot.review, .agentReview(agentId: rita.id, agentName: rita.name))
+        XCTAssertEqual(snapshot.typeReviews, [.init(type: .plan, routing: .autoAccept)], "Code matches Default")
+        let reviewing = try XCTUnwrap(snapshot.sessions.first { $0.sessionId == "s-review" })
+        XCTAssertEqual(snapshot.roleLabel(reviewing), "reviewer · Rita · Code")
     }
 
     private struct Line {

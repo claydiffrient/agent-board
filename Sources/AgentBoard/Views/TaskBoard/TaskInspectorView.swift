@@ -13,6 +13,7 @@ struct TaskInspectorView: View {
     @State private var draftBody = ""
     @State private var draftAcceptance = ""
     @State private var draftModel: String?
+    @State private var draftType: TaskType?
     @State private var deps = Observed<[String]>([])
     @State private var progress = Observed<[ProgressEntry]>([])
     @State private var errorMessage: String?
@@ -23,11 +24,11 @@ struct TaskInspectorView: View {
     }
 
     private var savedDraft: TaskDraft {
-        TaskDraft(body: task.body ?? "", acceptance: task.acceptance ?? "", model: task.model)
+        TaskDraft(body: task.body ?? "", acceptance: task.acceptance ?? "", model: task.model, type: task.type)
     }
 
     private var currentDraft: TaskDraft {
-        TaskDraft(body: draftBody, acceptance: draftAcceptance, model: draftModel)
+        TaskDraft(body: draftBody, acceptance: draftAcceptance, model: draftModel, type: draftType)
     }
 
     private var hasEdits: Bool {
@@ -41,6 +42,13 @@ struct TaskInspectorView: View {
                 editor("Body", text: $draftBody, minHeight: 120)
                 editor("Acceptance", text: $draftAcceptance, minHeight: 80)
                 ModelPicker(label: "Model", inheritLabel: "Project default", model: $draftModel)
+                Picker("Type", selection: $draftType) {
+                    Text("Default").tag(TaskType?.none)
+                    ForEach(TaskType.allCases, id: \.self) { type in
+                        Text(type.label).tag(TaskType?.some(type))
+                    }
+                }
+                .help("Chooses this task's row in the project's review routing table. A review already under way keeps its reviewer.")
                 HStack {
                     Spacer()
                     Button("Revert") { resetDrafts() }
@@ -118,6 +126,7 @@ struct TaskInspectorView: View {
                 if let priority = task.priority, !priority.isEmpty {
                     PriorityChip(priority: priority)
                 }
+                if let type = task.type { TaskTypeChip(type: type) }
                 if let model = task.model { ModelChip(model: model) }
                 Text(task.origin.rawValue)
                 if task.blocked { FlagBadge(text: "blocked") }
@@ -284,13 +293,14 @@ struct TaskInspectorView: View {
         draftBody = draft.body
         draftAcceptance = draft.acceptance
         draftModel = draft.model
+        draftType = draft.type
     }
 
     private func retainDrafts(for taskId: String) {
         let saved = taskId == task.id
             ? savedDraft
             : allTasks.first { $0.id == taskId }.map {
-                TaskDraft(body: $0.body ?? "", acceptance: $0.acceptance ?? "", model: $0.model)
+                TaskDraft(body: $0.body ?? "", acceptance: $0.acceptance ?? "", model: $0.model, type: $0.type)
             }
         guard let saved else { return }
         drafts.retain(currentDraft, for: taskId, ifDifferentFrom: saved)
@@ -301,6 +311,7 @@ struct TaskInspectorView: View {
         updated.body = draftBody.isEmpty ? nil : draftBody
         updated.acceptance = draftAcceptance.isEmpty ? nil : draftAcceptance
         updated.model = draftModel
+        updated.type = draftType
         do {
             try TaskStore(env.db).update(updated)
             drafts.clear(task.id)

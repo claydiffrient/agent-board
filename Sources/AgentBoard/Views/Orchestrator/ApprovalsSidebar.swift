@@ -371,9 +371,12 @@ private struct ReviewRow: View {
             Text(task.title)
                 .fontWeight(.medium)
                 .lineLimit(2)
-            Label(hold.label(now: now), systemImage: "person.crop.circle.badge.checkmark")
-                .font(.caption)
-                .foregroundStyle(hold.endedWithoutVerdict ? .orange : .secondary)
+            HStack(spacing: 6) {
+                Label(hold.label(now: now), systemImage: "person.crop.circle.badge.checkmark")
+                    .font(.caption)
+                    .foregroundStyle(hold.endedWithoutVerdict ? .orange : .secondary)
+                if let type = task.type { TaskTypeChip(type: type) }
+            }
             if let reason = hold.reason {
                 Text(reason)
                     .font(.caption)

@@ -1,9 +1,11 @@
+import AgentBoardCore
 import Observation
 
 struct TaskDraft: Equatable {
     var body: String
     var acceptance: String
     var model: String?
+    var type: TaskType?
 }
 
 /// Survives the inspector being dismissed so closing the tray never silently drops unsaved edits.

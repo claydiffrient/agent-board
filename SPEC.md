@@ -2554,7 +2554,8 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
    Each row says who holds the review: `<reviewer> reviewing · <elapsed>` while
    a rostered reviewer's session is working, `<reviewer> stopped without a
    verdict` when its turn or session ended without one (§5.1), and `Waiting on you` otherwise, with the routing
-   reason `Board.complete` wrote to `progress` when there is one. While a
+   reason `Board.complete` wrote to `progress` when there is one. A typed task
+   shows its type pill beside that line. While a
    reviewer is live, Accept and Reopen ask first ("Rita is reviewing this task.
    Accepting now stops Rita's review."), because either one stops the reviewer
    (§5).
@@ -2640,7 +2641,11 @@ per card. A `done` card whose landing (§5) asks for attention shows it as a pil
 "not landed", "landing unknown", "PR pending", or "PR #N open" once a pull request
 is recorded — with the landing detail, including why a merge check could not run,
 as its tooltip. Drag between columns. Cards in `review` show the branch, worktree
-path, and a diffstat.
+path, and a diffstat. A typed task (§4) shows its type — Code, Docs, Tests, Plan,
+Review — as a small pill beside its priority and model; a Default task shows none.
+The inspector's **Type** picker (Default plus the five types) saves through the
+same task update as its body and model. Changing it doesn't touch a review
+already under way; the task's next completion routes by the new type.
 
 The task inspector shows a **Comments** thread above the Progress log, oldest
 first. Each comment names its author in words — `You`, `Orchestrator`,
@@ -2674,8 +2679,8 @@ or the inspector unarchives it.
 a matching card stays in its own column and lane, and nothing is regrouped
 into a results list. Every whitespace-separated term must appear, case- and
 diacritic-insensitively, in one of the task's title, body, acceptance criteria,
-epic title, model (id or display name), or the name of the rostered agent that
-last worked or reviewed it; the task id is not searched. While a query is
+epic title, model (id or display name), type name (§4), or the name of the
+rostered agent that last worked or reviewed it; the task id is not searched. While a query is
 active an epic lane with no match vanishes, header and rail entry included,
 and a collapsed lane with a match is drawn open without changing its saved
 state. The lane header's done/total tally and actions still count the whole
@@ -2736,13 +2741,17 @@ against cap, last tool used. A blocked agent's row opens its terminal, which is
 how permission prompts get answered (D15).
 
 The role names the roster agent a session runs as: `reviewer · Rita`,
-`worker · Rita`, or plain `worker` with no roster agent. Reviewing is read from
+`worker · Rita`, or plain `worker` with no roster agent. A reviewer on a typed
+task carries the type too: `reviewer · Rita · Code`. Reviewing is read from
 the scope of the first grant bound to the session — the scope it launched
 under, which a resume does not erase — or, before any grant is bound, from the
 task naming that agent as its reviewer. Under review level `agent`, a line
 above the roster says where `ReviewPolicy` sends finished tasks by the routing
 table's Default row (§4): the agent, a person (with the reason when there is
-one), or accepted without review; under any other level there is no line.
+one), or accepted without review. Beneath it, one compact line lists each type
+row whose value differs from Default's, e.g. `Plan: no review · Review: Roscoe`,
+with any person-routing reason as its tooltip; a row set to the same value as
+Default is not listed. Under any other level there is no line.
 
 Below the roster, the ports **this project** holds — the same rows the sidebar
 panel draws, in the same `PortRow`, filtered to this project rather than swept

@@ -10,10 +10,12 @@ import GRDB
 public struct SessionAgent: Sendable, Equatable {
     public var name: String
     public var isReviewing: Bool
+    public var taskType: TaskType?
 
-    public init(name: String, isReviewing: Bool) {
+    public init(name: String, isReviewing: Bool, taskType: TaskType? = nil) {
         self.name = name
         self.isReviewing = isReviewing
+        self.taskType = taskType
     }
 }
 
@@ -22,19 +24,37 @@ public struct StatusSnapshot: Sendable, Equatable {
     public var sessions: [AgentSession]
     /// Keyed by session id; a session with no roster agent is absent.
     public var agents: [String: SessionAgent]
-    /// Nil unless the project's review level is `agent`.
+    /// The Default row's routing. Nil unless the project's review level is `agent`.
     public var review: ReviewRouting?
+    /// The type rows whose assignee differs from the Default row's, in `TaskType` order.
+    public var typeReviews: [TypeReview]
 
-    public init(sessions: [AgentSession] = [], agents: [String: SessionAgent] = [:], review: ReviewRouting? = nil) {
+    public struct TypeReview: Sendable, Equatable {
+        public var type: TaskType
+        public var routing: ReviewRouting
+
+        public init(type: TaskType, routing: ReviewRouting) {
+            self.type = type
+            self.routing = routing
+        }
+    }
+
+    public init(
+        sessions: [AgentSession] = [], agents: [String: SessionAgent] = [:], review: ReviewRouting? = nil,
+        typeReviews: [TypeReview] = []
+    ) {
         self.sessions = sessions
         self.agents = agents
         self.review = review
+        self.typeReviews = typeReviews
     }
 
-    /// `reviewer · Rita`, `worker · Rita`, or the bare role for a session with no roster agent.
+    /// `reviewer · Rita · Code`, `worker · Rita`, or the bare role for a session with no roster agent.
     public func roleLabel(_ session: AgentSession) -> String {
         guard let agent = agents[session.sessionId] else { return session.role.rawValue }
-        return "\(agent.isReviewing ? "reviewer" : session.role.rawValue) · \(agent.name)"
+        let label = "\(agent.isReviewing ? "reviewer" : session.role.rawValue) · \(agent.name)"
+        guard agent.isReviewing, let type = agent.taskType else { return label }
+        return "\(label) · \(type.label)"
     }
 
     static func fetch(_ db: Database, projectId: String) throws -> StatusSnapshot {
@@ -45,7 +65,8 @@ public struct StatusSnapshot: Sendable, Equatable {
                        r.name AS agent_name,
                        (SELECT g.scope FROM token_grant g WHERE g.session_id = s.session_id
                         ORDER BY g.created_at, g.rowid LIMIT 1) AS first_scope,
-                       t.reviewer_agent_id = s.roster_agent_id AS task_names_it
+                       t.reviewer_agent_id = s.roster_agent_id AS task_names_it,
+                       t.type AS task_type
                 FROM agent_session s
                 JOIN roster_agent r ON r.id = s.roster_agent_id
                 LEFT JOIN task t ON t.id = s.task_id
@@ -57,13 +78,24 @@ public struct StatusSnapshot: Sendable, Equatable {
         for row in rows {
             let scope: TokenScope? = row["first_scope"]
             let reviewing = scope.map { $0 == .reviewer } ?? (row["task_names_it"] as Bool? ?? false)
-            agents[row["session_id"]] = SessionAgent(name: row["agent_name"], isReviewing: reviewing)
+            agents[row["session_id"]] = SessionAgent(
+                name: row["agent_name"], isReviewing: reviewing, taskType: row["task_type"]
+            )
         }
-        let level = try Project.fetchOne(db, key: projectId)?.settings.reviewLevel
+        var review: ReviewRouting?
+        var typeReviews: [TypeReview] = []
+        if let settings = try Project.fetchOne(db, key: projectId)?.settings, settings.reviewLevel == .agent {
+            review = try ReviewPolicy.agentRouting(db, projectId: projectId, type: nil)
+            let table = settings.reviewRouting
+            typeReviews = try TaskType.allCases
+                .filter { type in table.typeAssignees[type].map { $0 != table.defaultAssignee } ?? false }
+                .map { TypeReview(type: $0, routing: try ReviewPolicy.agentRouting(db, projectId: projectId, type: $0)) }
+        }
         return StatusSnapshot(
             sessions: try SessionStore.all(db, projectId: projectId),
             agents: agents,
-            review: level == .agent ? try ReviewPolicy.agentRouting(db, projectId: projectId, type: nil) : nil
+            review: review,
+            typeReviews: typeReviews
         )
     }
 }
