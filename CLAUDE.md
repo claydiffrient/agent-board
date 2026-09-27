@@ -1,6 +1,8 @@
 # Agent Board
 
-Native macOS app (SwiftUI) that manages work for Claude Code agents. `SPEC.md` is the design record; `IDEA.md` is the origin note.
+Native macOS app (SwiftUI) that manages work for Claude Code agents. `SPEC.md` indexes the design record in `docs/spec/`; `IDEA.md` is the origin note.
+
+No count of anything that grows — tests, files, citations — goes in this file. Write the command that returns it instead, the way Build and test gives `swift test --list-tests | wc -l`.
 
 ## Build and test
 
@@ -50,7 +52,7 @@ Each test target mirrors the target it tests one-to-one (`AgentBoardCoreTests` -
 
 ## SPEC.md
 
-`SPEC.md` has 12 numbered top-level sections (some with numbered subsections, e.g. §3.1, §5.2, §9.1). Doc comments across the codebase cite them inline at the point they matter (`SPEC §9.1`, `SPEC §5.2 step 4, D8`) — 17 source/test files do this today. When a change alters behavior a SPEC section describes, update that section's text in the same change and cite it from the new code the same way existing comments do; don't leave a doc comment citing a section whose described behavior you just changed elsewhere.
+`SPEC.md` is an index. Each numbered top-level section is its own file under `docs/spec/`, named for its number (`docs/spec/05-task-lifecycle.md` is §5), and numbered subsections (§3.1, §5.2, §9.1) stay inside their parent's file. Doc comments across the codebase cite them inline at the point they matter (`SPEC §9.1`, `SPEC §5.2 step 4, D8`); `grep -rl 'SPEC §' Sources/ Tests/ | wc -l` counts the files that do. When a change alters behavior a SPEC section describes, update that section's file in `docs/spec/` in the same change and cite it from the new code the same way existing comments do; don't leave a doc comment citing a section whose described behavior you just changed elsewhere. A new top-level section is a new file plus its entry in `SPEC.md`.
 
 ## Conventions
 
@@ -61,6 +63,6 @@ Comments are sparse by default (`AgentBoardCore` runs ~5% comment lines). A `///
 - `Sources/AgentBoard/Services/WorkerSupervisor.swift` (~1,600 lines) — most features add a case to `SupervisorError` and wire it into `start()`.
 - `Sources/AgentBoard/Services/WorkerSupervising.swift` — the protocol; a new method here breaks every conformer at compile time, not merge time. Current stub/mock conformers, each needing the same new method: `Sources/AgentBoard/AppComposition.swift` (`StubSupervisor`, used by previews), `Tests/AgentBoardAppTests/AtAGlanceLaunchCostTests.swift`, `Tests/AgentBoardAppTests/AtAGlanceRowRenderTests.swift`, `Tests/AgentBoardAppTests/ShutdownSheetRenderTests.swift`.
 - `Sources/AgentBoardCore/AppDatabase.swift`'s migration list and `Tests/AgentBoardCoreTests/ApprovalTests.swift:32` — the file registers migrations one at a time; the test pins their exact identifiers as one ordered array literal. Add a migration in one without the other and the test fails on the mismatch, not on git.
-- `SPEC.md` — most features touch their own section, so branches editing adjacent sections conflict often.
+- `docs/spec/*.md` — a feature usually edits its own section's file, so two branches adding to the same section still collide there; `10-screens.md` takes every new screen.
 
 This project's shared notes (`search_notes`) cover headless UI verification on a machine with no display, and why a clean git merge here often does not compile — read those before assuming either works the way you'd expect; their content is not repeated here.
