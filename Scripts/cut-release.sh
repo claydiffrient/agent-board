@@ -14,9 +14,11 @@ The mechanical halves of /cut-release (.claude/skills/cut-release/SKILL.md).
               that added its heading, the version to cut (<version>, or the next
               minor when omitted), and the first-parent commits on origin/main
               since that cut. Refuses a <version> not newer than the newest heading.
-  build       Refuses unless RELEASES.md's newest heading is newer than the
-              installed app's CFBundleShortVersionString, then runs
-              Scripts/release.sh with the given options. The installed app is
+  build       Fetches origin, then refuses unless origin/main has the commit that
+              added RELEASES.md's newest heading and HEAD contains it, and unless
+              that version is newer than the installed app's
+              CFBundleShortVersionString. Prints the install path it's taking, then
+              runs Scripts/release.sh with the given options. The installed app is
               /Applications/Agent Board.app unless AGENTBOARD_INSTALLED_APP names
               another; with none installed there is nothing to compare, and it builds.
 USAGE
@@ -48,6 +50,11 @@ newer_than() {
   ((a3 > b3))
 }
 
+# The commit on origin/main that added the heading for version $1.
+cut_commit() {
+  git log -n1 --format=%H -S"## $1" origin/main -- RELEASES.md
+}
+
 preflight() {
   [ $# -le 1 ] || { usage >&2; exit 2; }
 
@@ -67,7 +74,7 @@ $dirty"
 
   local last cut next how
   last=$(newest_version RELEASES.md) || fail "RELEASES.md's first '## ' heading is not '## <version>'"
-  cut=$(git log -n1 --format=%H -S"## $last" origin/main -- RELEASES.md)
+  cut=$(cut_commit "$last")
   [ -n "$cut" ] || fail "no commit on origin/main adds the heading '## $last'"
 
   if [ $# -eq 1 ]; then
@@ -90,16 +97,20 @@ $dirty"
 }
 
 build() {
-  local app="${AGENTBOARD_INSTALLED_APP:-/Applications/Agent Board.app}" newest installed
+  local app="${AGENTBOARD_INSTALLED_APP:-/Applications/Agent Board.app}" newest installed cut
   newest=$(newest_version RELEASES.md) || fail "RELEASES.md's first '## ' heading is not '## <version>'"
+
+  git fetch origin --quiet || fail "git fetch origin failed"
+  cut=$(cut_commit "$newest")
+  [ -n "$cut" ] || fail "refusing to build: RELEASES.md's newest heading is $newest, but no commit on origin/main adds it. Merge the cut first, then run: git fetch origin && git merge --ff-only origin/main"
+  git merge-base --is-ancestor "$cut" HEAD ||
+    fail "refusing to build: HEAD ($(git rev-parse --short HEAD)) does not contain $(git rev-parse --short "$cut"), the commit on origin/main that cut $newest. Build from origin/main: git merge --ff-only origin/main, or git switch --detach origin/main from a cut branch"
+
   installed=$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist" 2>/dev/null) || installed=""
-  if [ -z "$installed" ]; then
-    echo "cut-release.sh: no installed version at $app to compare against; building $newest"
-  elif ! newer_than "$newest" "$installed"; then
+  if [ -n "$installed" ] && ! newer_than "$newest" "$installed"; then
     fail "refusing to build: RELEASES.md's newest heading is $newest, and $app is already $installed. Cut a newer version first (/cut-release), and build once it has merged."
-  else
-    echo "cut-release.sh: building $newest over installed $installed"
   fi
+  echo "install  local build of $newest, dragged over $app (${installed:-nothing} installed there now)"
   Scripts/release.sh "$@"
   echo "dmg      $PWD/dist/AgentBoard-$newest.dmg"
 }

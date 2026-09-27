@@ -5,10 +5,13 @@ cd "$(dirname "$0")/.."
 usage() {
   cat <<'USAGE'
 Usage: Scripts/release-notes.sh <tag>
+       Scripts/release-notes.sh --newest
 
 Prints the body of RELEASES.md's section for the version <tag> names, without its
 heading line. <tag> must be "v" followed by RELEASES.md's newest "## <version>"
 heading, the version Scripts/release.sh stamps; any other tag fails.
+
+--newest prints that newest version instead.
 USAGE
 }
 
@@ -26,6 +29,10 @@ newest_version() {
 tag="$1"
 
 newest=$(newest_version RELEASES.md) || fail "RELEASES.md's first '## ' heading is not '## <version>'"
+if [ "$tag" = --newest ]; then
+  echo "$newest"
+  exit 0
+fi
 [[ "$tag" == v* ]] || fail "tag '$tag' does not start with 'v'; expected 'v$newest'"
 version="${tag#v}"
 [ "$version" = "$newest" ] ||

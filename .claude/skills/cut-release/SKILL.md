@@ -1,6 +1,6 @@
 ---
 name: cut-release
-description: Cut a new Agent Board version. `/cut-release [version]` compiles every uncompiled "Release notes:" note and the user-visible merges since the last cut into a new RELEASES.md entry, commits it, and marks those notes compiled. `/cut-release --build`, after that commit has merged, builds the DMG, refusing if the installed app is already that version. Use when asked to cut, compile or build a release.
+description: Cut a new Agent Board version. `/cut-release [version]` compiles every uncompiled "Release notes:" note and the user-visible merges since the last cut into a new RELEASES.md entry, commits it, and marks those notes compiled. `/cut-release --build`, after that commit has merged, builds the DMG, refusing if the checkout doesn't contain the merged cut or the installed app is already that version. Use when asked to cut, compile or build a release.
 argument-hint: "[version] | --build"
 ---
 
@@ -35,10 +35,9 @@ If it exits non-zero, relay its message and stop.
 
 You need the `agent-board` MCP tools `search_notes` and `read_note`, and `append_section` for step 8. If this session has none of them, stop and say the cut needs a session connected to the agent-board MCP server. Never read the Agent Board database file directly, not even read-only.
 
-1. `search_notes` for `"Release notes"`, and again for `"What is new"`. A search returns a bounded list, so take the union of both.
-2. Keep each note whose title starts with `Release notes:`.
-3. `read_note` each one. Drop every note with a section headed exactly `Compiled`: it went into an earlier version. The rest are this cut's notes.
-4. List the notes you kept and the ones you dropped as compiled, by title, before you write anything.
+1. `search_notes` for `"Release notes"`. It returns every matching note, titles included, so one search finds them all. Keep each note whose title starts with `Release notes:`.
+2. `read_note` each one. Drop every note with a section headed exactly `Compiled`: it went into an earlier version. The rest are this cut's notes.
+3. List the notes you kept and the ones you dropped as compiled, by title, before you write anything.
 
 A note can be wrong. Some carry their own correction section, and some describe a branch that changed before it merged. Read the whole note.
 
@@ -108,8 +107,11 @@ A `Compiled` section is the only record that a note is compiled, and step 4 filt
 Print the version, the commit, and the notes you marked. Then print these steps and do none of them:
 
 1. The pull request: Clay approves one for this branch, or the orchestrator calls `open_pull_request`.
-2. After it merges: `git fetch origin && git merge --ff-only origin/main`, then `/cut-release --build` (or `Scripts/release.sh`), then install the DMG (`docs/releasing.md` §4).
-3. Optionally, for the draft GitHub Release: `git tag -a v<version> -m "Agent Board <version>" && git push origin v<version>`.
+2. When it merges, `.github/workflows/release.yml` tags the merge commit `v<version>` and creates a draft GitHub Release with the DMG attached. There's nothing to tag by hand.
+3. Install (`docs/releasing.md` §4) from either:
+   - a local build: `git fetch origin && git merge --ff-only origin/main`, then `/cut-release --build`;
+   - the draft's DMG, once that workflow run finishes: `gh release download v<version> --pattern '*.dmg'`.
+4. Publish the draft on GitHub.
 
 ## Build mode
 
@@ -119,6 +121,11 @@ Print the version, the commit, and the notes you marked. Then print these steps 
 Scripts/cut-release.sh build
 ```
 
-It refuses unless `RELEASES.md`'s newest heading is newer than the `CFBundleShortVersionString` in `/Applications/Agent Board.app/Contents/Info.plist`. A refusal means the version was never cut, or it's already installed. Rebuilding it would install the same version again, and What's New would show nothing. Relay the refusal and stop.
+It fetches origin, then refuses:
 
-Otherwise it runs `Scripts/release.sh` and ends with a `dmg` line. Print that path and `docs/releasing.md` §4's install step: quit through **Agent Board > Quit**, open the DMG, drag Agent Board onto Applications. Don't install it yourself. If `release.sh` refuses, relay it. It refuses a dirty tree, for one; pass `--allow-dirty` to `Scripts/cut-release.sh build` only when the user asks for it.
+- unless `origin/main` has the commit that added `RELEASES.md`'s newest heading and HEAD contains it. A refusal means the cut hasn't merged, or the checkout is behind `origin/main` or still on the cut branch;
+- unless that version is newer than the `CFBundleShortVersionString` in `/Applications/Agent Board.app/Contents/Info.plist`. A refusal means it's already installed. Rebuilding it would install the same version again, and What's New would show nothing.
+
+Relay a refusal and stop.
+
+Otherwise it prints an `install` line naming the app the build will replace and the version there now, runs `Scripts/release.sh`, and ends with a `dmg` line. Print that path and `docs/releasing.md` §4's install step: quit through **Agent Board > Quit**, open the DMG, drag Agent Board onto Applications. Don't install it yourself. If `release.sh` refuses, relay it. It refuses a dirty tree, for one; pass `--allow-dirty` to `Scripts/cut-release.sh build` only when the user asks for it.
