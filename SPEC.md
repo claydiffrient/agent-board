@@ -1618,7 +1618,7 @@ Everything in worker scope over any task in the project, plus:
 | `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting |
 | `list_roster_agents()` | The rostered agents this project has enabled, in its own preference order |
 | `assign_to_agent(task_id, roster_agent_id)` | `spawn_worker` carrying a rostered identity: the same caps, shutdown and autonomy gates, worker scope, and the agent's own deny list layered on. An agent outside the project's usable set is refused |
-| `stop_worker(session_id)` | `claude stop` |
+| `stop_worker(session_id)` | `claude stop`, then the session's process tree is reaped (§8.5) |
 | `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |
 | `list_projects()` | Every project Agent Board knows about, as id, name, and whether the entry is the caller's own project. Nothing else about another project is exposed — no repository path, no settings, no board contents, no agent state |
@@ -2145,6 +2145,53 @@ a shared worker commits by calling the `commit_my_work(message)` MCP tool
 records the commit's task in `task_commit` (§4) — the ledger that makes a
 task's work on a shared branch reviewable on its own, and that acceptance
 reads to decide whether every member is in (§5).
+
+### 8.5 Session end reaps the process tree
+
+**No process a worker session started outlives the session.** This holds for
+every way Agent Board ends one: the caps, `stop_worker` and a human's Stop,
+Pause All, discard, a vanished or failed session found by `reconcile`, a task
+settled under a live session, an acknowledged shutdown, `report_complete`, and
+the leaked-agent sweep. `claude stop` alone does not give it. Each Bash tool
+command runs in a `zsh -c` that leads its own session and process group
+(measured: sid = pgid = the shell's pid, while the host is in a session of its
+own). A `run_in_background` command survives `claude stop` reparented to
+launchd, with its children under it. A foreground command does not survive.
+An idle-capped worker's `swift test` did survive and was found four hours
+later, holding `.build/.lock` and more than fifty listening ports.
+
+`SessionProcessReaper` picks the processes to signal from two rules:
+
+1. **The host's tree.** The `claude` host's descendants are read from the
+   process table before `claude stop`, while it still parents them.
+2. **Orphans in the worktree.** These catch the paths where the host is
+   already dead. A process qualifies when it is reparented to launchd, has no
+   controlling terminal, has its cwd inside the session's own worktree, and
+   started after the session did.
+
+The rules also take in every current descendant of each process they
+select. Everything selected gets SIGTERM, and whatever remains after 2s gets
+SIGKILL. Each round re-reads the table and matches a pid only together with
+its start time, so a reused pid is never signalled.
+
+Nothing outside the session's own tree is signalled:
+
+- Every process is matched to the session by one of those two rules. None is
+  matched by name.
+- The worktree rule is off for a shared checkout, which is the human's own
+  repository. It is also off while another live session shares the worktree,
+  as a rostered reviewer does.
+- The following are never signalled: the app and its ancestors, every other
+  live `claude` host listed by `claude agents` together with its ancestors
+  and descendants, and any process whose executable is `claude` (the
+  daemon).
+- A human's terminal keeps its controlling tty. An app launched by launchd
+  runs in `/`.
+
+Another process's environment is not readable on this macOS:
+`KERN_PROCARGS2` returns argv but no environment for any pid but the caller's.
+So the `CLAUDE_CODE_SESSION_ID` that Claude exports to every Bash command
+cannot be used to find them.
 
 ---
 

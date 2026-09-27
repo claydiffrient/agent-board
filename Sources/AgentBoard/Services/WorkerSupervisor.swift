@@ -745,7 +745,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func stopSession(_ sessionId: String, by actor: BoardActor) async throws {
         let session = try requireSession(sessionId)
         if let shortId = session.shortId {
-            try await runtime.stop(shortId: shortId)
+            try await stopAgent(session, shortId: shortId)
         } else if session.state == .setup {
             // No agent to stop yet; `launch` finds the row gone and stops whatever it started.
             setupTasks[sessionId]?.cancel()
@@ -757,6 +757,53 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try grants.revokeAll(sessionId: sessionId)
         announceReports(projectId: session.projectId)
         refreshSleepAssertion()
+    }
+
+    /// SPEC §8.5: no process a session started outlives it. The host's tree is read before
+    /// `claude stop`, which leaves a `run_in_background` command running under launchd.
+    private func stopAgent(_ session: AgentSession, shortId: String, listing: [AgentInfo]? = nil) async throws {
+        let listed = await listingOrFetch(listing)
+        var tree: Set<PIDIdentity> = []
+        if let host = Self.hostPID(of: session, in: listed) { tree = await SessionProcessReaper.tree(ofHost: host) }
+        do {
+            try await runtime.stop(shortId: shortId)
+        } catch {
+            await reapProcesses(of: session, tree: tree, listing: listed)
+            throw error
+        }
+        await reapProcesses(of: session, tree: tree, listing: listed)
+    }
+
+    /// SPEC §8.5. The worktree rule is off for a shared checkout, and while another live session
+    /// shares the worktree, since an orphan there could be that session's.
+    private func reapProcesses(
+        of session: AgentSession, tree: Set<PIDIdentity> = [], listing: [AgentInfo]? = nil
+    ) async {
+        let listed = await listingOrFetch(listing)
+        let host = Self.hostPID(of: session, in: listed)
+        let shared = session.worktreePath.map { path in
+            ((try? sessions.all(projectId: session.projectId)) ?? []).contains {
+                $0.sessionId != session.sessionId && $0.state.isActive && $0.worktreePath == path
+            }
+        } ?? true
+        let scope = SessionProcessScope(
+            tree: tree,
+            worktree: shared ? nil : session.worktreePath,
+            startedAtMicros: session.startedAt * 1000,
+            otherHosts: Set(listed.compactMap { $0.pid.map { pid_t($0) } }.filter { $0 != host })
+        )
+        await SessionProcessReaper.reap(scope)
+    }
+
+    private func listingOrFetch(_ listing: [AgentInfo]?) async -> [AgentInfo] {
+        if let listing { return listing }
+        return (try? await runtime.listSessions()) ?? []
+    }
+
+    private static func hostPID(of session: AgentSession, in listing: [AgentInfo]) -> pid_t? {
+        listing.first { info in
+            info.sessionId == session.sessionId || (session.shortId != nil && info.id == session.shortId)
+        }?.pid.map { pid_t($0) }
     }
 
     func resume(sessionId: String) async throws {
@@ -823,7 +870,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             for session in try sessions.active(projectId: projectId) where session.role == .worker {
                 do {
                     if let shortId = session.shortId {
-                        try await runtime.stop(shortId: shortId)
+                        try await stopAgent(session, shortId: shortId)
                     } else if session.state == .setup {
                         setupTasks[session.sessionId]?.cancel()
                     } else {
@@ -881,6 +928,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 guard let info = Self.liveListing(of: session, in: listing ?? []) else {
                     let salvage = await branchSalvage(taskId: session.taskId)
                     try board.terminate(sessionId: session.sessionId, cause: .vanished, salvage: salvage)
+                    await reapProcesses(of: session, listing: listing)
                     try grants.revokeAll(sessionId: session.sessionId)
                     announceReports(projectId: session.projectId)
                     refreshSleepAssertion()
@@ -1366,7 +1414,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let taskSessions = try sessions.forTask(taskId)
             for session in taskSessions where session.state.isActive {
                 if let shortId = session.shortId {
-                    try? await runtime.stop(shortId: shortId)
+                    try? await stopAgent(session, shortId: shortId)
                 }
                 try sessions.setState(session.sessionId, .stopped, endedAt: .nowMillis)
             }
@@ -1410,6 +1458,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         sessionId: session.sessionId, cause: .vanished, salvage: salvage
                     )) ?? nil
                     queuedReport = queuedReport || report != nil
+                    await reapProcesses(of: session, listing: listed)
                 }
                 continue
             }
@@ -1425,12 +1474,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         sessionId: session.sessionId, cause: .vanished, salvage: salvage
                     )) ?? nil
                     queuedReport = queuedReport || report != nil
+                    await reapProcesses(of: session, listing: listed)
                 }
             } else if status == "running" {
                 if session.state == .stopped || session.state.isActive, let taskId = session.taskId,
                    !resuming.contains(session.sessionId),
                    (try? board.isSettled(taskId: taskId, apartFrom: session.sessionId)) == true {
-                    let queued = await stopOnSettledTask(session, listed: info)
+                    let queued = await stopOnSettledTask(session, listed: info, in: listed)
                     queuedReport = queuedReport || queued
                 } else if [.starting, .idle, .stopped].contains(session.state) {
                     try? sessions.setState(session.sessionId, .running)
@@ -1449,9 +1499,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §10, Status: nothing belongs running on a settled task, so its process is stopped and
     /// its row is not revived. True when that queued a report.
-    private func stopOnSettledTask(_ session: AgentSession, listed info: AgentInfo) async -> Bool {
+    private func stopOnSettledTask(_ session: AgentSession, listed info: AgentInfo, in listing: [AgentInfo]) async -> Bool {
         guard let shortId = session.shortId ?? info.id,
-              (try? await runtime.stop(shortId: shortId)) != nil,
+              (try? await stopAgent(session, shortId: shortId, listing: listing)) != nil,
               session.state.isActive
         else { return false }
         let report = (try? board.terminate(sessionId: session.sessionId, cause: .taskSettled)) ?? nil
@@ -2281,7 +2331,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let note = try? shutdowns.outstanding(projectId: projectId)
             .flatMap { try deliveries.get(orderId: $0.id, sessionId: sessionId)?.note }
         if let shortId = session.shortId {
-            try? await runtime.stop(shortId: shortId)
+            try? await stopAgent(session, shortId: shortId)
         }
         _ = try? board.terminate(sessionId: sessionId, cause: .shutdownAcknowledged(note: note ?? nil))
         try? grants.revokeAll(sessionId: sessionId)
@@ -2298,7 +2348,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// and attached to.
     func workerCompleted(projectId: String, sessionId: String) async {
         guard let session = try? sessions.get(sessionId), let shortId = session.shortId else { return }
-        try? await runtime.stop(shortId: shortId)
+        try? await stopAgent(session, shortId: shortId)
     }
 
     /// Stops the agent of every session this board's own rows say is finished — the backlog left by
@@ -2334,7 +2384,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 continue
             }
             do {
-                try await runtime.stop(shortId: shortId)
+                if let session = rows.first(where: { $0.sessionId == decision.sessionId }) {
+                    try await stopAgent(session, shortId: shortId, listing: listed)
+                } else {
+                    try await runtime.stop(shortId: shortId)
+                }
                 report.stopped.append(decision)
             } catch {
                 report.failed.append(LeakedAgentSweep.Decision(
@@ -2572,7 +2626,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func enforce(_ breach: CapBreach, on session: AgentSession, awake: AwakeElapsed) async {
         let description = Self.describe(breach, awake: awake)
         if let shortId = session.shortId {
-            try? await runtime.stop(shortId: shortId)
+            try? await stopAgent(session, shortId: shortId)
         }
         let salvage = await branchSalvage(taskId: session.taskId)
         _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description), salvage: salvage)
