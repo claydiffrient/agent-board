@@ -9,6 +9,65 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.3.0 — 2026-09-26
+
+- **Install.** Installing is now a DMG drag: open `dist/AgentBoard-<version>.dmg`
+  (or the one attached to a GitHub release) and drag Agent Board onto
+  Applications, instead of running a script. On the first launch of a new
+  build, the app backs up the database automatically before migrating it,
+  keeping the newest three under `backups/`. It also now refuses to open a
+  database a newer build already wrote, rather than silently skipping
+  migrations it doesn't recognize — quit Agent Board through **Agent Board >
+  Quit** first, so it can settle any running workers before you drag in the
+  new copy.
+- **Task comments.** Every task now has a comment thread in the task
+  inspector that you and any agent working the task can both post to —
+  ⌘Return or the Add Comment button to submit. Your own comments show as
+  "You"; an agent's comment is labeled by kind (Orchestrator, a rostered
+  reviewer's name, or "Worker <id>"). A comment you write while a worker or
+  reviewer is already running reaches it on its very next tool call, and
+  survives a `/clear`. A card on the Task Board shows a comment-count badge
+  once it has any. Comments are append-only — no edit, no delete, for anyone.
+- **Coordinator.** A new pinned sidebar item: a Claude Code session that
+  belongs to no project, for planning across all of them. It reads every
+  registered project's board, notes, and sessions but writes to none through
+  its own tools — to get something changed, it sends a request to that
+  project's orchestrator, which can accept, decline, or act on it within its
+  own approvals and caps. It's told never to touch a registered repo
+  directly, but nothing enforces that beyond instruction: a Bash command like
+  `git commit` or `mv` inside one still runs. Its own page lists the request
+  ledger, its plan notes, and session history; At a Glance shows its running
+  spend.
+- **Reviews.** A rostered reviewer's session now ends the moment it accepts
+  or reopens a task, the same as a worker's does at completion, instead of
+  sitting idle and later getting reported as stalled or failed. A reviewer is
+  no longer refused over changes it didn't make: its baseline is now taken at
+  spawn — HEAD plus a fingerprint of whatever the worker had already left
+  uncommitted — so leftover worker edits stop tripping every verdict.
+- **Epics and pull requests.** A standalone epic integrating by pull request
+  now stays open for as long as that PR is open, instead of Agent Board
+  treating it as settled the moment integration is requested. When the PR
+  merges, only the tasks whose commits actually made it into the merged head
+  are marked landed — one accepted after the PR's last push is called out by
+  name instead of being marked landed on trust.
+- **Cross-project messages.** A message between two projects' orchestrators
+  can now be deleted once it's been acted on — from its own row, or in bulk
+  for everything already read — instead of sitting there indefinitely.
+- **Stability.** A session can no longer be revived once its task is already
+  done or has gone back to Ready — Agent Board used to notice the process
+  was still alive and set it running again; now it stops that process and
+  reports the settled state instead of a false failure. Stopping a session
+  now reaps its whole process tree, including anything it started with
+  `run_in_background`, so a build or watcher a worker kicked off doesn't keep
+  running after the session ends. Terminal consoles opened from the app — the
+  orchestrator's console, a shell console, a task's terminal window — no
+  longer hold on to Agent Board's own listening port after you quit; they used
+  to inherit that socket without meaning to, which could keep the port bound
+  until you closed those windows too.
+- **Orchestrator.** The automatic `/compact` Agent Board sends between turns
+  now actually runs — it used to arrive fast enough that Claude Code read it
+  as one pasted block and dropped it.
+
 ## 0.2.0 — 2026-09-24
 
 - **Board.** A project can run every worker in its own checkout on one shared
