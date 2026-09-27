@@ -932,8 +932,9 @@ a project with no archive key stored.
 The three modes fire on two different things, so they have two entry points
 (`ArchiveSweep`):
 
-- **`manual`** archives nothing on its own; the Task Board button is the only
-  trigger.
+- **`manual`** archives nothing on its own; the Task Board's buttons are the
+  only triggers — the toolbar's **Archive**, and a `done` epic lane's
+  **Archive** (§10).
 - **`afterDays(N)`** archives a task once `now - done_at` is *strictly greater*
   than N days — at exactly N it stays. It rides `WorkerSupervisor`'s existing
   metering tick, throttled to one sweep every 5 minutes rather than the 5-second
@@ -954,9 +955,11 @@ policy is worse than one that does nothing.
 Automatic archiving never fights a human: `unarchive` stamps `unarchived_at`,
 and while that is set no policy re-archives the task. Moving a task out of `done`
 clears `done_at` and `unarchived_at` together, so a reopened task starts both the
-clock and the policy from scratch. The picker for the three modes lives in
-Project Settings, next to the day count it disables outside `afterDays`; the
-Task Board's own archive controls are in §10.
+clock and the policy from scratch. A `done` epic lane's **Archive** runs the
+same `ArchiveSweep.archiveEpic` as `afterEpicMerge`, so it too leaves a task a
+human unarchived, and every task outside `done`, where it is. The picker for
+the three modes lives in Project Settings, next to the day count it disables
+outside `afterDays`; the Task Board's own archive controls are in §10.
 
 `worktreeStrategy` (D6 amended, §1) is `worktree`, `shared`, or `auto`;
 `sharedCheckoutMaxAgents` bounds how many workers may be co-resident in a
@@ -2653,6 +2656,21 @@ columns they actually sit in (always `done`), dimmed to 55% opacity with a
 dashed border and an "archived `<when>`" line; from there a card's context menu
 or the inspector unarchives it.
 
+**Finished epics leave the board.** With Show Archived off, a `done` or
+`abandoned` epic whose tasks are all archived, or that has no tasks, gets no
+lane and no jump-rail entry, and the rail itself is dropped when no epic has a
+lane. Every other epic state keeps its lane, even when empty. Turning Show
+Archived on brings those lanes back, collapsed by default like every `done`
+lane. Nothing records this: it is derived from the epic's state and its tasks'
+`archived_at` (`EpicLaneVisibility`), with no flag, state or column of its own.
+A Coordinator epic link to a hidden lane turns Show Archived on, so the link
+still lands. A `done` epic's lane header carries **Archive N Done Tasks** while
+it holds a `done` task the archive sweep would take; it archives every one of
+them in one transaction, the synthetic `integration` task included, through the
+same `ArchiveSweep.archiveEpic` `afterEpicMerge` uses (§4). It is offered under
+every policy, and is how a `manual` or `afterDays` project clears a finished
+epic in one click.
+
 **Searching the board** — a search field heads the board, filtering in place:
 a matching card stays in its own column and lane, and nothing is regrouped
 into a results list. Every whitespace-separated term must appear, case- and
@@ -2663,7 +2681,8 @@ active an epic lane with no match vanishes, header and rail entry included,
 and a collapsed lane with a match is drawn open without changing its saved
 state. The lane header's done/total tally and actions still count the whole
 epic. Search does not reach past **Show Archived**: an archived match stays
-hidden, but its lane stays with the per-column "1 archived" notice, and the
+hidden, but its lane stays with the per-column "1 archived" notice — a
+finished epic's hidden lane comes back for it — and the
 summary beside the field says "1 archived match hidden". The summary reads "3
 of 41 tasks", or "No tasks match “idle cap”" in place of an empty-result
 screen. ⌘F (**Edit ▸ Find…**) focuses the field of whichever screen is showing

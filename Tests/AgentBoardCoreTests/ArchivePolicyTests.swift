@@ -307,6 +307,23 @@ final class ArchiveSweepPolicyTests: XCTestCase {
 
         XCTAssertFalse(try f.isArchived(members[0].id))
     }
+
+    /// The done lane's Archive action, which is how a `manual` project clears a finished epic.
+    func testArchivingADoneEpicArchivesItsDoneTasksAndLeavesReviewAlone() throws {
+        let f = try Fixture.make()
+        try f.setPolicy(.manual)
+        let (epic, members) = try f.epic(["schema", "api"])
+        let merged = try f.completeIntegration(of: epic)
+        try f.tasks.move(merged.integrationTaskId, to: .done)
+        try f.tasks.move(members[1].id, to: .review)
+
+        try f.board.archiveDoneTasks(epicId: epic.id)
+
+        XCTAssertTrue(try f.isArchived(members[0].id))
+        XCTAssertTrue(try f.isArchived(merged.integrationTaskId))
+        XCTAssertFalse(try f.isArchived(members[1].id))
+        XCTAssertEqual(try f.tasks.get(members[1].id)?.column, .review)
+    }
 }
 
 // MARK: - epic fixtures

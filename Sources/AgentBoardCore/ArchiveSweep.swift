@@ -81,6 +81,11 @@ public struct ArchiveSweep: Sendable {
     column_name = 'done' AND archived_at IS NULL AND unarchived_at IS NULL AND done_at IS NOT NULL
     """
 
+    /// `archivableSQL` over a row already in memory.
+    public static func isSweepable(_ task: Task) -> Bool {
+        task.column == .done && task.archivedAt == nil && task.unarchivedAt == nil && task.doneAt != nil
+    }
+
     private static func stamp(_ db: Database, ids: [String], at: Int64) throws {
         let placeholders = databaseQuestionMarks(count: ids.count)
         try db.execute(

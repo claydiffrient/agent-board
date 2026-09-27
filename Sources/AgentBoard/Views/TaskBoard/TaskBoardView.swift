@@ -41,6 +41,7 @@ struct TaskBoardView: View {
         let tasks: [BoardTask]
         /// The whole lane's tally, so a query never changes what the header offers.
         let count: EpicTaskCount
+        var archivable = 0
 
         func tasks(in column: TaskColumn) -> [BoardTask] {
             tasks.filter { $0.column == column }
@@ -69,6 +70,8 @@ struct TaskBoardView: View {
         let lanes: [Lane]
         let searched: ArchivePartition
         let isSearching: Bool
+        /// Decided before a query removes lanes, so typing never makes the rail come and go.
+        let hasEpicLanes: Bool
 
         /// Archived tasks the board is not drawing, per lane and column, so a cell can say so rather
         /// than letting the work disappear silently. Keyed by column too, because unarchiving is
@@ -90,7 +93,8 @@ struct TaskBoardView: View {
     }
 
     /// While a query is active a lane with nothing matching vanishes, header and all, unless it is
-    /// hiding an archived match: then it stays so its cell can say where that match is.
+    /// hiding an archived match: then it stays so its cell can say where that match is — including
+    /// a finished epic's lane that `EpicLaneVisibility` would otherwise leave off (SPEC §10).
     private var layout: Layout {
         let partition = partition
         let isSearching = !searchQuery.isEmpty
@@ -105,6 +109,7 @@ struct TaskBoardView: View {
         let all = Dictionary(grouping: partition.visible, by: \.epicId)
         let shown = Dictionary(grouping: searched.visible, by: \.epicId)
         let hiding = Set(searched.hidden.map(\.epicId))
+        let everyTask = Dictionary(grouping: tasks.value, by: \.epicId)
         func lane(id: String, title: String, epic: Epic?) -> Lane {
             Lane(
                 id: id, title: title, epic: epic, tasks: shown[epic?.id] ?? [],
@@ -113,12 +118,23 @@ struct TaskBoardView: View {
         }
         var lanes = [lane(id: EpicLaneOrder.noEpicLaneId, title: EpicJumpRail.noEpicTitle, epic: nil)]
         for epic in EpicLaneOrder.sorted(epics.value) {
-            lanes.append(lane(id: epic.id, title: epic.title, epic: epic))
+            let epicTasks = everyTask[epic.id] ?? []
+            let visible = EpicLaneVisibility.isShown(
+                state: epic.state, archived: epicTasks.lazy.map(\.isArchived), showArchived: showArchived
+            )
+            guard visible || (isSearching && hiding.contains(epic.id)) else { continue }
+            var epicLane = lane(id: epic.id, title: epic.title, epic: epic)
+            epicLane.archivable = EpicLaneVisibility.archivable(state: epic.state, tasks: epicTasks).count
+            lanes.append(epicLane)
         }
+        let hasEpicLanes = lanes.count > 1
         if isSearching {
             lanes.removeAll { $0.tasks.isEmpty && !hiding.contains($0.epic?.id) }
         }
-        return Layout(lanes: lanes, searched: searched, isSearching: isSearching, hiddenByEpicAndColumn: hidden)
+        return Layout(
+            lanes: lanes, searched: searched, isSearching: isSearching, hasEpicLanes: hasEpicLanes,
+            hiddenByEpicAndColumn: hidden
+        )
     }
 
     private func isCollapsed(_ epic: Epic) -> Bool {
@@ -162,7 +178,7 @@ struct TaskBoardView: View {
             .padding(.vertical, 8)
             Divider()
             HStack(spacing: 0) {
-                if !epics.value.isEmpty {
+                if layout.hasEpicLanes {
                     epicJumpRail(layout)
                     Divider()
                 }
@@ -344,10 +360,16 @@ struct TaskBoardView: View {
 
     /// A Coordinator epic link (SPEC §10) can arrive before the epics do, so it waits for the lane
     /// and then for one layout pass, since the scroll reader ignores a target set as it appears.
+    /// A finished epic whose lane is hidden turns Show Archived on, so the link still lands.
     private func jumpToRoutedEpic() async {
-        guard let epicId = routedEpicId, epics.value.contains(where: { $0.id == epicId }) else { return }
+        guard let epicId = routedEpicId, let epic = epics.value.first(where: { $0.id == epicId }) else { return }
         routedEpicId = nil
         try? await _Concurrency.Task.sleep(for: .milliseconds(100))
+        let archived = tasks.value.lazy.filter { $0.epicId == epicId }.map(\.isArchived)
+        if !EpicLaneVisibility.isShown(state: epic.state, archived: archived, showArchived: showArchived) {
+            showArchived = true
+            try? await _Concurrency.Task.sleep(for: .milliseconds(100))
+        }
         jumpTarget = EpicJumpRail.laneId(forEpicId: epicId)
     }
 
@@ -439,7 +461,9 @@ struct TaskBoardView: View {
                     pullRequest: epicPullRequests.value[epic.id],
                     integrationPending: epicsAwaitingIntegrationApproval.contains(epic.id),
                     isCollapsed: collapsed,
+                    archivable: lane.archivable,
                     onToggleCollapse: { toggleCollapse(epic) },
+                    onArchive: { archiveDoneTasks(epic) },
                     onRequestIntegration: { requestIntegration(epic) },
                     onOpenPullRequest: { openPullRequest(epic) },
                     onClose: { planClosure(epic, as: $0) }
@@ -616,6 +640,14 @@ struct TaskBoardView: View {
         guard !ids.isEmpty else { return }
         do {
             try TaskStore(env.db).archive(ids: ids)
+        } catch {
+            errorMessage = errorText(error)
+        }
+    }
+
+    private func archiveDoneTasks(_ epic: Epic) {
+        do {
+            try Board(env.db).archiveDoneTasks(epicId: epic.id)
         } catch {
             errorMessage = errorText(error)
         }
