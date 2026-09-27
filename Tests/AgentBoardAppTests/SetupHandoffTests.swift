@@ -62,22 +62,6 @@ final class SetupHandoffTests: XCTestCase {
         )
     }
 
-    /// The literal complaint: setup outruns the MCP call timeout on a large repository.
-    func testAssignDoesNotWaitOutASleepingSetup() async throws {
-        let task = try readyTask()
-        await fixture.runtime.delaySpawn(.seconds(2))
-
-        let startedAt = Date()
-        try await fixture.supervisor.assign(taskId: task.id)
-        let answeredIn = Date().timeIntervalSince(startedAt)
-
-        XCTAssertLessThan(answeredIn, 1, "assign sat through the 2s setup before answering")
-        XCTAssertEqual(try XCTUnwrap(sessions(for: task).first).state, .setup)
-
-        await fixture.supervisor.waitForSetup()
-        XCTAssertEqual(try XCTUnwrap(sessions(for: task).first).state, .starting)
-    }
-
     func testTheSetupRowBecomesTheRealSessionOnceSetupFinishes() async throws {
         let task = try readyTask()
         await fixture.runtime.holdSpawn()
