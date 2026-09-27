@@ -5,10 +5,18 @@ signing, notarization, or public distribution.
 
 ## 1. Write the RELEASES.md entry
 
-Add a new `## <version> — YYYY-MM-DD` heading at the top of `RELEASES.md`
-(newest first — the app's Help-menu window renders the whole file in that
-order). Write it for whoever is running the app, not the commit log: what
-changed, in plain language, grouped however reads best.
+Run `/cut-release [version]` in a Claude Code session in this repo, connected
+to the `agent-board` MCP server (`.claude/skills/cut-release/SKILL.md`). It
+checks you're on `origin/main`, gathers every `Release notes: <epic>` note not
+yet compiled and every user-visible merge since the last cut, writes the new
+entry, verifies it, commits `RELEASES.md` alone, and marks each note it used
+with a `Compiled` section. It never pushes, tags or opens a pull request. With
+no version it bumps the minor version.
+
+To do it by hand instead: add a new `## <version> — YYYY-MM-DD` heading at the
+top of `RELEASES.md` (newest first — the app's Help-menu window renders the
+whole file in that order). Write it for whoever is running the app, not the
+commit log: what changed, in plain language, grouped however reads best.
 
 There is deliberately no `Unreleased` section. Every heading is compared
 against the running version — both to decide what to show in the Help menu
@@ -18,14 +26,22 @@ to be a real, already-decided version the moment it's written.
 Per-epic release notes are **not** kept in `RELEASES.md` as epics land. Each
 epic writes its own note on the `agent-board` project instead, titled
 `Release notes: <epic>`. Find the ones written since the last cut with
-`search_notes("Release notes:")` on that project; none of them are marked
-"already compiled," so check each one against what the current top heading in
-`RELEASES.md` already says before folding it in — an epic's note sometimes
-describes work that a still-open earlier entry already covered in different
-words. Once you've gathered the notes for everything not yet reflected, write
-the new heading and commit `RELEASES.md`.
+`search_notes("Release notes:")` on that project and skip every note that has
+a `Compiled` section — that section, "Compiled into <version> (<sha>).", is the
+only record that a note already went into a release. Check the rest against
+the code on `main`, fold them in, commit `RELEASES.md`, then `append_section`
+a `Compiled` section onto each note you used.
 
 ## 2. Build
+
+Once the cut has merged and your checkout is on it, run `/cut-release --build`
+(`Scripts/cut-release.sh build`). It refuses unless `RELEASES.md`'s newest
+heading is newer than the version of the installed
+`/Applications/Agent Board.app`, so an already-installed version can't be
+rebuilt and reinstalled with nothing new for What's New to show. Then it runs
+`release.sh` and prints the DMG path.
+
+By hand:
 
 ```
 Scripts/release.sh [--allow-dirty]
