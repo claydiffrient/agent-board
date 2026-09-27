@@ -45,6 +45,20 @@ public enum EpicLaneCollapse {
     public static func defaultsKey(epicId: String) -> String { "epicLaneCollapsed.\(epicId)" }
 }
 
+/// Whether an epic gets a lane at all (SPEC §10). A finished epic leaves the board once every task
+/// of it is archived; Show Archived brings it back. Unfinished epics always keep theirs, even empty.
+public enum EpicLaneVisibility {
+    public static func isShown(state: EpicState, archived: some Sequence<Bool>, showArchived: Bool) -> Bool {
+        showArchived || !state.isTerminal || archived.contains(false)
+    }
+
+    /// What the lane header's Archive action would archive: exactly the rows `ArchiveSweep.archiveEpic`
+    /// stamps, so the button is never offered for a click that archives nothing.
+    public static func archivable(state: EpicState, tasks: some Sequence<BoardTask>) -> [BoardTask] {
+        state == .done ? tasks.filter(ArchiveSweep.isSweepable) : []
+    }
+}
+
 /// Per-viewer collapse state. `UserDefaults` on purpose: this is a view preference, not board state,
 /// and must never reach the database.
 public struct EpicCollapseStore {

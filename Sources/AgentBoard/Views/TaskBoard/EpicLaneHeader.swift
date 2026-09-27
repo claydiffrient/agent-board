@@ -7,7 +7,9 @@ struct EpicLaneHeader: View {
     var pullRequest: PullRequestReference?
     let integrationPending: Bool
     let isCollapsed: Bool
+    let archivable: Int
     let onToggleCollapse: () -> Void
+    let onArchive: () -> Void
     let onRequestIntegration: () -> Void
     let onOpenPullRequest: () -> Void
     let onClose: (EpicClosure) -> Void
@@ -43,6 +45,11 @@ struct EpicLaneHeader: View {
                 .background(Capsule().fill(Color.secondary.opacity(0.2)))
             ForEach(actions.filter { $0.closure == nil }, id: \.self) { action in
                 button(action)
+            }
+            if archivable > 0 {
+                Button(TaskArchive.buttonTitle(count: archivable), action: onArchive)
+                    .controlSize(.small)
+                    .help("Hide this epic's done tasks from the board. Nothing is deleted; with all of them archived the lane leaves the board until Show Archived is on.")
             }
             if !closures.isEmpty {
                 Menu {

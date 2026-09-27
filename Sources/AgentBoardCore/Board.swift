@@ -1208,6 +1208,21 @@ public struct Board: Sendable {
         )
     }
 
+    /// The done epic lane's Archive action (SPEC §10, §4): the same sweep `afterEpicMerge` runs on merge,
+    /// so a task outside `done`, or one a human unarchived, is left alone under every policy.
+    @discardableResult
+    public func archiveDoneTasks(epicId: String) throws -> [String] {
+        try db.writer.write { db in
+            guard let epic = try Epic.fetchOne(db, key: epicId) else {
+                throw BoardError.epicNotFound(epicId)
+            }
+            guard epic.state == .done else {
+                throw BoardError.archiveRequiresDoneEpic(epicId: epicId, state: epic.state)
+            }
+            return try ArchiveSweep.archiveEpic(db, epicId: epicId, at: .nowMillis)
+        }
+    }
+
     /// True when the epic holds at least one task and every one of them is in `done`.
     public func epicReadyForIntegration(epicId: String) throws -> Bool {
         try db.reader.read { db in

@@ -189,3 +189,12 @@ final class EpicJumpRailTests: XCTestCase {
         XCTAssertEqual(EpicJumpRail.entries(epics).map(\.laneId), ["no-epic", "e1", "e2"])
     }
 }
+
+final class EpicLaneVisibilityTests: XCTestCase {
+    func testAFinishedEpicLeavesTheBoardOnlyOnceNothingOfItIsUnarchived() {
+        XCTAssertFalse(EpicLaneVisibility.isShown(state: .done, archived: [true, true], showArchived: false))
+        XCTAssertFalse(EpicLaneVisibility.isShown(state: .abandoned, archived: [], showArchived: false))
+        XCTAssertTrue(EpicLaneVisibility.isShown(state: .done, archived: [true, false], showArchived: false))
+        XCTAssertTrue(EpicLaneVisibility.isShown(state: .active, archived: [], showArchived: false))
+    }
+}

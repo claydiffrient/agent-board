@@ -479,6 +479,7 @@ public enum BoardError: Error, Equatable, Sendable {
     case noShutdownOrder(String)
     /// Only a task in `done` may be archived; archiving live work would hide it from the board.
     case archiveRequiresDone(taskId: String, column: TaskColumn)
+    case archiveRequiresDoneEpic(epicId: String, state: EpicState)
     /// A setup row was resolved twice, or something ended it while its worktree was being prepared.
     case sessionNotInSetup(String, SessionState)
     /// `done` and `abandoned` are both terminal; one never silently becomes the other.
