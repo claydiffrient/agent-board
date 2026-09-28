@@ -18,6 +18,8 @@ struct AgentBoardApp: App {
             MainWindow()
                 .environment(appEnvironment)
         }
+        .defaultSize(width: 1200, height: 800)
+        .windowResizability(.contentMinSize)
         .commands {
             // `after:`, not `replacing:`. Measured through `MenuProbe`: this app's `.help` group
             // holds two items, "AgentBoard Help" and "Toggle Sidebar" (⌃⌘S) — SwiftUI puts the

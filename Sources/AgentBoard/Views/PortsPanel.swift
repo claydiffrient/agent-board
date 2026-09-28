@@ -178,10 +178,10 @@ struct PortRow: View {
 /// nobody to ask. An orphaned dev server is the row this epic exists for and it has no other
 /// affordance.
 ///
-/// **Height: at most `ceiling`, header included, and otherwise its content.** The panel sits in the
-/// sidebar's bottom `safeAreaInset`, which grows upward, so every point it claims comes out of the
-/// project list. The rows scroll under a fixed header; the scroll area is capped at the rows' own
-/// height, so a two-row panel is two rows tall rather than reserving the ceiling.
+/// **Height: at most `ceiling`, header included, and otherwise its content.** The panel sits between
+/// the project list and Add Project, so every point it claims comes out of the list. The rows scroll
+/// under a fixed header; the scroll area is capped at the rows' own height, so a two-row panel is two
+/// rows tall rather than reserving the ceiling.
 struct PortsPanel: View {
     @Environment(AppEnvironment.self) private var env
     @AppStorage private var expanded: Bool
@@ -205,10 +205,11 @@ struct PortsPanel: View {
         _expanded = AppStorage(wrappedValue: true, expandedKey)
     }
 
-    /// Twice the account-usage footer beneath it (SPEC §10). A footer with no reading draws nothing,
-    /// so the ceiling falls back to the full two-window footer's measured height.
-    static func ceiling(footerHeight: CGFloat) -> CGFloat {
-        2 * (footerHeight > 0 ? footerHeight : AccountUsageFooter.fullHeight)
+    /// Twice the account-usage footer beneath it (SPEC §10), and no more than the `room` the sidebar
+    /// has left once the project list keeps its reserve (SPEC §10.1). A footer with no reading draws
+    /// nothing, so the ceiling falls back to the full two-window footer's measured height.
+    static func ceiling(footerHeight: CGFloat, room: CGFloat = .infinity) -> CGFloat {
+        min(2 * (footerHeight > 0 ? footerHeight : AccountUsageFooter.fullHeight), max(0, room))
     }
 
     var body: some View {

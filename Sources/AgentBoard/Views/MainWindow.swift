@@ -2,6 +2,18 @@ import AgentBoardCore
 import AppKit
 import SwiftUI
 
+/// SPEC §10.1: the smallest window, and detail pane, at which every main-window screen lays out
+/// without overlap or clipped text.
+enum MainWindowLayout {
+    /// The Orchestrator and Coordinator screens: a 480pt console, a 1pt divider and a 280pt sidebar.
+    static let minimumDetailWidth: CGFloat = 761
+    static let sidebarMinimumWidth: CGFloat = 180
+    static let sidebarIdealWidth: CGFloat = 220
+    /// Seven 32pt sidebar rows: the three pinned rows, a section header and three projects.
+    static let sidebarListReserve: CGFloat = 224
+    static let minimumSize = CGSize(width: sidebarIdealWidth + minimumDetailWidth, height: 600)
+}
+
 struct MainWindow: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(\.openWindow) private var openWindow
@@ -17,6 +29,8 @@ struct MainWindow: View {
     @State private var collapsed: Set<String>
     @State private var errorMessage: String?
     @State private var usageFooterHeight: CGFloat = 0
+    @State private var fixedStackHeight: CGFloat = 0
+    @State private var sidebarHeight: CGFloat = 0
 
     private let collapseState: SidebarCollapseState
 
@@ -29,24 +43,10 @@ struct MainWindow: View {
         NavigationSplitView {
             sidebar
         } detail: {
-            switch selection {
-            case .roster:
-                RosterView(activity: LiveRosterActivity(db: env.db))
-            case .coordinator:
-                CoordinatorView()
-            case .atAGlance, .project:
-                if let project = projects.value.first(where: { $0.id == selection.projectId }) {
-                    ProjectDetailView(project: project)
-                        .id(project.id)
-                } else {
-                    AtAGlanceView(
-                        projects: projects.value, workspaces: workspaces.value,
-                        attention: attention.value, unreadReplies: CoordinatorRow.unreadReplies(coordinatorQueue.value),
-                        select: select
-                    )
-                }
-            }
+            detail
+                .frame(minWidth: MainWindowLayout.minimumDetailWidth)
         }
+        .frame(minWidth: MainWindowLayout.minimumSize.width, minHeight: MainWindowLayout.minimumSize.height)
         .task {
             await projects.run(ProjectStore(env.db).observeAll(), in: env.db.reader)
         }
@@ -84,6 +84,27 @@ struct MainWindow: View {
         }
         .errorAlert($errorMessage)
         .onChange(of: env.router.sequence) { openRoutedProject() }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        switch selection {
+        case .roster:
+            RosterView(activity: LiveRosterActivity(db: env.db))
+        case .coordinator:
+            CoordinatorView()
+        case .atAGlance, .project:
+            if let project = projects.value.first(where: { $0.id == selection.projectId }) {
+                ProjectDetailView(project: project)
+                    .id(project.id)
+            } else {
+                AtAGlanceView(
+                    projects: projects.value, workspaces: workspaces.value,
+                    attention: attention.value, unreadReplies: CoordinatorRow.unreadReplies(coordinatorQueue.value),
+                    select: select
+                )
+            }
+        }
     }
 
     /// Last in the launch sequence, after `supervisor.start()` returns — the server bind, the
@@ -127,20 +148,31 @@ struct MainWindow: View {
         Binding(get: { selection }, set: { select($0 ?? .atAGlance) })
     }
 
+    /// The list above the bottom stack rather than under a `safeAreaInset`: an inset lets the list
+    /// scroll beneath it, so every row past the fold painted under the stack's text (SPEC §10.1).
     private var sidebar: some View {
-        List(selection: sidebarSelection) {
-            ForEach(SidebarSelection.pinned, id: \.self) { item in
-                pinnedRow(item)
-                    .tag(item)
+        VStack(spacing: 0) {
+            List(selection: sidebarSelection) {
+                ForEach(SidebarSelection.pinned, id: \.self) { item in
+                    pinnedRow(item)
+                        .tag(item)
+                }
+                ForEach(sections) { section in
+                    sectionView(section)
+                }
             }
-            ForEach(sections) { section in
-                sectionView(section)
+            .frame(minHeight: MainWindowLayout.sidebarListReserve)
+            .overlay {
+                if projects.value.isEmpty && workspaces.value.isEmpty {
+                    Text("No projects yet")
+                        .foregroundStyle(.secondary)
+                }
             }
-        }
-        .navigationSplitViewColumnWidth(min: 180, ideal: 220)
-        .safeAreaInset(edge: .bottom) {
+            PortsPanel(ceiling: PortsPanel.ceiling(
+                footerHeight: usageFooterHeight,
+                room: sidebarHeight - MainWindowLayout.sidebarListReserve - fixedStackHeight
+            ))
             VStack(spacing: 0) {
-                PortsPanel(ceiling: PortsPanel.ceiling(footerHeight: usageFooterHeight))
                 HStack(spacing: 4) {
                     Button {
                         addProject()
@@ -155,13 +187,10 @@ struct MainWindow: View {
                 AccountUsageFooter(model: env.accountUsage)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { usageFooterHeight = $0 }
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { fixedStackHeight = $0 }
         }
-        .overlay {
-            if projects.value.isEmpty && workspaces.value.isEmpty {
-                Text("No projects yet")
-                    .foregroundStyle(.secondary)
-            }
-        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { sidebarHeight = $0 }
+        .navigationSplitViewColumnWidth(min: MainWindowLayout.sidebarMinimumWidth, ideal: MainWindowLayout.sidebarIdealWidth)
     }
 
     @ViewBuilder

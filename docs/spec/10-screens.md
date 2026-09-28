@@ -427,11 +427,13 @@ is never a row — it is excluded inside the sweep, not by this panel.
 The panel is never taller than twice the account-usage footer beneath it,
 header included: 286 points against the full two-window footer's measured 143.
 The ceiling tracks the footer's live height, and falls back to that 143 when the
-footer has no reading to draw. Below the ceiling the panel is as tall as its
-rows; at it, the rows scroll under a header that stays put, because the header
-carries the only refresh button and the collapse chevron. The sidebar's bottom
-inset grows upward, so every point the panel claims comes out of the project
-list.
+footer has no reading to draw. It is also never taller than the room the sidebar
+has left once the project list keeps its reserve (§10.1), so in a short window
+the panel gives way before the list does. Below the ceiling the panel is as tall
+as its rows; at it, the rows scroll under a header that stays put, because the
+header carries the only refresh button and the collapse chevron. The sidebar's
+bottom stack grows upward, so every point the panel claims comes out of the
+project list.
 
 Two link targets in a row, going to different places on purpose. The number
 opens `http://localhost:<port>` in the default browser. The owner name opens the
@@ -601,3 +603,45 @@ menu is empty — and replacing the group deletes both, taking the shortcut with
 it. Neither placement affects the Help search field: AppKit adds that to whatever
 menu is `NSApp.helpMenu` when the menu opens, and it is never an item in the
 built menu.
+
+### 10.1 Main window size
+
+**The rule: at or above the minimum window size and the minimum detail width,
+every main-window screen lays out with no view drawn over another and no text
+clipped.** A table or board that scrolls sideways is laid out, not clipped; a
+label cut off by its container is not. Below the minimum the window does not
+resize: the scene declares `.windowResizability(.contentMinSize)` and
+`MainWindow` carries a matching minimum frame, so AppKit refuses the drag rather
+than SwiftUI squeezing a screen past its own minimums. The screens the rule
+covers are At a Glance, Roster, Coordinator, a project's Orchestrator, Task
+Board, Status and Notes, and the project settings sheet over them.
+
+| | Minimum | Why |
+|---|---|---|
+| Detail pane width | 761pt | The Orchestrator and Coordinator screens are the widest fixed layouts: a 480pt console, the split's 1pt divider and a 280pt approvals or requests sidebar. At 760 the sidebar's trailing point is cut off. |
+| Sidebar width | 180pt, 220pt ideal | Unchanged. The bottom stack holds its measured heights at 180 (the usage footer is 143pt at both widths). |
+| Window width | 981pt | The sidebar's 220pt ideal plus the 761pt detail minimum, so the default sidebar never pushes a screen below its own minimum. It also holds the 780pt project settings sheet. |
+| Window height | 600pt | The tallest fixed stack a screen needs is the sidebar's: the project list's reserve plus Add Project, the notifications-off notice and the usage footer. Measured at the 180pt sidebar: 44 + 86 + 143 = 273pt, plus 224 for the list, is 497pt of the 548 a 600pt window leaves under a 52pt toolbar (the unified
+toolbar's usual height, assumed: an offscreen test window has no toolbar). The remainder goes to the Ports panel's header and rows. 600 also holds the settings sheet's 480pt minimum under the toolbar. |
+
+**The sidebar list always keeps seven rows' worth of height** (224pt, at the
+sidebar's 32pt row pitch: the three pinned rows, a section header and three
+projects), and scrolls within it. The bottom stack — Ports panel, Add Project…,
+the notifications-off notice and the usage footer — sits *below* the list, not
+in a `safeAreaInset` over it: an inset lets the list scroll beneath it, so any
+row past the fold is painted under the stack's text at every window height, not
+only a short one. The Ports panel is the only part of the stack that shrinks. Its
+ceiling (§10) is also bounded by the column's height less the list's reserve and
+the rest of the stack, down to its header line. The usage footer never collapses,
+because it is the one element whose reading has no other place in the window, and
+the notice and Add Project are one or two lines each.
+
+Measured at the minimum, rendered offscreen at 761×548 for a detail pane under
+the toolbar: At a Glance fits three card columns; Roster, Orchestrator, Notes and
+Coordinator lay out at their own minimums; the Task Board scrolls sideways
+through fixed 250pt columns, which it does at any width. Status is the one screen
+the minimum does not serve well. Its session table's column minimums alone sum
+to 760pt before cell padding, so it scrolls sideways at any detail width below
+about 920pt, and Actions starts out of view. That is a column redesign rather
+than a size, and it is filed as its own proposal rather than folded into this
+rule.

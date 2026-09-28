@@ -52,7 +52,7 @@ Subsections stay in their parent's file. Numbers do not change when a title does
 - **§10 [Screens](docs/spec/10-screens.md)** — every screen, one bold-titled
   entry each: At a Glance, Shut Down, Orchestrator Command, Stop All, Terminal,
   Task Board, Status, Roster, Coordinator, Notes, Project sidebar, Ports,
-  Project settings, What's New in Agent Board.
+  Project settings, What's New in Agent Board. §10.1 Main window size
 
 - **§11 [Milestones](docs/spec/11-milestones.md)** — M0–M4, what each proved,
   and the gate it set for what came next.
