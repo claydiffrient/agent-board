@@ -251,7 +251,10 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   it, nor are `gh`, `node` or `npx`. Agent Board looks `claude` up at its known
   install paths, and gives every agent process the PATH printed by the user's
   interactive login shell (`$SHELL -i -l -c`), resolved once per launch off the
-  main thread; a terminal awaits it before starting its process. A
+  main thread; a terminal awaits it before starting its process. Every git
+  command Agent Board runs gets the same PATH, so the repository hooks git
+  fires — the `post-checkout` setup `git worktree add` runs — and the
+  `WorktreeRemove` hooks see the user's tools, not launchd's four directories. A
   human shell builds its own PATH and keeps the inherited one.
 - **No programmatic read of account-wide remaining subscription quota exists.**
   Every budget in this spec is a self-imposed ceiling over what Agent Board
@@ -354,7 +357,12 @@ For a task `T` in project `P`:
    - **`worktree`** always places, and always worktrees: `git worktree add
      <worktrees>/<task-id> -b agentboard/<task-id> <base>` where `<base>` is
      the epic branch, or the project base branch for a standalone task. This
-     is every project's behavior from before this setting existed.
+     is every project's behavior from before this setting existed. Git exits
+     with the `post-checkout` hook's status and leaves the new worktree on
+     disk when it fails, while a spawn adopts any worktree already at its
+     path; so a failed `git worktree add` removes the worktree it created
+     (keeping the branch), and the retry runs the hook afresh instead of
+     starting a worker in a checkout whose setup never finished.
    - **`shared`** places in the project's own checkout — `P`'s repository root,
      not a path under `<worktrees>` — checking the wanted branch out there
      (`git checkout <branch>`, or `git checkout -b <branch> <base>` the first
