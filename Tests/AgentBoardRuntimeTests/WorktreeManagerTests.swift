@@ -501,6 +501,27 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertTrue(message.contains("no such target //:lint-staged"), message)
     }
 
+    /// A Finder launch hands git launchd's PATH, so a setup that calls a Homebrew tool dies unless
+    /// the manager applies the login-shell PATH (SPEC §2).
+    func testAPostCheckoutSetupRunsUnderTheResolvedPath() throws {
+        let bin = sandbox.appendingPathComponent("login-shell-bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let tool = bin.appendingPathComponent("agentboard-setup-tool")
+        try "#!/bin/sh\ntouch setup-ran\n".write(to: tool, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+        try installPostCheckoutSetup("agentboard-setup-tool")
+        let resolvedPath = "\(bin.path):/usr/bin:/bin"
+        let manager = WorktreeManager(
+            repoPath: repo, worktreeRoot: worktrees, hookSettingsURL: hookSettings,
+            attribution: .unattributable,
+            environment: { ChildEnvironment.sanitized(path: resolvedPath) }
+        )
+
+        let path = try manager.create(name: "task-1", branch: "agentboard/task-1", base: "main")
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.appendingPathComponent("setup-ran").path))
+    }
+
     private func installPostCheckoutSetup(_ body: String) throws {
         let hooks = repo.appendingPathComponent(".git/hooks")
         try FileManager.default.createDirectory(at: hooks, withIntermediateDirectories: true)
