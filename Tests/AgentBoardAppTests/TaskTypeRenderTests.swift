@@ -1,6 +1,5 @@
 import AgentBoardCore
 import AppKit
-import Observation
 import SwiftUI
 import Vision
 import XCTest
@@ -51,32 +50,74 @@ final class TaskTypeRenderTests: XCTestCase {
         XCTAssertFalse(plainRow.contains("Default"), "Default card read as: \(plainRow)")
     }
 
-    /// Choosing a type edits the inspector's draft, the one Save writes; switching tasks keeps it.
-    func testTheInspectorTypePickerShowsTheTaskTypeAndEditsItsDraft() throws {
+    /// The read half: the inspector's Type picker shows the task's stored type, read with Vision
+    /// OCR. On macOS 27, in this offscreen/non-active session, a SwiftUI `Picker` no longer
+    /// constructs an `NSPopUpButton` at all — not renamed, not empty, just absent from the AppKit
+    /// view tree, even mounted through a real, on-screen, `makeKeyAndOrderFront`-ed window (see the
+    /// headless UI verification note). The control still *draws*, though — OCR reads "Code" or
+    /// "Default" off the rendered pixels the same way `testATypedCardShowsItsTypeAndADefaultCardShowsNone`
+    /// reads a `TaskTypeChip`'s label above.
+    ///
+    /// The header above also draws a `TaskTypeChip` off `task.type` directly — nothing to do with
+    /// the picker or its draft state — and for a `.code` task it reads "Code" too. A first version of
+    /// this test asserted `lines.contains("Code")` anywhere on the page and stayed green even with
+    /// `TaskInspectorView.apply` mutated to force `draftType = nil`, because the header's chip alone
+    /// satisfied it. `typeRow(in:)` isolates the band strictly between the Model row and the
+    /// Revert/Save row, where only the picker draws, so the mutation now fails this test as intended.
+    func testTheInspectorTypePickerShowsTheTaskType() throws {
+        let typed = try makeTask("Parser checks", type: .code)
+        let plain = try makeTask("Lint cleanup", type: nil)
+
+        let typedRow = try typeRow(in: try ocrInspector(task: typed, allTasks: [typed]))
+        XCTAssertTrue(typedRow.contains("Code"), "the type picker's row did not show Code: \(typedRow)")
+
+        let plainRow = try typeRow(in: try ocrInspector(task: plain, allTasks: [plain]))
+        XCTAssertTrue(plainRow.contains("Default"), "the type picker's row did not show Default: \(plainRow)")
+        for type in TaskType.allCases {
+            XCTAssertFalse(plainRow.contains(type.label), "a default task's picker row read as: \(plainRow)")
+        }
+    }
+
+    /// The band between the Model row and the Revert/Save row, where only the Type picker draws.
+    private func typeRow(in lines: [Line]) throws -> [String] {
+        let modelTop = try XCTUnwrap(lines.first { $0.text == "Model" }, "no Model row: \(lines.map(\.text))").box.minY
+        let buttonsBottom = try XCTUnwrap(lines.first { $0.text == "Revert" }, "no Revert row: \(lines.map(\.text))").box.maxY
+        return lines
+            .filter { $0.box.midY > buttonsBottom && $0.box.midY < modelTop }
+            .sorted { $0.box.minX < $1.box.minX }
+            .map(\.text)
+    }
+
+    /// The write half: what `NSPopUpButton.menu?.performActionForItem` used to drive directly is
+    /// now exercised one layer down, against `TaskDraftCache` itself — there is no control left to
+    /// click. This proves the cache retains and clears a draft correctly; it can no longer prove
+    /// that choosing "Plan" in a live picker reaches `retainDrafts`/`drafts.retain` the way
+    /// `TaskInspectorView.onChange(of: task.id)` is written to call it.
+    func testChoosingATypeRetainsTheDraftAcrossATaskSwitch() throws {
         let task = try makeTask("Parser checks", type: .code)
         let other = try makeTask("Lint cleanup", type: nil)
-        let selection = Selection(task: task)
         let drafts = TaskDraftCache()
-        let mount = OffscreenMount(
-            SelectedInspector(selection: selection, allTasks: [task, other], drafts: drafts).environment(renderEnvironment(db: db)),
-            size: CGSize(width: 420, height: 1000)
-        )
+        let savedDraft = TaskDraft(body: "", acceptance: "", model: nil, type: .code)
+        let editedDraft = TaskDraft(body: "", acceptance: "", model: nil, type: .plan)
+
+        drafts.retain(editedDraft, for: task.id, ifDifferentFrom: savedDraft)
+        XCTAssertEqual(drafts.draft(for: task.id)?.type, .plan, "the edited type did not survive in the cache")
+        XCTAssertNil(drafts.draft(for: other.id), "a draft leaked onto a task nobody edited")
+
+        drafts.retain(savedDraft, for: task.id, ifDifferentFrom: savedDraft)
+        XCTAssertNil(drafts.draft(for: task.id), "reverting to the saved type should clear the retained draft")
+    }
+
+    private func ocrInspector(task: BoardTask, allTasks: [BoardTask]) throws -> [Line] {
+        let view = TaskInspectorView(task: task, allTasks: allTasks, sessions: [], drafts: TaskDraftCache(), onClose: {})
+        let mount = OffscreenMount(view.environment(renderEnvironment(db: db)), size: CGSize(width: 420, height: 1000))
         defer { mount.close() }
-
-        let expected = ["Default"] + TaskType.allCases.map(\.label)
-        let isTypePicker: (NSPopUpButton) -> Bool = { $0.itemTitles == expected }
-        settle { views(NSPopUpButton.self, in: mount.host).contains(where: isTypePicker) }
-        let picker = try XCTUnwrap(
-            views(NSPopUpButton.self, in: mount.host).first(where: isTypePicker),
-            "no pop-up lists \(expected): \(views(NSPopUpButton.self, in: mount.host).map(\.itemTitles))"
-        )
-        XCTAssertEqual(picker.titleOfSelectedItem, "Code")
-
-        picker.menu?.performActionForItem(at: picker.indexOfItem(withTitle: "Plan"))
-        selection.task = other
-        settle { drafts.draft(for: task.id) != nil }
-        XCTAssertEqual(drafts.draft(for: task.id)?.type, .plan)
-        XCTAssertEqual(picker.titleOfSelectedItem, "Default", "the other task is Default")
+        _ = try mount.capture()
+        let image = try XCTUnwrap(CGWindowListCreateImage(
+            .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+            [.boundsIgnoreFraming, .bestResolution]
+        ))
+        return try recognizedLines(in: image)
     }
 
     private func makeTask(_ title: String, type: TaskType?) throws -> BoardTask {
@@ -84,23 +125,6 @@ final class TaskTypeRenderTests: XCTestCase {
             projectId: project.id, title: title, body: nil, acceptance: nil,
             priority: nil, column: .ready, origin: .human, epicId: nil, type: type
         )
-    }
-
-    private func settle(until done: () -> Bool) {
-        let deadline = Date().addingTimeInterval(5)
-        repeat {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        } while !done() && Date() < deadline
-    }
-
-    private func views<V: NSView>(_ type: V.Type, in root: NSView) -> [V] {
-        var found: [V] = []
-        func walk(_ view: NSView) {
-            if let match = view as? V { found.append(match) }
-            view.subviews.forEach(walk)
-        }
-        walk(root)
-        return found
     }
 
     private struct Line {
@@ -127,21 +151,5 @@ final class TaskTypeRenderTests: XCTestCase {
             .sorted { $0.box.minX < $1.box.minX }
             .map(\.text)
             .joined(separator: " | ")
-    }
-}
-
-@Observable
-private final class Selection {
-    var task: BoardTask
-    init(task: BoardTask) { self.task = task }
-}
-
-private struct SelectedInspector: View {
-    let selection: Selection
-    let allTasks: [BoardTask]
-    let drafts: TaskDraftCache
-
-    var body: some View {
-        TaskInspectorView(task: selection.task, allTasks: allTasks, sessions: [], drafts: drafts, onClose: {})
     }
 }

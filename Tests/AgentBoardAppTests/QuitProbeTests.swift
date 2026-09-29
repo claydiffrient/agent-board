@@ -25,10 +25,36 @@ final class QuitProbeTests: XCTestCase {
             run.report?["willTerminateFired"] as? Bool, false,
             "termination got far enough to post willTerminate, so the sheet is not what stopped it"
         )
+        // `respondsToShouldTerminate` itself is no longer a stable cross-OS signal: on macOS 27,
+        // `NSApp.delegate` (reported here as `delegate == "AppDelegate"`, SwiftUI's own synthesized
+        // default) answers `applicationShouldTerminate(_:)` even though this target defines neither
+        // an `AppDelegate` nor that method; on macOS 26 (CI's runner) it does not. Asserting either
+        // boolean here would tie this test to whichever OS wrote it. What's actually in scope for
+        // "this refusal may be ours" is answered instead below, by scanning this target's own
+        // sources rather than reading a platform-supplied delegate's behavior.
         XCTAssertEqual(
-            run.report?["respondsToShouldTerminate"] as? Bool, false,
-            "something in this app now answers applicationShouldTerminate — this refusal may be ours"
+            Self.filesDefining("func applicationShouldTerminate"), [],
+            "this target now implements applicationShouldTerminate itself — the sheet refusal above may be ours, not the platform's"
         )
+    }
+
+    /// Enumerates `Sources/**/*.swift` for files containing `needle`, the way
+    /// `MessagePTYIsolationTests` proves the PTY-write invariant from source rather than behavior.
+    private static func filesDefining(_ needle: String) -> [String] {
+        let sourcesRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // AgentBoardAppTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // repo root
+            .appendingPathComponent("Sources")
+        guard let enumerator = FileManager.default.enumerator(at: sourcesRoot, includingPropertiesForKeys: nil)
+        else { return [] }
+        var matches: [String] = []
+        for case let url as URL in enumerator where url.pathExtension == "swift" {
+            if let text = try? String(contentsOf: url, encoding: .utf8), text.contains(needle) {
+                matches.append(url.lastPathComponent)
+            }
+        }
+        return matches
     }
 
     func testASecondOrdinaryWindowDoesNotStopTermination() throws {
