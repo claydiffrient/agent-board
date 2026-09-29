@@ -621,8 +621,7 @@ Board, Status and Notes, and the project settings sheet over them.
 | Detail pane width | 761pt | The Orchestrator and Coordinator screens are the widest fixed layouts: a 480pt console, the split's 1pt divider and a 280pt approvals or requests sidebar. At 760 the sidebar's trailing point is cut off. |
 | Sidebar width | 180pt, 220pt ideal | Unchanged. The bottom stack holds its measured heights at 180 (the usage footer is 143pt at both widths). |
 | Window width | 981pt | The sidebar's 220pt ideal plus the 761pt detail minimum, so the default sidebar never pushes a screen below its own minimum. It also holds the 780pt project settings sheet. |
-| Window height | 600pt | The tallest fixed stack a screen needs is the sidebar's: the project list's reserve plus Add Project, the notifications-off notice and the usage footer. Measured at the 180pt sidebar: 44 + 86 + 143 = 273pt, plus 224 for the list, is 497pt of the 548 a 600pt window leaves under a 52pt toolbar (the unified
-toolbar's usual height, assumed: an offscreen test window has no toolbar). The remainder goes to the Ports panel's header and rows. 600 also holds the settings sheet's 480pt minimum under the toolbar. |
+| Window height | 600pt | The tallest fixed stack a screen needs is the sidebar's: the project list's reserve plus Add Project, the notifications-off notice and the usage footer. Measured at the 180pt sidebar: 44 + 86 + 143 = 273pt, plus 224 for the list, is 497pt of the 548 a 600pt window leaves under a 52pt toolbar (the unified toolbar's usual height, assumed: an offscreen test window has no toolbar). The remainder goes to the Ports panel's header and rows. 600 also holds the settings sheet's 480pt minimum under the toolbar. |
 
 **The sidebar list always keeps seven rows' worth of height** (224pt, at the
 sidebar's 32pt row pitch: the three pinned rows, a section header and three
