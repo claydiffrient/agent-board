@@ -75,18 +75,23 @@ public struct WorktreeManager: Sendable {
     /// construction site, because the two intents — "this one only does git plumbing" and "nobody
     /// wired the ledger" — are otherwise the same value and only one of them is correct.
     public var attribution: CommitAttributionSource
+    /// Git and the repository hooks it fires run under the login-shell PATH, not launchd's (SPEC §2).
+    /// Blocks on the first lookup, so only call into this type off the main thread.
+    public var environment: @Sendable () -> [String: String]
 
     public init(
         repoPath: URL,
         worktreeRoot: URL,
         hookSettingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/settings.json"),
-        attribution: CommitAttributionSource
+        attribution: CommitAttributionSource,
+        environment: @escaping @Sendable () -> [String: String] = { ChildEnvironment.sanitized() }
     ) {
         self.repoPath = repoPath
         self.worktreeRoot = worktreeRoot
         self.hookSettingsURL = hookSettingsURL
         self.attribution = attribution
+        self.environment = environment
     }
 
     /// Reuses `branch` if it already exists so a retry sees what the previous attempt built.
@@ -96,8 +101,8 @@ public struct WorktreeManager: Sendable {
         if try branchExists(branch) {
             try addWorktree(["worktree", "add", path.path, branch], at: path)
         } else {
+            defer { if (try? branchExists(branch)) == true { recordBranchBase(branch, base: base) } }
             try addWorktree(["worktree", "add", path.path, "-b", branch, base], at: path)
-            recordBranchBase(branch, base: base)
         }
         return path
     }
@@ -487,7 +492,8 @@ public struct WorktreeManager: Sendable {
                     executable: URL(fileURLWithPath: "/bin/zsh"),
                     arguments: ["-lc", command],
                     cwd: repoPath,
-                    stdin: stdin
+                    stdin: stdin,
+                    environment: environment()
                 )
                 if result.status != 0 {
                     diagnostics.append("WorktreeRemove hook `\(command)` exited \(result.status): \(result.stderr)")
@@ -516,12 +522,22 @@ public struct WorktreeManager: Sendable {
     /// `git worktree add` runs the repository's `post-checkout` hook and exits with the hook's
     /// status, so a repository that sets a new worktree up from that hook reports its setup failure
     /// as this command's output — including the failure a shell-unsafe worktree path causes.
+    ///
+    /// Git leaves the worktree on disk when the hook fails, and a retry adopts any worktree it finds,
+    /// so a worktree this call created is removed again (the branch is kept) — SPEC §3.1 step 2.
     private func addWorktree(_ args: [String], at path: URL) throws {
+        let existed = FileManager.default.fileExists(atPath: path.path)
         let result = try gitRaw(args, cwd: repoPath)
         guard result.status != 0 else { return }
-        throw AgentRuntimeError(
-            WorktreePathDiagnosis.explain(Self.failure(args, result), worktreePath: path.path)
-        )
+        var message = WorktreePathDiagnosis.explain(Self.failure(args, result), worktreePath: path.path)
+        if !existed, (try? list())?.contains(where: { Self.samePath($0.path, path) }) == true {
+            let removal = try gitRaw(["worktree", "remove", "--force", path.path], cwd: repoPath)
+            if removal.status != 0 {
+                message += "\n\nThe half-set-up worktree could not be removed, so a retry will adopt it: "
+                    + Self.failure(["worktree", "remove", "--force", path.path], removal)
+            }
+        }
+        throw AgentRuntimeError(message)
     }
 
     private static func failure(_ args: [String], _ result: CommandResult) -> String {
@@ -529,7 +545,7 @@ public struct WorktreeManager: Sendable {
     }
 
     func gitRaw(_ args: [String], cwd: URL) throws -> CommandResult {
-        var env = ProcessInfo.processInfo.environment
+        var env = environment()
         env["GIT_TERMINAL_PROMPT"] = "0"
         return try ProcessRunner.run(
             executable: URL(fileURLWithPath: Self.gitPath),
