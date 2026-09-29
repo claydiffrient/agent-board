@@ -85,23 +85,30 @@ final class AcceptLandingTests: XCTestCase {
         XCTAssertNotEqual(accepted.landing, .unlanded)
         XCTAssertFalse(accepted.needsLanding)
         XCTAssertEqual(try awaitingLandingIds(), [])
-        XCTAssertEqual(try landingReports(), [])
+        let body = try XCTUnwrap(try landingReports().first, "an accept that merged nothing said nothing")
+        XCTAssertTrue(body.contains("nothing was merged"), body)
     }
 
-    /// Teardown reaps a branch whose work is already in, so by the time the merge looks there is no
-    /// branch left. That must read as landed, not as "nothing to land": the ledger tip ref outlives
-    /// the branch and says which it was.
-    func testABranchReapedBecauseItsWorkWasAlreadyInReadsAsLanded() async throws {
+    /// A sweep reaps a branch whose work someone else already merged, so the accept finds no branch.
+    /// That must read as landed, not as "nothing to land" — the ledger tip ref outlives the branch
+    /// and says which it was — and the report must say this accept merged nothing.
+    func testABranchReapedBeforeTheAcceptReadsAsLandedAndSaysItMergedNothing() async throws {
         let task = try makeTask(epicId: nil)
-        try fixture.worktreeWorker(task: task)
+        let session = try fixture.worktreeWorker(task: task)
+        let tip = try headOf("agentboard/\(task.id)")
+        try fixture.manager.setRef(TaskBranchLedger.tipRef(taskId: task.id), to: tip)
+        try fixture.git(["worktree", "remove", "--force", try XCTUnwrap(session.worktreePath)], cwd: fixture.repo)
+        try fixture.git(["branch", "-D", "agentboard/\(task.id)"], cwd: fixture.repo)
 
         try await fixture.supervisor.accept(taskId: task.id)
 
         let accepted = try XCTUnwrap(try fixture.tasks.get(task.id))
-        XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(task.id)"), "teardown was expected to reap it")
         XCTAssertEqual(accepted.landing, .landed)
         XCTAssertFalse(accepted.needsLanding)
         XCTAssertEqual(try awaitingLandingIds(), [])
+        let body = try XCTUnwrap(try landingReports().first, "an accept that merged nothing said nothing")
+        XCTAssertTrue(body.contains("merged nothing"), body)
+        XCTAssertTrue(body.contains(tip), body)
     }
 
     /// The worst shape of the bug: the branch is gone and the target does not carry its tip, so the
@@ -140,12 +147,13 @@ final class AcceptLandingTests: XCTestCase {
             )
         )
         try fixture.commitInto(worktree.path)
+        let taskHead = try headOf("agentboard/\(task.id)")
 
         try await fixture.supervisor.accept(taskId: task.id)
 
         let accepted = try XCTUnwrap(try fixture.tasks.get(task.id))
         XCTAssertEqual(accepted.landing, .landed)
-        XCTAssertEqual(try headOf(epic.branch), try headOf("agentboard/\(task.id)"))
+        XCTAssertEqual(try headOf(epic.branch), taskHead)
         XCTAssertEqual(try awaitingLandingIds(), [])
     }
 

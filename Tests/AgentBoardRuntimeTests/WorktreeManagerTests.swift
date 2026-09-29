@@ -225,7 +225,7 @@ final class WorktreeManagerTests: XCTestCase {
 
         let outcome = try manager.merge(
             taskBranch: "agentboard/task", into: "agentboard/epic-1",
-            taskTitle: "Add the widget", targetTitle: "Widgets", worktreeName: "merge"
+            taskTitle: "Add the widget", targetTitle: "Widgets"
         )
 
         XCTAssertEqual(outcome, .fastForwarded(head: taskHead))
@@ -233,7 +233,7 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(try manager.list().count, 1, "a fast-forward should not have cut a worktree")
     }
 
-    func testMergeIntoEpicUsesATemporaryWorktreeAndKeepsTheBranch() throws {
+    func testMergeIntoEpicMakesAMergeCommitWithoutAWorktree() throws {
         try manager.ensureBranch("agentboard/epic-1", from: "main")
         let work = try manager.create(name: "task", branch: "agentboard/task", base: "agentboard/epic-1")
         try addCommit("feature.txt", in: work)
@@ -246,14 +246,14 @@ final class WorktreeManagerTests: XCTestCase {
 
         let outcome = try manager.merge(
             taskBranch: "agentboard/task", into: "agentboard/epic-1",
-            taskTitle: "Add the widget", targetTitle: "Widgets", worktreeName: "merge"
+            taskTitle: "Add the widget", targetTitle: "Widgets"
         )
 
         guard case .merged(let head) = outcome else { return XCTFail("expected a merge, got \(outcome)") }
         XCTAssertEqual(try revParse("agentboard/epic-1"), head)
         XCTAssertNotEqual(head, epicBefore)
         XCTAssertTrue(try manager.branchExists("agentboard/epic-1"))
-        XCTAssertEqual(try manager.list().count, 1, "the temporary merge worktree was left behind")
+        XCTAssertEqual(try manager.list().count, 1, "a merge cut a worktree")
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktrees.appendingPathComponent("merge").path))
     }
 
@@ -270,7 +270,7 @@ final class WorktreeManagerTests: XCTestCase {
 
         let outcome = try manager.merge(
             taskBranch: "agentboard/task", into: "agentboard/epic-1",
-            taskTitle: "Add the widget", targetTitle: "Widgets", worktreeName: "merge"
+            taskTitle: "Add the widget", targetTitle: "Widgets"
         )
 
         XCTAssertEqual(outcome, .conflicted(files: ["schema.sql"]))
@@ -290,7 +290,7 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(
             try manager.merge(
                 taskBranch: "agentboard/task", into: "agentboard/epic-1",
-            taskTitle: "Add the widget", targetTitle: "Widgets", worktreeName: "merge"
+            taskTitle: "Add the widget", targetTitle: "Widgets"
             ),
             .alreadyMerged
         )
@@ -302,7 +302,7 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(
             try manager.merge(
                 taskBranch: "agentboard/never-ran", into: "agentboard/epic-1",
-                taskTitle: "Add the widget", targetTitle: "Widgets", worktreeName: "merge"
+                taskTitle: "Add the widget", targetTitle: "Widgets"
             ),
             .nothingToMerge
         )
@@ -314,7 +314,7 @@ final class WorktreeManagerTests: XCTestCase {
 
         let outcome = try manager.merge(
             taskBranch: "agentboard/task", into: "agentboard/epic-1",
-            taskTitle: "Add the widget", targetTitle: "Widgets", worktreeName: "merge"
+            taskTitle: "Add the widget", targetTitle: "Widgets"
         )
         guard case .skippedCheckedOut(let path) = outcome else {
             return XCTFail("expected the merge to defer to the checkout, got \(outcome)")
@@ -330,7 +330,7 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(
             try manager.merge(
                 taskBranch: "agentboard/task", into: "agentboard/epic-missing",
-                taskTitle: "Add the widget", targetTitle: "Widgets", worktreeName: "merge"
+                taskTitle: "Add the widget", targetTitle: "Widgets"
             ),
             .noTargetBranch("agentboard/epic-missing")
         )
@@ -353,7 +353,7 @@ final class WorktreeManagerTests: XCTestCase {
 
         let outcome = try manager.merge(
             taskBranch: taskBranch, into: epicBranch,
-            taskTitle: "Add the widget", targetTitle: "Widgets", worktreeName: "merge"
+            taskTitle: "Add the widget", targetTitle: "Widgets"
         )
 
         guard case .merged = outcome else { return XCTFail("expected a merge, got \(outcome)") }
