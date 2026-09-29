@@ -56,10 +56,23 @@ enum SupervisorError: LocalizedError {
         case .globalShutdownIncomplete(let failures):
             return "some projects could not be wound down:\n" + failures.joined(separator: "\n")
         case .dependencyNotOnBranch(let id, let title, let commit, let branch, let landing):
+            let next: String
+            switch landing {
+            case .unlanded?:
+                next = "Its landing is `unlanded`: the accept's merge failed or was skipped and will not run again. "
+                    + "Merge \(commit) into `\(branch)`, or dispatch a task to, then spawn again."
+            case .pending?, nil:
+                next = "Its landing is not settled, so the accept's merge may still be running. A merge that "
+                    + "succeeds sends no report, so do not wait for one: spawn again once "
+                    + "`git merge-base --is-ancestor \(commit) \(branch)` exits 0. If the landing turns "
+                    + "`unlanded` instead, merge \(commit) into `\(branch)` first."
+            case let other?:
+                next = "Its landing says `\(other.rawValue)`, but `\(branch)` lacks the commit, so the branch moved "
+                    + "after the accept. Merge \(commit) into `\(branch)`, then spawn again."
+            }
             return "spawn refused: this task depends on \(id) (\"\(title)\"), which was accepted, but its commit "
-                + "\(commit) is not on `\(branch)` (landing: \(landing?.label ?? "not recorded")). A worker cut "
-                + "from `\(branch)` now would start without it. Wait for that task's landing report, or merge "
-                + "the commit into `\(branch)`, then spawn again."
+                + "\(commit) is not on `\(branch)`. A worker cut from `\(branch)` now would start without it. "
+                + next
         }
     }
 }
@@ -1366,6 +1379,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         do {
             outcome = try await offMain {
                 try manager.ensureBranch(epicBranch, from: projectBase)
+                // Nothing to attribute, and the ledger's tip refs are all that is left to check.
+                guard try manager.branchExists(branch) else { return .nothingToMerge }
                 let base = try manager.mergeBase(branch, epicBranch) ?? projectBase
                 // A branch that predates the ledger has its attribution only in its old trailers,
                 // and this is the last moment anything reads it: reaping deletes the ref.
@@ -1389,13 +1404,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         switch outcome {
         case .nothingToMerge:
-            recordSharedLanding(memberIds, epic: epic, landing: .landed)
-            recordLanding(
-                task: task, epic: epic, landing: .landed,
-                detail: "`\(branch)`, shared by \(memberIds.count) tasks, does not exist, so nothing was merged "
-                    + "into the epic branch `\(epicBranch)`.",
-                advice: nil, reportAlways: true
-            )
+            await recordVanishedSharedBranch(branch, members: memberIds, accepted: task, epic: epic, project: project)
         case .alreadyMerged, .fastForwarded, .merged:
             recordSharedLanding(memberIds, epic: epic, landing: .landed)
             await reapSharedBranch(branch, epic: epic, project: project)
@@ -1425,6 +1434,77 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 advice: "Create `\(missing)`, then merge `\(branch)` into it."
             )
         }
+    }
+
+    /// SPEC §5: a shared branch already gone when its last member is accepted merged nothing, so
+    /// each member's landing is whether the epic branch holds the commits the ledger attributes to it.
+    private func recordVanishedSharedBranch(
+        _ branch: String, members memberIds: [String], accepted task: BoardTask, epic: Epic, project: Project
+    ) async {
+        let manager = worktreeManager(for: project)
+        let epicBranch = epic.branch
+        let ledger = TaskCommitStore(db)
+        let checked: [(id: String, commits: [String], missing: [String])]
+        do {
+            let wanted = try memberIds.map { (id: $0, shas: try ledger.shas(taskId: $0)) }
+            checked = try await offMain {
+                try wanted.map { member in
+                    let commits = try Self.ledgeredCommits(manager, taskId: member.id, shas: member.shas)
+                    let missing = try commits.filter {
+                        try !manager.commitExists($0) || !manager.isMerged(commit: $0, into: "refs/heads/\(epicBranch)")
+                    }
+                    return (member.id, commits, missing)
+                }
+            }
+        } catch {
+            recordLanding(
+                task: task, epic: epic, landing: .unlanded,
+                detail: "`\(branch)` was already gone when its last task was accepted, and whether the epic "
+                    + "branch `\(epicBranch)` holds its tasks' commits could not be checked: \(describe(error))",
+                advice: "Check each task's commits against `\(epicBranch)` by hand."
+            )
+            return
+        }
+        let gone = "`\(branch)`, shared by \(memberIds.count) task\(memberIds.count == 1 ? "" : "s"), was already "
+            + "gone when the last of them was accepted, so nothing was merged"
+        for member in checked {
+            guard let row = (try? tasks.get(member.id)) ?? nil else { continue }
+            let isAccepting = member.id == task.id
+            if member.commits.isEmpty {
+                recordLanding(
+                    task: row, epic: epic, landing: .noBranch,
+                    detail: gone + ", and the ledger attributes no commit to this task.",
+                    advice: nil, reportAlways: isAccepting
+                )
+            } else if member.missing.isEmpty {
+                recordLanding(
+                    task: row, epic: epic, landing: .landed,
+                    detail: gone + "; `\(epicBranch)` already contains every commit the ledger attributes to this task.",
+                    advice: nil, reportAlways: isAccepting
+                )
+            } else {
+                recordLanding(
+                    task: row, epic: epic, landing: .unlanded,
+                    detail: gone + ", and the epic branch `\(epicBranch)` lacks these commits the ledger attributes "
+                        + "to this task:\n" + member.missing.map { "- \($0)" }.joined(separator: "\n"),
+                    advice: "The branch that carried them is deleted. Dispatch a task to cherry-pick them onto `\(epicBranch)`."
+                )
+            }
+        }
+    }
+
+    /// The commits `task_commit` attributes to a shared-branch member, plus the tip the ledger kept
+    /// for it unless that tip is its base, which is how the ledger records "committed nothing".
+    private nonisolated static func ledgeredCommits(
+        _ manager: WorktreeManager, taskId: String, shas: [String]
+    ) throws -> [String] {
+        var commits = shas
+        if let tip = try manager.refCommit(TaskBranchLedger.tipRef(taskId: taskId)),
+           try tip != manager.refCommit(TaskBranchLedger.baseRef(taskId: taskId)),
+           !commits.contains(tip) {
+            commits.append(tip)
+        }
+        return commits
     }
 
     /// A shared branch's members all land at the same moment — the one merge carries every one of

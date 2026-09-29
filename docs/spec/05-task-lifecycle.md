@@ -55,8 +55,12 @@ nobody reviewed.
   reaped, or a commit `task_commit` attributes to it — naming the dependency,
   the commit, the branch and the landing. The accept's merge may still be
   running, or may have failed or been skipped; a worker cut then would start
-  without the work it builds on. A task whose branch already exists, a shared
-  placement and a reviewer cut nothing and are not checked.
+  without the work it builds on. A merge that succeeds queues no report, so the
+  refusal promises none: while the landing is unsettled it says to spawn again
+  once `git merge-base --is-ancestor <commit> <branch>` exits 0, and for an
+  `unlanded` dependency, or one whose landing the branch contradicts, it says to
+  merge the commit into the branch first. A task whose branch already exists, a
+  shared placement and a reviewer cut nothing and are not checked.
 - `running` — an `agent_session` row holds it. The board shows the agent, its
   spend, and elapsed time.
 - **Wound down** — a task whose worker was told to wind down (the shutdown
@@ -155,7 +159,12 @@ nobody reviewed.
   elsewhere reports the same way a task branch's would, naming that the one
   merge carries every task on it. The members' landings are written together, by
   the one merge that carries them: until it runs, each accepted member is
-  `unlanded`, and that merge marks every member `landed` at once.
+  `unlanded`, and that merge marks every member `landed` at once. A shared
+  branch already gone when its last member is accepted merges nothing and
+  writes no ledger, so each member's landing is read from git instead: `landed`
+  only when the epic branch contains every commit `task_commit` attributes to
+  it and the ledger's tip for it, `no_branch` when it has neither, and
+  `unlanded`, with a report listing the missing commits, otherwise.
 
   Two things the merge will not do. It never cuts a missing base branch — a
   project whose base branch does not exist is misconfigured, and creating one

@@ -52,10 +52,11 @@ final class EpicAcceptMergeTests: XCTestCase {
         try fixture.commitOn(branch: epic.branch, message: "Sibling work already on the epic branch")
         let epicHeadBefore = try headOf(epic.branch)
         let taskHead = try headOf("agentboard/\(task.id)")
-        try installFailingPostCheckoutHook()
+        let marker = try installFailingPostCheckoutHook()
 
         try await fixture.supervisor.accept(taskId: task.id)
 
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), "the merge ran the post-checkout hook")
         let epicHead = try headOf(epic.branch)
         XCTAssertNotEqual(epicHead, epicHeadBefore)
         XCTAssertNotEqual(epicHead, taskHead)
@@ -224,6 +225,7 @@ final class EpicAcceptMergeTests: XCTestCase {
         try fixture.commitInto(try XCTUnwrap(session.worktreePath))
         let commit = try headOf("agentboard/\(dependency.id)")
         try fixture.tasks.move(dependency.id, to: .done)
+        try fixture.tasks.setLanding(dependency.id, .pending, detail: nil)
         let dependent = try makeTask(epicId: epic.id)
         try fixture.tasks.setDeps(dependent.id, dependsOn: [dependency.id])
 
@@ -233,7 +235,8 @@ final class EpicAcceptMergeTests: XCTestCase {
         } catch {
             let message = error.localizedDescription
             XCTAssertTrue(message.contains(commit), message)
-            XCTAssertTrue(message.contains(epic.branch), message)
+            XCTAssertTrue(message.contains("merge-base --is-ancestor \(commit) \(epic.branch)"), message)
+            XCTAssertFalse(message.contains("landing report"), "a merge that succeeds queues no report: \(message)")
         }
         XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(dependent.id)"))
 
@@ -244,13 +247,24 @@ final class EpicAcceptMergeTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func installFailingPostCheckoutHook() throws {
-        let hooks = URL(fileURLWithPath: fixture.project.repoPath)
-            .appendingPathComponent(trimmed(try fixture.git(["rev-parse", "--git-path", "hooks"])))
+    /// Pinned in the repository's own config so a global `core.hooksPath` cannot send the hook
+    /// elsewhere, and proven to fire on a plain `git worktree add` before the test relies on it.
+    private func installFailingPostCheckoutHook() throws -> URL {
+        let hooks = fixture.supportDir.appendingPathComponent("hooks")
+        let marker = fixture.supportDir.appendingPathComponent("post-checkout-ran")
         try FileManager.default.createDirectory(at: hooks, withIntermediateDirectories: true)
+        _ = try fixture.git(["config", "--local", "core.hooksPath", hooks.path])
         let hook = hooks.appendingPathComponent("post-checkout")
-        try "#!/bin/sh\necho 'bazel: command not found' >&2\nexit 127\n".write(to: hook, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\ntouch '\(marker.path)'\necho 'bazel: command not found' >&2\nexit 127\n"
+            .write(to: hook, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+
+        let probe = fixture.supportDir.appendingPathComponent("hook-probe")
+        _ = try? fixture.git(["worktree", "add", "--detach", probe.path, "main"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "the post-checkout hook never fired")
+        _ = try fixture.git(["worktree", "remove", "--force", probe.path])
+        try FileManager.default.removeItem(at: marker)
+        return marker
     }
 
     private func makeEpic() throws -> Epic {
