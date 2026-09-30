@@ -37,6 +37,17 @@ final class ProjectSettingsTests: XCTestCase {
         XCTAssertEqual(ProjectSettings.decode(settings.encoded()), settings)
     }
 
+    func testAnAbsurdVerificationTimeoutIsClampedToADayFromTheFieldAndFromSettingsJSON() {
+        var typed = ProjectSettings()
+        typed.verificationTimeoutMinutes = Int.max
+        let edited = ProjectSettings.decode(#"{"verificationTimeoutSeconds":\#(Int.max)}"#)
+        let tooShort = ProjectSettings.decode(#"{"verificationTimeoutSeconds":1}"#)
+
+        XCTAssertEqual(typed.verification.timeoutSeconds, 24 * 60 * 60)
+        XCTAssertEqual(edited.verificationTimeoutSeconds, 24 * 60 * 60)
+        XCTAssertEqual(tooShort.verificationTimeoutSeconds, 60)
+    }
+
     func testTaskColumnOrderAndNeighbors() {
         XCTAssertEqual(TaskColumn.allCases, [.proposed, .backlog, .ready, .running, .review, .done])
         XCTAssertEqual(TaskColumn.proposed.next, .backlog)

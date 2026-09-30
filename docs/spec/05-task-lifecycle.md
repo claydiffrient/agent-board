@@ -596,8 +596,9 @@ check starts — safe only because no other check of that epic can be running.
 *Each step is bounded.* Creating the scratch worktree, the build and the test
 are each stopped once they run past the project's verification timeout
 (`verificationTimeoutSeconds`, default 30 minutes — over three times a cold
-build here; the settings sheet takes it in minutes). Time is counted on
-`CLOCK_UPTIME_RAW`, so a Mac asleep mid-build does not use it up. A step past
+build here; the settings sheet takes it in minutes, and §4 gives its range).
+Time is counted on `CLOCK_UPTIME_RAW`, so a Mac asleep mid-build does not use
+it up. A step past
 its timeout gets SIGTERM for its whole process group, then SIGKILL 5 seconds
 later; anything left in the group when the command exits is killed too. The
 branch does not move and the report says "timed out after" the timeout.

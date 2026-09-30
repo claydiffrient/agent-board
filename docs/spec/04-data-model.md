@@ -20,8 +20,10 @@ CREATE TABLE project (
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
                                    -- reviewLevel, reviewRouting, buildCommand, testCommand,
-                                   -- verificationTimeoutSeconds, archivePolicy,
-                                   -- worktreeStrategy, sharedCheckoutMaxAgents, rosterAgentIds
+                                   -- verificationTimeoutSeconds (null = 30 min; else clamped
+                                   --   to 60..86400, i.e. 1 min to 24 h, on decode and on set),
+                                   -- archivePolicy, worktreeStrategy, sharedCheckoutMaxAgents,
+                                   -- rosterAgentIds
   created_at      INTEGER NOT NULL,
   workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
 );

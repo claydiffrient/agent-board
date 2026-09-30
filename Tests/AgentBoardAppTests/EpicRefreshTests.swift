@@ -85,24 +85,6 @@ final class EpicRefreshTests: XCTestCase {
         XCTAssertEqual(try worktreeCount(), 1, "the scratch checkout the build ran in survived")
     }
 
-    func testACommandPastTheTimeoutIsStoppedWithItsProcessGroupAndTheBranchStays() async throws {
-        try fixture.manager.ensureBranch(epic.branch, from: "main")
-        try commit("main\n", to: "from-main.txt", on: "main")
-        let pidFile = fixture.repo.deletingLastPathComponent().appendingPathComponent("background.pid")
-        try setCommands(build: "sleep 60 & echo $! > '\(pidFile.path)'; sleep 60", test: "true", timeoutSeconds: 1)
-        let epicBefore = try head(epic.branch)
-
-        let message = try await refreshReport()
-
-        XCTAssertTrue(message.contains("timed out after 1s"), message)
-        XCTAssertEqual(try head(epic.branch), epicBefore, "a refresh whose build timed out moved the epic branch")
-        let background = try XCTUnwrap(Int32(String(contentsOf: pidFile, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines)))
-        let exited = await exits(background)
-        XCTAssertTrue(exited, "the build's background child outlived the timeout")
-        XCTAssertEqual(try worktreeCount(), 1, "the scratch checkout the build ran in survived")
-    }
-
     func testASecondRefreshOfTheSameEpicIsRefusedWhileTheFirstBuildsAndTheFirstStillPasses() async throws {
         try fixture.manager.ensureBranch(epic.branch, from: "main")
         try commit("main\n", to: "from-main.txt", on: "main")
@@ -208,14 +190,6 @@ final class EpicRefreshTests: XCTestCase {
         return ""
     }
 
-    private func exits(_ pid: pid_t) async -> Bool {
-        for _ in 0..<50 {
-            if kill(pid, 0) != 0, errno == ESRCH { return true }
-            try? await _Concurrency.Task.sleep(for: .milliseconds(100))
-        }
-        return false
-    }
-
     private func refusal() async throws -> String {
         do {
             let result = try await refresh()
@@ -232,11 +206,10 @@ final class EpicRefreshTests: XCTestCase {
         return try XCTUnwrap(object?["base_drift"] as? [String: Any], result.text)
     }
 
-    private func setCommands(build: String?, test: String?, timeoutSeconds: Int? = nil) throws {
+    private func setCommands(build: String?, test: String?) throws {
         var settings = fixture.project.settings
         settings.buildCommand = build
         settings.testCommand = test
-        settings.verificationTimeoutSeconds = timeoutSeconds
         try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
     }
 

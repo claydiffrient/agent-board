@@ -221,8 +221,11 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var buildCommand: String? = nil
     /// Shell command that runs this project's tests. Empty leaves the agent to work it out.
     public var testCommand: String? = nil
-    /// Nil uses `VerificationCommands.defaultTimeoutSeconds`.
-    public var verificationTimeoutSeconds: Int? = nil
+    /// Nil uses `VerificationCommands.defaultTimeoutSeconds`; any other value is clamped into
+    /// `VerificationCommands.timeoutRange` (SPEC §4).
+    public var verificationTimeoutSeconds: Int? = nil {
+        didSet { verificationTimeoutSeconds = verificationTimeoutSeconds.map(VerificationCommands.clampedTimeout) }
+    }
     public var archivePolicy: ArchivePolicy = .afterEpicMerge
     /// Whether a worker gets its own worktree, shares the project's checkout, or is decided per spawn.
     public var worktreeStrategy: WorktreeStrategy = .worktree
@@ -269,7 +272,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.reviewRouting = reviewRouting
         self.buildCommand = buildCommand
         self.testCommand = testCommand
-        self.verificationTimeoutSeconds = verificationTimeoutSeconds
+        self.verificationTimeoutSeconds = verificationTimeoutSeconds.map(VerificationCommands.clampedTimeout)
         self.archivePolicy = archivePolicy
         self.worktreeStrategy = worktreeStrategy
         self.sharedCheckoutMaxAgents = sharedCheckoutMaxAgents
@@ -297,6 +300,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
         verificationTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .verificationTimeoutSeconds)
+            .map(VerificationCommands.clampedTimeout)
         archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge
         worktreeStrategy = try c.decodeIfPresent(WorktreeStrategy.self, forKey: .worktreeStrategy) ?? .worktree
         sharedCheckoutMaxAgents = try c.decodeIfPresent(Int.self, forKey: .sharedCheckoutMaxAgents)

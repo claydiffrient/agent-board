@@ -42,7 +42,8 @@ public enum BoundedCommand {
         _ = fcntl(readEnd, F_SETFL, fcntl(readEnd, F_GETFL) | O_NONBLOCK)
 
         let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        let deadline = start + UInt64(max(0, timeout) * 1_000_000_000)
+        let (sum, overflowed) = start.addingReportingOverflow(nanoseconds(timeout))
+        let deadline = overflowed ? .max : sum
         var output = Data()
         var status: Int32?
         var ending: Result.Ending?
@@ -83,6 +84,13 @@ public enum BoundedCommand {
             ending: ending ?? .exited(status ?? -1),
             output: String(decoding: output, as: UTF8.self)
         )
+    }
+
+    /// Saturates instead of trapping: negative or NaN is 0, and anything past `UInt64.max` is `.max`.
+    static func nanoseconds(_ seconds: TimeInterval) -> UInt64 {
+        let nanoseconds = seconds * 1_000_000_000
+        guard nanoseconds > 0 else { return 0 }
+        return nanoseconds < Double(UInt64.max) ? UInt64(nanoseconds) : .max
     }
 
     /// False once the write end has closed.
