@@ -9,6 +9,48 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.4.0 — 2026-09-30
+
+- **Reviews.** Under Agent review, a project can now route each task type —
+  Code, Docs, Tests, Plan, Review, or unset (Default) — to its own reviewer
+  instead of one reviewer for the whole project. Project Settings → Agents
+  shows a Default row plus a row per type, each set to a named reviewer, Any
+  reviewer, A person, or **Accept without review**; existing projects keep
+  routing exactly as before until a row is edited. A typed task shows a chip
+  on its card, in the inspector, and in Pending reviews, and the inspector
+  gets a Type picker. A rostered reviewer is now limited to the task and its
+  diff — it can no longer read the worker's own notes or report, project
+  notes, or the board database, and a task with no diff to review goes
+  straight to a person instead of spawning a reviewer with nothing to look
+  at.
+- **Epics.** Accepting an epic task now merges its branch before tearing down
+  its worktree, with no checkout involved, instead of reporting the task
+  ready before the merge has actually run. Starting a task that depends on
+  another task in the same epic now refuses if that dependency's commit
+  isn't on the epic branch yet, instead of spawning against a checkout
+  that's missing it.
+- **Worktrees.** A worktree's setup hooks (`post-checkout`, etc.) now run
+  under your login shell's PATH instead of launchd's bare one, so a repo
+  whose setup depends on Homebrew or `/usr/local/bin` tools no longer fails
+  when Agent Board is launched from Finder or the Dock. A setup that fails
+  now rolls back the worktree it created instead of leaving a half-set-up one
+  behind for the next retry to silently adopt.
+- **Main window.** The window now has a 981×600 minimum size, and the
+  sidebar's bottom stack (Ports, Add Project…, the notifications-off notice,
+  the usage footer) no longer draws on top of the project list when the
+  window is short. The Status screen's session table now fits inside that
+  minimum width instead of scrolling sideways — Elapsed time and the last
+  tool used moved into captions under State and Last activity, and token
+  counts, cap, and cache reads moved into Spend's tooltip.
+- **Roster.** Agent definitions from `~/.claude/agents` and a project's own
+  `.claude/agents` now show up on the Roster screen and in project settings
+  as read-only archetypes, alongside board-local agents, and can be assigned
+  or set as a reviewer the same way. A board-local agent's name always wins
+  over a disk definition of the same name.
+- **App menu.** A new **Preview Leaked-Agent Sweep…** item opens a read-only
+  window showing what the sweep that stops leaked agent sessions would do on
+  this launch, with a Run Again button, before anything is actually stopped.
+
 ## 0.3.0 — 2026-09-26
 
 - **Install.** Installing is now a DMG drag: open `dist/AgentBoard-<version>.dmg`
