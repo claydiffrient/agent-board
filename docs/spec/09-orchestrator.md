@@ -78,6 +78,7 @@ became ready.
 | Human promotes a proposal | `decision` | Proposal, and the ids that became `ready` |
 | Human approves or denies an approval | `decision` | Approval, outcome, reason |
 | Human comments on a task | `comment` | Task id and title, the comment quoted; the human speaking. An agent's comment queues nothing |
+| A `refresh_epic` that answered before its check finishes | `refresh` | The verdict `refresh_epic` would have answered with: merged, conflicted, failed or timed out, or not finished for a reason the board caused (§5.2) |
 | Cap or idle kill | `failed` | Task, session, `failure_reason` |
 | Human stops a worker, or Pause All | `failed` | Task, session, that a human stopped it |
 | `reconcile` finds a session gone | `failed` | Task, session, that Agent Board did not stop it |

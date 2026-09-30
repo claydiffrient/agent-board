@@ -30,7 +30,7 @@ final class EpicRefreshTests: XCTestCase {
         let epicBefore = try head(epic.branch)
         let mainHead = try head("main")
 
-        let text = try await refresh().text
+        let text = try await refreshReport()
 
         XCTAssertTrue(try isAncestor(mainHead, of: epic.branch), "the base's commit is not on the epic branch")
         XCTAssertTrue(try isAncestor(epicBefore, of: epic.branch), "the epic's own commit was lost")
@@ -75,7 +75,7 @@ final class EpicRefreshTests: XCTestCase {
         try setCommands(build: "test -f from-main.txt || exit 9; echo 'error: no member named foo'; exit 3", test: "true")
         let epicBefore = try head(epic.branch)
 
-        let message = try await refusal()
+        let message = try await refreshReport()
 
         XCTAssertEqual(try head(epic.branch), epicBefore, "a refresh that failed to build moved the epic branch")
         XCTAssertTrue(message.contains("exited 3"), "the build did not run on the merge result: \(message)")
@@ -83,6 +83,53 @@ final class EpicRefreshTests: XCTestCase {
         XCTAssertTrue(message.contains("error: no member named foo"), message)
         XCTAssertFalse(message.contains("`true` passed"), "the tests ran after the build failed: \(message)")
         XCTAssertEqual(try worktreeCount(), 1, "the scratch checkout the build ran in survived")
+    }
+
+    func testACommandPastTheTimeoutIsStoppedWithItsProcessGroupAndTheBranchStays() async throws {
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        try commit("main\n", to: "from-main.txt", on: "main")
+        let pidFile = fixture.repo.deletingLastPathComponent().appendingPathComponent("background.pid")
+        try setCommands(build: "sleep 60 & echo $! > '\(pidFile.path)'; sleep 60", test: "true", timeoutSeconds: 1)
+        let epicBefore = try head(epic.branch)
+
+        let message = try await refreshReport()
+
+        XCTAssertTrue(message.contains("timed out after 1s"), message)
+        XCTAssertEqual(try head(epic.branch), epicBefore, "a refresh whose build timed out moved the epic branch")
+        let background = try XCTUnwrap(Int32(String(contentsOf: pidFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)))
+        let exited = await exits(background)
+        XCTAssertTrue(exited, "the build's background child outlived the timeout")
+        XCTAssertEqual(try worktreeCount(), 1, "the scratch checkout the build ran in survived")
+    }
+
+    func testASecondRefreshOfTheSameEpicIsRefusedWhileTheFirstBuildsAndTheFirstStillPasses() async throws {
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        try commit("main\n", to: "from-main.txt", on: "main")
+        try setCommands(build: "sleep 2; test -f from-main.txt", test: "true")
+
+        let first = try await refresh().text
+        XCTAssertTrue(first.contains("Refresh started"), first)
+        let second = try await refusal()
+
+        XCTAssertTrue(second.contains("already running"), second)
+        let report = try await awaitRefreshReport()
+        XCTAssertTrue(report.contains("`sleep 2; test -f from-main.txt` passed"), report)
+        XCTAssertTrue(try isAncestor(try head("main"), of: epic.branch))
+    }
+
+    func testTheRefreshCheckoutRunsTheRepositorysPostCheckoutHook() async throws {
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        try commit("main\n", to: "from-main.txt", on: "main")
+        let hook = fixture.repo.appendingPathComponent(".git/hooks/post-checkout")
+        try FileManager.default.createDirectory(at: hook.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "#!/bin/sh\ntouch .setup-done\n".write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+        try setCommands(build: "test -f .setup-done", test: nil)
+
+        let report = try await refreshReport()
+
+        XCTAssertTrue(report.contains("`test -f .setup-done` passed"), report)
     }
 
     func testARefreshIsRefusedWhileAWorktreeHoldsTheEpicBranchAndNamesTheHolder() async throws {
@@ -142,6 +189,33 @@ final class EpicRefreshTests: XCTestCase {
         try await fixture.callOrchestratorTool("refresh_epic", arguments: .object(["epic_id": .string(epic.id)]))
     }
 
+    /// Starts a refresh that has a command to run and waits for the report carrying its outcome.
+    private func refreshReport() async throws -> String {
+        let started = try await refresh().text
+        XCTAssertTrue(started.contains("Refresh started"), started)
+        return try await awaitRefreshReport()
+    }
+
+    private func awaitRefreshReport() async throws -> String {
+        let reports = ReportStore(fixture.db)
+        for _ in 0..<300 {
+            if let report = try reports.unconsumed(projectId: fixture.project.id).first(where: { $0.kind == .refresh }) {
+                return report.body
+            }
+            try await _Concurrency.Task.sleep(for: .milliseconds(100))
+        }
+        XCTFail("no refresh report arrived")
+        return ""
+    }
+
+    private func exits(_ pid: pid_t) async -> Bool {
+        for _ in 0..<50 {
+            if kill(pid, 0) != 0, errno == ESRCH { return true }
+            try? await _Concurrency.Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+
     private func refusal() async throws -> String {
         do {
             let result = try await refresh()
@@ -158,10 +232,11 @@ final class EpicRefreshTests: XCTestCase {
         return try XCTUnwrap(object?["base_drift"] as? [String: Any], result.text)
     }
 
-    private func setCommands(build: String?, test: String?) throws {
+    private func setCommands(build: String?, test: String?, timeoutSeconds: Int? = nil) throws {
         var settings = fixture.project.settings
         settings.buildCommand = build
         settings.testCommand = test
+        settings.verificationTimeoutSeconds = timeoutSeconds
         try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
     }
 

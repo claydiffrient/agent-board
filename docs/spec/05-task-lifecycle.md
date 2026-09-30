@@ -559,17 +559,58 @@ Drift is reporting only: it raises no attention badge and no notification.
 The merge commit is built with `merge-tree --write-tree` and `commit-tree` on
 no ref, as an accept's merge is (§5). If the project configures a build or test
 command (§4), the commit is checked out detached in a scratch worktree
-(`<worktree-root>/refresh-<epic-id>`, removed afterwards) and the configured
-commands run there, build first; the epic branch moves, by an `update-ref`
-guarded by its old head and serialized with accepts' merges, only once every
-configured command passes. A command the project does not configure is never
-guessed at: the refresh applies and its answer says `NOT VERIFIED`, names what
-was not run, tells the orchestrator to work it out and run it — the integrator
-wording (step 3) — and gives the head the branch had before. A conflict, a
-failing command, or an accept landing on the epic branch while the build ran
-leaves the branch exactly as it was; a conflict names its files, and both a
-conflict and a failure say that fixing it by hand or by a dispatched task is
-the human's call. Refused for a `done` or `abandoned` epic, for a missing base
-branch, and while any working tree has the epic branch checked out — naming the
-path and, when one is on record, the session working there — because moving a
-checked-out branch leaves that tree showing the merged files as deleted.
+(`<worktree-root>/refresh-<epic-id>-<random>`, removed afterwards) and the
+configured commands run there, build first; the epic branch moves, by an
+`update-ref` guarded by its old head and serialized with accepts' merges, only
+once every configured command passes. A command the project does not configure
+is never guessed at: the refresh applies and its answer says `NOT VERIFIED`,
+names what was not run, tells the orchestrator to work it out and run it — the
+integrator wording (step 3) — and gives the head the branch had before. A
+conflict, a failing command, or an accept landing on the epic branch while the
+build ran leaves the branch exactly as it was; a conflict names its files, and
+both a conflict and a failure say that fixing it by hand or by a dispatched
+task is the human's call. Refused for a `done` or `abandoned` epic, for a
+missing base branch, and while any working tree has the epic branch checked
+out — naming the path and, when one is on record, the session working there —
+because moving a checked-out branch leaves that tree showing the merged files
+as deleted.
+
+*It answers before anything is built.* Claude Code 2.1.285 abandons a call to
+an HTTP MCP server whose response headers have not arrived 60 seconds after the
+request (measured: a stub server that answered in 5s returned, one that took
+90s got "The operation timed out." at 60s), and the board answers a tool call
+only once it is done. A cold `swift build` in a checkout with no `.build` takes
+about 9 minutes here. So with a command configured, `refresh_epic` answers as
+soon as the merge commit exists: the commit, the commands and the timeout, and
+that the branch stays where it is until they pass. The verdict — every outcome
+above — is queued later as a `refresh` report (§9.1) and announced like any
+other. With no command configured nothing needs to wait, and the answer is the
+verdict.
+
+*One refresh per epic at a time.* A second `refresh_epic` for an epic whose
+check is still running is refused, naming the commit being verified; nothing
+new starts. Each check's scratch worktree also has a name of its own, and
+leftovers a crash stranded under `refresh-<epic-id>` are removed before a new
+check starts — safe only because no other check of that epic can be running.
+
+*Each step is bounded.* Creating the scratch worktree, the build and the test
+are each stopped once they run past the project's verification timeout
+(`verificationTimeoutSeconds`, default 30 minutes — over three times a cold
+build here; the settings sheet takes it in minutes). Time is counted on
+`CLOCK_UPTIME_RAW`, so a Mac asleep mid-build does not use it up. A step past
+its timeout gets SIGTERM for its whole process group, then SIGKILL 5 seconds
+later; anything left in the group when the command exits is killed too. The
+branch does not move and the report says "timed out after" the timeout.
+
+*The checkout runs the repository's hooks.* `git worktree add` fires
+`post-checkout` for the scratch worktree, exactly as it does for a task's
+worktree (§3.1 step 2), because the check is meant to say whether the merge
+builds the way a task spawned from it will — and for a repository whose hook
+is its setup (Derivita's runs a full `setup.sh`), a build without it fails for
+a reason that has nothing to do with the merge. The cost is the hook's full
+runtime on every check, inside the same timeout.
+
+*A failure the board caused is never a verdict.* A scratch worktree that cannot
+be set up (including a failing or timed-out hook) and Agent Board quitting
+mid-check both report that the refresh did not finish, that the branch did not
+move, and that no build or test failed — never that the merge is broken.

@@ -5,10 +5,17 @@ import Foundation
 public struct VerificationCommands: Sendable, Equatable {
     public var build: String?
     public var test: String?
+    /// How long `refresh_epic` lets each step of its check run before stopping it (SPEC §5.2).
+    public var timeoutSeconds: Int
 
-    public init(build: String? = nil, test: String? = nil) {
+    /// A cold `swift build` in a scratch checkout with no `.build` takes about 9 minutes here, and
+    /// its tests build their own targets before running; 30 minutes is over three times that.
+    public static let defaultTimeoutSeconds = 30 * 60
+
+    public init(build: String? = nil, test: String? = nil, timeoutSeconds: Int? = nil) {
         self.build = Self.normalized(build)
         self.test = Self.normalized(test)
+        self.timeoutSeconds = timeoutSeconds.flatMap { $0 > 0 ? $0 : nil } ?? Self.defaultTimeoutSeconds
     }
 
     static func normalized(_ value: String?) -> String? {
@@ -71,6 +78,6 @@ public struct VerificationCommands: Sendable, Equatable {
 
 extension ProjectSettings {
     public var verification: VerificationCommands {
-        VerificationCommands(build: buildCommand, test: testCommand)
+        VerificationCommands(build: buildCommand, test: testCommand, timeoutSeconds: verificationTimeoutSeconds)
     }
 }
