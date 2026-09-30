@@ -1,6 +1,6 @@
 /// Runs merges into the same target branch one after another, in arrival order (SPEC §5). A merge
-/// borrows a worktree on its target, and git lets only one worktree hold a branch, so a second
-/// merge that overlapped the first would fail instead of waiting.
+/// moves its target only if it is still where the merge started, so a second merge that overlapped
+/// the first would fail instead of waiting.
 @MainActor
 final class BranchMergeQueue {
     /// A key is present while its branch is held; the array is who is waiting for it.

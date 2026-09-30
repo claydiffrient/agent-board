@@ -31,13 +31,19 @@ final class EpicAcceptMergeTests: XCTestCase {
 
         XCTAssertEqual(try headOf(epic.branch), taskHead, "the epic branch did not fast-forward onto the task branch")
         XCTAssertEqual(try mergeCommitCount(epic.branch), 0, "a fast-forward should not have made a merge commit")
+        XCTAssertFalse(
+            try fixture.manager.branchExists("agentboard/\(task.id)"),
+            "teardown ran before the merge, so it kept a branch the merge then put in"
+        )
         XCTAssertEqual(try worktreePaths(), [], "a fast-forward needed no worktree")
         XCTAssertEqual(try column(task.id), .done)
         XCTAssertEqual(try landing(task.id), .landed)
         XCTAssertEqual(try mergeReports(), [])
     }
 
-    func testAcceptMergesThroughATemporaryWorktreeWhenTheEpicBranchHasMoved() async throws {
+    /// Derivita's `post-checkout` runs its setup script, which fails under launchd's PATH; a merge
+    /// that checked the epic branch out anywhere failed with it and left that checkout behind.
+    func testANonFastForwardAcceptMergesWithoutRunningTheRepositorysCheckoutHook() async throws {
         let epic = try makeEpic()
         try fixture.manager.ensureBranch(epic.branch, from: "main")
         let task = try makeTask(epicId: epic.id)
@@ -46,20 +52,22 @@ final class EpicAcceptMergeTests: XCTestCase {
         try fixture.commitOn(branch: epic.branch, message: "Sibling work already on the epic branch")
         let epicHeadBefore = try headOf(epic.branch)
         let taskHead = try headOf("agentboard/\(task.id)")
+        let marker = try installFailingPostCheckoutHook()
 
         try await fixture.supervisor.accept(taskId: task.id)
 
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), "the merge ran the post-checkout hook")
         let epicHead = try headOf(epic.branch)
         XCTAssertNotEqual(epicHead, epicHeadBefore)
         XCTAssertNotEqual(epicHead, taskHead)
         XCTAssertEqual(try parents(epicHead), [epicHeadBefore, taskHead], "the epic branch did not get a real merge commit")
-        XCTAssertTrue(try fixture.manager.branchExists(epic.branch), "the temporary worktree removal took the epic branch with it")
-        XCTAssertEqual(try worktreePaths(), [], "the temporary merge worktree was left behind")
+        XCTAssertEqual(try landing(task.id), .landed)
+        XCTAssertEqual(try worktreePaths(), [], "the merge left a worktree behind")
         XCTAssertEqual(try column(task.id), .done)
         XCTAssertEqual(try mergeReports(), [])
     }
 
-    /// Both merges need the temporary worktree, and git lets only one worktree hold the epic branch.
+    /// Both merges build on the epic branch's head, so the second must see the first's commit.
     func testTwoConcurrentAcceptsInOneEpicBothLand() async throws {
         let epic = try makeEpic()
         try fixture.manager.ensureBranch(epic.branch, from: "main")
@@ -147,7 +155,9 @@ final class EpicAcceptMergeTests: XCTestCase {
 
         XCTAssertEqual(try headOf(epic.branch), epicHead, "the second accept moved the epic branch again")
         XCTAssertEqual(try column(task.id), .done)
-        XCTAssertEqual(try mergeReports(), [])
+        XCTAssertEqual(try landing(task.id), .landed)
+        let body = try XCTUnwrap(try mergeReports().first, "an accept that merged nothing said nothing")
+        XCTAssertTrue(body.contains("merged nothing"), body)
     }
 
     /// A task in no epic targets the base branch, never some other epic's. Its own landing is
@@ -172,12 +182,13 @@ final class EpicAcceptMergeTests: XCTestCase {
         let task = try makeTask(epicId: epic.id)
         let session = try fixture.worktreeWorker(task: task)
         try fixture.commitInto(try XCTUnwrap(session.worktreePath))
+        let taskHead = try headOf("agentboard/\(task.id)")
         XCTAssertFalse(try fixture.manager.branchExists(epic.branch))
 
         try await fixture.supervisor.accept(taskId: task.id)
 
         XCTAssertTrue(try fixture.manager.branchExists(epic.branch))
-        XCTAssertEqual(try headOf(epic.branch), try headOf("agentboard/\(task.id)"))
+        XCTAssertEqual(try headOf(epic.branch), taskHead)
         XCTAssertEqual(try column(task.id), .done)
     }
 
@@ -202,7 +213,59 @@ final class EpicAcceptMergeTests: XCTestCase {
         XCTAssertTrue(body.contains(integration.path), body)
     }
 
+    /// The Derivita incident: a dependent spawned while its accepted dependency's commit was not yet
+    /// on the epic branch, so its worker started without the work it builds on.
+    func testADependentIsNotCutFromAnEpicBranchThatLacksItsDependencysCommit() async throws {
+        await fixture.supervisor.start()
+        try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
+        let epic = try makeEpic()
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        let dependency = try makeTask(epicId: epic.id)
+        let session = try epicWorker(task: dependency, epic: epic)
+        try fixture.commitInto(try XCTUnwrap(session.worktreePath))
+        let commit = try headOf("agentboard/\(dependency.id)")
+        try fixture.tasks.move(dependency.id, to: .done)
+        try fixture.tasks.setLanding(dependency.id, .pending, detail: nil)
+        let dependent = try makeTask(epicId: epic.id)
+        try fixture.tasks.setDeps(dependent.id, dependsOn: [dependency.id])
+
+        do {
+            try await fixture.supervisor.assign(taskId: dependent.id)
+            XCTFail("the dependent was spawned onto an epic branch without its dependency's commit")
+        } catch {
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains(commit), message)
+            XCTAssertTrue(message.contains("merge-base --is-ancestor \(commit) \(epic.branch)"), message)
+            XCTAssertFalse(message.contains("landing report"), "a merge that succeeds queues no report: \(message)")
+        }
+        XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(dependent.id)"))
+
+        try fixture.markMerged(epic: epic, branch: "agentboard/\(dependency.id)")
+        try await fixture.supervisor.assign(taskId: dependent.id)
+        XCTAssertTrue(try isAncestor(commit, of: "agentboard/\(dependent.id)"))
+    }
+
     // MARK: - Helpers
+
+    /// Pinned in the repository's own config so a global `core.hooksPath` cannot send the hook
+    /// elsewhere, and proven to fire on a plain `git worktree add` before the test relies on it.
+    private func installFailingPostCheckoutHook() throws -> URL {
+        let hooks = fixture.supportDir.appendingPathComponent("hooks")
+        let marker = fixture.supportDir.appendingPathComponent("post-checkout-ran")
+        try FileManager.default.createDirectory(at: hooks, withIntermediateDirectories: true)
+        _ = try fixture.git(["config", "--local", "core.hooksPath", hooks.path])
+        let hook = hooks.appendingPathComponent("post-checkout")
+        try "#!/bin/sh\ntouch '\(marker.path)'\necho 'bazel: command not found' >&2\nexit 127\n"
+            .write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+
+        let probe = fixture.supportDir.appendingPathComponent("hook-probe")
+        _ = try? fixture.git(["worktree", "add", "--detach", probe.path, "main"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "the post-checkout hook never fired")
+        _ = try fixture.git(["worktree", "remove", "--force", probe.path])
+        try FileManager.default.removeItem(at: marker)
+        return marker
+    }
 
     private func makeEpic() throws -> Epic {
         try EpicStore(fixture.db).create(projectId: fixture.project.id, title: "Roster", goal: "ship the roster")

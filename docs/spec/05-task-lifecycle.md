@@ -45,7 +45,22 @@ nobody reviewed.
   paths — `promote_proposal` and the human's Promote button — because both run
   through `Board.promote`.
 - `ready` — **the only column the orchestrator may pull from.** A task becomes
-  eligible when every row in `task_dep` points at a task in `done`.
+  eligible when every row in `task_dep` points at a task in `done`. Readiness
+  does not wait for the dependency's landing: it moves inside the acceptance
+  transaction, before git has run, and a landing cannot see a hand merge or a
+  reset of the target branch. What is enforced instead is the cut. A spawn that
+  would cut a new worktree for a task in an epic from its epic branch refuses
+  while any sibling it depends on is in `done` with a commit that branch lacks
+  — the dependency's branch tip, the tip the ledger kept when that branch was
+  reaped, or a commit `task_commit` attributes to it — naming the dependency,
+  the commit, the branch and the landing. The accept's merge may still be
+  running, or may have failed or been skipped; a worker cut then would start
+  without the work it builds on. A merge that succeeds queues no report, so the
+  refusal promises none: while the landing is unsettled it says to spawn again
+  once `git merge-base --is-ancestor <commit> <branch>` exits 0, and for an
+  `unlanded` dependency, or one whose landing the branch contradicts, it says to
+  merge the commit into the branch first. A task whose branch already exists, a
+  shared placement and a reviewer cut nothing and are not checked.
 - `running` — an `agent_session` row holds it. The board shows the agent, its
   spend, and elapsed time.
 - **Wound down** — a task whose worker was told to wind down (the shutdown
@@ -86,26 +101,37 @@ nobody reviewed.
   whose process is already gone — absent from `claude agents`, or `starting`
   with no short id and nothing listed under its id — is ended as vanished and
   does not block the decision; only an agent still listed as live that refuses
-  to stop aborts the accept or reopen before anything is written. Every attempt's
-  worktree is then removed (firing the
+  to stop aborts the accept or reopen before anything is written. The accept
+  then lands the task's branch, below, and only after that is every attempt's
+  worktree removed (firing the
   existing `WorktreeRemove` hook, which reclaims Bazel `output_base` on
-  Derivita), and `agentboard/<task-id>` is deleted once it is merged into the
+  Derivita), with `agentboard/<task-id>` deleted once it is merged into the
   base or epic branch. An unmerged branch, or a worktree with uncommitted
-  changes, is kept and the reason surfaced in the status bar.
+  changes, is kept and the reason surfaced in the status bar. Landing comes
+  first because removing a large worktree can take over a minute, and until the
+  merge runs a dependent cut from the target branch lacks this work. A member of
+  a shared branch has no worktree to remove, so its teardown still runs first.
 
-  The accept then merges the task's branch into the branch meant to carry it:
+  The merge takes the task's branch into the branch meant to carry it:
   `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling
   spawned into the epic branches from work that is already in, and the project's
   base branch for a task in none — unless the project integrates standalone
   tasks by pull request, below, when a task in none merges nothing. The merge runs after the acceptance
   transaction and off the main actor: nothing it does can hold the task out of
-  `done`. When the target branch is an ancestor of the task branch the ref is
-  advanced directly; otherwise a temporary worktree on the target branch carries
-  the merge and is removed afterwards, keeping the branch. Merges into one
-  target branch run one at a time, in the order their accepts arrived — git lets
-  only one worktree hold a branch, so a second accept waits for the first merge
-  rather than failing on it; this covers a shared branch's merge below too. A
-  conflict aborts and leaves the target branch where it was. The merge commit's subject is
+  `done`. Nothing is checked out, so no repository checkout hook runs: when the
+  target branch is an ancestor of the task branch the ref is advanced directly;
+  otherwise `git merge-tree --write-tree` builds the merged tree, `commit-tree`
+  makes the merge commit with both parents, and `update-ref` moves the target
+  only if it is still where the merge started. `merge-tree --write-tree` needs
+  git 2.38; macOS 14, the oldest the app supports, ships 2.39. A temporary
+  worktree was used before, and it fired `post-checkout`: Derivita's runs its
+  setup script, which fails under launchd's `PATH`, so every non-fast-forward
+  merge there failed and left its worktree holding the epic branch. Merges into
+  one target branch run one at a time, in the order their accepts arrived, so
+  each builds on the one before rather than losing the race on the guarded
+  `update-ref`; this covers a shared branch's merge below too. A conflict
+  leaves the target branch where it was and the report lists the conflicted
+  files. The merge commit's subject is
   `Merge <task title> into <epic title or base branch name>` — titles, never
   `agentboard/<id>` branch names, because this commit is on the branch a pull
   request is opened from and those names would publish the task and epic
@@ -133,7 +159,12 @@ nobody reviewed.
   elsewhere reports the same way a task branch's would, naming that the one
   merge carries every task on it. The members' landings are written together, by
   the one merge that carries them: until it runs, each accepted member is
-  `unlanded`, and that merge marks every member `landed` at once.
+  `unlanded`, and that merge marks every member `landed` at once. A shared
+  branch already gone when its last member is accepted merges nothing and
+  writes no ledger, so each member's landing is read from git instead: `landed`
+  only when the epic branch contains every commit `task_commit` attributes to
+  it and the ledger's tip for it, `no_branch` when it has neither, and
+  `unlanded`, with a report listing the missing commits, otherwise.
 
   Two things the merge will not do. It never cuts a missing base branch — a
   project whose base branch does not exist is misconfigured, and creating one
@@ -209,7 +240,12 @@ nobody reviewed.
   `decision` report naming the task, the branch, the target and the
   reason — for `awaiting_pull_request`, that a pull request is owed — so the
   orchestrator can dispatch a fix rather than discover the
-  divergence at integration time. The board can therefore never say `done` while
+  divergence at integration time. An accept whose merge found no branch to
+  merge queues one too, though it asks for no attention: `no_branch` says
+  nothing was merged, and a `landed` whose branch was already gone — a sweep
+  reaped it after some other hand merged it — says this accept merged nothing
+  and names the reaped tip the target contains, so neither reads as the board
+  having put the work there. The board can therefore never say `done` while
   silently meaning "done, and the work is nowhere": reaching `done` writes a
   landing, and the default value is the one that asks for attention.
 

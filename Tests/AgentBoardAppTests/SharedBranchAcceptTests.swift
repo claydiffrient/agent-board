@@ -116,6 +116,28 @@ final class SharedBranchAcceptTests: XCTestCase {
         XCTAssertEqual(try mergeReports(), [])
     }
 
+    /// A shared branch deleted before its last member is accepted merges nothing, so a member whose
+    /// commits never reached the epic branch must not read `landed`.
+    func testASharedBranchDeletedUnmergedLeavesItsCommittedMemberUnlanded() async throws {
+        try write("alpha.txt", "a\n")
+        try await commit(alpha, paths: ["alpha.txt"], message: "Add alpha")
+        let alphaCommit = try XCTUnwrap(try attributedCommits(of: alpha).first)
+        try await fixture.supervisor.accept(taskId: alpha.id)
+        try SupervisorFixture.git(["checkout", "-q", epic.branch], cwd: fixture.repo)
+        try SupervisorFixture.git(["branch", "-D", branch], cwd: fixture.repo)
+
+        try await fixture.supervisor.accept(taskId: beta.id)
+
+        XCTAssertFalse(try isAncestor(alphaCommit, of: epic.branch))
+        XCTAssertEqual(try fixture.tasks.get(alpha.id)?.landing, .unlanded)
+        XCTAssertEqual(try fixture.tasks.get(beta.id)?.landing, .noBranch)
+        let reports = try mergeReports()
+        XCTAssertTrue(
+            reports.contains { $0.contains(alpha.id) && $0.contains(alphaCommit) },
+            "no report names alpha's stranded commit: \(reports)"
+        )
+    }
+
     // MARK: - Reaping
 
     /// `reconcile`'s sweep is the second path that drops merged `agentboard/*` branches.

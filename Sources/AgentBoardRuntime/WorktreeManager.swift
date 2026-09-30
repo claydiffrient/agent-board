@@ -53,7 +53,7 @@ public enum BranchMerge: Sendable, Equatable {
     case alreadyMerged
     case fastForwarded(head: String)
     case merged(head: String)
-    /// The target branch is untouched and the temporary worktree is gone.
+    /// The target branch is untouched.
     case conflicted(files: [String])
     /// Something has the target branch checked out — the integrator on an epic branch, or, for a
     /// base branch, the human's own checkout. Advancing the ref anyway is not an option: measured
@@ -164,9 +164,9 @@ public struct WorktreeManager: Sendable {
     }
 
     /// Merges an accepted task branch into the branch that is meant to carry it (SPEC §5, §5.2),
-    /// without needing that branch to be checked out: a fast-forward moves the ref directly, and
-    /// anything else borrows a temporary worktree that is removed again — with the branch kept —
-    /// either way. A conflict aborts and leaves the target branch exactly where it was.
+    /// without checking anything out: a fast-forward moves the ref, and anything else is built with
+    /// `merge-tree --write-tree` and `commit-tree`, so no repository checkout hook ever runs. Either
+    /// write is guarded by the target's old value. A conflict leaves the target branch where it was.
     ///
     /// The one case it will not do is a target branch some working tree holds; see
     /// `BranchMerge.skippedCheckedOut`.
@@ -174,31 +174,51 @@ public struct WorktreeManager: Sendable {
         taskBranch: String,
         into target: String,
         taskTitle: String,
-        targetTitle: String,
-        worktreeName: String
+        targetTitle: String
     ) throws -> BranchMerge {
         if let settled = try premergeOutcome(taskBranch: taskBranch, into: target) { return settled }
-        let taskRef = "refs/heads/\(taskBranch)"
         let targetRef = "refs/heads/\(target)"
         if let holder = try list().first(where: { $0.branch == target }) {
             return .skippedCheckedOut(path: holder.path.path)
         }
-        if try isAncestor(targetRef, of: taskRef) {
-            let head = try resolve(taskRef)
-            try git(["update-ref", targetRef, head, try resolve(targetRef)])
-            return .fastForwarded(head: head)
+        let targetHead = try resolve(targetRef)
+        let taskHead = try resolve("refs/heads/\(taskBranch)")
+        if try isAncestor(targetHead, of: taskHead) {
+            try git(["update-ref", "-m", "fast-forward to \(taskBranch)", targetRef, taskHead, targetHead])
+            return .fastForwarded(head: taskHead)
         }
 
-        let worktree = try createForBranch(name: worktreeName, branch: target)
-        defer { try? remove(path: worktree) }
-        let message = Self.mergeSubject(taskTitle: taskTitle, targetTitle: targetTitle)
-        let merge = try gitRaw(mergeConfig() + ["merge", "--no-ff", "--no-edit", "-m", message, taskBranch], cwd: worktree)
-        guard merge.status == 0 else {
-            let files = conflictedFiles(in: worktree)
-            _ = try? gitRaw(["merge", "--abort"], cwd: worktree)
-            return .conflicted(files: files)
+        let tree: String
+        switch try mergeTree(targetHead, taskHead) {
+        case .conflicted(let files): return .conflicted(files: files)
+        case .clean(let written): tree = written
         }
-        return .merged(head: try headCommit(worktree: worktree))
+        let message = Self.mergeSubject(taskTitle: taskTitle, targetTitle: targetTitle)
+        let commit = try gitChecked(
+            mergeConfig() + ["commit-tree", tree, "-p", targetHead, "-p", taskHead, "-m", message], cwd: repoPath
+        ).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        try git(["update-ref", "-m", "merge \(taskBranch)", targetRef, commit, targetHead])
+        return .merged(head: commit)
+    }
+
+    private enum TreeMerge {
+        case clean(tree: String)
+        case conflicted(files: [String])
+    }
+
+    /// `merge-tree --write-tree` needs git 2.38; macOS 14's command line tools ship 2.39. It exits 1
+    /// for a conflict and for a bad argument alike, so only output that starts with a tree id is a
+    /// conflict.
+    private func mergeTree(_ ours: String, _ theirs: String) throws -> TreeMerge {
+        let args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", ours, theirs]
+        let result = try gitRaw(args, cwd: repoPath)
+        let fields = result.stdout.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
+        guard let tree = fields.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+              tree.wholeMatch(of: #/[0-9a-f]{40}|[0-9a-f]{64}/#) != nil,
+              result.status == 0 || result.status == 1
+        else { throw AgentRuntimeError(Self.failure(args, result)) }
+        if result.status == 0 { return .clean(tree: tree) }
+        return .conflicted(files: fields.dropFirst().reduce(into: []) { if !$0.contains($1) { $0.append($1) } })
     }
 
     /// The merge commit's subject, from titles rather than branch names: this commit lands in the
@@ -214,11 +234,6 @@ public struct WorktreeManager: Sendable {
     private static func subjectTitle(_ title: String, fallback: String) -> String {
         let collapsed = title.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         return collapsed.isEmpty ? fallback : collapsed
-    }
-
-    private func conflictedFiles(in worktree: URL) -> [String] {
-        guard let output = try? gitRaw(["diff", "--name-only", "--diff-filter=U"], cwd: worktree).stdout else { return [] }
-        return output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 
     /// A merge commit needs a committer identity and must never stop on a GPG passphrase prompt —
