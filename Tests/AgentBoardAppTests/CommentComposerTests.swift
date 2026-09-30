@@ -83,6 +83,51 @@ final class CommentComposerTests: XCTestCase {
         XCTAssertEqual(try CommentStore(db).list(taskId: b.id), [])
     }
 
+    /// `TaskInspectorView.onChange(of: task.id)` is what calls `retainDrafts` on the way out
+    /// (`TaskInspectorView.swift:86`); `TaskTypeRenderTests.testChoosingATypeRetainsTheDraftAcrossATaskSwitch`
+    /// now exercises `TaskDraftCache.retain` directly (the Type picker can no longer be driven — see
+    /// its own doc comment) and can no longer prove that wiring itself fires. This drives the same
+    /// board-keeps-one-inspector switch `testTheComposerShowsEachSelectedTasksOwnDraft` does above,
+    /// but types into the Body editor (index 0) instead of the comment composer (index 2), and
+    /// asserts on `TaskDraftCache` directly rather than only on what's drawn afterward.
+    ///
+    /// `allTasks` must include the task being navigated away from, or `retainDrafts(for:)` looks it
+    /// up, finds nothing, and silently keeps no draft at all (see its doc comment) — the empty
+    /// `allTasks: []` the composer test above passes is deliberately not reused here.
+    func testEditingTheBodyThenSwitchingTasksRetainsTheDraftThroughTheRealOnChangeWiring() throws {
+        let a = try makeTask("A")
+        let b = try makeTask("B")
+        let drafts = TaskDraftCache()
+        let selection = Selection(task: a)
+        let mount = OffscreenMount(
+            SelectedInspector(selection: selection, drafts: drafts, allTasks: [a, b])
+                .environment(renderEnvironment(db: db)),
+            size: CGSize(width: 420, height: 1400)
+        )
+        defer { mount.close() }
+
+        let typed = " needs another pass on the edge case"
+        let editors = settle(mount.host) { $0.count == 3 }
+        XCTAssertEqual(editors.map(\.string), ["A body", "A acceptance", ""])
+        let bodyEditor = try XCTUnwrap(editors.first)
+        let end = (bodyEditor.string as NSString).length
+        bodyEditor.insertText(typed, replacementRange: NSRange(location: end, length: 0))
+        _ = settle(mount.host) { $0.first?.string == "A body" + typed }
+        XCTAssertNil(drafts.draft(for: a.id), "nothing should be retained before the inspector leaves the task")
+
+        selection.task = b
+        let onB = settle(mount.host) { $0.first?.string == "B body" }
+        XCTAssertEqual(onB.map(\.string), ["B body", "B acceptance", ""], "task A's edited body leaked into task B's editor")
+        XCTAssertEqual(
+            drafts.draft(for: a.id)?.body, "A body" + typed,
+            "switching away from A should have retained its edited body"
+        )
+
+        selection.task = a
+        let backOnA = settle(mount.host) { $0.first?.string == "A body" + typed }
+        XCTAssertEqual(backOnA.first?.string, "A body" + typed, "task A's retained draft was lost on returning to it")
+    }
+
     private func makeTask(_ title: String) throws -> BoardTask {
         try TaskStore(db).create(
             projectId: project.id, title: title, body: "\(title) body", acceptance: "\(title) acceptance",
@@ -120,8 +165,9 @@ private final class Selection {
 private struct SelectedInspector: View {
     let selection: Selection
     let drafts: TaskDraftCache
+    var allTasks: [BoardTask] = []
 
     var body: some View {
-        TaskInspectorView(task: selection.task, allTasks: [], sessions: [], drafts: drafts, onClose: {})
+        TaskInspectorView(task: selection.task, allTasks: allTasks, sessions: [], drafts: drafts, onClose: {})
     }
 }
