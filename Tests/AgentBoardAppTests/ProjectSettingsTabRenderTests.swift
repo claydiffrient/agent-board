@@ -1,6 +1,7 @@
 import AgentBoardCore
 import AppKit
 import SwiftUI
+import Vision
 import XCTest
 @testable import AgentBoard
 
@@ -28,8 +29,10 @@ import XCTest
 ///   it) — the review-routing-table tests instead call `RosterStore.agents(forProject:)` and
 ///   `ProjectSettingsSheet.reviewerOptions`/`routingAssignee` directly, the same pure functions
 ///   `routingRow(_:)` calls, with the same database. This cannot prove `routingRow` actually calls
-///   them with what it looks like it calls them with, or that the `Group` around the routing rows is
-///   still the thing `.disabled(settings.reviewLevel != .agent)` is attached to.
+///   them with what it looks like it calls them with. Whether the `Group` around the routing rows is
+///   still the thing `.disabled(settings.reviewLevel != .agent)` is attached to is instead read from
+///   the pixels: a disabled control's text still draws, just dimmed, and `testAgentsRoutingTableIsDisabledOutsideAgentReview`
+///   measures that contrast directly rather than reading `NSPopUpButton.isEnabled`.
 @MainActor
 final class ProjectSettingsTabRenderTests: XCTestCase {
     private static let guidance = "Sonnet 5 for docs and tests, Opus 5 for features."
@@ -171,13 +174,13 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
 
     /// Rex left the roster after being named; the Default row still shows him rather than a blank.
     ///
-    /// Rendering can no longer confirm the `.disabled(settings.reviewLevel != .agent)` half of the
-    /// name (see the type-level doc comment) — that would need an actual `NSPopUpButton.isEnabled`
-    /// to read, and there is none. What is still checked, for both review levels, is that
-    /// `routingRow`'s own logic — `routingAssignee` and `reviewerChoice` over a `ReviewRoutingTable`
-    /// that has been through a real `ProjectStore.updateSettings`/`.get` round trip (JSON encode and
-    /// decode), against a roster read back from `RosterStore.agents(forProject:)` — resolves each
-    /// row's selected title the way the view is written to.
+    /// This checks, for both review levels, that `routingRow`'s own logic — `routingAssignee` and
+    /// `reviewerChoice` over a `ReviewRoutingTable` that has been through a real
+    /// `ProjectStore.updateSettings`/`.get` round trip (JSON encode and decode), against a roster
+    /// read back from `RosterStore.agents(forProject:)` — resolves each row's selected title the way
+    /// the view is written to. It does not cover the `.disabled(settings.reviewLevel != .agent)` half
+    /// of the original name — see `testAgentsRoutingTableIsDisabledOutsideAgentReview` below, which
+    /// reads that through pixel contrast instead of the `NSPopUpButton.isEnabled` this session has none of.
     func testAgentsRoutingTableShowsEachRowsChoice() throws {
         for level in [ReviewLevel.agent, .epic] {
             let db = try AppDatabase.inMemory()
@@ -219,6 +222,107 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
                 "\(level)"
             )
         }
+    }
+
+    /// `.disabled(settings.reviewLevel != .agent)` can no longer be read through
+    /// `NSPopUpButton.isEnabled` (see the type-level doc comment: macOS 27 builds no pop-up button
+    /// for a `Picker` in this offscreen session, at all). What survives is that a disabled control's
+    /// text still draws, dimmed — the same pixels `TaskTypeRenderTests` already reads a Picker's
+    /// selected label from. Measured on this machine over a per-type row's "Same as Default" value:
+    /// peak pixel brightness 222/255 at Agent review, 91/255 at Epic review — reproducible and far
+    /// apart, because SwiftUI drops a disabled view's opacity rather than merely changing hue.
+    ///
+    /// Proven by mutation: deleting `.disabled(settings.reviewLevel != .agent)` from
+    /// `ProjectSettingsSheet.swift` failed this test (`("222") is not less than ("150")` — no longer
+    /// dimmed even at Epic review); inverting it to `== .agent` also failed
+    /// (`("91") is not greater than ("150")` — Agent review came back dimmed instead).
+    func testAgentsRoutingTableIsDisabledOutsideAgentReview() throws {
+        let enabled = try ocrRoutingCapture(reviewLevel: .agent)
+        let disabled = try ocrRoutingCapture(reviewLevel: .epic)
+
+        let enabledValue = try XCTUnwrap(
+            enabled.lines.first { $0.text.contains("Same as Default") },
+            "no per-type routing value found at Agent review: \(enabled.lines.map(\.text))"
+        )
+        let disabledValue = try XCTUnwrap(
+            disabled.lines.first { $0.text.contains("Same as Default") },
+            "no per-type routing value found at Epic review: \(disabled.lines.map(\.text))"
+        )
+
+        let enabledPeak = peakBrightness(enabled.rep, box: enabledValue.box)
+        let disabledPeak = peakBrightness(disabled.rep, box: disabledValue.box)
+
+        XCTAssertGreaterThan(enabledPeak, 150, "Agent review's routing row should read at full contrast: \(enabledPeak)")
+        XCTAssertLessThan(disabledPeak, 150, "the routing row is not dimmed outside Agent review: \(disabledPeak)")
+        XCTAssertGreaterThan(
+            enabledPeak - disabledPeak, 60,
+            "enabled peak \(enabledPeak) is not clearly brighter than disabled peak \(disabledPeak)"
+        )
+    }
+
+    private struct OCRLine {
+        let text: String
+        let box: CGRect
+    }
+
+    /// Mounts the Agents tab at the given review level and reads its pixels two ways: Vision OCR
+    /// (to find where a routing row's value text sits) and the raw bitmap (to measure how bright it
+    /// is there). No roster agent is needed — an unconfigured `ReviewRoutingTable` already renders
+    /// "Same as Default" for every task type.
+    private func ocrRoutingCapture(reviewLevel: ReviewLevel) throws -> (lines: [OCRLine], rep: NSBitmapImageRep) {
+        let db = try AppDatabase.inMemory()
+        let projects = ProjectStore(db)
+        var project = try projects.register(
+            name: "Demo", repoPath: "/tmp/demo-\(UUID().uuidString)", baseBranch: "main",
+            worktreeRoot: "/tmp/demo-worktrees", memoryDir: nil
+        )
+        var settings = project.settings
+        settings.reviewLevel = reviewLevel
+        try projects.updateSettings(project.id, settings)
+        project = try XCTUnwrap(projects.get(project.id))
+
+        let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .agents, onDeleted: {})
+            .environment(renderEnvironment(db: db))
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 900))
+        defer { mount.close() }
+        _ = try mount.capture()
+        let image = try XCTUnwrap(CGWindowListCreateImage(
+            .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+            [.boundsIgnoreFraming, .bestResolution]
+        ))
+        let rep = try XCTUnwrap(NSBitmapImageRep(cgImage: image))
+
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        let lines = (request.results ?? []).compactMap { observation in
+            observation.topCandidates(1).first.map { OCRLine(text: $0.string, box: observation.boundingBox) }
+        }
+        return (lines, rep)
+    }
+
+    /// The brightest pixel (mean of R/G/B) inside a Vision bounding box (normalized, bottom-left
+    /// origin) of a bitmap (pixels, top-left origin). A disabled control's dimmed text loses its
+    /// brightest anti-aliased pixels; the background it sits on does not move, so the peak is a
+    /// cleaner signal than the mean, which mixes in however much of the box is background.
+    private func peakBrightness(_ rep: NSBitmapImageRep, box: CGRect) -> Int {
+        let w = rep.pixelsWide, h = rep.pixelsHigh
+        guard w > 0, h > 0 else { return 0 }
+        let x0 = max(0, Int(box.minX * CGFloat(w)))
+        let x1 = min(w, Int(box.maxX * CGFloat(w)))
+        let yTop = max(0, h - Int(box.maxY * CGFloat(h)))
+        let yBottom = min(h, h - Int(box.minY * CGFloat(h)))
+        var peak = 0
+        guard x0 < x1, yTop < yBottom else { return peak }
+        for y in yTop..<yBottom {
+            for x in x0..<x1 {
+                guard let color = rep.colorAt(x: x, y: y) else { continue }
+                let luma = Int((color.redComponent + color.greenComponent + color.blueComponent) / 3 * 255)
+                peak = max(peak, luma)
+            }
+        }
+        return peak
     }
 
     func testTheReviewerOptionsListTheProjectsAgentsThenAMissingChoiceThenTheFixedChoices() {
