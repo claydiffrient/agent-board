@@ -77,6 +77,24 @@ final class EpicSpawnTests: XCTestCase {
         XCTAssertNotEqual(try head(taskBranch), try head("main"))
     }
 
+    /// SPEC §5 "Resumed": only a resume merges the epic branch in. A spawn into a worktree the task
+    /// already has, behind an epic branch that moved, leaves it exactly where it was.
+    func testASpawnIntoAnExistingWorktreeMergesNothing() async throws {
+        let epic = try makeEpic()
+        try git(["branch", epic.branch, "main"])
+        let task = try makeTask("Handed off", epicId: epic.id)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(fixture.worktreeWorker(task: task).worktreePath))
+        let before = try SupervisorFixture.git(["rev-parse", "HEAD"], cwd: worktree)
+        try advance(epic.branch, message: "A sibling was accepted")
+
+        try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
+
+        let spawns = await fixture.runtime.spawns
+        XCTAssertEqual(spawns.last?.cwd.standardizedFileURL.path, worktree.standardizedFileURL.path)
+        XCTAssertEqual(try SupervisorFixture.git(["rev-parse", "HEAD"], cwd: worktree), before, "spawn merged the epic branch")
+    }
+
     func testTheEpicBranchIsCutFromTheProjectBaseWhenAbsent() async throws {
         let epic = try makeEpic()
         let task = try makeTask("First in epic", epicId: epic.id)

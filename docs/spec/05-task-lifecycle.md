@@ -83,6 +83,26 @@ nobody reviewed.
   the fourth termination shape alongside a cap kill, a human stop, and an
   acknowledged wind-down; each is distinguishable by report kind
   (`handoff`, `failed`, none, `decision`) and by the session's `stop_reason`.
+- **Resumed** — before a stopped worker in its own worktree is woken, a task in
+  an epic has `agentboard/epic-<id>` merged into its branch, in that worktree,
+  so it sees what siblings accepted since it last ran. Only the epic branch,
+  never the project's base; a task in no epic, a shared placement, a reviewer
+  and a wind-down delivery (§8.1) merge nothing, and spawn never merges — it
+  already cuts from the epic head. An epic branch already in the task's
+  history does nothing and says nothing. Uncommitted work the previous run left
+  is first committed, unchanged and hook-free, as `Save uncommitted work left
+  by an interrupted run`: a stash would go on the stack every worktree of the
+  repository shares, and git refuses to reapply one over a conflicted merge,
+  which is exactly when it matters. The merge commit is titled from the epic's
+  and task's titles, never branch names (§5.2). A conflict never refuses the
+  resume and is never resolved by the board: the worker wakes in the
+  conflicted tree, and the resume prompt says before anything else that the
+  epic branch was merged, which files conflicted, that resolving them is part
+  of the task, and that it is not done until the tree builds and the suite
+  passes. A clean merge names the commits and files it brought in; a merge
+  still unresolved from an earlier resume is reported again rather than
+  retried; a merge git refused tells the worker to merge the epic branch
+  itself. The prompt names any commit made of the worker's uncommitted work.
 - `blocked` — a flag, not a column. Set by the `Notification` hook, cleared on
   the next `PostToolUse`. The card keeps its position and shows why.
 - `review` — worker has committed and called `report_complete`, and the review
