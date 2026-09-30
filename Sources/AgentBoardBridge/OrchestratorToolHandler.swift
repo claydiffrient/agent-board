@@ -741,13 +741,18 @@ public final class OrchestratorToolHandler: ToolHandler {
     }
 
     private func listRosterAgents(identity: TokenIdentity) throws -> ToolResult {
-        .json(.array(try roster.usableAgents(forProject: identity.projectId).map { agent in
-            .object([
+        .json(.array(try roster.usableArchetypes(forProject: identity.projectId).map { archetype in
+            let agent = archetype.agent
+            return .object([
                 "id": .string(agent.id),
                 "name": .string(agent.name),
                 "role": .string(agent.role),
+                "source": .string(archetype.source.label),
+                "definition_path": .optional(archetype.source.path),
+                "description": .optional(archetype.description.isEmpty ? nil : archetype.description),
                 "system_prompt": .string(agent.systemPrompt),
                 "model": .optional(agent.model),
+                "tools": agent.tools.map { .array($0.map(JSONValue.string)) } ?? .null,
             ])
         }))
     }

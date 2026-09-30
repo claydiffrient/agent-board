@@ -23,7 +23,7 @@ enum AppComposition {
             _Concurrency.Task { await ports.run() }
             let environment = AppEnvironment(
                 db: db, supervisor: supervisor, sleepGuard: sleepGuard, startup: startup,
-                listeningPorts: ports
+                listeningPorts: ports, agentDefinitions: AgentDefinitionDirectories()
             )
             MacNotifier.shared.start(router: environment.router)
             return environment

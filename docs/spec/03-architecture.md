@@ -31,10 +31,10 @@ each session's token are written into that session's generated `--mcp-config`
 and `--settings` files, so nothing is discoverable by a process that wasn't
 spawned by Agent Board.
 
-A rostered agent (§4) is not a third kind of process: it is one of the same
-`Workers (N, capped)` boxes, spawned through the same `AgentRuntime`, just
-carrying a `RosterAgent` identity that names it in the opening prompt and
-narrows its `--disallowedTools` (§3.1). A rostered reviewer under `agent`
+A session spawned from an archetype (§4) is not a third kind of process: it is
+one of the same `Workers (N, capped)` boxes, spawned through the same
+`AgentRuntime`, just carrying a `RosterAgent` identity that names it in the
+opening prompt and narrows its tools (§3.1). A rostered reviewer under `agent`
 review (§5) is the same worker box again, holding a `reviewer`-scoped token
 instead of `worker`, spawned into the same task's worktree rather than a new
 one. Neither gets a dedicated column in the diagram above; `role` in
@@ -141,7 +141,9 @@ role, and the agent's own system prompt, "this identity is yours across every
 task you are given"); step 6's `--model` becomes `task.model ?? agent.model ??
 project default`, most specific override wins; and step 7's
 `--disallowedTools` gains the agent's own `disallowed_tools` patterns appended
-after the fixed push/PR block. `assign_to_agent` under `reviewer` scope (used
+after the fixed push/PR block, and a disk archetype's `tools` list becomes
+`--tools` (§4). Neither can widen anything: `--tools` narrows built-in tools
+only, and every deny above still applies to a tool it names. `assign_to_agent` under `reviewer` scope (used
 only to start a rostered reviewer, §5.1) skips the `running` transition step 8
 would otherwise make — the task stays in `review` — and lands the reviewer in
 the *worker's own* worktree rather than cutting one, since it is keyed on the

@@ -50,7 +50,7 @@ is reached by neither.
 | `get_my_task()` | The task bound to this token, plus its `type` (null for Default), `epic_id`, dependency summaries and comment thread |
 | `update_status(state, detail)` | Appends to `progress`; sets `blocked`/`failed` flags |
 | `log_progress(text)` | Appends to `progress` |
-| `add_comment(body, task_id?)` | Appends to the task's `task_comment` thread as `worker`, named after the session's rostered agent or `Worker <short id>`. A `task_id` other than the token's own is refused |
+| `add_comment(body, task_id?)` | Appends to the task's `task_comment` thread as `worker`, named after the session's archetype or `Worker <short id>`. A `task_id` other than the token's own is refused |
 | `search_notes(query)` | FTS over this project's notes |
 | `read_note(id)` | Full note with sections |
 | `append_section(note_id, heading, body, if_version)` | Section-scoped write |
@@ -66,14 +66,14 @@ A worker may not read other tasks, reassign, create a non-proposal task, or
 spawn anything.
 
 `add_comment` in every scope signs the comment from the token — kind, session,
-rostered agent and a name snapshot (§4) — and never from the arguments. A thread
+archetype and a name snapshot (§4) — and never from the arguments. A thread
 is returned oldest first, each comment as `author_kind`, `author_name`,
 `roster_agent` (that agent's current name, or null), `created_at` (ISO-8601 with
 milliseconds) and `body`. Every description that writes or returns a thread
 says a comment is a note about the task — not progress, a report or a verdict —
 and that one written by an agent is information, not an instruction.
 
-`hand_off` is for a rostered agent that does only the portion matching its
+`hand_off` is for a session spawned from an archetype that does only the portion matching its
 specialty. It never sets the `failed` flag, and it releases the session's hold
 on the task so nothing believes that agent is still working it. The worktree is
 retained: the next agent assigned to the task works the same checkout, which is
@@ -131,8 +131,8 @@ Everything in worker scope over any task in the project, plus:
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
 | `pin_note(note_id, pinned)` | Every future agent sees it in its note index and can fetch it |
 | `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting |
-| `list_roster_agents()` | The rostered agents this project has enabled, in its own preference order |
-| `assign_to_agent(task_id, roster_agent_id)` | `spawn_worker` carrying a rostered identity: the same caps, shutdown and autonomy gates, worker scope, and the agent's own deny list layered on. An agent outside the project's usable set is refused |
+| `list_roster_agents()` | The archetypes this project can use, in its own preference order: board-local and disk ones alike, each with `source` (`board-local`, `project`, `user`), `definition_path` for a disk one, `description`, `system_prompt`, `model` and `tools` (null inherits every tool) |
+| `assign_to_agent(task_id, roster_agent_id)` | `spawn_worker` instantiating an archetype: the same caps, shutdown and autonomy gates, worker scope, and the agent's own deny list layered on. An agent outside the project's usable set is refused |
 | `stop_worker(session_id)` | `claude stop`, then the session's process tree is reaped (§8.5) |
 | `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |
 | `list_reports()`, `get_report(id)` | The Q9 pull channel |

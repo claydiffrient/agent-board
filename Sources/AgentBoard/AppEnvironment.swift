@@ -25,6 +25,11 @@ final class AppEnvironment {
     /// its absence as an empty list rather than an error.
     let listeningPorts: ListeningPortModel?
     let sweepPreview: SweepPreview
+    /// Where disk archetypes are read from (SPEC §4). `.none` unless the app wires the real ones, so
+    /// a preview or render test never lists the machine's own `~/.claude/agents`.
+    let agentDefinitions: AgentDefinitionDirectories
+
+    var roster: RosterStore { RosterStore(db, definitions: agentDefinitions) }
 
     init(
         db: AppDatabase, supervisor: any WorkerSupervising, router: NotificationRouter? = nil,
@@ -32,7 +37,8 @@ final class AppEnvironment {
         quitter: (any AppQuitting)? = nil,
         releaseNotes: ReleaseNotesAnnouncer = ReleaseNotesAnnouncer(),
         startup: _Concurrency.Task<Void, Never>? = nil,
-        listeningPorts: ListeningPortModel? = nil
+        listeningPorts: ListeningPortModel? = nil,
+        agentDefinitions: AgentDefinitionDirectories = .none
     ) {
         self.db = db
         self.supervisor = supervisor
@@ -44,5 +50,6 @@ final class AppEnvironment {
         self.startup = startup
         self.listeningPorts = listeningPorts
         sweepPreview = SweepPreview(supervisor: supervisor)
+        self.agentDefinitions = agentDefinitions
     }
 }

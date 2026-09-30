@@ -55,7 +55,7 @@ CREATE TABLE task (
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
   reviewer_agent_id TEXT REFERENCES roster_agent(id),  -- the rostered reviewer holding it in `review`
-  roster_agent_id TEXT REFERENCES roster_agent(id),    -- the rostered agent that last worked it
+  roster_agent_id TEXT REFERENCES roster_agent(id),    -- the archetype that last worked it
   archived_at    INTEGER,          -- non-null = archived: hidden from the board, never deleted
   done_at        INTEGER,          -- entered done; cleared on leaving. The afterDays clock
   unarchived_at  INTEGER,          -- a human pulled it back; no automatic policy touches it again
@@ -97,7 +97,7 @@ CREATE TABLE agent_session (
   tool_started_at INTEGER,           -- oldest tool call not yet seen to return
   tools_in_flight INTEGER NOT NULL DEFAULT 0,
   blocked_on_path TEXT,               -- §8.4: the shared-checkout file lock this session is waiting on
-  roster_agent_id TEXT REFERENCES roster_agent(id),  -- §10: the rostered identity this session runs as
+  roster_agent_id TEXT REFERENCES roster_agent(id),  -- §10: the archetype this session was spawned from
   review_head    TEXT,               -- §5.1: HEAD (and uncommitted-change fingerprint) a rostered reviewer was spawned on
   agent_stopped_at INTEGER,         -- §8.6: a `claude stop` succeeded after the row's last sign of life; a trigger clears it
   CHECK ((role = 'coordinator') = (project_id IS NULL))
@@ -256,7 +256,8 @@ CREATE TABLE hook_event (
   at          INTEGER NOT NULL
 );
 
--- The roster is cross-project: no project_id. Projects opt in below.
+-- The roster is cross-project: no project_id. Projects opt in below. A row is a board-local
+-- archetype, or a content-free pointer (id `definition:<name>`) to a disk one; see below.
 CREATE TABLE roster_agent (
   id            TEXT PRIMARY KEY,
   name          TEXT NOT NULL,
@@ -328,9 +329,71 @@ Notes are sectioned rather than a single body specifically so three concurrent
 workers appending to one note do not silently lose each other's writes. Whole-
 document replace is not offered.
 
+An **archetype** is a template — role, system prompt, model, tool scope — and
+every assignment instantiates it in a fresh session. The role is the durable
+thing, not the agent: spike task `c4d74da3` found a `claude --bg` session cannot
+be moved to another working directory, so nothing outlives a task but the
+template. "Role is not identity": two sessions from one archetype in two repos
+are the same role.
+
+Archetypes come from three sources, each labeled in every list
+(`Archetype.Source`):
+
+| Source | Where | Editable in Agent Board |
+|---|---|---|
+| `board-local` | a `roster_agent` row | yes, on the Roster screen |
+| `project` | `<project repo_path>/.claude/agents/*.md` | no — shown with its file path |
+| `user` | `~/.claude/agents/*.md` | no — shown with its file path |
+
+A disk archetype is a Claude Code agent definition: frontmatter, then a markdown
+body that is the system prompt. `AgentDefinitionParser` reads only the subset
+those files use — one `key: value` scalar per line, split on the first colon so a
+description containing one survives, surrounding quotes stripped — and refuses
+anything else (an indented continuation, a block list) rather than half-reading
+it. `name` is required. `model` is a short alias mapped through
+`ModelCatalog.resolve` (`sonnet` → `claude-sonnet-5`, newest in the family
+first); an alias it cannot map, or `inherit`, is no model, so the task's or the
+project's default applies. `color` is Claude Code's and is ignored. An omitted
+`tools` key inherits every tool; `tools:` with nothing after it grants none.
+A file that fails to parse, or that repeats a name already read from its
+directory, is skipped with a diagnostic and the rest of the directory loads.
+
+Disk archetypes are **read at use**, never imported: every listing, every
+`usableAgents` call and so every spawn rereads the directory, with no cache, so
+editing a file changes the next spawn with no re-import step. Only what the
+foreign keys need is stored: when a project opts into a disk archetype, or its
+enabled switch is flipped, `RosterStore.linkDefinition` writes a pointer row
+with id `definition:<name>` whose content columns are placeholders the read path
+never uses. One pointer row serves every project; each resolves the name against
+its own directories. A pointer whose file is gone resolves to nothing and drops
+out of the usable set.
+
+On a name clash, the source nearest the board wins: **board-local, then
+project, then user.** A project definition replaces the user-level one of the
+same name inside that project. A board-local agent beats a disk definition of
+the same name (compared case-insensitively), so adding a file to
+`~/.claude/agents` can never change what an existing board-local agent spawns.
+The loser is never dropped silently: the Roster screen and the project picker
+list it, marked (`shadowedBy`, `shadows`, `overrides`), and a shadowed
+definition is left out of the usable set even if a project opted into it.
+
+A disk archetype's `tools` list reaches the spawn as `--tools`, which narrows
+Claude Code's built-in tools and nothing else. Measured on Claude Code 2.1.285
+by capturing the request's `tools` array: the board's own MCP tools from
+`--strict-mcp-config --mcp-config` survive every `--tools` list, including
+`--tools ""`, so an archetype can always call `report_complete` and there is no
+"can it finish" check to make. (`--agent`, which applies a definition the way
+Claude Code does for a subagent, *would* drop an unlisted `mcp__*` tool; that is
+why it is not used.) `--tools` also drops names it does not know — `LS`,
+`MultiEdit`, `TodoWrite` — and a permission pattern such as `Bash(git status*)`,
+which therefore grants nothing; the parser attaches a warning to the archetype
+for the pattern case. A tool the deny list names stays denied even when
+`--tools` names it, so an archetype listing `Bash(git push*)` still has push
+denied.
+
 `roster_agent.disallowed_tools` is a **deny-list**, not an allow-list: its
-patterns are appended to the worker default `--disallowedTools` at spawn, so a
-rostered agent can only ever have *less* authority than a plain worker and can
+patterns are appended to the worker default `--disallowedTools` at spawn, so an
+archetype can only ever have *less* authority than a plain worker and can
 never grant itself anything. That is why `NOT NULL DEFAULT '[]'` is the right
 default — an empty list is exactly a full worker's authority, which is the status
 quo for an unrostered one.
@@ -339,7 +402,7 @@ quo for an unrostered one.
 so adding a specialty must not need a migration. A project's *usable* set is
 `project_roster_agent` joined to `roster_agent` where `enabled = 1` — disabling
 an agent roster-wide takes it out of every project's rotation without removing
-anyone's selection. Deleting a rostered agent clears its `project_roster_agent`
+anyone's selection. Deleting an archetype's row clears its `project_roster_agent`
 rows and keeps its history: the tasks it worked or reviewed, its sessions, the
 `progress` rows naming it and the comments it wrote all survive it. Their `roster_agent_id` and
 `reviewer_agent_id` are set to NULL in the same transaction, because those columns

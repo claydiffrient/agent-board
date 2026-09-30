@@ -78,6 +78,7 @@ struct ProjectSettingsSheet: View {
     @State private var tab: ProjectSettingsTab
     @State private var confirmDelete = false
     @State private var roster = Observed<[RosterAgent]>([])
+    @State private var archetypes: [Archetype] = []
     @State private var selectedAgentIds: Set<String> = []
     @State private var projectAgents: [RosterAgent] = []
     @State private var errorMessage: String?
@@ -140,7 +141,7 @@ struct ProjectSettingsSheet: View {
             .task {
                 await roster.run(RosterStore(env.db).observe(), in: env.db.reader)
             }
-            .task(id: roster.value.map(\.id)) {
+            .task(id: roster.value) {
                 reloadSelection()
             }
 
@@ -349,18 +350,19 @@ struct ProjectSettingsSheet: View {
         }
     }
 
-    /// The whole roster with a toggle each: on writes the project's opt-in, off writes the opt-out.
-    /// Both land immediately rather than on Save, because they are per-project join rows and not
-    /// part of the settings blob the Save button rewrites.
+    /// Every archetype this project could use, with a toggle each: on writes the project's opt-in,
+    /// off writes the opt-out. Both land immediately rather than on Save, because they are
+    /// per-project join rows and not part of the settings blob the Save button rewrites.
     @ViewBuilder
     private var rosterSelection: some View {
-        if roster.value.isEmpty {
-            Text("No rostered agents yet. Add them in the Roster tab.")
+        if archetypes.isEmpty {
+            Text("No archetypes yet. Add one in the Roster tab, or define one in ~/.claude/agents or this repository's .claude/agents.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else {
-            let split = RosterListing.partition(roster: roster.value, selectedIds: selectedAgentIds)
-            ForEach(split.selected + split.available) { agent in
+            let selected = archetypes.filter { selectedAgentIds.contains($0.agent.id) }
+            ForEach(selected + archetypes.filter { !selectedAgentIds.contains($0.agent.id) }) { archetype in
+                let agent = archetype.agent
                 Toggle(isOn: Binding(
                     get: { selectedAgentIds.contains(agent.id) },
                     set: { setSelected(agent, $0) }
@@ -368,10 +370,14 @@ struct ProjectSettingsSheet: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(agent.name)
-                            Text(agent.role)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            if archetype.source.isEditable {
+                                Text(agent.role)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            ArchetypeSourceChip(source: archetype.source)
                         }
+                        ArchetypeProvenance(archetype: archetype)
                         if !agent.enabled {
                             Text("Disabled in the roster; this project will not spawn it.")
                                 .font(.caption)
@@ -379,8 +385,9 @@ struct ProjectSettingsSheet: View {
                         }
                     }
                 }
+                .disabled(archetype.shadowedBy != nil && !selectedAgentIds.contains(agent.id))
             }
-            Text("\(split.selected.count) of \(roster.value.count) selected for \(project.name). Other projects are unaffected.")
+            Text("\(selected.count) of \(archetypes.count) selected for \(project.name). Other projects are unaffected.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -388,15 +395,16 @@ struct ProjectSettingsSheet: View {
 
     private func reloadSelection() {
         do {
-            projectAgents = try RosterStore(env.db).agents(forProject: project.id)
+            projectAgents = try env.roster.agents(forProject: project.id)
             selectedAgentIds = Set(projectAgents.map(\.id))
+            archetypes = env.roster.archetypes(rows: roster.value, project: project).archetypes
         } catch {
             errorMessage = errorText(error)
         }
     }
 
     private func setSelected(_ agent: RosterAgent, _ selected: Bool) {
-        let store = RosterStore(env.db)
+        let store = env.roster
         do {
             if selected {
                 try store.enable(agentId: agent.id, forProject: project.id)

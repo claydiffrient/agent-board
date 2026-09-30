@@ -7,6 +7,9 @@ public struct SpawnRequest: Sendable {
     public var configFiles: SessionConfigFiles
     public var permissionMode: String
     public var disallowedTools: [String]
+    /// An archetype's allow-list, passed as `--tools`. It narrows built-in tools only: the board's own
+    /// MCP tools survive any list, and a `disallowedTools` entry still removes a tool it names (SPEC §4).
+    public var tools: [String]?
     public var appendSystemPrompt: String?
     public var model: String?
 
@@ -58,6 +61,7 @@ public struct SpawnRequest: Sendable {
         configFiles: SessionConfigFiles,
         permissionMode: String = "auto",
         disallowedTools: [String] = SpawnRequest.defaultDisallowedTools,
+        tools: [String]? = nil,
         appendSystemPrompt: String? = nil,
         model: String? = nil
     ) {
@@ -67,6 +71,7 @@ public struct SpawnRequest: Sendable {
         self.configFiles = configFiles
         self.permissionMode = permissionMode
         self.disallowedTools = disallowedTools
+        self.tools = tools
         self.appendSystemPrompt = appendSystemPrompt
         self.model = model
     }
@@ -116,6 +121,9 @@ public struct BackgroundSessionRuntime: AgentRuntime {
         }
         if let model = request.model {
             args += ["--model", model]
+        }
+        if let tools = request.tools {
+            args += ["--tools", tools.joined(separator: ",")]
         }
         if !request.disallowedTools.isEmpty {
             args += ["--disallowedTools"] + request.disallowedTools

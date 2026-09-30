@@ -110,6 +110,7 @@ final class ClaudeCLITests: XCTestCase {
             name: "task-1",
             prompt: "Do the thing",
             configFiles: files,
+            tools: ["Read", "Bash(git push*)"],
             appendSystemPrompt: "You are a worker.",
             model: "claude-sonnet-5"
         )
@@ -125,8 +126,9 @@ final class ClaudeCLITests: XCTestCase {
             "--settings", "/cfg/settings-x.json",
             "--append-system-prompt", "You are a worker.",
             "--model", "claude-sonnet-5",
+            "--tools", "Read,Bash(git push*)",
             "--disallowedTools", "Bash(git push*)", "Bash(gh pr create*)", "Bash(gh pr merge*)",
-        ])
+        ], "an archetype naming `Bash(git push*)` still gets the default deny for it")
         XCTAssertEqual(args.firstIndex(of: "--disallowedTools").map { args.count - $0 }, 4)
     }
 
@@ -139,6 +141,7 @@ final class ClaudeCLITests: XCTestCase {
         let args = BackgroundSessionRuntime.arguments(for: request)
         XCTAssertFalse(args.contains("--append-system-prompt"))
         XCTAssertFalse(args.contains("--model"))
+        XCTAssertFalse(args.contains("--tools"), "no list inherits every tool; `--tools \"\"` would grant none")
         XCTAssertFalse(args.contains("--disallowedTools"))
         XCTAssertEqual(args.last, "/cfg/s.json")
     }

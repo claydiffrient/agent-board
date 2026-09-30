@@ -59,16 +59,6 @@ public enum RosterListing {
         return ordered(agents).map { RosterListEntry(agent: $0, assignment: byAgent[$0.id]) }
     }
 
-    /// Splits the whole roster by whether this project has opted the agent in. Both halves keep
-    /// display order, and ids the project selected that are no longer in the roster fall away.
-    public static func partition(
-        roster: [RosterAgent], selectedIds: some Sequence<String>
-    ) -> (selected: [RosterAgent], available: [RosterAgent]) {
-        let selected = Set(selectedIds)
-        let ordered = ordered(roster)
-        return (ordered.filter { selected.contains($0.id) }, ordered.filter { !selected.contains($0.id) })
-    }
-
     public static func deleteDecision(for entry: RosterListEntry) -> RosterDeleteDecision {
         guard let assignment = entry.assignment else { return .allowed }
         return .refused(taskTitle: assignment.taskTitle)
