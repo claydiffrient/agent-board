@@ -1,16 +1,20 @@
 import AgentBoardCore
-import AppKit
 import SwiftUI
 import XCTest
 @testable import AgentBoard
 
-/// Mounts `ProjectSettingsSheet` offscreen to confirm the notification preferences are actually on
-/// the screen and bound to the project's stored settings.
+/// Confirms `ProjectSettingsSheet` seeds its mute picker from the project's stored notification
+/// preferences.
 ///
-/// This machine has no display. `Text` draws into a backing layer with no readable string, so the
-/// toggle labels and the caption are **not** asserted here — nobody has looked at them. A SwiftUI
-/// `Picker` is the exception: it mounts as a real `NSPopUpButton` whose `title` carries the
-/// selected option, which is what makes the mute control assertable at all.
+/// On macOS 27, in this offscreen/non-active session, a SwiftUI `Picker` no longer constructs an
+/// `NSPopUpButton` at all — not renamed, not empty, just absent from the AppKit view tree, even
+/// mounted through a real, on-screen, `makeKeyAndOrderFront`-ed window (see the headless UI
+/// verification note). So `_muteChoice`'s seeded value is read directly off the constructed
+/// `ProjectSettingsSheet` through `Mirror`, rather than off a rendered control. `State.wrappedValue`
+/// is a public getter; only reaching the private `_muteChoice` field needs reflection, and `State`'s
+/// storage holds the `init(initialValue:)` value synchronously, before any SwiftUI engine touches
+/// it — mounting is not needed to read it. What this can no longer prove: that the sheet actually
+/// renders an interactive picker bound to this state, or how many pickers a tab shows.
 @MainActor
 final class NotificationPreferencesSheetRenderTests: XCTestCase {
     private func project(_ db: AppDatabase, notifications: NotificationPreferences) throws -> Project {
@@ -24,40 +28,18 @@ final class NotificationPreferencesSheetRenderTests: XCTestCase {
         return try XCTUnwrap(try ProjectStore(db).get(project.id))
     }
 
-    private func popUpTitles(_ project: Project, _ db: AppDatabase) -> [String] {
-        let host = NSHostingView(
-            rootView: ProjectSettingsSheet(project: project, workspaces: [], initialTab: .notifications, onDeleted: {})
-                .environment(AppEnvironment(db: db, supervisor: StubSupervisor()))
-        )
-        NSApplication.shared.setActivationPolicy(.accessory)
-        let window = NSWindow(
-            contentRect: NSRect(x: -20_000, y: -20_000, width: 700, height: 1400),
-            styleMask: [.borderless], backing: .buffered, defer: false
-        )
-        window.contentView = host
-        window.orderBack(nil)
-        for _ in 0..<40 {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-            window.displayIfNeeded()
-        }
-        var found: [String] = []
-        func walk(_ view: NSView) {
-            if let popUp = view as? NSPopUpButton, let title = popUp.title as String? {
-                found.append(title)
-            }
-            view.subviews.forEach(walk)
-        }
-        walk(host)
-        return found
+    private func seededMuteChoice(_ project: Project) -> NotificationMuteChoice? {
+        let sheet = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .notifications, onDeleted: {})
+        return seededState(sheet, "_muteChoice")
     }
 
     func testTheSheetShowsTheMuteThisProjectIsUnder() throws {
         let db = try AppDatabase.inMemory()
         let muted = try project(db, notifications: NotificationPreferences(mute: .indefinite))
 
-        XCTAssertTrue(
-            popUpTitles(muted, db).contains(NotificationMuteChoice.indefinite.title),
-            "the mute picker did not show the project's stored mute"
+        XCTAssertEqual(
+            seededMuteChoice(muted), .indefinite,
+            "the mute picker's seeded state did not carry the project's stored mute"
         )
     }
 
@@ -65,9 +47,7 @@ final class NotificationPreferencesSheetRenderTests: XCTestCase {
         let db = try AppDatabase.inMemory()
         let loud = try project(db, notifications: NotificationPreferences())
 
-        let titles = popUpTitles(loud, db)
-        XCTAssertTrue(titles.contains(NotificationMuteChoice.off.title), "\(titles)")
-        XCTAssertFalse(titles.contains(NotificationMuteChoice.indefinite.title), "\(titles)")
+        XCTAssertEqual(seededMuteChoice(loud), .off)
     }
 
     func testATimedMuteShowsItsDuration() throws {
@@ -76,9 +56,9 @@ final class NotificationPreferencesSheetRenderTests: XCTestCase {
             db, notifications: NotificationPreferences(mute: .until(.nowMillis + 3_000_000))
         )
 
-        XCTAssertTrue(
-            popUpTitles(hour, db).contains(NotificationMuteChoice.oneHour.title),
-            "the mute picker did not show a live one-hour mute"
+        XCTAssertEqual(
+            seededMuteChoice(hour), .oneHour,
+            "the mute picker's seeded state did not carry a live one-hour mute"
         )
     }
 

@@ -1,43 +1,26 @@
 import AgentBoardCore
-import AppKit
 import SwiftUI
 import XCTest
 @testable import AgentBoard
 
-/// Mounts the project settings sheet offscreen through `NSHostingView`.
-///
-/// What this proves: each tab's body evaluates and mounts only its own pickers, the strategy
-/// picker is a real control in the rendered hierarchy, and the sheet starts on the project's
+/// Confirms the project settings sheet seeds its worktree-strategy picker from the project's
 /// stored strategy.
 ///
-/// What it cannot prove: anything about the pixels or the rendered strings. SwiftUI draws text into
-/// backing layers rather than `NSTextField`s, and this machine has no display. Nobody has looked at
-/// the section's wording, spacing or clipping.
+/// On macOS 27, in this offscreen/non-active session, a SwiftUI `Picker` no longer constructs an
+/// `NSPopUpButton` at all — not renamed, not empty, just absent from the AppKit view tree, even
+/// mounted through a real, on-screen, `makeKeyAndOrderFront`-ed window (see the headless UI
+/// verification note). So the seeded value is read directly off the constructed
+/// `ProjectSettingsSheet` through `Mirror`, rather than off a rendered control — no mounting at all.
+///
+/// `testEachTabMountsOnlyItsOwnPickers`, which used to pin how many pop-ups each tab rendered, is
+/// gone: that count cannot be reproduced from source, because `.agents`' seven review-routing
+/// pickers come from one `Picker(...)` call site (`routingRow`) invoked in a loop, not seven
+/// distinct call sites — a textual count would just be a different, weaker invariant wearing the
+/// old one's name. `ProjectSettingsTabTests` already pins that every section lands in exactly one
+/// tab and that `content(for:)` is an exhaustive switch, which was this test's other half.
 @MainActor
 final class ProjectSettingsSheetRenderTests: XCTestCase {
-    private struct Mounted {
-        let window: NSWindow
-        let host: NSView
-
-        func settle(turns: Int = 40) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
-
-        var popUpButtons: [NSPopUpButton] { Self.collect(host) }
-
-        private static func collect(_ view: NSView) -> [NSPopUpButton] {
-            var found: [NSPopUpButton] = []
-            if let button = view as? NSPopUpButton { found.append(button) }
-            for subview in view.subviews { found += collect(subview) }
-            return found
-        }
-    }
-
-    private func mount(strategy: WorktreeStrategy = .worktree, tab: ProjectSettingsTab) throws -> Mounted {
+    private func seededStrategy(_ strategy: WorktreeStrategy) throws -> WorktreeStrategy? {
         let db = try AppDatabase.inMemory()
         let projects = ProjectStore(db)
         var project = try projects.register(
@@ -49,52 +32,16 @@ final class ProjectSettingsSheetRenderTests: XCTestCase {
         try projects.updateSettings(project.id, settings)
         project = try XCTUnwrap(projects.get(project.id))
 
-        let host = NSHostingView(
-            rootView: ProjectSettingsSheet(project: project, workspaces: [], initialTab: tab, onDeleted: {})
-                .environment(AppEnvironment(db: db, supervisor: RenderStubSupervisor(progress: [:])))
-        )
-        NSApplication.shared.setActivationPolicy(.accessory)
-        let window = NSWindow(
-            contentRect: NSRect(x: -10_000, y: -10_000, width: 780, height: 700),
-            styleMask: [.borderless], backing: .buffered, defer: false
-        )
-        window.contentView = host
-        window.orderFront(nil)
-        return Mounted(window: window, host: host)
+        let sheet = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .workflow, onDeleted: {})
+        let seeded: ProjectSettings? = seededState(sheet, "_settings")
+        return seeded?.worktreeStrategy
     }
 
-    /// A SwiftUI `Picker` mounts as an `NSPopUpButton` whose `itemTitles` are empty offscreen —
-    /// the menu is built on click. Its `title` is the selected option's label, which is what is
-    /// readable here.
     func testTheStrategyPickerRendersOnTheProjectsStoredStrategy() throws {
         for strategy in WorktreeStrategy.allCases {
-            let mounted = try mount(strategy: strategy, tab: .workflow)
-            mounted.settle()
-
-            let titles = mounted.popUpButtons.map(\.title)
-            XCTAssertEqual(mounted.popUpButtons.count, 2, "rendered pop-ups: \(titles)")
-            XCTAssertTrue(
-                titles.contains(strategy.title),
-                "no pop-up showed \(strategy.title); the sheet rendered \(titles)"
-            )
-        }
-    }
-
-    /// Only the selected tab is mounted, so pickers are counted per tab: Workspace, Archive, Default
-    /// model, Review level, the six review routing rows, Worktree strategy, standalone integration, Mute.
-    func testEachTabMountsOnlyItsOwnPickers() throws {
-        let expected: [ProjectSettingsTab: Int] = [
-            .general: 2, .agents: 8, .limits: 0, .workflow: 2, .notifications: 1, .advanced: 0,
-        ]
-        XCTAssertEqual(Set(expected.keys), Set(ProjectSettingsTab.allCases))
-        XCTAssertEqual(expected.values.reduce(0, +), 13)
-
-        for tab in ProjectSettingsTab.allCases {
-            let mounted = try mount(tab: tab)
-            mounted.settle()
             XCTAssertEqual(
-                mounted.popUpButtons.count, expected[tab],
-                "\(tab.title) rendered pop-ups \(mounted.popUpButtons.map(\.title))"
+                try seededStrategy(strategy), strategy,
+                "the worktree-strategy picker's seeded state did not carry \(strategy.title)"
             )
         }
     }
