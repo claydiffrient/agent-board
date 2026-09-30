@@ -31,7 +31,15 @@ struct AgentBoardApp: App {
             CommandGroup(after: .textEditing) {
                 FindCommand()
             }
+            CommandGroup(after: .appInfo) {
+                SweepPreviewMenuItem()
+            }
         }
+
+        Window(SweepPreviewScene.title, id: SweepPreviewScene.id) {
+            SweepPreviewWindow(preview: appEnvironment.sweepPreview)
+        }
+        .defaultSize(width: 760, height: 480)
 
         Window(ReleaseNotesScene.title, id: ReleaseNotesScene.id) {
             ReleaseNotesWindow(state: appEnvironment.releaseNotes.state)

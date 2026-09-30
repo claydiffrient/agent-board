@@ -166,6 +166,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("task_type") { db in
             try db.execute(sql: "ALTER TABLE task ADD COLUMN type TEXT")
         }
+        migrator.registerMigration("session_agent_stopped_at") { db in
+            try db.execute(sql: Schema.sessionAgentStoppedAt)
+        }
         return migrator
     }
 }

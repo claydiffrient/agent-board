@@ -247,7 +247,7 @@ their Mac awake.
 
 The decision reads the observed session rows and nothing else — never a
 spawn-side counter — so a worker that dies without reporting stops holding the
-Mac awake the moment `reconcile` or the leaked-agent sweep (§3) flips its row
+Mac awake the moment `reconcile` or the leaked-agent sweep (§8.6) flips its row
 inactive. It is re-evaluated on the metering tick and immediately after `stop`,
 `pauseAll` and `reconcile`.
 
@@ -370,3 +370,37 @@ Another process's environment is not readable on this macOS:
 `KERN_PROCARGS2` returns argv but no environment for any pid but the caller's.
 So the `CLAUDE_CODE_SESSION_ID` that Claude exports to every Bash command
 cannot be used to find them.
+
+### 8.6 The leaked-agent sweep
+
+Every launch stops the `claude --bg` agent of each `agent_session` row that is
+inactive but still holds a short id. The sweep decides from the rows alone
+(`LeakedAgentSweep.plan`); the `claude agents` listing is read afterwards and
+may only subtract a target, never add one, so a `claude` session the board has
+no row for is never touched. A row whose registry entry carries no pid is kept:
+there is no process to free.
+
+**A row is examined until its agent is confirmed stopped.** Every successful
+`claude stop` on a session — the sweep, `report_complete`, a human's Stop, the
+caps — writes `agent_session.agent_stopped_at`, and the sweep plans only rows
+where it is NULL. A trigger clears it the moment the row shows life again: its
+state becomes active, or `last_activity` moves past the stop. The second rule
+is for a session resumed on a settled task, whose `SessionStart` deliberately
+does not revive the row (§7) but whose tool calls still bump `last_activity`.
+Each life of a row therefore costs at most one successful `claude stop`, however
+long the table grows, and the case of an unlistable runtime — where every
+unmarked row is attempted — is paid once, not on every launch.
+
+This is not an age horizon. A row that ended a year ago and was never
+confirmed stopped is planned exactly like one that ended a minute ago, which is
+the leak the sweep exists for. Nothing is marked on weaker evidence than a
+`claude stop` that succeeded: a registry entry with no pid is not enough,
+because the registry failing to report a resident session's pid is the one
+failure that would otherwise hide a real leak forever. A marked row whose short
+id the listing does show with a process is counted in the report rather than
+stopped, because acting on it would let the listing add a target.
+
+**Preview Leaked-Agent Sweep…** in the app menu runs the same sweep as a dry
+run and shows its report in a window (§10). The dry run stops nothing and marks
+nothing; `WorkerSupervising` exposes only the dry run, so no surface can reach
+the real one.

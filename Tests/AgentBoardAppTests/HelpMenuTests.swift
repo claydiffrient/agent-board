@@ -16,6 +16,7 @@ final class HelpMenuTests: XCTestCase {
     private struct Probe {
         let help: [[String: Any]]
         let edit: [[String: Any]]
+        let app: [[String: Any]]
         let windowsAfterOne: [[String: Any]]
         let windowsAfterTwo: [[String: Any]]
 
@@ -85,6 +86,15 @@ final class HelpMenuTests: XCTestCase {
         XCTAssertTrue(others.isEmpty, "another Edit item also claims ⌘F: \(others)")
     }
 
+    func testTheAppMenuCarriesTheSweepPreview() throws {
+        let probe = try probeApp()
+        let item = try XCTUnwrap(
+            probe.app.first { $0["title"] as? String == SweepPreviewScene.menuTitle },
+            "\(probe.app.compactMap { $0["title"] as? String })"
+        )
+        XCTAssertEqual(item["action"] as? String, "menuAction:", "the item is in the menu but wired to nothing")
+    }
+
     // MARK: driving the app
 
     private func probeApp(invoking item: String? = nil) throws -> Probe {
@@ -122,6 +132,8 @@ final class HelpMenuTests: XCTestCase {
         return Probe(
             help: report["help"] as? [[String: Any]] ?? [],
             edit: (report["menus"] as? [String: Any])?["Edit"] as? [[String: Any]] ?? [],
+            app: ((report["topLevel"] as? [String])?.first)
+                .flatMap { (report["menus"] as? [String: Any])?[$0] as? [[String: Any]] } ?? [],
             windowsAfterOne: report["windowsAfterOne"] as? [[String: Any]] ?? [],
             windowsAfterTwo: report["windowsAfterTwo"] as? [[String: Any]] ?? []
         )

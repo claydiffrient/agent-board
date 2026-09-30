@@ -83,9 +83,13 @@ protocol WorkerSupervising: AnyObject {
     /// A report was queued outside the supervisor — the human's comment (SPEC §9.1) — so the
     /// orchestrator console is told now rather than on the next board event.
     func reportQueued(projectId: String) async
+    /// The launch sweep as a dry run (SPEC §8.6); nil where there is nothing to sweep with. Only the
+    /// dry run is on the protocol, so no surface can reach the sweep that stops sessions.
+    func previewLeakedAgentSweep() async -> AgentSweepReport?
 }
 
 extension WorkerSupervising {
     func focusChanged(projectId: String?) {}
     func reportQueued(projectId: String) async {}
+    func previewLeakedAgentSweep() async -> AgentSweepReport? { nil }
 }
