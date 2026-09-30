@@ -247,7 +247,7 @@ their Mac awake.
 
 The decision reads the observed session rows and nothing else — never a
 spawn-side counter — so a worker that dies without reporting stops holding the
-Mac awake the moment `reconcile` or the leaked-agent sweep (§3) flips its row
+Mac awake the moment `reconcile` or the leaked-agent sweep (§8.6) flips its row
 inactive. It is re-evaluated on the metering tick and immediately after `stop`,
 `pauseAll` and `reconcile`.
 
