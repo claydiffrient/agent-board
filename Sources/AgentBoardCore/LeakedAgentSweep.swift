@@ -38,6 +38,13 @@ public enum LeakedAgentSweep {
                 ? "UNTRACKED \(report.untracked) — live claude sessions the board has no row for, never touched"
                 : "UNTRACKED unknown — the runtime could not be listed"
         )
+        if report.confirmedStopped > 0 {
+            var line = "CONFIRMED-STOPPED \(report.confirmedStopped) — a claude stop already ended these, not re-examined"
+            if report.confirmedStoppedButListed > 0 {
+                line += "; \(report.confirmedStoppedButListed) listed with a process again, left alone because the listing may only subtract"
+            }
+            lines.append(line)
+        }
         return lines
     }
 
@@ -79,6 +86,10 @@ public struct AgentSweepReport: Sendable, Equatable {
     /// deliberately left alone is visible; never a candidate for anything.
     public var untracked = 0
     public var runtimeListed = false
+    /// Rows left out of the plan because a `claude stop` succeeded after their last sign of life
+    /// (SPEC §8.6).
+    public var confirmedStopped = 0
+    public var confirmedStoppedButListed = 0
 
     public init(dryRun: Bool) {
         self.dryRun = dryRun

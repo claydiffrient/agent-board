@@ -443,6 +443,22 @@ enum Schema {
     );
     """
 
+    /// SPEC §8.6. The trigger, not each writer, clears the mark, so no revival path can forget to.
+    /// A rebuild of `agent_session` drops it and must recreate it.
+    static var sessionAgentStoppedAt: String {
+        """
+        ALTER TABLE agent_session ADD COLUMN agent_stopped_at INTEGER;
+
+        CREATE TRIGGER agent_session_alive_again
+        AFTER UPDATE OF state, last_activity ON agent_session
+        WHEN NEW.agent_stopped_at IS NOT NULL
+          AND (NEW.state IN (\(SessionStore.activeStatesSQL)) OR NEW.last_activity > NEW.agent_stopped_at)
+        BEGIN
+          UPDATE agent_session SET agent_stopped_at = NULL WHERE session_id = NEW.session_id;
+        END;
+        """
+    }
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",

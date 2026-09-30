@@ -24,6 +24,7 @@ final class AppEnvironment {
     /// Nil in the previews and in tests that do not wire a supervisor; every port surface treats
     /// its absence as an empty list rather than an error.
     let listeningPorts: ListeningPortModel?
+    let sweepPreview: SweepPreview
 
     init(
         db: AppDatabase, supervisor: any WorkerSupervising, router: NotificationRouter? = nil,
@@ -42,5 +43,6 @@ final class AppEnvironment {
         self.releaseNotes = releaseNotes
         self.startup = startup
         self.listeningPorts = listeningPorts
+        sweepPreview = SweepPreview(supervisor: supervisor)
     }
 }

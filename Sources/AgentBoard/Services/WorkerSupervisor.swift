@@ -856,6 +856,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             await reapProcesses(of: session, tree: tree, listing: listed)
             throw error
         }
+        try? sessions.markAgentStopped(session.sessionId)
         await reapProcesses(of: session, tree: tree, listing: listed)
     }
 
@@ -2536,10 +2537,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Every target comes from `agent_session`, and the runtime list read afterwards can only
     /// subtract. A `claude` session with no row here is never a candidate, whatever its process
     /// looks like: argv and environment cannot tell a parked spare from a session doing real work.
+    /// A row whose agent a `claude stop` already confirmed stopped is not planned (SPEC §8.6).
     @discardableResult
     func sweepLeakedAgents(dryRun: Bool = false) async -> AgentSweepReport {
         var report = AgentSweepReport(dryRun: dryRun)
-        let rows = ((try? projects.list()) ?? []).flatMap { (try? sessions.all(projectId: $0.id)) ?? [] }
+        let projectIds = ((try? projects.list()) ?? []).map(\.id)
+        let rows = projectIds.flatMap { (try? sessions.sweepCandidates(projectId: $0)) ?? [] }
+        let confirmed = projectIds.flatMap { (try? sessions.confirmedStoppedShortIds(projectId: $0)) ?? [] }
+        report.confirmedStopped = confirmed.count
         let listed = try? await runtime.listSessions()
         // A registry entry without a pid has no process to free. Measured on this machine: of 124
         // inactive rows `claude stop` accepted, the 8 carrying a pid were the whole 1,311 MB, and
@@ -2567,6 +2572,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     try await stopAgent(session, shortId: shortId, listing: listed)
                 } else {
                     try await runtime.stop(shortId: shortId)
+                    try? sessions.markAgentStopped(decision.sessionId)
                 }
                 report.stopped.append(decision)
             } catch {
@@ -2576,13 +2582,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 ))
             }
         }
-        if let listed {
-            let known = Set(rows.compactMap(\.shortId))
+        if let listed, let resident {
+            let known = Set(rows.compactMap(\.shortId)).union(confirmed)
             report.untracked = listed
                 .filter { $0.pid != nil && $0.id.map { !known.contains($0) } ?? true }
                 .count
+            report.confirmedStoppedButListed = confirmed.filter(resident.contains).count
         }
         return report
+    }
+
+    func previewLeakedAgentSweep() async -> AgentSweepReport? {
+        await sweepLeakedAgents(dryRun: true)
     }
 
     /// The orchestrator only learns of a queued report through the console notice.

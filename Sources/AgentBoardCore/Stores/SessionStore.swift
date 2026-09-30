@@ -116,6 +116,37 @@ public struct SessionStore: Sendable {
         )
     }
 
+    /// SPEC §8.6: the rows the leaked-agent sweep plans — every row but those whose agent a
+    /// `claude stop` has confirmed stopped since their last sign of life.
+    public func sweepCandidates(projectId: String) throws -> [AgentSession] {
+        try db.reader.read { db in
+            try AgentSession.fetchAll(
+                db,
+                sql: "SELECT * FROM agent_session WHERE project_id = ? AND agent_stopped_at IS NULL ORDER BY started_at DESC",
+                arguments: [projectId]
+            )
+        }
+    }
+
+    public func confirmedStoppedShortIds(projectId: String) throws -> [String] {
+        try db.reader.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT short_id FROM agent_session WHERE project_id = ? AND agent_stopped_at IS NOT NULL AND short_id IS NOT NULL",
+                arguments: [projectId]
+            )
+        }
+    }
+
+    public func markAgentStopped(_ sessionId: String, at: Int64 = .nowMillis) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE agent_session SET agent_stopped_at = ? WHERE session_id = ?",
+                arguments: [at, sessionId]
+            )
+        }
+    }
+
     public func setState(_ sessionId: String, _ state: SessionState, endedAt: Int64? = nil) throws {
         try db.writer.write { db in
             try Self.setState(db, sessionId, state, endedAt: endedAt)

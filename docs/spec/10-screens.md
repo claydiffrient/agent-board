@@ -517,6 +517,16 @@ deleted from the roster or opted out — stays listed anyway, suffixed
 than silently dropping the choice. A caption beneath the table repeats that it
 takes effect only while Review level is Agent.
 
+**Preview Leaked-Agent Sweep…** — in the app menu, beside About, because it is
+a one-off diagnostic and not a screen anyone lives in. It opens a `Window` scene
+that runs the launch sweep as a dry run (§8.6) and shows its report one line per
+decision — `WOULD-STOP`, `KEPT` with its reason, the untracked and
+already-confirmed counts — in a selectable, monospaced, read-only text view, so
+a human can copy it. **Run Again** re-runs it; nothing on the window can stop a
+session. The Status pane was rejected because a one-shot report there wants to
+become a live view, and a dry-run-only setting because its output would reach a
+human only through stderr.
+
 **What's New in Agent Board** — the release notes, opened from the Help menu and
 once on their own after an update installs. A `Window` scene rather than a
 `WindowGroup`, so choosing the menu item again — or a second launch that decides
