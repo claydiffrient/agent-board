@@ -217,10 +217,10 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
             $0.standaloneIntegration = .localMerge
         }
 
-        XCTAssertEqual(mounted.fields.map(\.stringValue), ["make", "", "5", ""])
+        XCTAssertEqual(mounted.fields.map(\.stringValue), ["make", "", "", "5", ""])
         XCTAssertEqual(
             mounted.fields.map(\.placeholderString),
-            ["e.g. swift build", "e.g. swift test", nil, "e.g. clay/{slug}"]
+            ["e.g. swift build", "e.g. swift test", "30", nil, "e.g. clay/{slug}"]
         )
         XCTAssertEqual(
             mounted.collect(NSPopUpButton.self).map(\.title),

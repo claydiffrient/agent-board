@@ -266,13 +266,34 @@ public struct WorktreeManager: Sendable {
         throw AgentRuntimeError(Self.failure(["update-ref", ref, candidate, previousHead], result))
     }
 
-    /// A throwaway checkout of `commit` on no branch. Replaces whatever a crashed run left at `name`.
-    public func createDetached(name: String, commit: String) throws -> URL {
+    /// A throwaway checkout of `commit` on no branch. `git worktree add` runs the repository's
+    /// `post-checkout` hook, so the timeout bounds the hook too, and stops its whole process group.
+    public func createDetached(
+        name: String, commit: String, timeout: TimeInterval, isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) throws -> URL {
         try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
         let path = worktreeRoot.appendingPathComponent(name)
-        if FileManager.default.fileExists(atPath: path.path) { removeScratch(path: path) }
-        try addWorktree(["worktree", "add", "--detach", path.path, commit], at: path)
-        return path
+        var env = environment()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        let args = ["worktree", "add", "--detach", path.path, commit]
+        let result = try BoundedCommand.run(
+            executable: Self.gitPath, arguments: args, cwd: repoPath, environment: env,
+            timeout: timeout, isCancelled: isCancelled
+        )
+        let failure: String
+        switch result.ending {
+        case .exited(0): return path
+        case .exited(let status): failure = "git \(args.joined(separator: " ")) exited \(status)"
+        case .timedOut: failure = "git \(args.joined(separator: " ")) timed out after \(Int(timeout))s and was stopped"
+        case .canceled: failure = "git \(args.joined(separator: " ")) was canceled"
+        }
+        removeScratch(path: path)
+        throw AgentRuntimeError(failure + (result.output.isEmpty ? "" : "\n\(RefreshVerifier.tail(result.output))"))
+    }
+
+    /// Scratch checkouts under `worktreeRoot` whose directory name starts with `prefix`.
+    public func scratchCheckouts(prefix: String) throws -> [URL] {
+        try list().map(\.path).filter { $0.lastPathComponent.hasPrefix(prefix) }
     }
 
     /// Forced: a scratch checkout holds build output and nobody's work.

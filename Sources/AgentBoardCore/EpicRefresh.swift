@@ -19,21 +19,42 @@ public struct RefreshCheck: Sendable, Equatable {
     public var status: Int32
     /// The end of the command's combined output, only kept for a failure.
     public var outputTail: String
+    /// Set when the command was stopped, with its process group, for running this long.
+    public var timedOutAfter: Int?
 
-    public init(kind: Kind, command: String, status: Int32, outputTail: String = "") {
+    public init(kind: Kind, command: String, status: Int32, outputTail: String = "", timedOutAfter: Int? = nil) {
         self.kind = kind
         self.command = command
         self.status = status
         self.outputTail = outputTail
+        self.timedOutAfter = timedOutAfter
     }
 
-    public var passed: Bool { status == 0 }
+    public var passed: Bool { status == 0 && timedOutAfter == nil }
+
+    var outcomeClause: String {
+        if let seconds = timedOutAfter {
+            return "`\(command)` timed out after \(duration(seconds)) on the result and was stopped with its whole "
+                + "process group (if it legitimately takes longer, the human can raise the refresh check timeout in "
+                + "the project's Verification settings)"
+        }
+        return "`\(command)` exited \(status) on the result"
+    }
 }
 
 /// What `refresh_epic` did (SPEC §5.2). Every case but `refreshed` and `alreadyCurrent` leaves the
 /// epic branch exactly where it was.
 public enum EpicRefresh: Sendable, Equatable {
     case alreadyCurrent(head: String)
+    /// The configured commands are running on `candidate` in the background; the outcome arrives
+    /// as a `refresh` report. A cold build outlasts the 60 seconds Claude Code waits for a tool's
+    /// answer, so the call cannot wait for it.
+    case verifying(head: String, candidate: String, commands: [String], timeoutSeconds: Int)
+    /// Another refresh of this epic is still verifying; nothing was started.
+    case inProgress(candidate: String?)
+    /// The board, not the merge, stopped the refresh before a verdict: its scratch checkout could
+    /// not be set up, or Agent Board stopped mid-run.
+    case interrupted(head: String, reason: String)
     /// `passed` is every configured command, all green; `unverified` is what nothing was
     /// configured for, and so was never run.
     case refreshed(previousHead: String, head: String, passed: [RefreshCheck], unverified: [RefreshCheck.Kind])
@@ -54,8 +75,8 @@ public enum EpicRefresh: Sendable, Equatable {
 
     public var isFailure: Bool {
         switch self {
-        case .alreadyCurrent, .refreshed, .noEpicBranch: return false
-        case .conflicted, .verificationFailed, .checkedOut, .moved, .noBaseBranch: return true
+        case .alreadyCurrent, .refreshed, .noEpicBranch, .verifying: return false
+        case .conflicted, .verificationFailed, .checkedOut, .moved, .noBaseBranch, .inProgress, .interrupted: return true
         }
     }
 
@@ -65,6 +86,19 @@ public enum EpicRefresh: Sendable, Equatable {
         switch self {
         case .alreadyCurrent(let head):
             return "\(branch) already has every commit on \(base); nothing was merged. It is at \(short(head))."
+        case let .verifying(head, candidate, commands, timeout):
+            return "Refresh started: \(base) merges into \(branch) cleanly as commit \(short(candidate)), and "
+                + commands.map { "`\($0)`" }.joined(separator: " then ")
+                + " now run\(commands.count == 1 ? "s" : "") on it in a scratch checkout, each stopped after "
+                + "\(duration(timeout)). \(branch) stays at \(short(head)) until they pass. The outcome arrives as "
+                + "a `refresh` report through list_reports; until then another refresh_epic for this epic is refused."
+        case .inProgress(let candidate):
+            return "Refresh refused: a refresh of \(branch) is already running"
+                + (candidate.map { ", verifying commit \(short($0))" } ?? "")
+                + ". Its outcome arrives as a `refresh` report through list_reports. Nothing new was started."
+        case let .interrupted(head, reason):
+            return "Refresh did not finish: \(reason). \(branch) was not moved: it is still at \(short(head)). "
+                + "This is not a verdict on the merge — no build or test failed. Refresh again once the cause is dealt with."
         case let .refreshed(previous, head, passed, unverified):
             var text = "Merged \(base) into \(branch): it moved from \(short(previous)) to \(short(head))."
             if !passed.isEmpty {
@@ -81,7 +115,7 @@ public enum EpicRefresh: Sendable, Equatable {
         case let .verificationFailed(head, candidate, failure, passed):
             var text = "Refresh failed: \(base) merged into \(branch) without conflicts, but "
             if !passed.isEmpty { text += passed.map { "`\($0.command)` passed and " }.joined() }
-            text += "`\(failure.command)` exited \(failure.status) on the result. \(branch) was not moved: it is "
+            text += failure.outcomeClause + ". \(branch) was not moved: it is "
                 + "still at \(short(head)). The merge that failed is commit \(short(candidate)), which no branch holds. "
                 + Self.humanDecides
             if !failure.outputTail.isEmpty { text += "\n\nEnd of its output:\n\(failure.outputTail)" }
@@ -118,3 +152,7 @@ public enum EpicRefresh: Sendable, Equatable {
 }
 
 private func short(_ commit: String) -> String { String(commit.prefix(12)) }
+
+private func duration(_ seconds: Int) -> String {
+    seconds >= 60 && seconds % 60 == 0 ? "\(seconds / 60) min" : "\(seconds)s"
+}

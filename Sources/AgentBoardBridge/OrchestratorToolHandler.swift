@@ -309,8 +309,11 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "scratch checkout before the epic branch moves; if either fails, or the merge conflicts, the epic "
                 + "branch is left exactly as it was and the answer says why. With no command configured, the merge "
                 + "is applied and the answer says plainly that nothing was verified and what you must run. Refused "
-                + "for a done or abandoned epic, and while any working tree has the epic branch checked out. This "
-                + "call waits for the whole build and test run.",
+                + "for a done or abandoned epic, while any working tree has the epic branch checked out, and while "
+                + "another refresh of the same epic is still running. With a command configured the call answers "
+                + "before anything is built, and the outcome arrives later as a `refresh` report through "
+                + "list_reports: a build can outlast the time Claude Code waits for a tool's answer. Each command "
+                + "is stopped once it runs past the project's verification timeout.",
             inputSchema: ToolSchema.object(properties: ["epic_id": ToolSchema.string()], required: ["epic_id"])
         ),
         ToolDescriptor(

@@ -9,26 +9,55 @@ public enum RefreshVerifier {
         public var passed: [RefreshCheck]
         public var failure: RefreshCheck?
         public var unverified: [RefreshCheck.Kind]
+        /// The command that was running when the caller canceled the run; it was stopped, not failed.
+        public var canceled: String?
 
-        public init(passed: [RefreshCheck] = [], failure: RefreshCheck? = nil, unverified: [RefreshCheck.Kind] = []) {
+        public init(
+            passed: [RefreshCheck] = [], failure: RefreshCheck? = nil, unverified: [RefreshCheck.Kind] = [],
+            canceled: String? = nil
+        ) {
             self.passed = passed
             self.failure = failure
             self.unverified = unverified
+            self.canceled = canceled
         }
     }
 
     static let tailLines = 40
     static let tailCharacters = 4000
 
-    /// Stops at the first failing command.
+    /// Stops at the first failing command. Each command gets `commands.timeoutSeconds` of awake time.
     public static func run(
         _ commands: VerificationCommands, in worktree: URL,
-        environment: [String: String] = ChildEnvironment.sanitized()
+        environment: [String: String] = ChildEnvironment.sanitized(),
+        isCancelled: @escaping @Sendable () -> Bool = { false }
     ) -> Outcome {
         let steps: [(RefreshCheck.Kind, String?)] = [(.build, commands.build), (.test, commands.test)]
         var outcome = Outcome(passed: [], failure: nil, unverified: steps.filter { $0.1 == nil }.map(\.0))
         for case let (kind, command?) in steps {
-            let check = runOne(kind: kind, command: command, in: worktree, environment: environment)
+            let result: BoundedCommand.Result
+            do {
+                result = try BoundedCommand.run(
+                    executable: "/bin/sh", arguments: ["-c", command], cwd: worktree, environment: environment,
+                    timeout: TimeInterval(commands.timeoutSeconds), isCancelled: isCancelled
+                )
+            } catch {
+                outcome.failure = RefreshCheck(kind: kind, command: command, status: -1, outputTail: String(describing: error))
+                return outcome
+            }
+            let check: RefreshCheck
+            switch result.ending {
+            case .canceled:
+                outcome.canceled = command
+                return outcome
+            case .timedOut:
+                check = RefreshCheck(
+                    kind: kind, command: command, status: -1, outputTail: tail(result.output),
+                    timedOutAfter: commands.timeoutSeconds
+                )
+            case .exited(let status):
+                check = RefreshCheck(kind: kind, command: command, status: status, outputTail: status == 0 ? "" : tail(result.output))
+            }
             guard check.passed else {
                 outcome.failure = check
                 return outcome
@@ -36,21 +65,6 @@ public enum RefreshVerifier {
             outcome.passed.append(check)
         }
         return outcome
-    }
-
-    private static func runOne(
-        kind: RefreshCheck.Kind, command: String, in worktree: URL, environment: [String: String]
-    ) -> RefreshCheck {
-        do {
-            let result = try ProcessRunner.run(
-                executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "exec 2>&1\n" + command],
-                cwd: worktree, environment: environment
-            )
-            let tail = result.status == 0 ? "" : Self.tail(result.stdout)
-            return RefreshCheck(kind: kind, command: command, status: result.status, outputTail: tail)
-        } catch {
-            return RefreshCheck(kind: kind, command: command, status: -1, outputTail: String(describing: error))
-        }
     }
 
     static func tail(_ output: String) -> String {

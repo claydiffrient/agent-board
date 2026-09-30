@@ -157,6 +157,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// A resume starts the process before it moves the task back to `running`, so until then its
     /// session looks like a stray one on a settled task to `reconcile`.
     @ObservationIgnored private var resuming: Set<String> = []
+    /// Keyed by epic id; present from the moment a refresh is asked for until its outcome is known.
+    @ObservationIgnored private var refreshes: [String: RefreshRun] = [:]
 
     nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
@@ -242,6 +244,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func stop() async {
         meteringTask?.cancel()
         meteringTask = nil
+        let running = refreshes.values
+        running.forEach { $0.cancel() }
+        for run in running { await run.task?.value }
         await server.stop()
     }
 
@@ -514,34 +519,101 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §5.2: the merge result is built and tested in a scratch checkout before the epic branch
     /// moves, and only the final move waits on the merge queue, so an accept is not held up by a build.
+    /// With commands configured the call answers `.verifying` at once and the verdict is queued as a
+    /// `refresh` report; one refresh per epic runs at a time.
     func refreshEpic(epicId: String) async throws -> EpicRefresh {
         guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
         guard let project = try projects.get(epic.projectId) else { throw SupervisorError.projectNotFound(epic.projectId) }
+        if let running = refreshes[epicId] { return .inProgress(candidate: running.candidate) }
+        let run = RefreshRun()
+        refreshes[epicId] = run
         let manager = worktreeManager(for: project)
         let branch = epic.branch
         let message = WorktreeManager.mergeSubject(taskTitle: project.baseBranch, targetTitle: epic.title)
         let base = project.baseBranch
         let commands = project.settings.verification
 
-        let plan = try await offMain { try manager.refreshCandidate(branch: branch, base: base, message: message) }
-        let previousHead: String
-        let candidate: String
-        switch plan {
-        case .settled(let outcome): return try named(outcome, projectId: project.id)
-        case let .merge(head, commit): (previousHead, candidate) = (head, commit)
+        let plan: RefreshCandidate
+        do {
+            plan = try await offMain { try manager.refreshCandidate(branch: branch, base: base, message: message) }
+        } catch {
+            refreshes[epicId] = nil
+            throw error
         }
+        switch plan {
+        case .settled(let outcome):
+            refreshes[epicId] = nil
+            return try named(outcome, projectId: project.id)
+        case let .merge(previousHead, candidate) where commands.isEmpty:
+            defer { refreshes[epicId] = nil }
+            return try await applyRefresh(
+                RefreshVerifier.Outcome(unverified: [.build, .test]), branch: branch, from: previousHead,
+                to: candidate, manager: manager, project: project
+            )
+        case let .merge(previousHead, candidate):
+            run.candidate = candidate
+            run.task = _Concurrency.Task { [weak self] in
+                guard let self else { return }
+                let outcome = await self.verifyRefresh(
+                    epicId: epicId, branch: branch, from: previousHead, to: candidate, commands: commands,
+                    manager: manager, project: project, run: run
+                )
+                self.refreshes[epicId] = nil
+                self.queueRefreshReport(outcome, projectId: project.id, branch: branch, base: base)
+            }
+            let steps = [commands.build, commands.test].compactMap { $0 }
+            return .verifying(
+                head: previousHead, candidate: candidate, commands: steps, timeoutSeconds: commands.timeoutSeconds
+            )
+        }
+    }
 
-        let verification = try await offMain {
-            if commands.isEmpty { return RefreshVerifier.Outcome(unverified: [.build, .test]) }
-            let scratch = try manager.createDetached(name: "refresh-\(epicId)", commit: candidate)
-            defer { manager.removeScratch(path: scratch) }
-            return RefreshVerifier.run(commands, in: scratch)
+    private func verifyRefresh(
+        epicId: String, branch: String, from previousHead: String, to candidate: String,
+        commands: VerificationCommands, manager: WorktreeManager, project: Project, run: RefreshRun
+    ) async -> EpicRefresh {
+        let isCancelled: @Sendable () -> Bool = { run.isCanceled }
+        let verification: RefreshVerifier.Outcome
+        do {
+            verification = try await offMain {
+                for leftover in try manager.scratchCheckouts(prefix: "refresh-\(epicId)") {
+                    manager.removeScratch(path: leftover)
+                }
+                let scratch = try manager.createDetached(
+                    name: "refresh-\(epicId)-\(UUID().uuidString.prefix(8).lowercased())", commit: candidate,
+                    timeout: TimeInterval(commands.timeoutSeconds), isCancelled: isCancelled
+                )
+                defer { manager.removeScratch(path: scratch) }
+                return RefreshVerifier.run(commands, in: scratch, isCancelled: isCancelled)
+            }
+        } catch {
+            return .interrupted(
+                head: previousHead,
+                reason: "Agent Board could not set up the scratch checkout the check runs in (creating it runs "
+                    + "this repository's post-checkout hook): \(describe(error))"
+            )
+        }
+        if let command = verification.canceled {
+            return .interrupted(head: previousHead, reason: "Agent Board stopped while `\(command)` was running, and stopped it")
         }
         if let failure = verification.failure {
             return .verificationFailed(
                 head: previousHead, candidate: candidate, failure: failure, passed: verification.passed
             )
         }
+        do {
+            return try await applyRefresh(
+                verification, branch: branch, from: previousHead, to: candidate, manager: manager, project: project
+            )
+        } catch {
+            return .interrupted(head: previousHead, reason: "moving the branch failed: \(describe(error))")
+        }
+    }
+
+    private func applyRefresh(
+        _ verification: RefreshVerifier.Outcome, branch: String, from previousHead: String, to candidate: String,
+        manager: WorktreeManager, project: Project
+    ) async throws -> EpicRefresh {
         let applied = try await mergeQueue.serialize(repo: project.repoPath, branch: branch) {
             await _Concurrency.Task.detached(priority: .userInitiated) {
                 Result { try manager.applyRefresh(branch: branch, from: previousHead, to: candidate) }
@@ -551,6 +623,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return .refreshed(
             previousHead: previousHead, head: candidate, passed: verification.passed, unverified: verification.unverified
         )
+    }
+
+    private func queueRefreshReport(_ outcome: EpicRefresh, projectId: String, branch: String, base: String) {
+        do {
+            try ReportStore(db).insert(
+                projectId: projectId, taskId: nil, sessionId: nil, kind: .refresh,
+                body: outcome.message(branch: branch, base: base)
+            )
+        } catch {
+            lastError = describe(error)
+            return
+        }
+        announceReports(projectId: projectId)
     }
 
     /// Names the session working in a checkout that holds the branch, when one is on record.
@@ -3041,4 +3126,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private nonisolated func offMain<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
         try await _Concurrency.Task.detached(priority: .userInitiated) { try body() }.value
     }
+}
+
+/// One in-flight `refresh_epic`. The cancel flag is read from the thread running its commands.
+private final class RefreshRun: @unchecked Sendable {
+    var candidate: String?
+    var task: _Concurrency.Task<Void, Never>?
+    private let lock = NSLock()
+    private var canceled = false
+
+    var isCanceled: Bool { lock.withLock { canceled } }
+    func cancel() { lock.withLock { canceled = true } }
 }

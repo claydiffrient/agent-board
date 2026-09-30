@@ -135,6 +135,8 @@ public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, Data
     case request
     /// A project's orchestrator answered a request; queued for the Coordinator only.
     case reply
+    /// How a `refresh_epic` that returned before its build and tests ran came out (SPEC §5.2).
+    case refresh
 }
 
 /// Where a Coordinator request stands in the ledger (SPEC §9.4). `sent` and `accepted` are open;
