@@ -64,23 +64,30 @@ final class TaskTypeRenderTests: XCTestCase {
     /// `TaskInspectorView.apply` mutated to force `draftType = nil`, because the header's chip alone
     /// satisfied it. `typeRow(in:)` isolates the band strictly between the Model row and the
     /// Revert/Save row, where only the picker draws, so the mutation now fails this test as intended.
+    ///
+    /// Vision groups a label and its value into one line differently per OS. On macOS 27 (this
+    /// machine) "Model" is its own line; on macOS 26 CI it reads as one merged line, "Model Project
+    /// default" (and "Type Code =" for the picker's own row). `isLabelLine`/`rowHasWord` accept
+    /// either grouping — see `LabelLineMatchingTests` for the macOS 26 shape reproduced as a fixture.
     func testTheInspectorTypePickerShowsTheTaskType() throws {
         let typed = try makeTask("Parser checks", type: .code)
         let plain = try makeTask("Lint cleanup", type: nil)
 
         let typedRow = try typeRow(in: try ocrInspector(task: typed, allTasks: [typed]))
-        XCTAssertTrue(typedRow.contains("Code"), "the type picker's row did not show Code: \(typedRow)")
+        XCTAssertTrue(rowHasWord(typedRow, "Code"), "the type picker's row did not show Code: \(typedRow)")
 
         let plainRow = try typeRow(in: try ocrInspector(task: plain, allTasks: [plain]))
-        XCTAssertTrue(plainRow.contains("Default"), "the type picker's row did not show Default: \(plainRow)")
+        XCTAssertTrue(rowHasWord(plainRow, "Default"), "the type picker's row did not show Default: \(plainRow)")
         for type in TaskType.allCases {
-            XCTAssertFalse(plainRow.contains(type.label), "a default task's picker row read as: \(plainRow)")
+            XCTAssertFalse(rowHasWord(plainRow, type.label), "a default task's picker row read as: \(plainRow)")
         }
     }
 
     /// The band between the Model row and the Revert/Save row, where only the Type picker draws.
     private func typeRow(in lines: [Line]) throws -> [String] {
-        let modelTop = try XCTUnwrap(lines.first { $0.text == "Model" }, "no Model row: \(lines.map(\.text))").box.minY
+        let modelTop = try XCTUnwrap(
+            lines.first { isLabelLine($0.text, label: "Model") }, "no Model row: \(lines.map(\.text))"
+        ).box.minY
         let buttonsBottom = try XCTUnwrap(lines.first { $0.text == "Revert" }, "no Revert row: \(lines.map(\.text))").box.maxY
         return lines
             .filter { $0.box.midY > buttonsBottom && $0.box.midY < modelTop }
@@ -151,5 +158,47 @@ final class TaskTypeRenderTests: XCTestCase {
             .sorted { $0.box.minX < $1.box.minX }
             .map(\.text)
             .joined(separator: " | ")
+    }
+}
+
+/// A Vision-recognized line is either exactly a field's label (macOS 27, this machine) or the
+/// label merged with its value on one line (macOS 26 CI: "Model Project default", "Type Code =").
+/// Accept both without matching an unrelated label that happens to start with the same word.
+func isLabelLine(_ text: String, label: String) -> Bool {
+    text == label || text.hasPrefix(label + " ")
+}
+
+/// Whether any recognized line in a row shows `word` — as its own line, or as a whitespace-
+/// separated token inside a merged label+value line. A substring check alone would let "Code"
+/// match inside "Encode", so split on whitespace instead.
+func rowHasWord(_ row: [String], _ word: String) -> Bool {
+    row.contains { $0.split(separator: " ").map(String.init).contains(word) }
+}
+
+/// Pins the matcher against the macOS 26 grouping this machine cannot reproduce by rendering
+/// (this Mac runs macOS 27 — see the headless UI verification note). Fixture strings are the
+/// exact OCR lines PR #51's CI run reported: `TaskTypeRenderTests.swift:83: ... no Model row:
+/// ["Parser checks", "Ready Code human", ..., "Model Project default", "Type Code =", "Revert", ...]`.
+final class LabelLineMatchingTests: XCTestCase {
+    private let macOS26TypeRow = ["Type Code ="]
+    private let macOS27TypeRow = ["Code"]
+
+    func testIsLabelLineAcceptsBothGroupings() {
+        XCTAssertTrue(isLabelLine("Model", label: "Model"), "macOS 27's bare label line")
+        XCTAssertTrue(isLabelLine("Model Project default", label: "Model"), "macOS 26's merged label+value line")
+        XCTAssertFalse(isLabelLine("Type Code =", label: "Model"), "a different field's merged line must not match")
+    }
+
+    func testRowHasWordAcceptsBothGroupings() {
+        XCTAssertTrue(rowHasWord(macOS26TypeRow, "Code"), "macOS 26's merged row: \(macOS26TypeRow)")
+        XCTAssertTrue(rowHasWord(macOS27TypeRow, "Code"), "macOS 27's single-word row: \(macOS27TypeRow)")
+    }
+
+    /// The matcher must still fail the test when the picker shows the wrong type — reproducing
+    /// the macOS 26 grouping for a task typed `.docs` instead of `.code`.
+    func testRowHasWordFailsOnTheWrongTypeUnderTheMacOS26Grouping() {
+        let wrongTypeRow = ["Type Docs ="]
+        XCTAssertFalse(rowHasWord(wrongTypeRow, "Code"), "must not match Code in: \(wrongTypeRow)")
+        XCTAssertTrue(rowHasWord(wrongTypeRow, "Docs"), "sanity: the row does show Docs: \(wrongTypeRow)")
     }
 }
