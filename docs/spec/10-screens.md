@@ -616,6 +616,12 @@ than SwiftUI squeezing a screen past its own minimums. The screens the rule
 covers are At a Glance, Roster, Coordinator, a project's Orchestrator, Task
 Board, Status and Notes, and the project settings sheet over them.
 
+`MainWindow`'s `NavigationSplitView` pins `columnVisibility` to `.all` rather
+than leaving it `.automatic`. The AppKit floor above already guarantees the
+sidebar and detail minimums both fit, so there is no narrow width left for the
+split view's own collapse heuristic to react to — and that heuristic is not
+guaranteed to agree with this table across macOS versions.
+
 | | Minimum | Why |
 |---|---|---|
 | Detail pane width | 761pt | The Orchestrator and Coordinator screens are the widest fixed layouts: a 480pt console, the split's 1pt divider and a 280pt approvals or requests sidebar. At 760 the sidebar's trailing point is cut off. |

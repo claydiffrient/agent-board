@@ -31,6 +31,11 @@ struct MainWindow: View {
     @State private var usageFooterHeight: CGFloat = 0
     @State private var fixedStackHeight: CGFloat = 0
     @State private var sidebarHeight: CGFloat = 0
+    /// `.all`, never `.automatic`: the window already has a hard AppKit floor at
+    /// `MainWindowLayout.minimumSize` (`.windowResizability(.contentMinSize)`), so there is no narrow
+    /// width for `NavigationSplitView` to react to by collapsing the sidebar on its own. `.automatic`
+    /// leaves that decision to a per-OS layout heuristic SPEC §10.1 does not account for.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     private let collapseState: SidebarCollapseState
 
@@ -40,7 +45,7 @@ struct MainWindow: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
         } detail: {
             detail

@@ -100,7 +100,7 @@ final class MainWindowMinimumSizeTests: XCTestCase {
     }
 
     private func sidebar(in mount: OffscreenMount) -> SidebarFrames? {
-        var list: NSScrollView?
+        var rowViews: [NSView] = []
         var rows: [CGRect] = []
         var bars: [CGRect] = []
         var menu: CGRect?
@@ -111,15 +111,21 @@ final class MainWindowMinimumSizeTests: XCTestCase {
             let frame = view.convert(view.bounds, to: nil)
             let inSidebar = frame.maxX <= MainWindowLayout.sidebarIdealWidth + 0.5
             switch name {
-            case "ListCoreScrollView" where inSidebar: list = view as? NSScrollView
-            case "ListTableCellView" where inSidebar, "ListTableHeaderView" where inSidebar: rows.append(frame)
+            case "ListTableCellView" where inSidebar, "ListTableHeaderView" where inSidebar:
+                rows.append(frame)
+                rowViews.append(view)
             case "SwiftUIPopupButton" where inSidebar: menu = frame
             case "HostingScrollView" where inSidebar: portRows = frame
             default: if view is NSProgressIndicator, inSidebar { bars.append(frame) }
             }
             queue.append(contentsOf: view.subviews)
         }
-        guard let list, let document = list.documentView else { return nil }
+        // Not a class-name match: SwiftUI's private NSScrollView subclass backing a `List` is not
+        // guaranteed to keep its name across an SDK ("ListCoreScrollView" was only ever measured on
+        // this machine's own macOS 27). `enclosingScrollView` is public AppKit API that walks up from
+        // a row we already found by its stable class name, so it does not depend on that subclass's
+        // name at all.
+        guard let list = rowViews.first?.enclosingScrollView, let document = list.documentView else { return nil }
         let clipFrame = list.contentView.convert(list.contentView.bounds, to: nil)
         let insets = list.contentInsets
         let unobstructed = CGRect(
