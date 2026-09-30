@@ -286,8 +286,8 @@ final class PortsPanelLiveTests: XCTestCase {
     /// One row per port, and every row above the Add Project button.
     ///
     /// Coordinate-free, because nothing in a SwiftUI sidebar is findable by name — `.help()` and
-    /// the accessibility tree are both empty here. The footer is a bottom `safeAreaInset`, so it
-    /// grows upward: a panel *above* Add Project leaves the button's pixels untouched when a row
+    /// the accessibility tree are both empty here. The stack sits under a list that takes the rest of
+    /// the column, so it grows upward: a panel *above* Add Project leaves the button's pixels untouched when a row
     /// appears, which means the changed band never reaches below the band the empty panel occupies.
     /// A panel below the button would shove it and the change would run to the bottom of the
     /// sidebar.
