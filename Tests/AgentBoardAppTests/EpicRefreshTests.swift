@@ -85,6 +85,24 @@ final class EpicRefreshTests: XCTestCase {
         XCTAssertEqual(try worktreeCount(), 1, "the scratch checkout the build ran in survived")
     }
 
+    /// `BoundedCommandTests` covers the process-group kill itself; this covers what `refresh_epic`
+    /// does around it — the settings floor at `VerificationCommands.timeoutRange` (60s) means a real
+    /// project can't reach this through settings, so the test drives it through
+    /// `refreshCheckTimeoutOverride` instead.
+    func testARefreshWhoseBuildTimesOutLeavesTheBranchAloneAndCleansUpTheScratchCheckout() async throws {
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        try commit("main\n", to: "from-main.txt", on: "main")
+        try setCommands(build: "sleep 60", test: "true")
+        fixture.supervisor.refreshCheckTimeoutOverride = 1
+        let epicBefore = try head(epic.branch)
+
+        let message = try await refreshReport()
+
+        XCTAssertTrue(message.contains("timed out after 1s"), message)
+        XCTAssertEqual(try head(epic.branch), epicBefore, "a refresh whose build timed out moved the epic branch")
+        XCTAssertEqual(try worktreeCount(), 1, "the scratch checkout the build ran in survived")
+    }
+
     func testASecondRefreshOfTheSameEpicIsRefusedWhileTheFirstBuildsAndTheFirstStillPasses() async throws {
         try fixture.manager.ensureBranch(epic.branch, from: "main")
         try commit("main\n", to: "from-main.txt", on: "main")

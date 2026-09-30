@@ -159,6 +159,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var resuming: Set<String> = []
     /// Keyed by epic id; present from the moment a refresh is asked for until its outcome is known.
     @ObservationIgnored private var refreshes: [String: RefreshRun] = [:]
+    /// Test-only: overrides the refresh check's timeout below what a project's settings can express
+    /// (`VerificationCommands.timeoutRange` floors at 60s), so a test can drive the timeout path
+    /// without a build that actually runs a minute.
+    @ObservationIgnored var refreshCheckTimeoutOverride: Int?
 
     nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
@@ -531,7 +535,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let branch = epic.branch
         let message = WorktreeManager.mergeSubject(taskTitle: project.baseBranch, targetTitle: epic.title)
         let base = project.baseBranch
-        let commands = project.settings.verification
+        var commands = project.settings.verification
+        if let override = refreshCheckTimeoutOverride { commands.timeoutSeconds = override }
 
         let plan: RefreshCandidate
         do {
