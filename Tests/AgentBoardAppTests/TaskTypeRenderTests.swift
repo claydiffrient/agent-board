@@ -99,7 +99,10 @@ final class TaskTypeRenderTests: XCTestCase {
     /// now exercised one layer down, against `TaskDraftCache` itself — there is no control left to
     /// click. This proves the cache retains and clears a draft correctly; it can no longer prove
     /// that choosing "Plan" in a live picker reaches `retainDrafts`/`drafts.retain` the way
-    /// `TaskInspectorView.onChange(of: task.id)` is written to call it.
+    /// `TaskInspectorView.onChange(of: task.id)` is written to call it. That real wiring — the
+    /// `onChange` firing `retainDrafts` on a task switch — is covered instead by driving the Body
+    /// `TextEditor` (still a real `NSTextView` offscreen) through a task switch: see
+    /// `CommentComposerTests.testEditingTheBodyThenSwitchingTasksRetainsTheDraftThroughTheRealOnChangeWiring`.
     func testChoosingATypeRetainsTheDraftAcrossATaskSwitch() throws {
         let task = try makeTask("Parser checks", type: .code)
         let other = try makeTask("Lint cleanup", type: nil)

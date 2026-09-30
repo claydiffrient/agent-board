@@ -1,6 +1,7 @@
 import AgentBoardCore
 import AppKit
 import SwiftUI
+import Vision
 import XCTest
 @testable import AgentBoard
 
@@ -28,8 +29,12 @@ import XCTest
 ///   it) — the review-routing-table tests instead call `RosterStore.agents(forProject:)` and
 ///   `ProjectSettingsSheet.reviewerOptions`/`routingAssignee` directly, the same pure functions
 ///   `routingRow(_:)` calls, with the same database. This cannot prove `routingRow` actually calls
-///   them with what it looks like it calls them with, or that the `Group` around the routing rows is
-///   still the thing `.disabled(settings.reviewLevel != .agent)` is attached to.
+///   them with what it looks like it calls them with. Whether the `Group` around the routing rows is
+///   still the thing `.disabled(settings.reviewLevel != .agent)` is attached to is read by
+///   `testAgentsRoutingTableIsDisabledOutsideAgentReview` two ways, chosen per platform: where a real
+///   `NSPopUpButton` exists (seen on macOS 26 CI) its `.isEnabled` is read directly; where none is
+///   constructed at all (this machine, macOS 27) the test falls back to pixel contrast on the row's
+///   drawn text.
 @MainActor
 final class ProjectSettingsTabRenderTests: XCTestCase {
     private static let guidance = "Sonnet 5 for docs and tests, Opus 5 for features."
@@ -171,13 +176,13 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
 
     /// Rex left the roster after being named; the Default row still shows him rather than a blank.
     ///
-    /// Rendering can no longer confirm the `.disabled(settings.reviewLevel != .agent)` half of the
-    /// name (see the type-level doc comment) — that would need an actual `NSPopUpButton.isEnabled`
-    /// to read, and there is none. What is still checked, for both review levels, is that
-    /// `routingRow`'s own logic — `routingAssignee` and `reviewerChoice` over a `ReviewRoutingTable`
-    /// that has been through a real `ProjectStore.updateSettings`/`.get` round trip (JSON encode and
-    /// decode), against a roster read back from `RosterStore.agents(forProject:)` — resolves each
-    /// row's selected title the way the view is written to.
+    /// This checks, for both review levels, that `routingRow`'s own logic — `routingAssignee` and
+    /// `reviewerChoice` over a `ReviewRoutingTable` that has been through a real
+    /// `ProjectStore.updateSettings`/`.get` round trip (JSON encode and decode), against a roster
+    /// read back from `RosterStore.agents(forProject:)` — resolves each row's selected title the way
+    /// the view is written to. It does not cover the `.disabled(settings.reviewLevel != .agent)` half
+    /// of the original name — see `testAgentsRoutingTableIsDisabledOutsideAgentReview` below, which
+    /// reads that through pixel contrast instead of the `NSPopUpButton.isEnabled` this session has none of.
     func testAgentsRoutingTableShowsEachRowsChoice() throws {
         for level in [ReviewLevel.agent, .epic] {
             let db = try AppDatabase.inMemory()
@@ -219,6 +224,142 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
                 "\(level)"
             )
         }
+    }
+
+    /// `.disabled(settings.reviewLevel != .agent)` wraps a `Group` of pickers, one per task type,
+    /// each showing "Same as Default" while the routing table is unconfigured. On a build that still
+    /// constructs a real `NSPopUpButton` for a `Picker` offscreen (macOS 26 CI, as of this writing),
+    /// `.isEnabled` on that button is the strongest read of `.disabled(...)` there is, and is taken
+    /// directly. On a build that does not (macOS 27, this machine — see the type-level doc comment:
+    /// no pop-up button is constructed at all, not renamed, not empty, just absent), no such button
+    /// exists to read, so this falls back to pixel contrast: a disabled control's text still draws,
+    /// dimmed. That fallback sums the glyph ink in a per-type value's OCR box — every pixel's
+    /// departure from the box's own background corner, not the box's single brightest pixel — and
+    /// compares Agent review's ink against Epic review's ink directly, rather than against a fixed
+    /// brightness threshold. A threshold assumes a particular background; summed deviation from the
+    /// box's own corner does not, and a lone bright pixel (a caret, a stray anti-aliasing artifact)
+    /// cannot dominate a sum the way it can a peak.
+    ///
+    /// Proven by mutation on the pixel fallback (this machine, macOS 27): deleting
+    /// `.disabled(settings.reviewLevel != .agent)` from `ProjectSettingsSheet.swift` failed this test
+    /// (Epic review's ink came back within the Agent-review floor — no longer dimmed); inverting it to
+    /// `== .agent` also failed (Agent review came back dimmed instead, Epic review did not).
+    func testAgentsRoutingTableIsDisabledOutsideAgentReview() throws {
+        let enabled = try ocrRoutingCapture(reviewLevel: .agent)
+        let disabled = try ocrRoutingCapture(reviewLevel: .epic)
+
+        if !enabled.routingPopUps.isEmpty || !disabled.routingPopUps.isEmpty {
+            XCTAssertFalse(enabled.routingPopUps.isEmpty, "expected per-type routing pop-up buttons at Agent review")
+            XCTAssertFalse(disabled.routingPopUps.isEmpty, "expected per-type routing pop-up buttons at Epic review")
+            XCTAssertTrue(
+                enabled.routingPopUps.allSatisfy(\.isEnabled),
+                "Agent review's routing pop-up buttons should be enabled"
+            )
+            XCTAssertTrue(
+                disabled.routingPopUps.allSatisfy { !$0.isEnabled },
+                "a routing pop-up button is not disabled outside Agent review"
+            )
+            return
+        }
+
+        let enabledInk = try glyphInk(enabled)
+        let disabledInk = try glyphInk(disabled)
+        XCTAssertGreaterThan(enabledInk, 1000, "Agent review's routing row drew too little glyph ink to compare: \(enabledInk)")
+        XCTAssertGreaterThan(
+            enabledInk, disabledInk * 2,
+            "the routing row is not clearly dimmer outside Agent review: enabled ink \(enabledInk), disabled ink \(disabledInk)"
+        )
+    }
+
+    private struct OCRLine {
+        let text: String
+        let box: CGRect
+    }
+
+    /// Mounts the Agents tab at the given review level and reads it two ways: Vision OCR (to find
+    /// where a routing row's value text sits, for the pixel fallback) and a walk for the per-type
+    /// routing `Picker`s' `NSPopUpButton`s, where the platform still constructs one. No roster agent
+    /// is needed — an unconfigured `ReviewRoutingTable` already renders "Same as Default" for every
+    /// task type, which is also how the per-type pop-up buttons are told apart from the Default row's
+    /// (which never reads "Same as Default" — see `ProjectSettingsSheet.routingRow`) and from every
+    /// other pop-up button on the tab.
+    private func ocrRoutingCapture(
+        reviewLevel: ReviewLevel
+    ) throws -> (lines: [OCRLine], rep: NSBitmapImageRep, routingPopUps: [NSPopUpButton]) {
+        let db = try AppDatabase.inMemory()
+        let projects = ProjectStore(db)
+        var project = try projects.register(
+            name: "Demo", repoPath: "/tmp/demo-\(UUID().uuidString)", baseBranch: "main",
+            worktreeRoot: "/tmp/demo-worktrees", memoryDir: nil
+        )
+        var settings = project.settings
+        settings.reviewLevel = reviewLevel
+        try projects.updateSettings(project.id, settings)
+        project = try XCTUnwrap(projects.get(project.id))
+
+        let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .agents, onDeleted: {})
+            .environment(renderEnvironment(db: db))
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 900))
+        defer { mount.close() }
+        _ = try mount.capture()
+        let routingPopUps = popUpButtons(titled: ProjectSettingsSheet.sameAsDefaultTitle, in: mount.host)
+        let image = try XCTUnwrap(CGWindowListCreateImage(
+            .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+            [.boundsIgnoreFraming, .bestResolution]
+        ))
+        let rep = try XCTUnwrap(NSBitmapImageRep(cgImage: image))
+
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        let lines = (request.results ?? []).compactMap { observation in
+            observation.topCandidates(1).first.map { OCRLine(text: $0.string, box: observation.boundingBox) }
+        }
+        return (lines, rep, routingPopUps)
+    }
+
+    private func popUpButtons(titled title: String, in host: NSView) -> [NSPopUpButton] {
+        var found: [NSPopUpButton] = []
+        func walk(_ view: NSView) {
+            if let button = view as? NSPopUpButton, button.title == title { found.append(button) }
+            view.subviews.forEach(walk)
+        }
+        walk(host)
+        return found
+    }
+
+    /// Sum, over a per-type routing row's "Same as Default" OCR box, of each pixel's brightness
+    /// departure from the box's own top-left corner (its background). The glyph strokes are what
+    /// create that departure; summing rather than peaking means one stray bright pixel cannot stand
+    /// in for the whole row, and starting from the box's own corner rather than a fixed threshold
+    /// means the metric does not assume which appearance (light or dark mode) it is reading.
+    private func glyphInk(
+        _ capture: (lines: [OCRLine], rep: NSBitmapImageRep, routingPopUps: [NSPopUpButton])
+    ) throws -> Int {
+        let value = try XCTUnwrap(
+            capture.lines.first { $0.text.contains("Same as Default") },
+            "no per-type routing value found: \(capture.lines.map(\.text))"
+        )
+        let rep = capture.rep
+        let box = value.box
+        let w = rep.pixelsWide, h = rep.pixelsHigh
+        guard w > 0, h > 0 else { return 0 }
+        let x0 = max(0, Int(box.minX * CGFloat(w)))
+        let x1 = min(w, Int(box.maxX * CGFloat(w)))
+        let yTop = max(0, h - Int(box.maxY * CGFloat(h)))
+        let yBottom = min(h, h - Int(box.minY * CGFloat(h)))
+        guard x0 < x1, yTop < yBottom, let background = rep.colorAt(x: x0, y: yTop) else { return 0 }
+        let backgroundLuma = (background.redComponent + background.greenComponent + background.blueComponent) / 3 * 255
+        var ink = 0
+        for y in yTop..<yBottom {
+            for x in x0..<x1 {
+                guard let color = rep.colorAt(x: x, y: y) else { continue }
+                let luma = (color.redComponent + color.greenComponent + color.blueComponent) / 3 * 255
+                ink += Int(abs(luma - backgroundLuma))
+            }
+        }
+        return ink
     }
 
     func testTheReviewerOptionsListTheProjectsAgentsThenAMissingChoiceThenTheFixedChoices() {
