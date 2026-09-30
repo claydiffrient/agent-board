@@ -3,9 +3,11 @@ import GRDB
 
 public struct RosterStore: Sendable {
     let db: AppDatabase
+    let directories: AgentDefinitionDirectories
 
-    public init(_ db: AppDatabase) {
+    public init(_ db: AppDatabase, definitions: AgentDefinitionDirectories = AgentDefinitionDirectories()) {
         self.db = db
+        self.directories = definitions
     }
 
     @discardableResult
@@ -50,6 +52,7 @@ public struct RosterStore: Sendable {
 
     public func setEnabled(_ id: String, _ enabled: Bool) throws {
         try db.writer.write { db in
+            try Self.linkDefinition(db, id: id)
             guard try RosterAgent.exists(db, key: id) else {
                 throw BoardError.rosterAgentNotFound(id)
             }
@@ -90,9 +93,63 @@ public struct RosterStore: Sendable {
         try db.reader.read { db in try Self.agents(db, forProject: projectId, enabledOnly: false) }
     }
 
-    /// The subset the project can actually spawn: opted in *and* enabled in the roster.
+    /// The subset the project can actually spawn: opted in *and* enabled in the roster. A disk
+    /// archetype is read from its file on this call, and drops out if the file is gone or a
+    /// board-local agent has its name.
     public func usableAgents(forProject projectId: String) throws -> [RosterAgent] {
-        try db.reader.read { db in try Self.agents(db, forProject: projectId, enabledOnly: true) }
+        try usableArchetypes(forProject: projectId).map(\.agent)
+    }
+
+    public func usableArchetypes(forProject projectId: String) throws -> [Archetype] {
+        let (rows, all, project) = try db.reader.read { db in
+            (
+                try Self.agents(db, forProject: projectId, enabledOnly: true),
+                try Self.list(db),
+                try Project.fetchOne(db, key: projectId)
+            )
+        }
+        guard rows.contains(where: { $0.definitionName != nil }), let project else {
+            return rows.filter { $0.definitionName == nil }.map { Archetype(agent: $0, source: .board) }
+        }
+        let resolved = archetypes(rows: all, project: project).archetypes
+        return rows.compactMap { row in
+            row.definitionName == nil
+                ? Archetype(agent: row, source: .board)
+                : resolved.first { $0.agent.id == row.id && $0.isUsable }
+        }
+    }
+
+    /// Board-local agents and this project's disk definitions, merged with the project's own
+    /// definitions over user-level ones (SPEC §4).
+    public func archetypes(forProject projectId: String) throws -> ArchetypeListing {
+        let (all, project) = try db.reader.read { db in (try Self.list(db), try Project.fetchOne(db, key: projectId)) }
+        guard let project else { throw BoardError.projectNotFound(projectId) }
+        return archetypes(rows: all, project: project)
+    }
+
+    /// `rows` is passed in so a screen already observing the table does not read it twice.
+    public func archetypes(rows: [RosterAgent], project: Project) -> ArchetypeListing {
+        ArchetypeCatalog.resolve(
+            rows: rows, user: directories.userScan(), project: directories.projectScan(repoPath: project.repoPath)
+        )
+    }
+
+    /// The cross-project roster screen's list: every user definition and every project's own.
+    public func allArchetypes(rows: [RosterAgent]) throws -> ArchetypeListing {
+        let repos = try db.reader.read { db in
+            try String.fetchAll(db, sql: "SELECT DISTINCT repo_path FROM project ORDER BY name COLLATE NOCASE")
+        }
+        return ArchetypeCatalog.all(
+            rows: rows, user: directories.userScan(), projects: repos.map(directories.projectScan(repoPath:))
+        )
+    }
+
+    /// One agent resolved the way a spawn in this project would see it, disabled or not; for a
+    /// board-local row that is the row itself.
+    public func resolved(_ id: String, forProject projectId: String) throws -> RosterAgent? {
+        guard let row = try get(id) else { return nil }
+        guard row.definitionName != nil else { return row }
+        return try archetypes(forProject: projectId).archetypes.first { $0.agent.id == id }?.agent
     }
 
     /// One agent, but only if the project may actually be given work on it. Nil is the single
@@ -118,6 +175,7 @@ public struct RosterStore: Sendable {
     /// the project already uses keeps its existing position.
     public func enable(agentId: String, forProject projectId: String) throws {
         try db.writer.write { db in
+            try Self.linkDefinition(db, id: agentId)
             guard try RosterAgent.exists(db, key: agentId) else {
                 throw BoardError.rosterAgentNotFound(agentId)
             }
@@ -196,6 +254,20 @@ public struct RosterStore: Sendable {
                 )
             }
         }
+    }
+
+    /// Writes the content-free row a disk archetype needs before anything can reference it. The
+    /// columns are placeholders the read path never uses; the file is the definition.
+    static func linkDefinition(_ db: Database, id: String) throws {
+        guard let name = RosterAgent.definitionName(of: id), !name.isEmpty else { return }
+        let now = Int64.nowMillis
+        try db.execute(
+            sql: """
+            INSERT OR IGNORE INTO roster_agent (id, name, role, system_prompt, created_at, updated_at)
+            VALUES (?, ?, ?, '', ?, ?)
+            """,
+            arguments: [id, name, name, now, now]
+        )
     }
 
     public func observe() -> ValueObservation<ValueReducers.Fetch<[RosterAgent]>> {

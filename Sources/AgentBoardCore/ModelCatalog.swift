@@ -31,6 +31,19 @@ public enum ModelCatalog {
         return known.filter { id.hasPrefix($0.id) }.max { $0.id.count < $1.id.count }
     }
 
+    /// Claude Code's `model: inherit`: use whatever the session would have used anyway.
+    public static let inheritAlias = "inherit"
+
+    /// An agent definition's `model:` as a catalog id. A family alias (`sonnet`, `opus`, `haiku`,
+    /// `fable`) picks that family's first entry in `known`, which lists newest first; an id the
+    /// catalog recognizes passes through. Anything else is nil rather than a guess.
+    public static func resolve(alias: String) -> String? {
+        let alias = alias.trimmingCharacters(in: .whitespaces)
+        guard !alias.isEmpty, alias != inheritAlias else { return nil }
+        if option(for: alias) != nil { return alias }
+        return known.first { $0.id.hasPrefix("claude-\(alias.lowercased())-") }?.id
+    }
+
     public static func effectiveContextWindow(for id: String?) -> Int {
         option(for: id)?.effectiveContextWindow ?? fallbackContextWindow
     }

@@ -13,7 +13,7 @@ Per project, overridable:
 - **A rostered session (`agent_session.roster_agent_id` set — a worker spawned
   by `assign_to_agent`, or a reviewer spawned under `agent` review) is exempt
   from the elapsed and idle caps.** `WorkerSupervisor.exempting` overrides both
-  to `nil` before `CapEvaluator.evaluate` runs, so a rostered agent can neither
+  to `nil` before `CapEvaluator.evaluate` runs, so a session spawned from an archetype can neither
   stall out nor run long and be stopped for it. **This is deliberate, not an
   oversight** — the epic that built the roster decided no caps apply to it for
   now, on the reasoning that a durable, human-curated identity is not the same

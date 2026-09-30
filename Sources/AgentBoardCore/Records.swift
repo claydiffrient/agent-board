@@ -734,8 +734,8 @@ public struct HookEventRecord: Codable, FetchableRecord, MutablePersistableRecor
     public var date: Date { at.asDate }
 }
 
-/// A specialist that outlives any one task. Not owned by a project — projects opt in
-/// through `project_roster_agent`.
+/// A board-local archetype, or the pointer row for a disk one (SPEC §4). Not owned by a project —
+/// projects opt in through `project_roster_agent`.
 public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
     public static let databaseTableName = "roster_agent"
 
@@ -754,6 +754,9 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
     public var enabled: Bool
     public var createdAt: Int64
     public var updatedAt: Int64
+    /// A disk archetype's `tools` allow-list, filled from its definition file at read time and never
+    /// stored. Nil inherits every tool, which is all a board-local row can say.
+    public var tools: [String]? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -769,7 +772,8 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
 
     public init(
         id: String, name: String, role: String, systemPrompt: String, model: String? = nil,
-        disallowedTools: [String] = [], enabled: Bool = true, createdAt: Int64, updatedAt: Int64
+        disallowedTools: [String] = [], enabled: Bool = true, createdAt: Int64, updatedAt: Int64,
+        tools: [String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -780,9 +784,23 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
         self.enabled = enabled
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.tools = tools
     }
 
     public static func newId() -> String { BoardId.new() }
+
+    static let definitionIdPrefix = "definition:"
+
+    /// The row that stands in for a disk archetype, so the foreign keys that name an agent have
+    /// something to point at. It holds no content: prompt, model and tools come from the file (SPEC §4).
+    public static func definitionId(name: String) -> String { definitionIdPrefix + name }
+
+    /// The definition this row points at, or nil for a board-local agent.
+    public var definitionName: String? { Self.definitionName(of: id) }
+
+    public static func definitionName(of id: String) -> String? {
+        id.hasPrefix(definitionIdPrefix) ? String(id.dropFirst(definitionIdPrefix.count)) : nil
+    }
 
     public var createdDate: Date { createdAt.asDate }
     public var updatedDate: Date { updatedAt.asDate }
