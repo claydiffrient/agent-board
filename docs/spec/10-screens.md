@@ -285,7 +285,8 @@ as dead rather than phantom-running. A session listed as running on a task in
 `reconcile` stops its process, and a row still active is ended with the
 settled-task `decision` report (§5.1), never a `failed` one. Per agent: role,
 task, state, elapsed, spend
-against cap, last tool used. A blocked agent's row opens its terminal, which is
+against cap, last tool used — in seven columns sized to the minimum detail
+width (§10.1). A blocked agent's row opens its terminal, which is
 how permission prompts get answered (D15).
 
 The role names the roster agent a session runs as: `reviewer · Rita`,
@@ -644,9 +645,13 @@ the notice and Add Project are one or two lines each.
 Measured at the minimum, rendered offscreen at 761×548 for a detail pane under
 the toolbar: At a Glance fits three card columns; Roster, Orchestrator, Notes and
 Coordinator lay out at their own minimums; the Task Board scrolls sideways
-through fixed 250pt columns, which it does at any width. Status is the one screen
-the minimum does not serve well. Its session table's column minimums alone sum
-to 760pt before cell padding, so it scrolls sideways at any detail width below
-about 920pt, and Actions starts out of view. That is a column redesign rather
-than a size, and it is filed as its own proposal rather than folded into this
-rule.
+through fixed 250pt columns, which it does at any width; and Status's session
+table fits without scrolling sideways, Actions included. A `Table` lays its
+columns out at their *ideal* widths and scrolls when those overflow, and each
+column costs its width plus 17pt of intercell spacing, with 20pt more for the
+inset style. So the table has seven columns whose ideals come to 745pt: State
+carries elapsed time under it, Last activity carries the last tool, and Spend
+draws the cost (with the cap's progress bar) while its token detail — counted
+tokens, the cap, cache reads — is the cell's tooltip. The 16pt left over is room
+for a legacy vertical scroller. Wider, the extra goes to Role, Task and Last
+activity; the other columns are capped.

@@ -120,6 +120,10 @@ struct StatusView: View {
         .errorAlert($errorMessage)
     }
 
+    /// The ideal widths plus 17pt of intercell spacing per column and the inset style's 20pt come to
+    /// 745pt, inside the 761pt minimum detail width with room for a legacy vertical scroller, so
+    /// Actions is on screen without scrolling sideways (SPEC §10.1). Wider, the extra goes to the
+    /// uncapped Role, Task and Last activity.
     private func table(_ layout: Layout) -> some View {
         let roster = layout.roster
         return Table(layout.rows) {
@@ -127,61 +131,65 @@ struct StatusView: View {
                 Text(session.displayShortId)
                     .monospaced()
             }
-            .width(min: 80, ideal: 90)
+            .width(min: 64, ideal: 64, max: 100)
 
             TableColumn("Role") { session in
                 Text(status.value.roleLabel(session))
                     .lineLimit(1)
                     .help(status.value.roleLabel(session))
             }
-            .width(min: 80, ideal: 130)
+            .width(min: 64, ideal: 64)
 
             TableColumn("Task") { session in
-                Text(session.taskId.flatMap { taskTitles[$0] } ?? "—")
+                let title = session.taskId.flatMap { taskTitles[$0] } ?? "—"
+                Text(title)
                     .lineLimit(1)
+                    .help(title)
             }
+            .width(min: 50, ideal: 126)
 
             TableColumn("State") { session in
-                SessionStateLabel(state: session.state)
-            }
-            .width(min: 70, ideal: 90)
-
-            TableColumn("Elapsed") { session in
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text(session.elapsedText(at: context.date))
-                        .monospacedDigit()
-                }
-            }
-            .width(min: 70, ideal: 80)
-
-            TableColumn("Spend") { session in
-                VStack(alignment: .leading, spacing: 2) {
-                    if let tokenCap {
-                        Text("\(Format.cost(session.estCostUSD)) · \(Format.tokens(session.countedTokens)) / \(Format.tokens(tokenCap)) · \(Format.tokens(session.cacheRead)) cached")
+                VStack(alignment: .leading, spacing: 0) {
+                    SessionStateLabel(state: session.state)
+                        .lineLimit(1)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(session.elapsedText(at: context.date))
                             .font(.caption)
                             .monospacedDigit()
-                        ProgressView(value: Double(min(session.countedTokens, tokenCap)), total: Double(tokenCap))
-                            .tint(session.countedTokens >= tokenCap ? .red : .accentColor)
-                    } else {
-                        Text("\(Format.cost(session.estCostUSD)) · \(Format.tokens(session.countedTokens)) · \(Format.tokens(session.cacheRead)) cached")
-                            .font(.caption)
-                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
-            .width(min: 140, ideal: 180)
+            .width(min: 70, ideal: 70, max: 130)
 
-            TableColumn("Last tool") { session in
-                Text(session.lastTool ?? "—")
+            TableColumn("Spend") { session in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(Format.cost(session.estCostUSD))
+                        .font(.caption)
+                        .monospacedDigit()
+                    if let tokenCap {
+                        ProgressView(value: Double(min(session.countedTokens, tokenCap)), total: Double(tokenCap))
+                            .tint(session.countedTokens >= tokenCap ? .red : .accentColor)
+                    }
+                }
+                .help(StatusCell.spend(session, cap: tokenCap))
             }
-            .width(min: 80, ideal: 110)
+            .width(min: 56, ideal: 56, max: 140)
 
             TableColumn("Last activity") { session in
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
-                    Text(session.lastActivityDate.map(Format.relative) ?? "—")
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(session.lastActivityDate.map(Format.relative) ?? "—")
+                            .lineLimit(1)
+                        Text(session.lastTool ?? "—")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .help(StatusCell.activity(session))
                 }
             }
-            .width(min: 90, ideal: 110)
+            .width(min: 76, ideal: 76)
 
             TableColumn("Actions") { session in
                 HStack(spacing: 4) {
@@ -194,7 +202,7 @@ struct StatusView: View {
                 }
                 .controlSize(.small)
             }
-            .width(min: 150, ideal: 170)
+            .width(min: 150, ideal: 150, max: 200)
         }
         .overlay {
             if roster.visible.isEmpty {
