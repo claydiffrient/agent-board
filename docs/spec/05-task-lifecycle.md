@@ -73,7 +73,7 @@ nobody reviewed.
   worker stopped and what remains"), not a `failed` report. A worker that
   vanishes or is cap-killed still gets the old `failed` shape; only an
   acknowledged wind-down gets this one.
-- **Handed off** — a rostered agent that did only the portion matching its
+- **Handed off** — a session spawned from an archetype that did only the portion matching its
   specialty calls `hand_off` (§6) instead of `report_complete`. Like a
   wind-down, the task goes back to `ready`, **never to `review`**, and
   `failed` is never set; unlike a wind-down, nothing asked it to stop — it

@@ -227,7 +227,7 @@ a matching card stays in its own column and lane, and nothing is regrouped
 into a results list. Every whitespace-separated term must appear, case- and
 diacritic-insensitively, in one of the task's title, body, acceptance criteria,
 epic title, model (id or display name), type name (§4), or the name of the
-rostered agent that last worked or reviewed it; the task id is not searched. While a query is
+archetype that last worked or reviewed it; the task id is not searched. While a query is
 active an epic lane with no match vanishes, header and rail entry included,
 and a collapsed lane with a match is drawn open without changing its saved
 state. The lane header's done/total tally and actions still count the whole
@@ -321,7 +321,7 @@ that line carries the refresh button, and this section has no button to keep.
 the pane, narrows the roster and the ports section together: `:3000` finds a
 port, `idle cap` finds a session's task and the port that session holds. Terms
 match as on the board, every one somewhere in a single row. A session row
-matches on its short id, task title, role label (so the rostered agent's name),
+matches on its short id, task title, role label (so the archetype's name),
 state as drawn and as stored (`setting up`, `setup`), and model id or display
 name; not on its last tool, which changes under the query while the session
 works, nor its full session id. A port row matches on `:<port>`, its command,
@@ -335,15 +335,25 @@ Archived: the summary counts ended matches instead — "No sessions match “idl
 · 1 ended match hidden · 1 of 2 ports". Filtering reads the rows the sidebar
 panel's sweep already holds, so a query starts no sweep.
 
-**Roster** — the cross-project register of specialists (§4), and the one screen
+**Roster** — the cross-project register of archetypes (§4), and the one screen
 not scoped to a project: a `Roster` row in the sidebar beside `At a Glance` and
 above the workspace sections, so it does not join Task Board and Status inside a
-project. Per agent: name, role, model, an enabled switch, and the task it is
-mid-way through. Add, edit and delete; the editor covers name, role, system
-prompt, model and enabled. Deleting an agent that is working is **refused**, and
+project. Per archetype: name, a source chip (`board-local`, `project`, `user`),
+model, an enabled switch, and the task it is mid-way through. A board-local one
+also shows its role and can be added, edited and deleted; the editor covers
+name, role, system prompt, model and enabled. A disk one is read-only: it shows
+its file path and description, and offers Open and Reveal in Finder instead of
+Edit and Delete. Every user definition is listed, plus every project's own, each
+project one noting the user file it replaces. A name clash is marked on both
+sides (§4), along with any warning from parsing (an unknown model alias, a
+permission pattern in `tools`), and files the scan skipped are listed with the
+reason under **Skipped definition files**. The disk list rereads the directories
+when the roster table changes and whenever the app becomes active. Deleting an agent that is working is **refused**, and
 the confirmation names the task holding it, because deleting would leave a live
 session with no identity behind it. Which agents a project uses is chosen in
-that project's settings sheet, one toggle per rostered agent, writing
+that project's settings sheet, one toggle per archetype the project resolves
+(its own definitions over user ones), labeled the same way, with a shadowed one's
+toggle disabled unless the project already had it on, writing
 `project_roster_agent` immediately rather than on Save — those are join rows,
 not part of the settings blob the Save button rewrites.
 

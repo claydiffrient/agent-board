@@ -203,7 +203,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         deliveries = ShutdownDeliveryStore(db)
         epics = EpicStore(db)
         notes = NoteStore(db)
-        roster = RosterStore(db)
+        roster = RosterStore(db, definitions: AgentDefinitionDirectories(home: home))
         board = Board(db)
         archives = ArchiveSweep(db)
         messages = MessageStore(db)
@@ -703,6 +703,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             + SpawnRequest.reviewerBoardDeny(supportDir: appSupportDir, home: home)
                         : [])
                     + (plan.rosterAgent?.disallowedTools ?? []),
+                tools: plan.rosterAgent?.tools,
                 model: plan.model
             )
             let spawned = try await runtime.spawn(request)

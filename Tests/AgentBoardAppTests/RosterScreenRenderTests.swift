@@ -95,6 +95,31 @@ final class RosterScreenRenderTests: XCTestCase {
         )
     }
 
+    /// Disk archetypes are read through `AppEnvironment.agentDefinitions`; with a definitions
+    /// directory wired in, each file gets a row beside the board-local agents (SPEC §4).
+    func testDiskDefinitionsGetARowBesideBoardLocalAgents() throws {
+        let (db, _) = try board()
+        try RosterStore(db).create(name: "Ada", role: "frontend", systemPrompt: "p")
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let agents = home.appendingPathComponent(".claude/agents")
+        try FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
+        for name in ["lit-developer", "unit-tester"] {
+            try "---\nname: \(name)\n---\nbody".write(
+                to: agents.appendingPathComponent("\(name).md"), atomically: true, encoding: .utf8
+            )
+        }
+        let env = AppEnvironment(
+            db: db, supervisor: RenderStubSupervisor(progress: [:]),
+            agentDefinitions: AgentDefinitionDirectories(home: home)
+        )
+
+        let mounted = mount(RosterView().environment(env))
+        mounted.settle()
+
+        XCTAssertEqual(mounted.collect(NSSwitch.self).count, 3, "one board-local row and one per definition file")
+    }
+
     func testAnEmptyRosterRendersNoSwitches() throws {
         let (db, _) = try board()
         let mounted = mount(RosterView().environment(environment(db)))

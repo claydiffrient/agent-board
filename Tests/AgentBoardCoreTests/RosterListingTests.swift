@@ -71,48 +71,6 @@ final class RosterListingOrderTests: XCTestCase {
     }
 }
 
-final class RosterProjectPartitionTests: XCTestCase {
-    private let roster = [
-        agent("1", "Zoe"),
-        agent("2", "Ada"),
-        agent("3", "Mo", enabled: false),
-    ]
-
-    func testSelectedAndAvailableSplitOnMembership() {
-        let split = RosterListing.partition(roster: roster, selectedIds: ["2"])
-        XCTAssertEqual(split.selected.map(\.name), ["Ada"])
-        XCTAssertEqual(split.available.map(\.name), ["Zoe", "Mo"])
-    }
-
-    func testBothHalvesKeepDisplayOrder() {
-        let split = RosterListing.partition(roster: roster, selectedIds: ["1", "2", "3"])
-        XCTAssertEqual(split.selected.map(\.name), ["Ada", "Zoe", "Mo"])
-        XCTAssertTrue(split.available.isEmpty)
-    }
-
-    func testSelectingNobodyLeavesTheWholeRosterAvailable() {
-        let split = RosterListing.partition(roster: roster, selectedIds: [])
-        XCTAssertTrue(split.selected.isEmpty)
-        XCTAssertEqual(split.available.count, 3)
-    }
-
-    func testAStaleSelectionForAMissingAgentIsDropped() {
-        let split = RosterListing.partition(roster: roster, selectedIds: ["2", "deleted"])
-        XCTAssertEqual(split.selected.map(\.id), ["2"])
-        XCTAssertEqual(split.selected.count + split.available.count, roster.count)
-    }
-
-    func testADisabledAgentTheProjectPickedStaysSelected() {
-        let split = RosterListing.partition(roster: roster, selectedIds: ["3"])
-        XCTAssertEqual(split.selected.map(\.name), ["Mo"])
-    }
-
-    func testTheProjectSelectionNeverMutatesTheRoster() {
-        _ = RosterListing.partition(roster: roster, selectedIds: ["1"])
-        XCTAssertEqual(roster.map(\.id), ["1", "2", "3"])
-    }
-}
-
 final class RosterDeleteDecisionTests: XCTestCase {
     func testAnIdleAgentCanBeDeleted() {
         let entry = RosterListEntry(agent: agent("1", "Ada"))
@@ -156,14 +114,6 @@ final class RosterScreenStorePathTests: XCTestCase {
         let stored = try XCTUnwrap(f.roster.get(ada.id))
         XCTAssertEqual(stored.disallowedTools, ["Bash"])
         XCTAssertEqual(stored.model, "claude-opus-5")
-
-        // What the settings sheet renders from: the toggle is on for the one it opted into.
-        let split = RosterListing.partition(
-            roster: try f.roster.list(),
-            selectedIds: try f.roster.agents(forProject: f.project.id).map(\.id)
-        )
-        XCTAssertEqual(split.selected.map(\.name), ["Ada"])
-        XCTAssertTrue(split.available.isEmpty)
     }
 
     func testTheColumnIsTheDenyListOneAndTheDroppedNameIsGone() throws {
