@@ -897,14 +897,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let placement = try projects.get(session.projectId).map {
                 WorkerStanding.recorded(session: session, project: $0, taskId: session.taskId ?? "").placement
             } ?? .worktree
-            try await resume(
-                session,
-                prompt: Self.resumePrompt(previousStop: session.stopReason, placement: placement)
-            )
+            try await resume(session, mergingEpic: true) { merge in
+                Self.resumePrompt(previousStop: session.stopReason, placement: placement, merge: merge)
+            }
         }
     }
 
-    private func resume(_ session: AgentSession, prompt: String) async throws {
+    private func resume(
+        _ session: AgentSession, mergingEpic: Bool = false, prompt: (ResumeMerge?) -> String
+    ) async throws {
         do {
             let sessionId = session.sessionId
             resuming.insert(sessionId)
@@ -914,6 +915,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(session.projectId) else {
                 throw SupervisorError.projectNotFound(session.projectId)
             }
+            let merge = mergingEpic ? try await epicMerge(for: session, taskId: taskId, project: project) : nil
             let token: String
             if let grant = try grants.forSession(sessionId).first(where: { !$0.isRevoked }) {
                 token = grant.token
@@ -933,7 +935,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let resumed = try await runtime.resume(
                 sessionId: sessionId,
                 cwd: URL(fileURLWithPath: session.cwd),
-                prompt: prompt
+                prompt: prompt(merge)
             )
             if resumed.shortId != session.shortId {
                 try sessions.setShortId(sessionId, resumed.shortId)
@@ -946,6 +948,23 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             lastError = describe(error)
             throw error
+        }
+    }
+
+    /// SPEC §5 "Resumed": a worker in its own worktree on an epic task sees what its siblings
+    /// finished while it was stopped.
+    private func epicMerge(for session: AgentSession, taskId: String, project: Project) async throws -> ResumeMerge? {
+        guard session.reviewHead == nil,
+              let worktreePath = session.worktreePath,
+              FileManager.default.fileExists(atPath: worktreePath),
+              let task = try tasks.get(taskId),
+              let epic = try task.epicId.flatMap({ try epics.get($0) })
+        else { return nil }
+        let manager = worktreeManager(for: project)
+        let epicBranch = epic.branch
+        let message = WorktreeManager.mergeSubject(taskTitle: epic.title, targetTitle: task.title)
+        return try await offMain {
+            manager.mergeEpicBranch(epicBranch, intoWorktree: URL(fileURLWithPath: worktreePath), message: message)
         }
     }
 
@@ -2305,7 +2324,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )) ?? false
         guard claimed else { return }
         do {
-            try await resume(session, prompt: ShutdownOrder.windDownOrder(reason: order.reason, via: .resume))
+            try await resume(session) { _ in ShutdownOrder.windDownOrder(reason: order.reason, via: .resume) }
         } catch {
             try? deliveries.releaseDelivery(orderId: order.id, sessionId: session.sessionId)
         }
@@ -2881,8 +2900,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// The commit step differs by placement: `git commit` is refused in a shared checkout, so a
     /// resumed co-resident worker told to "commit on this branch" is sent at a command that fails.
-    static func resumePrompt(previousStop: String?, placement: WorkerPlacement = .worktree) -> String {
-        var lines = ["Agent Board resumed this session. Continue your task from where you left off; check `git status` and `git log` first."]
+    static func resumePrompt(
+        previousStop: String?, placement: WorkerPlacement = .worktree, merge: ResumeMerge? = nil
+    ) -> String {
+        var lines = ["Agent Board resumed this session."]
+        if let merge { lines += mergeNotice(merge) }
+        lines.append("Continue your task from where you left off; check `git status` and `git log` first.")
         if let previousStop, !previousStop.isEmpty {
             lines.append("The previous run was stopped by Agent Board: \(previousStop).")
         }
@@ -2895,6 +2918,68 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             + "read the MCP resource `\(BriefingResourceURI.worker)` — it returns them in full."
         )
         return lines.joined(separator: " ")
+    }
+
+    /// SPEC §5 "Resumed": a conflict comes first, so a worker waking into conflict markers
+    /// cannot read them as its own damage.
+    private static func mergeNotice(_ merge: ResumeMerge) -> [String] {
+        let epic = "`\(merge.epicBranch)`"
+        let owned = "Resolving them is part of this task: you have the context for it. Keep both your work "
+            + "and the epic branch's, then commit the merge. Your task is not done until the tree builds and "
+            + "the test suite passes with the merge committed."
+        var lines: [String]
+        switch merge.outcome {
+        case .upToDate:
+            lines = []
+        case .conflicted(let files):
+            lines = [
+                "Before you do anything else: Agent Board merged the epic branch \(epic) into this branch, so that "
+                    + "you see what your sibling tasks finished while you were stopped, and the merge conflicted. "
+                    + "Conflicted files: \(listed(files, limit: 50)). The conflict markers in them come from that "
+                    + "merge, not from anything you did.",
+                owned,
+            ]
+        case .stillConflicted(let files):
+            lines = [files.isEmpty
+                ? "Before you do anything else: the merge of the epic branch \(epic) into this branch that Agent "
+                    + "Board started on an earlier resume has no conflicted files left but is not committed. "
+                    + "Committing it is part of this task; your task is not done until the tree builds and the "
+                    + "test suite passes with the merge committed."
+                : "Before you do anything else: the merge of the epic branch \(epic) into this branch that Agent "
+                    + "Board started on an earlier resume is still unresolved. Conflicted files: "
+                    + "\(listed(files, limit: 50)). The conflict markers in them come from that merge, not from "
+                    + "anything you did. " + owned]
+        case .merged(let commits, let files):
+            lines = [
+                "While you were stopped, your sibling tasks' finished work reached the epic branch \(epic), and "
+                    + "Agent Board merged it into this branch without conflicts. It brought in "
+                    + "\(listed(commits.map { "\"\($0)\"" }, limit: 8, quoted: false))"
+                    + (files.isEmpty
+                        ? ", which changed no files."
+                        : ", which is why these files you did not touch have changed: \(listed(files, limit: 20))."),
+            ]
+        case .failed(let reason):
+            lines = [
+                "Before you do anything else: Agent Board tried to merge the epic branch \(epic) into this branch, "
+                    + "so that you see what your sibling tasks finished while you were stopped, and could not: "
+                    + "\(String(reason.prefix(600))). Merge \(epic) into this branch yourself; resolving any "
+                    + "conflict it raises is part of this task.",
+            ]
+        }
+        if let savedWork = merge.savedWork {
+            lines.append(
+                "Your previous run left uncommitted changes in this worktree. Agent Board committed them "
+                    + "unchanged as `\(savedWork)` (\"\(ResumeMerge.savedWorkSubject)\") before merging, so none "
+                    + "of it is lost; `git show \(savedWork)` is exactly that unfinished work, and it is yours, "
+                    + "not a sibling's."
+            )
+        }
+        return lines
+    }
+
+    private static func listed(_ items: [String], limit: Int, quoted: Bool = true) -> String {
+        let shown = items.prefix(limit).map { quoted ? "`\($0)`" : $0 }.joined(separator: ", ")
+        return items.count > limit ? shown + ", and \(items.count - limit) more" : shown
     }
 
     static func configId(taskId: String, attempt: Int) -> String {
