@@ -93,6 +93,18 @@ actor FakeWorkerControl: WorkerControl {
     func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String? {
         nil
     }
+
+    var drift: BaseDrift = .measured(behind: 0, ahead: 0)
+    private(set) var refreshed: [String] = []
+
+    func baseDrift(epicId: String) async throws -> BaseDrift {
+        drift
+    }
+
+    func refreshEpic(epicId: String) async throws -> EpicRefresh {
+        refreshed.append(epicId)
+        return .alreadyCurrent(head: "0000000000000000000000000000000000000000")
+    }
 }
 
 struct BridgeFixture {

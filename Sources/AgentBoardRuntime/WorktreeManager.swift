@@ -65,6 +65,11 @@ public enum BranchMerge: Sendable, Equatable {
     case noTargetBranch(String)
 }
 
+public enum RefreshCandidate: Sendable, Equatable {
+    case settled(EpicRefresh)
+    case merge(previousHead: String, candidate: String)
+}
+
 public struct WorktreeManager: Sendable {
     public static let gitPath = "/usr/bin/git"
 
@@ -183,22 +188,100 @@ public struct WorktreeManager: Sendable {
         }
         let targetHead = try resolve(targetRef)
         let taskHead = try resolve("refs/heads/\(taskBranch)")
-        if try isAncestor(targetHead, of: taskHead) {
+        let message = Self.mergeSubject(taskTitle: taskTitle, targetTitle: targetTitle)
+        switch try combine(targetHead, taskHead, message: message) {
+        case .fastForward:
             try git(["update-ref", "-m", "fast-forward to \(taskBranch)", targetRef, taskHead, targetHead])
             return .fastForwarded(head: taskHead)
+        case .conflicted(let files):
+            return .conflicted(files: files)
+        case .commit(let commit):
+            try git(["update-ref", "-m", "merge \(taskBranch)", targetRef, commit, targetHead])
+            return .merged(head: commit)
         }
+    }
 
+    private enum Combination {
+        case fastForward
+        case commit(String)
+        case conflicted(files: [String])
+    }
+
+    /// The commit that would carry both heads, written to the object store but to no ref.
+    private func combine(_ targetHead: String, _ sourceHead: String, message: String) throws -> Combination {
+        if try isAncestor(targetHead, of: sourceHead) { return .fastForward }
         let tree: String
-        switch try mergeTree(targetHead, taskHead) {
+        switch try mergeTree(targetHead, sourceHead) {
         case .conflicted(let files): return .conflicted(files: files)
         case .clean(let written): tree = written
         }
-        let message = Self.mergeSubject(taskTitle: taskTitle, targetTitle: targetTitle)
         let commit = try gitChecked(
-            mergeConfig() + ["commit-tree", tree, "-p", targetHead, "-p", taskHead, "-m", message], cwd: repoPath
+            mergeConfig() + ["commit-tree", tree, "-p", targetHead, "-p", sourceHead, "-m", message], cwd: repoPath
         ).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        try git(["update-ref", "-m", "merge \(taskBranch)", targetRef, commit, targetHead])
-        return .merged(head: commit)
+        return .commit(commit)
+    }
+
+    /// One `rev-list` for both counts, so `get_epic` can afford it on every call.
+    public func drift(of branch: String, from base: String) throws -> BaseDrift {
+        let result = try gitRaw(
+            ["rev-list", "--left-right", "--count", "refs/heads/\(base)...refs/heads/\(branch)"], cwd: repoPath
+        )
+        if result.status == 0 {
+            let counts = result.stdout.split(whereSeparator: { $0.isWhitespace }).compactMap { Int($0) }
+            if counts.count == 2 { return .measured(behind: counts[0], ahead: counts[1]) }
+        }
+        if try !branchExists(branch) { return .noEpicBranch(branch) }
+        if try !branchExists(base) { return .noBaseBranch(base) }
+        throw AgentRuntimeError(Self.failure(["rev-list", "--left-right", "--count", "\(base)...\(branch)"], result))
+    }
+
+    /// Where merging `base` into `branch` would leave it, without moving anything: a settled
+    /// outcome, or a commit on no ref for the caller to verify and then `applyRefresh`.
+    public func refreshCandidate(branch: String, base: String, message: String) throws -> RefreshCandidate {
+        guard try branchExists(base) else { return .settled(.noBaseBranch) }
+        guard try branchExists(branch) else { return .settled(.noEpicBranch) }
+        if let holder = try list().first(where: { $0.branch == branch }) {
+            return .settled(.checkedOut(path: holder.path.path, holder: nil))
+        }
+        let head = try resolve("refs/heads/\(branch)")
+        let baseHead = try resolve("refs/heads/\(base)")
+        if try isAncestor(baseHead, of: head) { return .settled(.alreadyCurrent(head: head)) }
+        switch try combine(head, baseHead, message: message) {
+        case .fastForward: return .merge(previousHead: head, candidate: baseHead)
+        case .commit(let commit): return .merge(previousHead: head, candidate: commit)
+        case .conflicted(let files): return .settled(.conflicted(head: head, files: files))
+        }
+    }
+
+    /// Moves `branch` from `previousHead` to `candidate`, unless something checked it out or moved
+    /// it since `refreshCandidate` looked.
+    public func applyRefresh(branch: String, from previousHead: String, to candidate: String) throws -> EpicRefresh? {
+        if let holder = try list().first(where: { $0.branch == branch }) {
+            return .checkedOut(path: holder.path.path, holder: nil)
+        }
+        let ref = "refs/heads/\(branch)"
+        let result = try gitRaw(["update-ref", "-m", "refresh from base", ref, candidate, previousHead], cwd: repoPath)
+        guard result.status != 0 else { return nil }
+        if let now = try refCommit(ref), now != previousHead { return .moved(from: previousHead, to: now) }
+        throw AgentRuntimeError(Self.failure(["update-ref", ref, candidate, previousHead], result))
+    }
+
+    /// A throwaway checkout of `commit` on no branch. Replaces whatever a crashed run left at `name`.
+    public func createDetached(name: String, commit: String) throws -> URL {
+        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
+        let path = worktreeRoot.appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: path.path) { removeScratch(path: path) }
+        try addWorktree(["worktree", "add", "--detach", path.path, commit], at: path)
+        return path
+    }
+
+    /// Forced: a scratch checkout holds build output and nobody's work.
+    public func removeScratch(path: URL) {
+        _ = try? gitRaw(["worktree", "remove", "--force", path.path], cwd: repoPath)
+        if FileManager.default.fileExists(atPath: path.path) {
+            try? FileManager.default.removeItem(at: path)
+            _ = try? gitRaw(["worktree", "prune"], cwd: repoPath)
+        }
     }
 
     private enum TreeMerge {

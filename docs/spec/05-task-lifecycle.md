@@ -525,3 +525,31 @@ than one that is finished; they merge nothing and are not part of this sequence.
    workflow and the approval is already a human gate; the approval row names
    how many tasks are unfinished, so the mistake is visible to the person
    deciding rather than pre-empted for them.
+
+**Drift and refresh.** An epic branch advances only when a task is accepted
+into it or when you ask the orchestrator to refresh it — never on spawn, never
+on a timer. `get_epic` reports `base_drift` next to `ready_for_integration`:
+`behind` (the base branch's commits the epic branch lacks) and `ahead` (the
+epic's own), from one `git rev-list --left-right --count` per call, measured
+under 10ms on this repository. An epic branch not cut yet, or a missing base
+branch, reports `behind` and `ahead` as null with `unavailable` saying which.
+Drift is reporting only: it raises no attention badge and no notification.
+
+`refresh_epic(epic_id)` merges the project's base branch into the epic branch.
+The merge commit is built with `merge-tree --write-tree` and `commit-tree` on
+no ref, as an accept's merge is (§5). If the project configures a build or test
+command (§4), the commit is checked out detached in a scratch worktree
+(`<worktree-root>/refresh-<epic-id>`, removed afterwards) and the configured
+commands run there, build first; the epic branch moves, by an `update-ref`
+guarded by its old head and serialized with accepts' merges, only once every
+configured command passes. A command the project does not configure is never
+guessed at: the refresh applies and its answer says `NOT VERIFIED`, names what
+was not run, tells the orchestrator to work it out and run it — the integrator
+wording (step 3) — and gives the head the branch had before. A conflict, a
+failing command, or an accept landing on the epic branch while the build ran
+leaves the branch exactly as it was; a conflict names its files, and both a
+conflict and a failure say that fixing it by hand or by a dispatched task is
+the human's call. Refused for a `done` or `abandoned` epic, for a missing base
+branch, and while any working tree has the epic branch checked out — naming the
+path and, when one is on record, the session working there — because moving a
+checked-out branch leaves that tree showing the merged files as deleted.

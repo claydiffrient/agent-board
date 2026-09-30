@@ -127,7 +127,7 @@ Everything in worker scope over any task in the project, plus:
 | `set_epic(task_id, epic_id)` | Moves an existing task into an epic, between epics, or — with `epic_id` omitted — out of its epic. Refused for a task that has ever been spawned, and for a `done` destination epic. Dependencies are left alone |
 | `create_epic(title, goal, tasks[])` | One transaction: the epic (state `planning`) plus every task in `tasks`. Each task's `depends_on` is a zero-based index into this same array, validated before anything is written. Each task takes an optional `type`, validated as `create_task`'s |
 | `list_epics()` | Every epic on the project with its state, branch, newest pull request opened from the branch (or null), and done/total task count |
-| `get_epic(id)` | One epic in full: goal, branch, newest pull request, its tasks grouped by column, and whether it is ready for integration |
+| `get_epic(id)` | One epic in full: goal, branch, newest pull request, its tasks grouped by column, whether it is ready for integration, and `base_drift` — commits behind and ahead of the base branch, or why they cannot be counted (§5.2). Drift raises no attention and no notification |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
 | `pin_note(note_id, pinned)` | Every future agent sees it in its note index and can fetch it |
 | `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting |
@@ -143,6 +143,7 @@ Everything in worker scope over any task in the project, plus:
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Refused unless every task in the epic is `done` (names how many remain); otherwise creates a human approval row, or returns the one already pending |
 | `close_epic(epic_id, state)` | Ends the epic without integrating it. `state` is `done` or `abandoned`; both are terminal. Board state and a `decision` report and nothing else — no merge, no push, no branch or worktree deleted, no task deleted, archived or moved out. Refused while any session in the epic is active, and refused for an epic that is already terminal |
+| `refresh_epic(epic_id)` | Merges the base branch into the epic branch, on the human's request only. Built and tested with the configured commands in a scratch checkout before the branch moves; an unconfigured command is reported `NOT VERIFIED`, never passed. A conflict or a failing command leaves the branch untouched. Refused for a terminal epic and while any working tree holds the epic branch, naming it (§5.2) |
 | `push_branch(branch)` | Always creates a human approval row. Refused for any branch that is not `agentboard/<something>` or the project's base branch. The approval carries both the local branch and the name it takes on the remote (§6.1) |
 | `open_pull_request(epic_id \| branch, title, body, base?)` | Always creates a human approval row. Same branch rule; `base` defaults to the project's base branch. On approval the branch is pushed if the remote lacks it, the pull request is opened from the **published** name (§6.1), and its URL lands in `progress` and in a `decision` report |
 

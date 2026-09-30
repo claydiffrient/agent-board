@@ -503,6 +503,67 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return try await offMain { try ReviewCheckout.change(since: head, in: cwd) }
     }
 
+    func baseDrift(epicId: String) async throws -> BaseDrift {
+        guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
+        guard let project = try projects.get(epic.projectId) else { throw SupervisorError.projectNotFound(epic.projectId) }
+        let manager = worktreeManager(for: project)
+        let branch = epic.branch
+        let base = project.baseBranch
+        return try await offMain { try manager.drift(of: branch, from: base) }
+    }
+
+    /// SPEC §5.2: the merge result is built and tested in a scratch checkout before the epic branch
+    /// moves, and only the final move waits on the merge queue, so an accept is not held up by a build.
+    func refreshEpic(epicId: String) async throws -> EpicRefresh {
+        guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
+        guard let project = try projects.get(epic.projectId) else { throw SupervisorError.projectNotFound(epic.projectId) }
+        let manager = worktreeManager(for: project)
+        let branch = epic.branch
+        let message = WorktreeManager.mergeSubject(taskTitle: project.baseBranch, targetTitle: epic.title)
+        let base = project.baseBranch
+        let commands = project.settings.verification
+
+        let plan = try await offMain { try manager.refreshCandidate(branch: branch, base: base, message: message) }
+        let previousHead: String
+        let candidate: String
+        switch plan {
+        case .settled(let outcome): return try named(outcome, projectId: project.id)
+        case let .merge(head, commit): (previousHead, candidate) = (head, commit)
+        }
+
+        let verification = try await offMain {
+            if commands.isEmpty { return RefreshVerifier.Outcome(unverified: [.build, .test]) }
+            let scratch = try manager.createDetached(name: "refresh-\(epicId)", commit: candidate)
+            defer { manager.removeScratch(path: scratch) }
+            return RefreshVerifier.run(commands, in: scratch)
+        }
+        if let failure = verification.failure {
+            return .verificationFailed(
+                head: previousHead, candidate: candidate, failure: failure, passed: verification.passed
+            )
+        }
+        let applied = try await mergeQueue.serialize(repo: project.repoPath, branch: branch) {
+            await _Concurrency.Task.detached(priority: .userInitiated) {
+                Result { try manager.applyRefresh(branch: branch, from: previousHead, to: candidate) }
+            }.value
+        }.get()
+        if let applied { return try named(applied, projectId: project.id) }
+        return .refreshed(
+            previousHead: previousHead, head: candidate, passed: verification.passed, unverified: verification.unverified
+        )
+    }
+
+    /// Names the session working in a checkout that holds the branch, when one is on record.
+    private func named(_ outcome: EpicRefresh, projectId: String) throws -> EpicRefresh {
+        guard case .checkedOut(let path, nil) = outcome else { return outcome }
+        let holder = try sessions.active(projectId: projectId).first { session in
+            session.worktreePath.map { Self.resolved($0) == Self.resolved(path) } ?? false
+        }
+        return .checkedOut(path: path, holder: holder.map { session in
+            "\(session.role.rawValue) session \(session.sessionId)" + (session.taskId.map { " on task \($0)" } ?? "")
+        })
+    }
+
     /// Where a worker will run, once the strategy, the group holding the checkout and git have all
     /// had their say.
     private struct CheckoutSite {
