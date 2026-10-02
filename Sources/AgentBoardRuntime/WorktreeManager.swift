@@ -65,6 +65,19 @@ public enum BranchMerge: Sendable, Equatable {
     case noTargetBranch(String)
 }
 
+/// Where a branch cut from the project base starts (SPEC §3.1 step 1).
+public struct BaseStartPoint: Sendable, Equatable {
+    /// The remote's base commit when local `base` is behind or equal to it, otherwise `base` itself.
+    public var ref: String
+    /// Set when the fetch failed, so `ref` is local `base` and may be behind.
+    public var warning: String?
+
+    public init(ref: String, warning: String? = nil) {
+        self.ref = ref
+        self.warning = warning
+    }
+}
+
 public struct WorktreeManager: Sendable {
     public static let gitPath = "/usr/bin/git"
 
@@ -142,6 +155,52 @@ public struct WorktreeManager: Sendable {
         guard result.status == 0 else { return nil }
         let name = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         return name.isEmpty ? nil : name
+    }
+
+    public static let baseFetchTimeout: TimeInterval = 10
+
+    /// SPEC §3.1 step 1: fetches `base` from `remote` and picks the start point for a branch cut from
+    /// it. Never moves local `base`, and never throws: no remote, or a failed fetch, means local `base`.
+    public func freshestBase(
+        _ base: String, remote: String = "origin", timeout: TimeInterval = baseFetchTimeout
+    ) -> BaseStartPoint {
+        guard (try? gitRaw(PublishCommand.remoteURL(remote), cwd: repoPath))?.status == 0 else {
+            return BaseStartPoint(ref: base)
+        }
+        let tracking = "refs/remotes/\(remote)/\(base)"
+        let args = ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/\(base):\(tracking)"]
+        let problem: String
+        do {
+            let fetched = try gitRaw(args, cwd: repoPath, timeout: timeout)
+            if fetched.status == 0 { return startPoint(local: "refs/heads/\(base)", remote: tracking, base: base) }
+            let stderr = fetched.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            problem = stderr.isEmpty ? "git fetch exited \(fetched.status)" : stderr
+        } catch {
+            problem = "\(error)"
+        }
+        return BaseStartPoint(
+            ref: base,
+            warning: "Could not fetch \(base) from \(remote), so this branch was cut from local \(base), "
+                + "which may be behind \(remote)/\(base): \(problem)"
+        )
+    }
+
+    /// Behind or equal takes the remote; ahead or diverged keeps local, which holds unpushed work.
+    private func startPoint(local: String, remote: String, base: String) -> BaseStartPoint {
+        guard let remoteTip = try? refCommit(remote), let localTip = try? refCommit(local),
+              (try? isAncestor(localTip, of: remoteTip)) == true
+        else { return BaseStartPoint(ref: base) }
+        return BaseStartPoint(ref: remoteTip)
+    }
+
+    /// A standalone task's recorded cut point while local `base` is still behind it (SPEC §3.1
+    /// step 1), so commits the remote had are not read as the task's own; `base` otherwise.
+    public func diffBase(taskId: String, base: String) -> String {
+        guard let recorded = try? refCommit(TaskBranchLedger.baseRef(taskId: taskId)),
+              let local = try? refCommit("refs/heads/\(base)"), local != recorded,
+              (try? isAncestor(local, of: recorded)) == true
+        else { return base }
+        return recorded
     }
 
     public func ensureBranch(_ name: String, from base: String) throws {
@@ -557,6 +616,15 @@ public struct WorktreeManager: Sendable {
 
     private static func failure(_ args: [String], _ result: CommandResult) -> String {
         "git \(args.joined(separator: " ")) exited \(result.status)\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)"
+    }
+
+    func gitRaw(_ args: [String], cwd: URL, timeout: TimeInterval) throws -> CommandResult {
+        var env = environment()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        return try ProcessRunner.run(
+            executable: URL(fileURLWithPath: Self.gitPath), arguments: args, cwd: cwd, environment: env,
+            timeout: timeout
+        )
     }
 
     func gitRaw(_ args: [String], cwd: URL) throws -> CommandResult {

@@ -354,10 +354,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             ? preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
             : clearedWorktreePathWarning()
         let base: String
+        var baseWarnings: [String] = []
         if let epic {
             let epicBranch = epic.branch
             let projectBase = project.baseBranch
-            try await offMain { try manager.ensureBranch(epicBranch, from: projectBase) }
+            // SPEC §3.1 step 1: only a new epic branch looks at the remote; an existing one is local
+            // integration state its tasks branch from as it stands.
+            let cut = try await offMain { () -> String? in
+                guard try !manager.branchExists(epicBranch) else { return nil }
+                let start = manager.freshestBase(projectBase)
+                try manager.ensureBranch(epicBranch, from: start.ref)
+                return start.warning
+            }
+            baseWarnings += [cut].compactMap { $0 }
             base = epicBranch
             if scope != .reviewer, placement.sharedBranch == nil {
                 try await requireDependenciesOnEpicBranch(task: task, epic: epic, manager: manager)
@@ -365,10 +374,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } else {
             base = project.baseBranch
         }
-        let site = try await checkoutSite(
-            project: project, taskId: taskId, placement: placement, base: base, manager: manager,
-            warnings: warnings
+        var site = try await checkoutSite(
+            project: project, taskId: taskId, placement: placement, base: base,
+            cutsFromProjectBase: epic == nil, manager: manager, warnings: warnings
         )
+        report(baseWarnings)
+        site.warnings += baseWarnings
         let branch = site.branch
         // A handed-off task keeps its worktree on disk, so a second agent could otherwise be launched
         // into a checkout someone is still working in. Co-resident agents in a shared checkout are
@@ -519,7 +530,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// spawn.
     private func checkoutSite(
         project: Project, taskId: String, placement: WorkerPlacement, base: String,
-        manager: WorktreeManager, warnings: [String]
+        cutsFromProjectBase: Bool, manager: WorktreeManager, warnings: [String]
     ) async throws -> CheckoutSite {
         if let sharedBranch = placement.sharedBranch {
             let repo = URL(fileURLWithPath: project.repoPath)
@@ -536,12 +547,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let fallbackWarnings = placement == .worktree
             ? warnings
             : preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
-        let worktree = try await offMain {
-            try Self.existingWorktree(manager, name: taskId) ?? manager.create(name: taskId, branch: branch, base: base)
+        let (worktree, baseWarning) = try await offMain { () -> (URL, String?) in
+            if let existing = try Self.existingWorktree(manager, name: taskId) { return (existing, nil) }
+            // SPEC §3.1 step 1: a reused task branch keeps whatever it was cut from.
+            guard cutsFromProjectBase, try !manager.branchExists(branch) else {
+                return (try manager.create(name: taskId, branch: branch, base: base), nil)
+            }
+            let start = manager.freshestBase(base)
+            return (try manager.create(name: taskId, branch: branch, base: start.ref), start.warning)
         }
+        if let baseWarning { report([baseWarning]) }
         return CheckoutSite(
             placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch,
-            warnings: fallbackWarnings
+            warnings: fallbackWarnings + [baseWarning].compactMap { $0 }
         )
     }
 
@@ -1694,7 +1712,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return try? await offMain {
             switch context.site {
             case .worktree(let path):
-                return try context.manager.diffstat(worktree: path, against: context.base)
+                return try context.manager.diffstat(worktree: path, against: context.diffBase)
             case .sharedBranch(let branch):
                 context.backfillTrailers(branch: branch)
                 return try context.manager.diffstat(taskId: taskId, on: branch, since: context.base)
@@ -1707,7 +1725,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return try? await offMain {
             switch context.site {
             case .worktree(let path):
-                return try context.manager.diffSummary(worktree: path, against: context.base)
+                return try context.manager.diffSummary(worktree: path, against: context.diffBase)
             case .sharedBranch(let branch):
                 context.backfillTrailers(branch: branch)
                 return try context.manager.diffSummary(taskId: taskId, on: branch, since: context.base)
@@ -1729,6 +1747,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         /// Set for the first shared-branch read of a branch this run, which is the one that turns
         /// pre-ledger `Agent-Board-Task` trailers into rows. Off main, because it runs git.
         var readTrailers: Bool = false
+        /// Set for a standalone task, whose branch may be cut from the remote's base (SPEC §3.1 step 1).
+        var standaloneTaskId: String?
+
+        /// Runs git, so only off main.
+        var diffBase: String {
+            standaloneTaskId.map { manager.diffBase(taskId: $0, base: base) } ?? base
+        }
 
         func backfillTrailers(branch: String) {
             guard readTrailers else { return }
@@ -1757,7 +1782,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             .first(where: { FileManager.default.fileExists(atPath: $0) })
         else { return nil }
         return DiffContext(
-            manager: manager, site: .worktree(URL(fileURLWithPath: worktreePath)), base: project.baseBranch
+            manager: manager, site: .worktree(URL(fileURLWithPath: worktreePath)), base: project.baseBranch,
+            standaloneTaskId: task.epicId == nil ? taskId : nil
         )
     }
 
