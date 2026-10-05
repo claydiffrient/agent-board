@@ -1,3 +1,4 @@
+import AgentBoardBridge
 import AgentBoardCore
 import AgentBoardRuntime
 import Foundation
@@ -38,6 +39,7 @@ final class RemoteBaseSpawnTests: XCTestCase {
         XCTAssertEqual(standalone.warnings, [])
         let diff = await fixture.supervisor.worktreeDiffSummary(taskId: standalone.taskId)
         XCTAssertEqual(diff?.isEmpty, true, "the diff read the remote's commit as the task's own")
+        try await assertReviewDiffsAgainstTheCutPoint(standalone, cutPoint: remoteOnly)
 
         let newEpic = try fixture.epics.create(projectId: fixture.project.id, title: "New", goal: nil)
         _ = try await spawn(epicId: newEpic.id)
@@ -68,6 +70,25 @@ final class RemoteBaseSpawnTests: XCTestCase {
         XCTAssertEqual(local.warnings, [])
 
         XCTAssertEqual(try head("main"), unpushed, "spawning moved local main")
+    }
+
+    private func assertReviewDiffsAgainstTheCutPoint(_ task: Spawned, cutPoint: String) async throws {
+        let rita = try RosterStore(fixture.db).create(name: "Rita", role: "reviewer", systemPrompt: "You review.")
+        try RosterStore(fixture.db).enable(agentId: rita.id, forProject: fixture.project.id)
+        let worker = try XCTUnwrap(fixture.sessions.forTask(task.taskId).last)
+        _ = try fixture.board.complete(taskId: task.taskId, sessionId: worker.sessionId, summary: "done")
+        try fixture.tasks.setReviewer(task.taskId, rita.id)
+        do {
+            _ = try await fixture.supervisor.assignAgent(taskId: task.taskId, rosterAgentId: rita.id, scope: .reviewer)
+            XCTFail("a reviewer was spawned on a branch with no commits of its own")
+        } catch is NothingToReview {}
+
+        try fixture.commitInto(worker.cwd, file: "work.txt")
+        _ = try await fixture.supervisor.assignAgent(taskId: task.taskId, rosterAgentId: rita.id, scope: .reviewer)
+        await fixture.supervisor.waitForSetup()
+        let reviewer = try XCTUnwrap(fixture.sessions.forTask(task.taskId).first { $0.rosterAgentId == rita.id })
+        let prompt = try XCTUnwrap(ReviewPrompt.recorded(db: fixture.db, session: reviewer))
+        XCTAssertTrue(prompt.contains("`git diff \(cutPoint)...HEAD`"), prompt)
     }
 
     private struct Spawned {

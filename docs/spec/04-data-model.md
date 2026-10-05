@@ -99,6 +99,7 @@ CREATE TABLE agent_session (
   blocked_on_path TEXT,               -- §8.4: the shared-checkout file lock this session is waiting on
   roster_agent_id TEXT REFERENCES roster_agent(id),  -- §10: the archetype this session was spawned from
   review_head    TEXT,               -- §5.1: HEAD (and uncommitted-change fingerprint) a rostered reviewer was spawned on
+  review_base    TEXT,               -- §3.1 step 1, §5.1: what a rostered reviewer diffs against; `ReviewPrompt.recorded` rebuilds from it
   agent_stopped_at INTEGER,         -- §8.6: a `claude stop` succeeded after the row's last sign of life; a trigger clears it
   CHECK ((role = 'coordinator') = (project_id IS NULL))
 );

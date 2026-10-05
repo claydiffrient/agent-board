@@ -61,8 +61,9 @@ For a task `T` in project `P`:
    main thread under `ChildEnvironment.sanitized()` with
    `GIT_TERMINAL_PROMPT=0`, like every other git call. Whatever start point
    is chosen is what `refs/agentboard/base/<task-id>` records, and a
-   standalone task's diff reads against that record while local `<base>` is
-   still behind it, so commits the remote had are not shown as the task's.
+   standalone task's diff, and its reviewer's (§5.1), reads against that
+   record while local `<base>` is still behind it, so commits the remote had
+   are not shown as the task's.
    **A task inside an epic always branches from the local epic branch as it
    stands**: no fetch, no comparison with any remote. An existing epic branch
    is local integration state its tasks must see each other's merged work on,

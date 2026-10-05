@@ -387,12 +387,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if let path = site.worktreePath, let holder = try sessions.activeHolder(worktreePath: path) {
             throw SupervisorError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
         }
+        // SPEC §3.1 step 1: a standalone branch cut from the remote's base diffs against that cut
+        // point while local base is behind it, or the remote's commits read as the task's work.
+        let reviewBase = scope == .reviewer && epic == nil
+            ? try await offMain { manager.diffBase(taskId: taskId, base: base) }
+            : base
         // SPEC §5.1: a reviewer judges the diff and nothing else, so an empty one — a task whose
         // deliverable is a note, say — goes to a person rather than to a reviewer that could only reopen it.
         if scope == .reviewer {
             let cwd = site.cwd
-            guard try await offMain({ try ReviewCheckout.hasDiff(against: base, in: cwd) }) else {
-                throw NothingToReview(reason: "Branch `\(branch)` has no diff against `\(base)`, so there is no "
+            guard try await offMain({ try ReviewCheckout.hasDiff(against: reviewBase, in: cwd) }) else {
+                throw NothingToReview(reason: "Branch `\(branch)` has no diff against `\(reviewBase)`, so there is no "
                     + "code for a rostered reviewer to judge. A task whose deliverable is not code, such as an "
                     + "Agent Board note, needs a person to review it.")
             }
@@ -404,7 +409,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 : nil
             let row = Self.setupRow(
                 projectId: project.id, taskId: taskId, site: site, attempt: attempt,
-                rosterAgentId: agent?.id, reviewHead: reviewHead
+                rosterAgentId: agent?.id, reviewHead: reviewHead, reviewBase: scope == .reviewer ? reviewBase : nil
             )
             // A reviewer holds a task that is already in `review`; `assign` would move it to
             // `running` and take it out of the queue its own accept_task reads.
@@ -425,7 +430,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     name: Self.sessionName(for: task),
                     prompt: scope == .reviewer
                         ? ReviewPrompt.compose(
-                            task: task, branch: branch, base: base,
+                            task: task, branch: branch, base: reviewBase,
                             verification: project.settings.verification,
                             workingDirectory: site.cwd.path,
                             agent: agent?.identity,
@@ -572,7 +577,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private static func setupRow(
         projectId: String, taskId: String, site: CheckoutSite, attempt: Int,
-        rosterAgentId: String? = nil, reviewHead: String? = nil
+        rosterAgentId: String? = nil, reviewHead: String? = nil, reviewBase: String? = nil
     ) -> AgentSession {
         AgentSession(
             sessionId: "setup-\(UUID().uuidString)",
@@ -585,7 +590,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             state: .setup,
             attempt: attempt,
             rosterAgentId: rosterAgentId,
-            reviewHead: reviewHead
+            reviewHead: reviewHead,
+            reviewBase: reviewBase
         )
     }
 

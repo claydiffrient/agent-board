@@ -169,6 +169,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("session_agent_stopped_at") { db in
             try db.execute(sql: Schema.sessionAgentStoppedAt)
         }
+        migrator.registerMigration("session_review_base") { db in
+            try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN review_base TEXT")
+        }
         return migrator
     }
 }
