@@ -776,6 +776,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             )
         }
         let branches = IntegrationPlan.classify(ordered, facts: facts)
+        let settings = project.settings
+        let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
+        let shipsByPullRequest = (try? await offMain { publisher.standaloneIntegration(settings) }) == .pullRequest
 
         let task = try board.createIntegrationTask(epicId: epicId)
         var assigned: AgentSession?
@@ -793,6 +796,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 )
             )
             assigned = placeholder
+            try epics.setShipsByPullRequest(epicId, shipsByPullRequest)
             // A PR-open epic stays so: its pull request, not this integrator, decides when it is done.
             if epic.state != .pullRequestOpen { try epics.setState(epicId, .integrating) }
             beginSetup(

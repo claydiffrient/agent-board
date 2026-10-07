@@ -264,7 +264,7 @@ struct ProjectSettingsSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .publishing:
-            Picker("Integrate standalone tasks by", selection: $settings.standaloneIntegration) {
+            Picker("Integrate standalone tasks and epics by", selection: $settings.standaloneIntegration) {
                 Text(Self.defaultIntegrationTitle(integrationDefault)).tag(StandaloneIntegration?.none)
                 ForEach(StandaloneIntegration.allCases, id: \.self) { integration in
                     Text(integration.title).tag(StandaloneIntegration?.some(integration))
@@ -280,7 +280,7 @@ struct ProjectSettingsSheet: View {
                 get: { settings.remoteBranchTemplate ?? "" },
                 set: { settings.remoteBranchTemplate = $0.isEmpty ? nil : $0 }
             ), prompt: Text("e.g. clay/{slug}"))
-            Text("The name a branch takes on the remote. \(RemoteBranchTemplate.slugToken) comes from the epic's or task's title; \(RemoteBranchTemplate.idToken) is an optional short id. The local branch stays agentboard/<id> either way. Left empty, the local name is what reaches the remote. By pull request, accepting a task in no epic merges nothing, and it is marked landed once its recorded pull request merges on GitHub; local merge merges it into the base branch on accept. The default is pull request when the repository has an origin remote and local merge when it has none. A task in an epic always merges into its epic branch.")
+            Text("The name a branch takes on the remote. \(RemoteBranchTemplate.slugToken) comes from the epic's or task's title; \(RemoteBranchTemplate.idToken) is an optional short id. The local branch stays agentboard/<id> either way. Left empty, the local name is what reaches the remote. By pull request, accepting a task in no epic merges nothing, and it is marked landed once its recorded pull request merges on GitHub; local merge merges it into the base branch on accept. The default is pull request when the repository has an origin remote and local merge when it has none. A task in an epic always merges into its epic branch. By pull request, an epic stays open after its integration and closes when its pull request merges; by local merge, its integration closes it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .archive:

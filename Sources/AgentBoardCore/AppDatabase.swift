@@ -169,6 +169,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("session_agent_stopped_at") { db in
             try db.execute(sql: Schema.sessionAgentStoppedAt)
         }
+        migrator.registerMigration("epic_ships_by_pull_request") { db in
+            try db.execute(sql: "ALTER TABLE epic ADD COLUMN ships_by_pull_request INTEGER")
+        }
         return migrator
     }
 }

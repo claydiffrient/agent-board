@@ -295,14 +295,17 @@ public final class OrchestratorToolHandler: ToolHandler {
         ToolDescriptor(
             name: "get_epic",
             description: "One epic in full: its goal, integration branch, newest pull request, its tasks grouped by column, "
-                + "and whether it is ready for integration.",
+                + "whether it is ready for integration, and `next_step` when the epic is waiting on you to open its "
+                + "pull request or on that pull request to merge (null otherwise).",
             inputSchema: ToolSchema.object(properties: ["id": ToolSchema.string()], required: ["id"])
         ),
         ToolDescriptor(
             name: "request_integration",
             description: "Ask the human to integrate an epic. Refused until every task in the epic is `done`. Integration "
                 + "always requires human approval regardless of the autonomy setting; you will learn the decision "
-                + "through list_reports.",
+                + "through list_reports. In a project that ships epics by pull request, a finished integration leaves "
+                + "the epic `integrated`, not `done`: it still takes tasks, and the next step is `open_pull_request`. "
+                + "In a project that merges locally, a finished integration makes the epic `done`.",
             inputSchema: ToolSchema.object(properties: ["epic_id": ToolSchema.string()], required: ["epic_id"])
         ),
         ToolDescriptor(
@@ -1057,6 +1060,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "done_tasks": .number(Double(counts.done)),
             "total_tasks": .number(Double(counts.total)),
             "ready_for_integration": .bool(try board.epicReadyForIntegration(epicId: epic.id)),
+            "next_step": .optional(Board.nextStep(for: epic)),
             "columns": .object(columns),
         ]))
     }

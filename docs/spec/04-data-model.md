@@ -31,9 +31,10 @@ CREATE TABLE epic (
   title          TEXT NOT NULL,
   goal           TEXT,
   branch         TEXT NOT NULL,    -- agentboard/epic-<id>
-  state          TEXT NOT NULL,    -- planning | active | integrating | pull_request_open | done | abandoned
+  state          TEXT NOT NULL,    -- planning | active | integrating | integrated | pull_request_open | done | abandoned
   created_at     INTEGER NOT NULL,
-  review_level   TEXT              -- none|agent|task|epic for this epic's tasks; NULL inherits the project's
+  review_level   TEXT,             -- none|agent|task|epic for this epic's tasks; NULL inherits the project's
+  ships_by_pull_request INTEGER    -- set when the integrator spawns (§5.2 step 4); NULL completes as a local merge
 );
 
 CREATE TABLE task (
@@ -310,8 +311,9 @@ that is not listed here:
 | `planning` | `EpicStore.insert` | The epic is created; `create_epic` and the New Epic sheet both land here |
 | `active` | `WorkerSupervisor.spawn`, `Board.accept`, `Board.reopenEpicAfterClosedPullRequest` | The first task in the epic is spawned, or accepted, while the epic is still `planning`, **or** its pull request closed without merging (§5.2 step 5) |
 | `integrating` | `WorkerSupervisor.spawnIntegrator` | The integrator worker spawned successfully on the epic branch (§5.2 step 3) |
+| `integrated` | `Board.complete` | The integrator reported on an `integrating` epic whose project ships epics by pull request (§5.2 step 4) |
 | `pull_request_open` | `Board.recordPublished` | An approved `open_pull_request(epic_id)` recorded its URL, from any state but `abandoned` (§5.2 step 5) |
-| `done` | `Board.complete`, `Board.landEpicPullRequest`, `Board.closeEpic` | The integrator reported on an `integrating` epic, **or** its pull request merged, **or** a human closed the epic by hand (§10) |
+| `done` | `Board.complete`, `Board.landEpicPullRequest`, `Board.closeEpic` | The integrator reported on an `integrating` epic whose project merges epics locally, **or** its pull request merged, **or** a human closed the epic by hand (§10) |
 | `abandoned` | `Board.closeEpic` | A human abandoned the epic by hand (§10) |
 
 `done` and `abandoned` are terminal: `Board.closeEpic` refuses an epic that is
@@ -475,7 +477,10 @@ The three modes fire on two different things, so they have two entry points
   metering cadence, and there is no second timer. `done_at` rather than
   `updated_at` measures time-in-done, because archiving, reordering, blocking and
   every other edit move `updated_at`.
-- **`afterEpicMerge`** archives every `done` task of an epic inside the same
+- **`afterEpicMerge`** archives every `done` task of an epic when the epic
+  becomes `done` by merging: in a project that ships epics by pull request,
+  inside `Board.landEpicPullRequest` once the pull request merges; in one that
+  merges locally, inside the same
   `Board.complete` transaction that moves the epic to `done` (§5.2 step 4),
   including the synthetic `integration` task. Under this policy alone that task
   lands in `done` rather than `review`: the epic reaching `done` is its
