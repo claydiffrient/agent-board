@@ -395,7 +395,12 @@ one whose whole deliverable is an Agent Board note, such as release notes — ha
 nothing for it to decide, and `reopen_task` would send correct work back.
 `assignAgent(scope: .reviewer)` runs `git diff --quiet <base>...HEAD` in the
 worktree before it writes a session row and throws `NothingToReview` when it
-is empty. `report_complete` then leaves the task in `review` for a person
+is empty. For a standalone task `<base>` is `WorktreeManager.diffBase`: the
+recorded cut point while local base is still behind it (§3.1 step 1), so a
+branch cut from the remote's base is not read as carrying the remote's
+commits. The same `<base>` goes into the reviewer's prompt and is stored in
+`agent_session.review_base`, which `briefing://reviewer` and the
+post-compaction brief rebuild from. `report_complete` then leaves the task in `review` for a person
 (`Board.leaveReviewToPerson`: `reviewer_agent_id` cleared, the reason in a
 `status` row, exactly as `humanReview` routing parks it) and tells the worker
 so. No reviewer starts and nothing is flagged as an error.

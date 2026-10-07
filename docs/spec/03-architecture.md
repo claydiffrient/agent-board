@@ -46,6 +46,30 @@ For a task `T` in project `P`:
 
 1. Ensure the epic branch exists (`agentboard/epic-<epic-id>`, cut from `P`'s
    base branch) if `T` belongs to an epic.
+   A branch cut **from the base** — a standalone task's new branch, or a new
+   epic branch — first runs `git fetch origin +refs/heads/<base>:refs/remotes/origin/<base>`,
+   because work integrates by pull request and local `<base>` falls behind
+   until a human pulls. When local `<base>` is an ancestor of
+   `origin/<base>` (behind or equal) the branch is cut from the remote's
+   commit; when local has commits the remote lacks (ahead or diverged) it is
+   cut from local `<base>`, which holds the human's unpushed work. Local
+   `<base>` itself is never moved: it is usually checked out in the human's
+   own checkout. The fetch never fails a spawn. A project with no `origin`
+   (the remote `BranchPublisher` pushes to, §6.1) skips it; a fetch that
+   fails or outlives `WorktreeManager.baseFetchTimeout` falls back to local
+   `<base>` and returns a spawn warning naming the problem. It runs off the
+   main thread under `ChildEnvironment.sanitized()` with
+   `GIT_TERMINAL_PROMPT=0`, like every other git call. Whatever start point
+   is chosen is what `refs/agentboard/base/<task-id>` records, and a
+   standalone task's diff, and its reviewer's (§5.1), reads against that
+   record while local `<base>` is still behind it, so commits the remote had
+   are not shown as the task's.
+   **A task inside an epic always branches from the local epic branch as it
+   stands**: no fetch, no comparison with any remote. An existing epic branch
+   is local integration state its tasks must see each other's merged work on,
+   and it is never fetched into, moved or rebased. Reusing an existing task
+   branch or worktree, and adopting a shared checkout (step 2), fetch nothing
+   either.
 2. Decide where `T`'s worker runs: `WorkerPlacementDecision.decide(strategy:
    project.settings.worktreeStrategy, wantedSharedBranch:
    SharedCheckoutGroup.branch(epicId:), group: SharedCheckoutGroup.current(...))`.
@@ -58,7 +82,8 @@ For a task `T` in project `P`:
    next launch.
    - **`worktree`** always places, and always worktrees: `git worktree add
      <worktrees>/<task-id> -b agentboard/<task-id> <base>` where `<base>` is
-     the epic branch, or the project base branch for a standalone task. This
+     the epic branch, or for a standalone task the start point step 1 chose
+     from the project base branch. This
      is every project's behavior from before this setting existed. Git exits
      with the `post-checkout` hook's status and leaves the new worktree on
      disk when it fails, while a spawn adopts any worktree already at its

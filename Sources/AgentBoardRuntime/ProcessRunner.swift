@@ -88,6 +88,43 @@ enum ProcessRunner {
         )
     }
 
+    /// Bounded from launch: past `timeout` the child is terminated and this throws. Each pipe drains
+    /// on its own thread, so a grandchild that keeps one open (git's ssh) cannot stall the caller.
+    static func run(
+        executable: URL,
+        arguments: [String],
+        cwd: URL? = nil,
+        environment: [String: String]? = nil,
+        timeout: TimeInterval
+    ) throws -> CommandResult {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.currentDirectoryURL = cwd
+        process.environment = environment ?? ChildEnvironment.sanitized()
+        process.standardInput = FileHandle.nullDevice
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+
+        try process.run()
+        let stdout = PipeCapture(stdoutPipe)
+        let stderr = PipeCapture(stderrPipe)
+        guard exited.wait(timeout: .now() + timeout) == .success else {
+            process.terminate()
+            if exited.wait(timeout: .now() + 1) != .success { kill(process.processIdentifier, SIGKILL) }
+            throw AgentRuntimeError(
+                "\(executable.lastPathComponent) \(arguments.joined(separator: " ")) did not finish within \(Int(timeout))s"
+            )
+        }
+        return CommandResult(
+            status: process.terminationStatus, stdout: stdout.collected(), stderr: stderr.collected()
+        )
+    }
+
     static func runChecked(
         executable: URL,
         arguments: [String],
@@ -107,4 +144,22 @@ enum ProcessRunner {
 
 private final class DataBox: @unchecked Sendable {
     var data = Data()
+}
+
+private final class PipeCapture: @unchecked Sendable {
+    private var data = Data()
+    private let done = DispatchSemaphore(value: 0)
+
+    init(_ pipe: Pipe) {
+        DispatchQueue.global().async {
+            self.data = pipe.fileHandleForReading.readDataToEndOfFile()
+            self.done.signal()
+        }
+    }
+
+    /// Empty when the pipe is still held open after the child exited.
+    func collected(within seconds: TimeInterval = 2) -> String {
+        guard done.wait(timeout: .now() + seconds) == .success else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
 }

@@ -354,10 +354,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             ? preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
             : clearedWorktreePathWarning()
         let base: String
+        var baseWarnings: [String] = []
         if let epic {
             let epicBranch = epic.branch
             let projectBase = project.baseBranch
-            try await offMain { try manager.ensureBranch(epicBranch, from: projectBase) }
+            // SPEC §3.1 step 1: only a new epic branch looks at the remote; an existing one is local
+            // integration state its tasks branch from as it stands.
+            let cut = try await offMain { () -> String? in
+                guard try !manager.branchExists(epicBranch) else { return nil }
+                let start = manager.freshestBase(projectBase)
+                try manager.ensureBranch(epicBranch, from: start.ref)
+                return start.warning
+            }
+            baseWarnings += [cut].compactMap { $0 }
             base = epicBranch
             if scope != .reviewer, placement.sharedBranch == nil {
                 try await requireDependenciesOnEpicBranch(task: task, epic: epic, manager: manager)
@@ -365,10 +374,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } else {
             base = project.baseBranch
         }
-        let site = try await checkoutSite(
-            project: project, taskId: taskId, placement: placement, base: base, manager: manager,
-            warnings: warnings
+        var site = try await checkoutSite(
+            project: project, taskId: taskId, placement: placement, base: base,
+            cutsFromProjectBase: epic == nil, manager: manager, warnings: warnings
         )
+        report(baseWarnings)
+        site.warnings += baseWarnings
         let branch = site.branch
         // A handed-off task keeps its worktree on disk, so a second agent could otherwise be launched
         // into a checkout someone is still working in. Co-resident agents in a shared checkout are
@@ -376,12 +387,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if let path = site.worktreePath, let holder = try sessions.activeHolder(worktreePath: path) {
             throw SupervisorError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
         }
+        // SPEC §3.1 step 1: a standalone branch cut from the remote's base diffs against that cut
+        // point while local base is behind it, or the remote's commits read as the task's work.
+        let reviewBase = scope == .reviewer && epic == nil
+            ? try await offMain { manager.diffBase(taskId: taskId, base: base) }
+            : base
         // SPEC §5.1: a reviewer judges the diff and nothing else, so an empty one — a task whose
         // deliverable is a note, say — goes to a person rather than to a reviewer that could only reopen it.
         if scope == .reviewer {
             let cwd = site.cwd
-            guard try await offMain({ try ReviewCheckout.hasDiff(against: base, in: cwd) }) else {
-                throw NothingToReview(reason: "Branch `\(branch)` has no diff against `\(base)`, so there is no "
+            guard try await offMain({ try ReviewCheckout.hasDiff(against: reviewBase, in: cwd) }) else {
+                throw NothingToReview(reason: "Branch `\(branch)` has no diff against `\(reviewBase)`, so there is no "
                     + "code for a rostered reviewer to judge. A task whose deliverable is not code, such as an "
                     + "Agent Board note, needs a person to review it.")
             }
@@ -393,7 +409,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 : nil
             let row = Self.setupRow(
                 projectId: project.id, taskId: taskId, site: site, attempt: attempt,
-                rosterAgentId: agent?.id, reviewHead: reviewHead
+                rosterAgentId: agent?.id, reviewHead: reviewHead, reviewBase: scope == .reviewer ? reviewBase : nil
             )
             // A reviewer holds a task that is already in `review`; `assign` would move it to
             // `running` and take it out of the queue its own accept_task reads.
@@ -414,7 +430,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     name: Self.sessionName(for: task),
                     prompt: scope == .reviewer
                         ? ReviewPrompt.compose(
-                            task: task, branch: branch, base: base,
+                            task: task, branch: branch, base: reviewBase,
                             verification: project.settings.verification,
                             workingDirectory: site.cwd.path,
                             agent: agent?.identity,
@@ -519,7 +535,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// spawn.
     private func checkoutSite(
         project: Project, taskId: String, placement: WorkerPlacement, base: String,
-        manager: WorktreeManager, warnings: [String]
+        cutsFromProjectBase: Bool, manager: WorktreeManager, warnings: [String]
     ) async throws -> CheckoutSite {
         if let sharedBranch = placement.sharedBranch {
             let repo = URL(fileURLWithPath: project.repoPath)
@@ -536,12 +552,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let fallbackWarnings = placement == .worktree
             ? warnings
             : preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
-        let worktree = try await offMain {
-            try Self.existingWorktree(manager, name: taskId) ?? manager.create(name: taskId, branch: branch, base: base)
+        let (worktree, baseWarning) = try await offMain { () -> (URL, String?) in
+            if let existing = try Self.existingWorktree(manager, name: taskId) { return (existing, nil) }
+            // SPEC §3.1 step 1: a reused task branch keeps whatever it was cut from.
+            guard cutsFromProjectBase, try !manager.branchExists(branch) else {
+                return (try manager.create(name: taskId, branch: branch, base: base), nil)
+            }
+            let start = manager.freshestBase(base)
+            return (try manager.create(name: taskId, branch: branch, base: start.ref), start.warning)
         }
+        if let baseWarning { report([baseWarning]) }
         return CheckoutSite(
             placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch,
-            warnings: fallbackWarnings
+            warnings: fallbackWarnings + [baseWarning].compactMap { $0 }
         )
     }
 
@@ -554,7 +577,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private static func setupRow(
         projectId: String, taskId: String, site: CheckoutSite, attempt: Int,
-        rosterAgentId: String? = nil, reviewHead: String? = nil
+        rosterAgentId: String? = nil, reviewHead: String? = nil, reviewBase: String? = nil
     ) -> AgentSession {
         AgentSession(
             sessionId: "setup-\(UUID().uuidString)",
@@ -567,7 +590,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             state: .setup,
             attempt: attempt,
             rosterAgentId: rosterAgentId,
-            reviewHead: reviewHead
+            reviewHead: reviewHead,
+            reviewBase: reviewBase
         )
     }
 
@@ -1694,7 +1718,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return try? await offMain {
             switch context.site {
             case .worktree(let path):
-                return try context.manager.diffstat(worktree: path, against: context.base)
+                return try context.manager.diffstat(worktree: path, against: context.diffBase)
             case .sharedBranch(let branch):
                 context.backfillTrailers(branch: branch)
                 return try context.manager.diffstat(taskId: taskId, on: branch, since: context.base)
@@ -1707,7 +1731,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return try? await offMain {
             switch context.site {
             case .worktree(let path):
-                return try context.manager.diffSummary(worktree: path, against: context.base)
+                return try context.manager.diffSummary(worktree: path, against: context.diffBase)
             case .sharedBranch(let branch):
                 context.backfillTrailers(branch: branch)
                 return try context.manager.diffSummary(taskId: taskId, on: branch, since: context.base)
@@ -1729,6 +1753,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         /// Set for the first shared-branch read of a branch this run, which is the one that turns
         /// pre-ledger `Agent-Board-Task` trailers into rows. Off main, because it runs git.
         var readTrailers: Bool = false
+        /// Set for a standalone task, whose branch may be cut from the remote's base (SPEC §3.1 step 1).
+        var standaloneTaskId: String?
+
+        /// Runs git, so only off main.
+        var diffBase: String {
+            standaloneTaskId.map { manager.diffBase(taskId: $0, base: base) } ?? base
+        }
 
         func backfillTrailers(branch: String) {
             guard readTrailers else { return }
@@ -1757,7 +1788,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             .first(where: { FileManager.default.fileExists(atPath: $0) })
         else { return nil }
         return DiffContext(
-            manager: manager, site: .worktree(URL(fileURLWithPath: worktreePath)), base: project.baseBranch
+            manager: manager, site: .worktree(URL(fileURLWithPath: worktreePath)), base: project.baseBranch,
+            standaloneTaskId: task.epicId == nil ? taskId : nil
         )
     }
 

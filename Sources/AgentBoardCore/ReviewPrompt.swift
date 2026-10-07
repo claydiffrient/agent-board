@@ -32,7 +32,8 @@ public enum ReviewPrompt {
         guard let taskId = session.taskId, let task = try TaskStore(db).get(taskId),
               let project = try ProjectStore(db).get(session.projectId)
         else { return nil }
-        let base = try task.epicId.flatMap { try EpicStore(db).get($0) }?.branch ?? project.baseBranch
+        let base = try session.reviewBase
+            ?? task.epicId.flatMap { try EpicStore(db).get($0) }?.branch ?? project.baseBranch
         let agent = try session.rosterAgentId.flatMap {
             try RosterStore(db).resolved($0, forProject: session.projectId)
         }?.identity

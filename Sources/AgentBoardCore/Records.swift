@@ -315,6 +315,9 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     /// The checkout a rostered reviewer was spawned on (`ReviewCheckout.baseline`). A verdict is refused
     /// once HEAD or the uncommitted tracked changes differ from it (SPEC §5.1).
     public var reviewHead: String?
+    /// What a rostered reviewer was told to diff against, which for a standalone task can be the
+    /// recorded cut point rather than the base branch (SPEC §3.1 step 1).
+    public var reviewBase: String?
 
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -344,6 +347,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case toolStartedAt = "tool_started_at"
         case toolsInFlight = "tools_in_flight"
         case reviewHead = "review_head"
+        case reviewBase = "review_base"
     }
 
     public init(
@@ -354,7 +358,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil,
         lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil,
         rosterAgentId: String? = nil, toolStartedAt: Int64? = nil, toolsInFlight: Int = 0,
-        reviewHead: String? = nil
+        reviewHead: String? = nil, reviewBase: String? = nil
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -383,6 +387,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.toolStartedAt = toolStartedAt
         self.toolsInFlight = toolsInFlight
         self.reviewHead = reviewHead
+        self.reviewBase = reviewBase
     }
 
     public var id: String { sessionId }
