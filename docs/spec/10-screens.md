@@ -210,7 +210,9 @@ or the inspector unarchives it.
 **Finished epics leave the board.** With Show Archived off, a `done` or
 `abandoned` epic whose tasks are all archived, or that has no tasks, gets no
 lane and no jump-rail entry, and the rail itself is dropped when no epic has a
-lane. Every other epic state keeps its lane, even when empty. Turning Show
+lane. Every other epic state keeps its lane, even when empty — an
+`integrated` epic (§5.2 step 4) among them, with a teal badge and **Open PR**
+in its header. Turning Show
 Archived on brings those lanes back, collapsed by default like every `done`
 lane. Nothing records this: it is derived from the epic's state and its tasks'
 `archived_at` (`EpicLaneVisibility`), with no flag, state or column of its own.

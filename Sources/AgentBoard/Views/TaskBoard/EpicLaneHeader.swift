@@ -108,6 +108,7 @@ struct EpicStateBadge: View {
         case .planning: .secondary
         case .active: .blue
         case .integrating: .orange
+        case .integrated: .teal
         case .pullRequestOpen: .purple
         case .done: .green
         case .abandoned: .red

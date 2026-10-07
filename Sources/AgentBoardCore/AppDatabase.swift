@@ -172,6 +172,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("session_review_base") { db in
             try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN review_base TEXT")
         }
+        migrator.registerMigration("epic_ships_by_pull_request") { db in
+            try db.execute(sql: "ALTER TABLE epic ADD COLUMN ships_by_pull_request INTEGER")
+        }
         return migrator
     }
 }

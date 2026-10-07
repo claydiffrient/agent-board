@@ -209,6 +209,22 @@ final class EpicIntegrationTests: XCTestCase {
         XCTAssertEqual(try fixture.tasks.list(projectId: fixture.project.id), [])
     }
 
+    func testARepositoryWithAnOriginShipsTheEpicByPullRequest() async throws {
+        let remote = fixture.supportDir.appendingPathComponent("remote.git")
+        _ = try SupervisorFixture.git(["init", "--bare", "-q", remote.path], cwd: fixture.supportDir)
+        _ = try fixture.git(["remote", "add", "origin", remote.path])
+        let ready = try fixture.epicReadyForIntegration(["api"])
+        let approval = try requestIntegration(epicId: ready.epic.id)
+
+        try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
+        let session = try XCTUnwrap(fixture.sessions.all(projectId: fixture.project.id).first)
+        try await reportComplete(session: session)
+
+        XCTAssertEqual(try fixture.epics.get(ready.epic.id)?.state, .integrated)
+        XCTAssertFalse(try XCTUnwrap(fixture.tasks.get(ready.tasks[0].id)).isArchived)
+    }
+
     func testApprovingASpawnStillSpawnsTheTaskWorker() async throws {
         let task = try fixture.tasks.create(
             projectId: fixture.project.id, title: "Do the thing", body: nil, acceptance: nil,

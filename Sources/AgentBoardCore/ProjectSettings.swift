@@ -84,8 +84,8 @@ public enum ArchivePolicy: Codable, Sendable, Equatable {
     }
 }
 
-/// How an accepted task in no epic reaches the base branch (SPEC §5). A task in an epic always
-/// merges locally into its epic branch, whichever this is.
+/// How an accepted task in no epic reaches the base branch (SPEC §5), and whether an integrated epic
+/// waits on its pull request (§5.2). A task in an epic always merges locally into its epic branch.
 public enum StandaloneIntegration: String, Codable, Sendable, CaseIterable, Equatable {
     /// The accept merges nothing; the task is landed when its recorded pull request merges.
     case pullRequest
