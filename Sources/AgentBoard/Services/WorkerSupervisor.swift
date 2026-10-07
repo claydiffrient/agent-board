@@ -2541,7 +2541,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func endedSessionRestarted(projectId: String, sessionId: String) async {
         guard !resuming.contains(sessionId),
               let session = try? sessions.get(sessionId),
-              session.state == .failed || session.state == .completed,
+              session.state == .failed || session.state == .completed
+                  || !((try? grants.hasLiveGrant(sessionId: sessionId)) ?? true),
               let shortId = session.shortId
         else { return }
         if let attached = attachRequestedAt[sessionId], attached >= session.endedAt ?? 0 { return }

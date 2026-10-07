@@ -22,8 +22,8 @@ public protocol BoardEventSink: Sendable {
     /// doing nothing is the supervisor's to do. Which of the two it was is carried by the report
     /// kind, the task's column and the session's stop reason, never by this signal.
     func workerCompleted(projectId: String, sessionId: String) async
-    /// A worker row Agent Board already ended (`failed` or `completed`) heard a `SessionStart`: its
-    /// process is running again without the board having resumed it (SPEC §8.5).
+    /// A worker Agent Board already ended (its row `failed` or `completed`, or its grant revoked) heard a
+    /// `SessionStart`: its process is running again without the board having resumed it (SPEC §8.5).
     func endedSessionRestarted(projectId: String, sessionId: String) async
     /// Something landed in the Coordinator's queue — today only a reply to one of its requests.
     func coordinatorReportQueued() async

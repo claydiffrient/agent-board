@@ -321,8 +321,10 @@ the first report's id and the column the task actually sits in.
 **A report from a session Agent Board already ended moves nothing.** A session
 the board failed, stopped or completed can still be running, because Claude Code
 resumes a stopped `--bg` session by itself (§8.5), and by the time it reports
-another session may have finished the task. `Board.complete` reads the session
-row inside the same transaction. When the row is no longer active, the report is
+another session may have finished the task. A session `Board.terminate` ended
+has its grant revoked, so its `report_complete` gets a 401 and never reaches
+the board. For the rest, `Board.complete` reads the session row inside the same
+transaction. When the row is no longer active, the report is
 kept as a `decision` headed "Late report_complete from a session Agent Board had
 already ended", and the task's column, landing, archive state, review routing and
 epic are left as they are. The answer says the session had already ended and

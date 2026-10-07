@@ -17,18 +17,32 @@ public struct TokenIdentity: Sendable, Equatable {
     public var projectId: String
     public var sessionId: String?
     public var taskId: String?
+    /// Only ever true on a hook: an MCP call on a revoked token is refused before it gets here.
+    public var revoked: Bool
 
-    public init(token: String, scope: TokenScope, projectId: String, sessionId: String? = nil, taskId: String? = nil) {
+    public init(
+        token: String, scope: TokenScope, projectId: String, sessionId: String? = nil, taskId: String? = nil,
+        revoked: Bool = false
+    ) {
         self.token = token
         self.scope = scope
         self.projectId = projectId
         self.sessionId = sessionId
         self.taskId = taskId
+        self.revoked = revoked
     }
 }
 
 public protocol TokenResolver: Sendable {
     func resolve(token: String) async -> TokenIdentity?
+    /// A revoked token too, flagged `revoked`, so a session that was ended and came back is still heard.
+    func resolveIncludingRevoked(token: String) async -> TokenIdentity?
+}
+
+extension TokenResolver {
+    public func resolveIncludingRevoked(token: String) async -> TokenIdentity? {
+        await resolve(token: token)
+    }
 }
 
 public struct HookEvent: Sendable {

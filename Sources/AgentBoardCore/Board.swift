@@ -756,12 +756,16 @@ public struct Board: Sendable {
     /// An already-inactive session row is not a reason to stop. The worker's `SessionEnd` hook races
     /// this call and writes `stopped` first often enough that bailing there strands the task in
     /// `running` with no report and nothing able to pick it up.
+    ///
+    /// A worker's grants are revoked whatever the row says, so a session Claude Code resumes on its own
+    /// can call no tool, and its hooks mark it as one the board ended (SPEC §8.5).
     @discardableResult
     public func terminate(
         sessionId: String, cause: SessionTermination, salvage: BranchSalvage? = nil
     ) throws -> Report? {
         try db.writer.write { db in
             guard let session = try AgentSession.fetchOne(db, key: sessionId) else { return nil }
+            if session.role == .worker { try TokenGrantStore.revokeAll(db, sessionId: sessionId) }
             let task = session.role == .worker
                 ? try session.taskId.flatMap { try Task.fetchOne(db, key: $0) }
                 : nil

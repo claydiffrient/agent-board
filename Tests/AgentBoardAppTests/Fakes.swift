@@ -78,6 +78,11 @@ actor FakeRuntime: AgentRuntime {
     /// `claude stop` on this short id fails the way it does for a job that is no longer running.
     func failStop(shortId: String, _ error: Error) { stopFailures[shortId] = error }
 
+    private var stopHooks: [String: @Sendable () async -> Void] = [:]
+
+    /// Runs once, inside the next `stop` of this short id, where a real session's `SessionEnd` hook lands.
+    func whenStopped(shortId: String, _ action: @escaping @Sendable () async -> Void) { stopHooks[shortId] = action }
+
     private var hosts: [String: pid_t] = [:]
 
     /// A real process standing in for this short id's `claude` host, killed by `stop` as `claude stop` kills one.
@@ -86,6 +91,7 @@ actor FakeRuntime: AgentRuntime {
     func stop(shortId: String) async throws {
         if let failure = stopFailures[shortId] { throw failure }
         if let host = hosts[shortId] { kill(host, SIGKILL) }
+        if let hook = stopHooks.removeValue(forKey: shortId) { await hook() }
         stopped.append(shortId)
         if let watchedPath { watchedPathExistedAtStop.append(FileManager.default.fileExists(atPath: watchedPath)) }
     }
