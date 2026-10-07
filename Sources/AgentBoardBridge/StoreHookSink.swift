@@ -35,6 +35,7 @@ public final class StoreHookSink: HookSink {
         case orchestratorCompacted(projectId: String, sessionId: String, manual: Bool)
         case coordinatorTurnEnded(sessionId: String)
         case coordinatorCompacted(sessionId: String, manual: Bool)
+        case endedSessionRestarted(projectId: String, sessionId: String)
     }
 
     /// A write whose file another live session holds. Carried out of `process` so the wait happens
@@ -103,6 +104,11 @@ public final class StoreHookSink: HookSink {
                 await events.coordinatorTurnEnded(sessionId: sessionId)
             case .coordinatorCompacted(let sessionId, let manual):
                 await events.coordinatorCompacted(sessionId: sessionId, manual: manual)
+            case .endedSessionRestarted(let projectId, let sessionId):
+                // The stop kills the very host waiting on this hook's answer, so it must not hold it.
+                _Concurrency.Task { [events] in
+                    await events.endedSessionRestarted(projectId: projectId, sessionId: sessionId)
+                }
             }
         }
         if let wait = outcome.lockWait {
@@ -427,13 +433,18 @@ public final class StoreHookSink: HookSink {
 
         switch event.name {
         case "SessionStart":
+            if let path = event.transcriptPath {
+                try? sessions.setTranscriptPath(sessionId, path)
+            }
+            // SPEC §8.5: Claude Code resumes a stopped session by itself to deliver a background
+            // command's notification. A row Agent Board ended stays ended; the supervisor stops it again.
+            if session.role == .worker, session.state == .failed || session.state == .completed {
+                return .follow([.endedSessionRestarted(projectId: session.projectId, sessionId: sessionId)])
+            }
             // SPEC §7: never revived on a settled task, and never stopped from here either: a resume's
             // own SessionStart can beat its move back to `running`, and `resume` marks the row itself.
             let settled = session.taskId.flatMap { try? board.isSettled(taskId: $0, apartFrom: sessionId) } ?? false
             if !settled { try? sessions.setState(sessionId, .running) }
-            if let path = event.transcriptPath {
-                try? sessions.setTranscriptPath(sessionId, path)
-            }
             // A compaction keeps the session id and writes no `SessionEnd` (measured, SPEC §2), so
             // nothing is rebound or re-pinned here. A worker's compaction is handled instead by
             // `PreCompact` arming a re-brief that `PostToolUse` delivers.

@@ -366,6 +366,23 @@ Nothing outside the session's own tree is signalled:
 - A human's terminal keeps its controlling tty. An app launched by launchd
   runs in `/`.
 
+**A session the board ended stays stopped.** `claude stop` does not keep a
+session down. Claude Code resumes a stopped `--bg` session by itself to deliver
+a background command's task-notification, and killing those commands is exactly
+what the reap does. This was measured on 2026-10-07 with integrator d44b3f51:
+
+- 10:43:15: the idle cap stopped it (`SessionEnd`, reason `other`). Its two
+  `run_in_background` commands were reaped and reported `exited with code 144`.
+- 10:43:43: a `SessionStart` arrived with `source: resume`, followed by a
+  `UserPromptSubmit` carrying their `<task-notification>`.
+- It then worked for another 32 minutes under a `failed` row.
+
+So a `SessionStart` on a worker row that is `failed` or `completed` does not
+revive the row. The supervisor stops the process again (`endedSessionRestarted`)
+and logs the stop on the task. Two restarts are exempt: a board resume in
+flight, and a session a human opened Attach on after it ended, since
+`claude attach` also resumes a stopped session. A `stopped` row keeps §7's rule.
+
 Another process's environment is not readable on this macOS:
 `KERN_PROCARGS2` returns argv but no environment for any pid but the caller's.
 So the `CLAUDE_CODE_SESSION_ID` that Claude exports to every Bash command

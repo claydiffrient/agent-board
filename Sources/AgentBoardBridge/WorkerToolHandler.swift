@@ -201,6 +201,10 @@ public final class WorkerToolHandler: ToolHandler {
         case "report_complete":
             let outcome = try reportComplete(task, arguments: arguments, identity: identity)
             guard !outcome.wasAlreadyComplete else { return Self.completionResult(outcome) }
+            if outcome.endedSessionState != nil {
+                await events.reportQueued(projectId: identity.projectId)
+                return stoppingAfterwards(Self.completionResult(outcome), identity: identity)
+            }
             let result = await routeCompletion(task, outcome: outcome)
             await events.reportQueued(projectId: identity.projectId)
             return stoppingAfterwards(result, identity: identity)
@@ -493,7 +497,14 @@ public final class WorkerToolHandler: ToolHandler {
     }
 
     private static func completionResult(_ outcome: Board.CompletionOutcome) -> ToolResult {
-        ToolResult(
+        if let ended = outcome.endedSessionState {
+            return ToolResult(
+                text: "\(Self.recordedLine(outcome)) Agent Board had already ended this session (\(ended.rawValue)) "
+                    + "before this call, so the report changed nothing on the task: it stays in "
+                    + "\(outcome.column.rawValue.capitalized). Stop here; do not start further work."
+            )
+        }
+        return ToolResult(
             text: "\(Self.recordedLine(outcome)) The task is now in \(outcome.column.rawValue.capitalized). "
                 + "Stop here; do not start further work."
         )

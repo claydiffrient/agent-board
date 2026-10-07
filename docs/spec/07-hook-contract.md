@@ -5,7 +5,7 @@ Generated into each managed session's `--settings`. All post to
 
 | Event | Agent Board's reaction |
 |---|---|
-| `SessionStart` | Mark `agent_session.state = running`, unless its task is in `done`, or in `ready` with no other session on it; record transcript path |
+| `SessionStart` | Mark `agent_session.state = running`, unless its task is in `done`, or in `ready` with no other session on it; a worker row already `failed` or `completed` is not revived, and the supervisor stops its process again (§8.5); record transcript path |
 | `PreToolUse` (matcher `Bash`) | Deny `git push`, `gh pr create`, `gh pr merge`; append an `error` progress row (§8) |
 | `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row; reply with a worker's post-compaction brief or queued human comments as `additionalContext` |
 | `Notification` | Set `blocked` + reason on the task and session; the task appears in the orchestrator's **Blocked** section (§10) and raises the project's attention signal, which posts the banner |
