@@ -366,6 +366,40 @@ Nothing outside the session's own tree is signalled:
 - A human's terminal keeps its controlling tty. An app launched by launchd
   runs in `/`.
 
+**A session the board ended stays stopped.** `claude stop` does not keep a
+session down. Claude Code resumes a stopped `--bg` session by itself to deliver
+a background command's task-notification, and killing those commands is exactly
+what the reap does. This was measured on 2026-10-07 with integrator d44b3f51:
+
+- 10:43:15: the idle cap stopped it (`SessionEnd`, reason `other`). Its two
+  `run_in_background` commands were reaped and reported `exited with code 144`.
+- 10:43:43: a `SessionStart` arrived with `source: resume`, followed by a
+  `UserPromptSubmit` carrying their `<task-notification>`.
+- It then worked for another 32 minutes under a `failed` row.
+
+The row's `state` cannot say whether the board ended a session. The
+`SessionEnd` that `claude stop` fires races `Board.terminate` and often writes
+`stopped` first, so an idle-capped row can end `stopped` rather than `failed`,
+the same state a session that merely exited leaves. So the board marks the
+session itself: `Board.terminate` revokes the worker's token grants in the same
+transaction, on every route through it (the caps, a human's Stop, Pause All, a
+vanished or failed session, a settled task, an acknowledged shutdown). A
+revived session then gets a 401 on every MCP tool call. Its hooks are still
+heard on the revoked token (§7). A `SessionStart` on one does not revive the
+row: the supervisor stops the process again (`endedSessionRestarted`) and logs
+the stop on the task. A `SessionStart` on a worker row that is `failed` or
+`completed` is handled the same way, since only the board writes those states.
+That covers `report_complete`, which keeps its grant so that a resend still gets
+its answer (§5.1).
+
+Two restarts are exempt. A board resume issues a fresh grant before it starts
+the process, so its `SessionStart` never arrives on the revoked one. A session a
+human opened Attach on after it ended is left running too, since
+`claude attach` also resumes a stopped session; its tool calls get the same 401.
+Attach requests are held in memory, so one made before an app restart no longer
+exempts the session after it. A `stopped` row with a live grant ended without
+the board ending it, and keeps §7's rule.
+
 Another process's environment is not readable on this macOS:
 `KERN_PROCARGS2` returns argv but no environment for any pid but the caller's.
 So the `CLAUDE_CODE_SESSION_ID` that Claude exports to every Bash command

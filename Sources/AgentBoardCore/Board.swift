@@ -363,10 +363,15 @@ public struct Board: Sendable {
         public var wasAlreadyComplete: Bool
         /// The epic this integration left `integrated`, waiting on its pull request (SPEC §5.2).
         public var awaitingPullRequest: Epic? = nil
+        /// The state of a session Agent Board had already ended before this call. Its report is kept
+        /// as a `decision`, and nothing on the task moves (SPEC §5.1).
+        public var endedSessionState: SessionState? = nil
 
         /// Never true on a resend: the first call already ran the acceptance path.
-        public var autoAccept: Bool { routing == .autoAccept && !wasAlreadyComplete }
+        public var autoAccept: Bool { routing == .autoAccept && !wasAlreadyComplete && endedSessionState == nil }
     }
+
+    static let lateCompletionHeadline = "Late report_complete from a session Agent Board had already ended"
 
     /// Records the report and parks the task where §5's review level says. Under `.none` (and `.epic`
     /// for a task inside an epic) the task stays in `review` for the length of this transaction only:
@@ -388,6 +393,9 @@ public struct Board: Sendable {
                     column: task.column,
                     wasAlreadyComplete: true
                 )
+            }
+            if let session = try AgentSession.fetchOne(db, key: sessionId), !session.state.isActive {
+                return try Self.lateCompletion(db, task: task, session: session, summary: summary)
             }
             let report = try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .complete, body: summary
@@ -435,6 +443,32 @@ public struct Board: Sendable {
                 awaitingPullRequest: awaitingPullRequest
             )
         }
+    }
+
+    /// A session the board failed, stopped or completed can still be running — Claude Code resumes a
+    /// stopped one by itself — and the task may have moved on under another session since. Its report
+    /// is kept for the orchestrator; the column, the landing and the archive are left alone.
+    private static func lateCompletion(
+        _ db: Database, task: Task, session: AgentSession, summary: String
+    ) throws -> CompletionOutcome {
+        let existing = try ReportStore.lateCompletion(db, taskId: task.id, sessionId: session.sessionId, headline: lateCompletionHeadline)
+        let report = try existing ?? ReportStore.insert(
+            db, projectId: task.projectId, taskId: task.id, sessionId: session.sessionId, kind: .decision,
+            body: [
+                "\(lateCompletionHeadline) (\(session.state.rawValue)); the task was left in \(task.column.rawValue).",
+                "Task: \(task.id) (\(task.title))",
+                "Session: \(session.sessionId) (attempt \(session.attempt))",
+                summary,
+            ].joined(separator: "\n")
+        )
+        return CompletionOutcome(
+            report: report,
+            level: try ReviewPolicy.level(db, task: task),
+            routing: try ReviewPolicy.routing(db, task: task, completedBy: session.sessionId),
+            column: task.column,
+            wasAlreadyComplete: existing != nil,
+            endedSessionState: session.state
+        )
     }
 
     /// A task in `review` that its rostered reviewer will not take: it stays in `review` for a person,
@@ -731,12 +765,16 @@ public struct Board: Sendable {
     /// An already-inactive session row is not a reason to stop. The worker's `SessionEnd` hook races
     /// this call and writes `stopped` first often enough that bailing there strands the task in
     /// `running` with no report and nothing able to pick it up.
+    ///
+    /// A worker's grants are revoked whatever the row says, so a session Claude Code resumes on its own
+    /// can call no tool, and its hooks mark it as one the board ended (SPEC §8.5).
     @discardableResult
     public func terminate(
         sessionId: String, cause: SessionTermination, salvage: BranchSalvage? = nil
     ) throws -> Report? {
         try db.writer.write { db in
             guard let session = try AgentSession.fetchOne(db, key: sessionId) else { return nil }
+            if session.role == .worker { try TokenGrantStore.revokeAll(db, sessionId: sessionId) }
             let task = session.role == .worker
                 ? try session.taskId.flatMap { try Task.fetchOne(db, key: $0) }
                 : nil

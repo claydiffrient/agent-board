@@ -10,15 +10,22 @@ public struct StoreTokenResolver: TokenResolver {
     }
 
     public func resolve(token: String) async -> TokenIdentity? {
-        guard let grant = try? grants.resolve(token: token),
-              let scope = AgentBoardServer.TokenScope(rawValue: grant.scope.rawValue)
-        else { return nil }
+        Self.identity(try? grants.resolve(token: token))
+    }
+
+    public func resolveIncludingRevoked(token: String) async -> TokenIdentity? {
+        Self.identity(try? grants.lookup(token: token))
+    }
+
+    private static func identity(_ grant: TokenGrant?) -> TokenIdentity? {
+        guard let grant, let scope = AgentBoardServer.TokenScope(rawValue: grant.scope.rawValue) else { return nil }
         return TokenIdentity(
             token: grant.token,
             scope: scope,
             projectId: grant.projectId ?? "",
             sessionId: grant.sessionId,
-            taskId: grant.taskId
+            taskId: grant.taskId,
+            revoked: grant.isRevoked
         )
     }
 }
