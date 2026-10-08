@@ -283,6 +283,11 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     /// task type, which is also how the per-type pop-up buttons are told apart from the Default row's
     /// (which never reads "Same as Default" — see `ProjectSettingsSheet.routingRow`) and from every
     /// other pop-up button on the tab.
+    /// Waits not just for pixels to stop moving but for at least one per-type routing row to show its
+    /// "Same as Default" value — the same `Picker`-backed `NSPopUpButton` lag `typeRowHasValue(in:)`
+    /// guards against in `TaskTypeRenderTests`. Without this, `mount.capture()` can agree on a frame
+    /// drawn before any routing picker has painted its title, and `glyphInk` then fails loudly with
+    /// "no per-type routing value found" instead of comparing real ink.
     private func ocrRoutingCapture(
         reviewLevel: ReviewLevel
     ) throws -> (lines: [OCRLine], rep: NSBitmapImageRep, routingPopUps: [NSPopUpButton]) {
@@ -301,22 +306,32 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
             .environment(renderEnvironment(db: db))
         let mount = OffscreenMount(view, size: CGSize(width: 780, height: 900))
         defer { mount.close() }
-        _ = try mount.capture()
+        var lines: [OCRLine] = []
+        var lastImage: CGImage?
+        _ = try mount.capture(until: { _ in
+            guard let image = CGWindowListCreateImage(
+                .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+                [.boundsIgnoreFraming, .bestResolution]
+            ) else { return false }
+            lastImage = image
+            guard let recognized = try? self.recognizedRoutingLines(in: image) else { return false }
+            lines = recognized
+            return recognized.contains { $0.text.contains(ProjectSettingsSheet.sameAsDefaultTitle) }
+        })
         let routingPopUps = popUpButtons(titled: ProjectSettingsSheet.sameAsDefaultTitle, in: mount.host)
-        let image = try XCTUnwrap(CGWindowListCreateImage(
-            .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
-            [.boundsIgnoreFraming, .bestResolution]
-        ))
+        let image = try XCTUnwrap(lastImage, "no window-server image captured")
         let rep = try XCTUnwrap(NSBitmapImageRep(cgImage: image))
+        return (lines, rep, routingPopUps)
+    }
 
+    private func recognizedRoutingLines(in image: CGImage) throws -> [OCRLine] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
         try VNImageRequestHandler(cgImage: image).perform([request])
-        let lines = (request.results ?? []).compactMap { observation in
+        return (request.results ?? []).compactMap { observation in
             observation.topCandidates(1).first.map { OCRLine(text: $0.string, box: observation.boundingBox) }
         }
-        return (lines, rep, routingPopUps)
     }
 
     private func popUpButtons(titled title: String, in host: NSView) -> [NSPopUpButton] {
