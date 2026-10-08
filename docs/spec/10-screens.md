@@ -90,7 +90,12 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
    shows its type pill beside that line. While a
    reviewer is live, Accept and Reopen ask first ("Rita is reviewing this task.
    Accepting now stops Rita's review."), because either one stops the reviewer
-   (§5).
+   (§5). A row whose reviewer stopped without a verdict also offers **Re-run
+   review** between them: it stops that reviewer's session and starts a fresh
+   one from the same roster agent on the same task, which stays in `review`
+   (`WorkerSupervising.rerunReview`). Reopen stays, but it sends finished work
+   back to `ready` as a redo, so it is no longer the only way out of a stalled
+   review.
 4. **Proposals** — worker-proposed tasks awaiting promotion.
 5. **Messages** — every §9.3 message this project sent or received, newest
    first, bold until the receiving orchestrator pulls it. Each row deletes on

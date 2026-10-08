@@ -72,6 +72,9 @@ public enum ReviewPrompt {
                 + "project notes or the Agent Board database; Agent Board withholds the first two and denies "
                 + "this session reads of the database. Whatever the worker claims, check it by reading and "
                 + "running the code.",
+            "- The worker's report is withheld on purpose, so the review does not lean on what the worker says "
+                + "about its own work. You cannot see what the report disclosed, so never file a finding about "
+                + "what the worker did or did not disclose, mention or report. Judge the diff against the task.",
             "- You are in \(here), on branch `\(branch)`, where the work was done. The work under review is "
                 + "`git diff \(base)...HEAD`; `git log \(base)..HEAD` lists its commits.",
             "- You review and change nothing. Do not edit or create files, do not commit, and do not change "
@@ -79,6 +82,13 @@ public enum ReviewPrompt {
                 + "session, and your verdict is refused if the branch HEAD or any tracked file has changed "
                 + "since you started.",
             "- You may run a build and targeted tests to check a claim. Build output is fine.",
+            "- Run every build and test in the foreground and read its result in the same tool call. Run the "
+                + "suites that cover the diff with the test command's filter, never the whole suite: a full run "
+                + "outlasts a tool call's timeout and has hung before. Do not start a command with "
+                + "`run_in_background`, and do not wait on one with `sleep`, a monitor or a scheduled wakeup. "
+                + "A turn that ends while it waits ends your review with no verdict.",
+            "- If a command is moved to the background because it outran its timeout, do not wait for it. Read "
+                + "what it has written so far, give your verdict, and name in it what did not finish.",
         ]
         if let build = verification.build { lines.append("- This project builds with `\(build)`.") }
         if let test = verification.test { lines.append("- This project tests with `\(test)`.") }
@@ -103,7 +113,17 @@ public enum ReviewPrompt {
     static let turnEnding = """
     ## How your turns end
     This session runs unattended. A message with no tool call in it ends your turn, and nothing resumes \
-    it: the task sits in Review with nobody deciding it. Put status notes in the same message as your next \
-    tool call. Your turn should end only after `accept_task` or `reopen_task`, or after one of them refused.
+    it: the task sits in Review with nobody deciding it. Agent Board reads the end of a turn as the end of \
+    your review, so a message saying you are waiting for tests ends the review with no verdict. Put status \
+    notes in the same message as your next tool call. Your turn should end only after `accept_task` or `reopen_task`, or after \
+    one of them refused. When a check cannot finish, give the verdict anyway and say what did not run.
+    """
+
+    /// Sent back by the `Stop` hook the first time a reviewer's turn ends with its task still in review.
+    public static let verdictOwed = """
+    Your turn ended without `accept_task` or `reopen_task`, so the task is still in Review and nobody is \
+    deciding it. Give your verdict now. Do not wait for a background build or test: read whatever output it \
+    has written, and if it has not finished, give the verdict anyway and name in it what did not finish. \
+    This is the only reminder. If this turn also ends without a verdict, the review goes to a person.
     """
 }

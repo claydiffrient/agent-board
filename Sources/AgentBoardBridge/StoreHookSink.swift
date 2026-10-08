@@ -521,6 +521,11 @@ public final class StoreHookSink: HookSink {
             if session.role == .coordinator {
                 return .follow([.coordinatorTurnEnded(sessionId: sessionId)])
             }
+            // SPEC §5.1: continues the turn once, before the session is marked idle or reported.
+            if identity.scope == .reviewer, let taskId,
+               (try? board.remindReviewerOfVerdict(taskId: taskId, sessionId: sessionId)) == true {
+                return .respond(.context(ReviewPrompt.verdictOwed))
+            }
             if session.state.isActive {
                 try? sessions.setState(sessionId, .idle)
             }

@@ -31,7 +31,8 @@ public final class ReviewerToolHandler: ToolHandler {
             name: "get_my_task",
             description: "Return the task you are reviewing: id, title, body, acceptance criteria and its comment "
                 + "thread oldest first. It carries no worker report or progress: judge the work from the task and "
-                + "the diff alone. Call it first. " + CommentTools.authority,
+                + "the diff alone. The report is withheld on purpose, so never file a finding about what the "
+                + "worker did or did not disclose in it. Call it first. " + CommentTools.authority,
             inputSchema: ToolSchema.object(properties: [:], required: [])
         ),
         ToolDescriptor(

@@ -333,11 +333,31 @@ task is the point: a person reading a task that reached `done` without them can
 see who approved it and why.
 
 A reviewer whose turn ends (its `Stop` hook) with the task still in `review` gave
-no verdict. Nothing accepts the task: its Pending reviews row reads `<reviewer>
-stopped without a verdict` (§10), and one `blocked` report per reviewer session
-tells the orchestrator. The session is left idle, not stopped, because a turn can
-end while a build the reviewer started in the background still runs; the
-orchestrator can message it or `stop_worker` it.
+no verdict. The first time that happens in a reviewer session, the hook answers
+with `hookSpecificOutput.additionalContext` carrying `ReviewPrompt.verdictOwed`,
+which continues the turn: give the verdict now, read whatever a background
+command has written instead of waiting for it, and name what did not finish.
+A `status` row headed "Reviewer's turn ended without a verdict." records the
+reminder and makes it once per session (`Board.remindReviewerOfVerdict`). If the
+turn ends again with no verdict, nothing accepts the task: its Pending reviews
+row reads `<reviewer> stopped without a verdict` (§10), and one `blocked` report
+per reviewer session tells the orchestrator. The session is left idle, not
+stopped; the orchestrator can message it or `stop_worker` it, and the human can
+Accept, Re-run review or Reopen from the row.
+
+Every missing verdict measured before the reminder existed had one cause. Seven
+reviews between 2026-09-29 and 2026-10-08 each ended on a text-only "still
+waiting on the tests" message while a `swift test` ran in the background: started with
+`run_in_background`, or a foreground run that outlasted the Bash timeout (120 s
+default, 600 s maximum) and was moved to the background, after which the
+reviewer waited with `ScheduleWakeup`, a `Monitor` or `sleep`. A full run of this
+suite outlasts the 600 s ceiling, so "run it in the foreground" alone cannot
+hold a full run in one tool call. `ReviewPrompt` therefore tells the reviewer to
+run builds and tests in the foreground, filtered to the suites that cover the
+diff and never the whole suite, never to wait on a backgrounded command, and to
+give the verdict and name what did not finish when a check cannot finish; the
+reviewer's `--disallowedTools` also denies `ScheduleWakeup`, `Monitor` and
+`CronCreate`.
 
 A session that ends on a task already in `done`, or back in `ready` with a
 reviewer's findings or with no other session on it, left nothing unfinished:
@@ -373,7 +393,11 @@ A reviewer's inputs are the task — title, body, acceptance criteria and its
 comment thread — and the diff on the task's branch. Nothing else: not the
 worker's report, not the task's `progress` rows (the worker's own notes and any
 hand-off summary), not project notes, not the board database. It checks the
-worker's claims by reading and running the code. `ReviewPrompt` says so; its
+worker's claims by reading and running the code. The report is withheld on
+purpose, so the review does not lean on the worker's own account; because the
+reviewer cannot see what the report disclosed, `ReviewPrompt` and the reviewer's
+`get_my_task` description tell it never to file a finding about what the worker
+did or did not disclose. `ReviewPrompt` says so; its
 `get_my_task` returns the task and its comments and nothing from `report` or
 `progress`; its scope has no note tools, and `NoteResourceHandler` lists no
 `note://` resource to a `reviewer` token and refuses to read one.

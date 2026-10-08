@@ -73,14 +73,22 @@ final class ReviewerVerdictEndsTheReviewTests: XCTestCase {
         XCTAssertEqual(try failedReports().map(\.body), [])
     }
 
-    func testAReviewerWhoseTurnEndsWithoutAVerdictRaisesOneReportAndTheTaskStaysInReview() async throws {
+    func testAReviewerWhoseTurnEndsWithoutAVerdictIsRemindedOnceThenRaisesOneReport() async throws {
         let (task, reviewer, rita, token) = try await taskUnderReview()
         let hooks = StoreHookSink(db: fixture.db, events: ClosureBoardEventSink())
         let identity = try await fixture.identity(token: token)
         let before = try fixture.reports.unconsumed(projectId: fixture.project.id).count
+        let stop = HookEvent(name: "Stop", sessionId: reviewer.sessionId, rawJSON: "{}")
+
+        let reminder = await hooks.handle(stop, identity: identity)
+        XCTAssertEqual(reminder?.additionalContext, ReviewPrompt.verdictOwed, "the first stop must continue the turn")
+        XCTAssertNil(reminder?.permissionDecision)
+        XCTAssertEqual(try fixture.reports.unconsumed(projectId: fixture.project.id).count, before)
+        XCTAssertNotEqual(try fixture.sessions.get(reviewer.sessionId)?.state, .idle)
 
         for _ in 0..<2 {
-            _ = await hooks.handle(HookEvent(name: "Stop", sessionId: reviewer.sessionId, rawJSON: "{}"), identity: identity)
+            let later = await hooks.handle(stop, identity: identity)
+            XCTAssertNil(later?.additionalContext, "the reminder is sent once per session")
         }
 
         let raised = try fixture.reports.unconsumed(projectId: fixture.project.id).dropFirst(before)
@@ -93,5 +101,25 @@ final class ReviewerVerdictEndsTheReviewTests: XCTestCase {
             progress: try ProgressStore(fixture.db).list(taskId: task.id)
         )
         XCTAssertEqual(hold.label(now: Date()), "Rita stopped without a verdict")
+    }
+
+    func testRerunReviewReplacesAStalledReviewerWithAFreshSessionAndKeepsTheTaskInReview() async throws {
+        let (task, stalled, rita, _) = try await taskUnderReview()
+        try fixture.sessions.setState(stalled.sessionId, .idle)
+
+        try await fixture.supervisor.rerunReview(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
+
+        XCTAssertEqual(try fixture.sessions.get(stalled.sessionId)?.state, .stopped)
+        let reviewers = try fixture.sessions.forTask(task.id).filter { $0.rosterAgentId == rita.id }
+        let fresh = try XCTUnwrap(reviewers.first { $0.sessionId != stalled.sessionId }, "no fresh reviewer started")
+        XCTAssertTrue(fresh.state.isActive)
+        let held = try XCTUnwrap(fixture.tasks.get(task.id))
+        XCTAssertEqual(held.column, .review, "re-running the review must not send finished work back to ready")
+        let hold = ReviewHold.of(
+            task: held, sessions: try fixture.sessions.forTask(task.id), roster: [rita],
+            progress: try ProgressStore(fixture.db).list(taskId: task.id)
+        )
+        XCTAssertFalse(hold.endedWithoutVerdict)
     }
 }
