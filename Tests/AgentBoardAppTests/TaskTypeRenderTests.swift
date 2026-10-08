@@ -89,10 +89,28 @@ final class TaskTypeRenderTests: XCTestCase {
             lines.first { isLabelLine($0.text, label: "Model") }, "no Model row: \(lines.map(\.text))"
         ).box.minY
         let buttonsBottom = try XCTUnwrap(lines.first { $0.text == "Revert" }, "no Revert row: \(lines.map(\.text))").box.maxY
-        return lines
+        return bandLines(in: lines, above: buttonsBottom, below: modelTop)
+    }
+
+    private func bandLines(in lines: [Line], above buttonsBottom: CGFloat, below modelTop: CGFloat) -> [String] {
+        lines
             .filter { $0.box.midY > buttonsBottom && $0.box.midY < modelTop }
             .sorted { $0.box.minX < $1.box.minX }
             .map(\.text)
+    }
+
+    /// Whether the Type row already shows a value rather than just the bare "Type" label — used to
+    /// poll a capture until the picker's value has actually drawn, not merely until pixels stop
+    /// moving. A capture can settle (agreeing frames) while the row still reads only `["Type"]`,
+    /// which is exactly what PR #59's CI run hit: `the type picker's row did not show Code: ["Type"]`.
+    /// Quiet by design — called every poll iteration, so it must not record a test failure itself;
+    /// `typeRow(in:)` above still owns the failure message once the real assertion runs.
+    private func typeRowHasValue(in lines: [Line]) -> Bool {
+        guard let modelTop = lines.first(where: { isLabelLine($0.text, label: "Model") })?.box.minY,
+              let buttonsBottom = lines.first(where: { $0.text == "Revert" })?.box.maxY
+        else { return false }
+        let row = bandLines(in: lines, above: buttonsBottom, below: modelTop)
+        return !row.isEmpty && !row.allSatisfy { $0 == "Type" }
     }
 
     /// The write half: what `NSPopUpButton.menu?.performActionForItem` used to drive directly is
@@ -118,16 +136,24 @@ final class TaskTypeRenderTests: XCTestCase {
         XCTAssertNil(drafts.draft(for: task.id), "reverting to the saved type should clear the retained draft")
     }
 
+    /// Waits not just for pixels to stop moving but for the Type row's band to show a value — see
+    /// `typeRowHasValue(in:)`. Without this, `mount.capture()` can agree on a frame drawn before the
+    /// picker's `NSPopUpButton` has painted its selected title, and the row it hands back reads as
+    /// bare `["Type"]`.
     private func ocrInspector(task: BoardTask, allTasks: [BoardTask]) throws -> [Line] {
         let view = TaskInspectorView(task: task, allTasks: allTasks, sessions: [], drafts: TaskDraftCache(), onClose: {})
         let mount = OffscreenMount(view.environment(renderEnvironment(db: db)), size: CGSize(width: 420, height: 1000))
         defer { mount.close() }
-        _ = try mount.capture()
-        let image = try XCTUnwrap(CGWindowListCreateImage(
-            .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
-            [.boundsIgnoreFraming, .bestResolution]
-        ))
-        return try recognizedLines(in: image)
+        var lines: [Line] = []
+        _ = try mount.capture(until: { _ in
+            guard let image = CGWindowListCreateImage(
+                .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+                [.boundsIgnoreFraming, .bestResolution]
+            ), let recognized = try? self.recognizedLines(in: image) else { return false }
+            lines = recognized
+            return self.typeRowHasValue(in: recognized)
+        })
+        return lines
     }
 
     private func makeTask(_ title: String, type: TaskType?) throws -> BoardTask {
