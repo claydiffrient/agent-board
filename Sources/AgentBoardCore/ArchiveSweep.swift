@@ -52,17 +52,17 @@ public struct ArchiveSweep: Sendable {
                 db,
                 sql: """
                 SELECT id FROM task
-                WHERE project_id = ? AND \(archivableSQL) AND done_at < ?
-                ORDER BY done_at, id
+                WHERE project_id = ? AND \(archivableSQL) AND COALESCE(done_at, closed_at) < ?
+                ORDER BY COALESCE(done_at, closed_at), id
                 """,
                 arguments: [projectId, cutoff]
             )
         }
     }
 
-    /// Archives every task of an epic that just merged, including the synthetic `integration` task
-    /// the integrator ran on. Unlike `TaskStore.archive(ids:)` this skips rather than throws for a
-    /// task outside `done` — an epic can reach `done` with a stray task parked elsewhere, and that
+    /// Archives every done or closed task of an epic that just merged, including the synthetic
+    /// `integration` task the integrator ran on. Unlike `TaskStore.archive(ids:)` this skips rather
+    /// than throws for a task outside those columns — an epic can reach `done` with a stray task parked elsewhere, and that
     /// must not roll back the merge.
     @discardableResult
     static func archiveEpic(_ db: Database, epicId: String, at: Int64) throws -> [String] {
@@ -76,14 +76,17 @@ public struct ArchiveSweep: Sendable {
         return ids
     }
 
-    /// An automatic policy only ever touches an unarchived done task a human has not pulled back out.
+    /// An automatic policy only ever touches an unarchived done or closed task a human has not pulled
+    /// back out.
     private static let archivableSQL = """
-    column_name = 'done' AND archived_at IS NULL AND unarchived_at IS NULL AND done_at IS NOT NULL
+    ((column_name = 'done' AND done_at IS NOT NULL) OR (column_name = 'closed' AND closed_at IS NOT NULL))
+    AND archived_at IS NULL AND unarchived_at IS NULL
     """
 
     /// `archivableSQL` over a row already in memory.
     public static func isSweepable(_ task: Task) -> Bool {
-        task.column == .done && task.archivedAt == nil && task.unarchivedAt == nil && task.doneAt != nil
+        let terminal = (task.column == .done && task.doneAt != nil) || (task.column == .closed && task.closedAt != nil)
+        return terminal && task.archivedAt == nil && task.unarchivedAt == nil
     }
 
     private static func stamp(_ db: Database, ids: [String], at: Int64) throws {

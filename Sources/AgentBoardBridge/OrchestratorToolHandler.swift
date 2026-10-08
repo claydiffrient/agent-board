@@ -64,7 +64,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             description: "Full detail for one task: body, acceptance criteria, flags, dependencies, the most recent "
                 + "worker report on it if any, and its comment thread oldest first — each comment's author kind "
                 + "(human, orchestrator, worker, reviewer), name, rostered agent, time and body. Archived tasks are "
-                + "returned too, carrying `archived: true` and the `archived_at` timestamp. "
+                + "returned too, carrying `archived: true` and the `archived_at` timestamp. A closed task carries "
+                + "`closed_reason`, `closed_at` and `closed_by`. "
                 + CommentTools.authority,
             inputSchema: ToolSchema.object(properties: ["id": ToolSchema.string()], required: ["id"])
         ),
@@ -115,8 +116,9 @@ public final class OrchestratorToolHandler: ToolHandler {
         ),
         ToolDescriptor(
             name: "move_task",
-            description: "Move a task to another column. `running` is entered only through spawn_worker and `done` only "
-                + "when a human accepts the work, so those two are refused. Moving into `backlog` or `ready` is "
+            description: "Move a task to another column. `running` is entered only through spawn_worker, `done` only "
+                + "when a human accepts the work, and `closed` only through close_task, so those three are refused. "
+                + "A `closed` task cannot be moved: a human reopens it. Moving into `backlog` or `ready` is "
                 + "subject to the dependency check, and the response tells you where the task actually ended up. "
                 + "Moving an archived task out of `done` unarchives it, so it does not sit hidden in a live column.",
             inputSchema: ToolSchema.object(
@@ -125,6 +127,25 @@ public final class OrchestratorToolHandler: ToolHandler {
                     "column": ToolSchema.enumeration(["proposed", "backlog", "ready", "review"]),
                 ],
                 required: ["id", "column"]
+            )
+        ),
+        ToolDescriptor(
+            name: "close_task",
+            description: "Retire a task nobody needs to finish: its work was done some other way, it was superseded, "
+                + "or it is no longer wanted. The task moves to `closed` with your reason recorded on it, on its card "
+                + "and in its history, so it leaves `ready` and cannot be spawned by mistake. `closed` is not `done`: "
+                + "it never counts as landed work, and it does not satisfy a dependency — every unfinished task that "
+                + "depends on it stays blocked and is named in the answer, so you can `set_deps` it or close it too. "
+                + "Nothing is deleted and no branch or worktree is touched. An epic with closed tasks is ready for "
+                + "integration once the rest are done. Only a human can reopen a closed task, from the board. Refused "
+                + "for a blank reason, a task in `done` or already `closed`, an epic's integration task, and a task a "
+                + "worker or reviewer session is still running on — stop it first.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "task_id": ToolSchema.string(),
+                    "reason": ToolSchema.string("Why the task no longer needs doing. Shown on the card and kept in its history."),
+                ],
+                required: ["task_id", "reason"]
             )
         ),
         ToolDescriptor(
@@ -301,7 +322,8 @@ public final class OrchestratorToolHandler: ToolHandler {
         ),
         ToolDescriptor(
             name: "request_integration",
-            description: "Ask the human to integrate an epic. Refused until every task in the epic is `done`. Integration "
+            description: "Ask the human to integrate an epic. Refused until every task in the epic is `done` or `closed`, "
+                + "with at least one `done`. Integration "
                 + "always requires human approval regardless of the autonomy setting; you will learn the decision "
                 + "through list_reports. In a project that ships epics by pull request, a finished integration leaves "
                 + "the epic `integrated`, not `done`: it still takes tasks, and the next step is `open_pull_request`. "
@@ -372,8 +394,9 @@ public final class OrchestratorToolHandler: ToolHandler {
         ),
         ToolDescriptor(
             name: "archive_task",
-            description: "Hide a `done` task from the board without deleting it. Archived tasks stay readable through "
-                + "get_task and reappear in list_tasks with `include_archived`. Only `done` tasks can be archived.",
+            description: "Hide a `done` or `closed` task from the board without deleting it. Archived tasks stay readable "
+                + "through get_task and reappear in list_tasks with `include_archived`. Only `done` and `closed` tasks "
+                + "can be archived.",
             inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
         ),
         ToolDescriptor(
@@ -459,6 +482,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "create_task": return try createTask(arguments, identity: identity)
         case "update_task": return try updateTask(arguments, identity: identity)
         case "move_task": return try moveTask(arguments, identity: identity)
+        case "close_task": return try closeTask(arguments, identity: identity)
         case "set_epic": return try setEpic(arguments, identity: identity)
         case "set_deps": return try setDeps(arguments, identity: identity)
         case "archive_task": return try archiveTask(arguments, identity: identity)
@@ -552,6 +576,9 @@ public final class OrchestratorToolHandler: ToolHandler {
             "updated_at": .millis(task.updatedAt),
             "archived": .bool(task.isArchived),
             "archived_at": .millis(task.archivedAt),
+            "closed_reason": .optional(task.closedReason),
+            "closed_at": .millis(task.closedAt),
+            "closed_by": .optional(task.closedBy),
             "deps": .array(deps),
             "active_session": try activeSession(for: task.id),
             "latest_report": .null,
@@ -613,6 +640,12 @@ public final class OrchestratorToolHandler: ToolHandler {
         let task = try projectTask(try ToolArguments.requiredString("id", in: arguments), identity: identity)
         let column = try parseColumn(try ToolArguments.requiredString("column", in: arguments))
         try refuseTerminalColumns(column, verb: "move a task into")
+        if task.column == .closed {
+            throw ToolError(
+                "Task \(task.id) is closed (\(task.closedReason ?? "no reason recorded")). Only a human reopens a "
+                    + "closed task, from the board."
+            )
+        }
         try tasks.move(task.id, to: column)
         if task.isArchived {
             try tasks.unarchive(task.id)
@@ -628,6 +661,27 @@ public final class OrchestratorToolHandler: ToolHandler {
             )
         }
         return ToolResult(text: "Task \(task.id) is now in \(final.rawValue).\(unarchived)")
+    }
+
+    private func closeTask(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let task = try projectTask(try ToolArguments.requiredString("task_id", in: arguments), identity: identity)
+        let reason = ToolArguments.optionalString("reason", in: arguments) ?? ""
+        let closure: TaskClosure
+        do {
+            closure = try board.close(taskId: task.id, reason: reason, by: .orchestrator(sessionId: identity.sessionId))
+        } catch BoardError.closeRefused(_, let refusal) {
+            throw ToolError(refusal)
+        }
+        var text = "Task \(task.id) is closed, moved from \(task.column.rawValue). It is not done: it lands nothing "
+            + "and satisfies no dependency. Nothing was deleted, and its branch and worktree are untouched."
+        if closure.waitingDependents.isEmpty {
+            text += " No unfinished task depends on it."
+        } else {
+            let listed = closure.waitingDependents.map { "- \($0.id) (\($0.title)) in \($0.column.rawValue)" }
+                .joined(separator: "\n")
+            text += " These tasks depend on it and stay blocked until you set_deps them or close them too:\n\(listed)"
+        }
+        return ToolResult(text: text)
     }
 
     private func setEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
@@ -699,8 +753,10 @@ public final class OrchestratorToolHandler: ToolHandler {
         if task.isArchived {
             return ToolResult(text: "Task \(task.id) is already archived.")
         }
-        guard task.column == .done else {
-            throw ToolError("Task \(task.id) is in \(task.column.rawValue), not done: only done tasks can be archived.")
+        guard task.column == .done || task.column == .closed else {
+            throw ToolError(
+                "Task \(task.id) is in \(task.column.rawValue): only done tasks and closed tasks can be archived."
+            )
         }
         try tasks.archive(task.id)
         return ToolResult(text: "Task \(task.id) archived. It is hidden from list_tasks but still readable with get_task.")
@@ -1036,6 +1092,7 @@ public final class OrchestratorToolHandler: ToolHandler {
                 "branch": .string(epic.branch),
                 "pull_request": try renderPullRequest(epic),
                 "done_tasks": .number(Double(counts.done)),
+                "closed_tasks": .number(Double(counts.closed)),
                 "total_tasks": .number(Double(counts.total)),
             ])
         }))
@@ -1058,6 +1115,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "created_at": .millis(epic.createdAt),
             "pull_request": try renderPullRequest(epic),
             "done_tasks": .number(Double(counts.done)),
+            "closed_tasks": .number(Double(counts.closed)),
             "total_tasks": .number(Double(counts.total)),
             "ready_for_integration": .bool(try board.epicReadyForIntegration(epicId: epic.id)),
             "next_step": .optional(Board.nextStep(for: epic)),
@@ -1072,9 +1130,12 @@ public final class OrchestratorToolHandler: ToolHandler {
             guard counts.total > 0 else {
                 throw ToolError("Epic \(epic.id) has no tasks, so there is nothing to integrate.")
             }
-            let unfinished = counts.total - counts.done
+            guard counts.unfinished > 0 else {
+                throw ToolError("Every task in epic \(epic.id) is closed, so there is nothing to integrate.")
+            }
             throw ToolError(
-                "Epic \(epic.id) is not ready for integration: \(unfinished) of \(counts.total) task(s) are not done yet."
+                "Epic \(epic.id) is not ready for integration: \(counts.unfinished) of \(counts.total - counts.closed) "
+                    + "task(s) are not done yet."
             )
         }
         let approval = try board.requestIntegration(
@@ -1157,7 +1218,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             let counts = try taskCounts(epic)
             reason += counts.total == 0
                 ? "\nThis epic has no tasks yet."
-                : "\nThis epic is not ready for integration: \(counts.total - counts.done) of \(counts.total) task(s) are not done."
+                : "\nThis epic is not ready for integration: \(counts.unfinished) of \(counts.total - counts.closed) task(s) are not done."
         }
 
         let approval = try board.requestPublish(
@@ -1223,9 +1284,9 @@ public final class OrchestratorToolHandler: ToolHandler {
         return epic
     }
 
-    private func taskCounts(_ epic: Epic) throws -> (done: Int, total: Int) {
+    private func taskCounts(_ epic: Epic) throws -> EpicTaskCount {
         let list = try tasks.list(projectId: epic.projectId, epicId: epic.id, includeArchived: true)
-        return (done: list.filter { $0.column == .done }.count, total: list.count)
+        return EpicLane.taskCount(columns: list.map(\.column))
     }
 
     private func projectTask(_ id: String, identity: TokenIdentity) throws -> BoardTask {
@@ -1269,6 +1330,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             throw ToolError("Cannot \(verb) running: a task enters running only when spawn_worker assigns it to a worker.")
         case .done:
             throw ToolError("Cannot \(verb) done: only a human accepts work into done.")
+        case .closed:
+            throw ToolError("Cannot \(verb) closed: use close_task, which records why.")
         default:
             break
         }

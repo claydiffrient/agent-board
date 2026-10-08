@@ -11,7 +11,7 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D4 | Tiered authority enforced at the token | Prompts are not a permission system | Flat authority |
 | D5 | Budgeted autonomy with caps | Recorded session ids + `--resume` make cap-kills non-destructive | Manual gate on every spawn |
 | D6 | Worktree per task, branch bound to task id | A retry sees what the previous attempt built | Worktree per agent session |
-| D7 | Fixed columns: Proposed → Backlog → Ready → Running → Review → Done | The orchestrator must be told which column is assignable | User-defined columns |
+| D7 | Fixed columns: Proposed → Backlog → Ready → Running → Review → Done, plus a terminal Closed beside Done for work retired without being done (§5) | The orchestrator must be told which column is assignable | User-defined columns; a closed flag on a task left in its column |
 | D8 | Workers commit and stop. They never push. The orchestrator may push and open a pull request, but only through named tools that each wait on a human approval | Nothing reaches a shared remote unattended; the last step of an epic stops being manual without handing an agent a shell it can aim anywhere | Worker opens a draft PR; unblocking `gh` in Bash for the orchestrator |
 | D9 | Reports queue in SQLite; app injects a fixed notice; orchestrator pulls | Worker text never enters the orchestrator's user-authority turn | Inject report text into PTY |
 | D10 | Epics group tasks and own the integration branch | Merge scope becomes a lookup, not a judgment call | Flat tasks |

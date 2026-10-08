@@ -459,6 +459,12 @@ enum Schema {
         """
     }
 
+    static let taskClosed = """
+    ALTER TABLE task ADD COLUMN closed_at INTEGER;
+    ALTER TABLE task ADD COLUMN closed_reason TEXT;
+    ALTER TABLE task ADD COLUMN closed_by TEXT;
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",

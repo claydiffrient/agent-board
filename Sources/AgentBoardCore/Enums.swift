@@ -7,6 +7,9 @@ public enum TaskColumn: String, Codable, Sendable, CaseIterable, Equatable, Data
     case running
     case review
     case done
+    /// Retired without being finished (SPEC §5): never satisfies a dependency, lands nothing, and is
+    /// entered only through `Board.close` with a reason.
+    case closed
 
     public var index: Int { Self.allCases.firstIndex(of: self)! }
 

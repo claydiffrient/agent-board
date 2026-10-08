@@ -170,6 +170,10 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     /// Why `landing` is what it is, for the cases a human has to act on.
     public var landingDetail: String?
     public var type: TaskType?
+    /// Set together when the task enters `closed` (SPEC §5) and cleared together when it leaves.
+    public var closedAt: Int64?
+    public var closedReason: String?
+    public var closedBy: String?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -197,6 +201,9 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case landing
         case landingDetail = "landing_detail"
         case type
+        case closedAt = "closed_at"
+        case closedReason = "closed_reason"
+        case closedBy = "closed_by"
     }
 
     public init(
@@ -206,8 +213,11 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         createdAt: Int64, updatedAt: Int64, model: String? = nil, reviewerAgentId: String? = nil,
         rosterAgentId: String? = nil, archivedAt: Int64? = nil, doneAt: Int64? = nil,
         unarchivedAt: Int64? = nil, landing: TaskLanding? = nil, landingDetail: String? = nil,
-        type: TaskType? = nil
+        type: TaskType? = nil, closedAt: Int64? = nil, closedReason: String? = nil, closedBy: String? = nil
     ) {
+        self.closedAt = closedAt
+        self.closedReason = closedReason
+        self.closedBy = closedBy
         self.type = type
         self.landing = landing
         self.landingDetail = landingDetail
@@ -242,6 +252,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var archivedDate: Date? { archivedAt?.asDate }
     public var isArchived: Bool { archivedAt != nil }
     public var doneDate: Date? { doneAt?.asDate }
+    public var closedDate: Date? { closedAt?.asDate }
+    public var isClosed: Bool { column == .closed }
 
     /// A `done` task whose work the human still has to place somewhere. False for `noBranch`,
     /// which is a task that legitimately had nothing to land.

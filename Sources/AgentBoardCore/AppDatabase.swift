@@ -175,6 +175,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("epic_ships_by_pull_request") { db in
             try db.execute(sql: "ALTER TABLE epic ADD COLUMN ships_by_pull_request INTEGER")
         }
+        migrator.registerMigration("task_closed") { db in
+            try db.execute(sql: Schema.taskClosed)
+        }
         return migrator
     }
 }

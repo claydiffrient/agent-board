@@ -45,7 +45,7 @@ CREATE TABLE task (
   body           TEXT,
   acceptance     TEXT,
   priority       TEXT,
-  column_name    TEXT NOT NULL,    -- proposed|backlog|ready|running|review|done
+  column_name    TEXT NOT NULL,    -- proposed|backlog|ready|running|review|done|closed
   blocked        INTEGER NOT NULL DEFAULT 0,
   blocked_reason TEXT,
   failed         INTEGER NOT NULL DEFAULT 0,
@@ -60,7 +60,10 @@ CREATE TABLE task (
   archived_at    INTEGER,          -- non-null = archived: hidden from the board, never deleted
   done_at        INTEGER,          -- entered done; cleared on leaving. The afterDays clock
   unarchived_at  INTEGER,          -- a human pulled it back; no automatic policy touches it again
-  type           TEXT              -- code|docs|tests|plan|review; NULL = Default. Picks its review row (§4)
+  type           TEXT,             -- code|docs|tests|plan|review; NULL = Default. Picks its review row (§4)
+  closed_at      INTEGER,          -- entered closed (§5); cleared on leaving. afterDays reads it for a closed task
+  closed_reason  TEXT,             -- why it was retired; required to enter closed
+  closed_by      TEXT              -- who closed it, e.g. "orchestrator (<session id>)"
 );
 CREATE INDEX task_project_archived ON task(project_id, archived_at);
 CREATE INDEX task_project_done_at ON task(project_id, done_at);
@@ -457,9 +460,9 @@ defaults to **`task`**, so a project that predates the setting behaves exactly a
 it did. `epic.review_level` overrides it for that epic's tasks; NULL inherits.
 Nothing else reads either value — the level is resolved once, on completion (§5).
 
-`archived_at` is a flag on a task, not a seventh column — D7 fixes the six, and
-`blocked`/`failed` are the precedent. Only a task in `done` may be archived;
-unarchiving is always allowed. Archiving hides a task from the default board
+`archived_at` is a flag on a task, not a column — D7 fixes the columns, and
+`blocked`/`failed` are the precedent. Only a task in a terminal column, `done`
+or `closed` (§5), may be archived; unarchiving is always allowed. Archiving hides a task from the default board
 query and does nothing else: no branch, worktree, session row, report or
 progress row is removed or altered by it. `settings_json.archivePolicy` says
 when a done task is archived automatically — `{"mode":"manual"}`,
@@ -477,15 +480,17 @@ The three modes fire on two different things, so they have two entry points
   metering tick, throttled to one sweep every 5 minutes rather than the 5-second
   metering cadence, and there is no second timer. `done_at` rather than
   `updated_at` measures time-in-done, because archiving, reordering, blocking and
-  every other edit move `updated_at`.
-- **`afterEpicMerge`** archives every `done` task of an epic when the epic
+  every other edit move `updated_at`. A `closed` task (§5) is measured from
+  `closed_at` the same way.
+- **`afterEpicMerge`** archives every `done` or `closed` task of an epic when the epic
   becomes `done` by merging: in a project that ships epics by pull request,
   inside `Board.landEpicPullRequest` once the pull request merges; in one that
   merges locally, inside the same
   `Board.complete` transaction that moves the epic to `done` (§5.2 step 4),
   including the synthetic `integration` task. Under this policy alone that task
   lands in `done` rather than `review`: the epic reaching `done` is its
-  acceptance. A task of the epic parked outside `done` is skipped, not an error.
+  acceptance. A task of the epic parked outside `done` and `closed` is skipped,
+  not an error.
 
 A done task with no epic has no merge event, so under `afterEpicMerge` it never
 archives automatically; it stays on the board until archived by hand. There is
@@ -494,10 +499,10 @@ policy is worse than one that does nothing.
 
 Automatic archiving never fights a human: `unarchive` stamps `unarchived_at`,
 and while that is set no policy re-archives the task. Moving a task out of `done`
-clears `done_at` and `unarchived_at` together, so a reopened task starts both the
+or `closed` clears `done_at`, the `closed_*` fields and `unarchived_at` together, so a reopened task starts both the
 clock and the policy from scratch. A `done` epic lane's **Archive** runs the
 same `ArchiveSweep.archiveEpic` as `afterEpicMerge`, so it too leaves a task a
-human unarchived, and every task outside `done`, where it is. The picker for
+human unarchived, and every task outside `done` and `closed`, where it is. The picker for
 the three modes lives in Project Settings, next to the day count it disables
 outside `afterDays`; the Task Board's own archive controls are in §10.
 

@@ -287,6 +287,9 @@ public struct Board: Sendable {
             guard let task = try Task.fetchOne(db, key: taskId) else {
                 throw BoardError.taskNotFound(taskId)
             }
+            guard task.column != .closed else {
+                throw BoardError.invalidTransition(taskId: taskId, from: .closed, to: .running)
+            }
             if let holder = try SessionStore.activeHolder(db, taskId: taskId) {
                 throw BoardError.taskAlreadyHeld(taskId: taskId, sessionId: holder.sessionId)
             }
@@ -728,6 +731,8 @@ public struct Board: Sendable {
         }
     }
 
+    /// A closed task (SPEC §5) is unarchived and goes back through the readiness check, so one whose
+    /// dependency left `done` meanwhile lands in `backlog`; the report quotes why it had been closed.
     @discardableResult
     public func reopen(taskId: String) throws -> Report {
         try db.writer.write { db in
@@ -736,11 +741,78 @@ public struct Board: Sendable {
             try TaskStore.setFailed(db, taskId, false, reason: nil)
             try TaskStore.move(db, taskId, to: .ready, before: nil)
             try Self.closeReviewFindings(db, taskId: taskId, by: "reopened by a human")
+            guard task.column == .closed else {
+                return try ReportStore.insert(
+                    db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision,
+                    body: "Task \(taskId) (\(task.title)) was reopened by a human and is back in ready."
+                )
+            }
+            try db.execute(sql: "UPDATE task SET archived_at = NULL WHERE id = ?", arguments: [taskId])
+            _ = try TaskStore.refreshReadiness(db, projectId: task.projectId)
+            let column = try Self.requireTask(db, taskId).column
+            _ = try ProgressStore.append(
+                db, taskId: taskId, sessionId: nil, kind: .note,
+                text: "Reopened by a human after being closed. It is in \(column.rawValue)."
+            )
             return try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision,
-                body: "Task \(taskId) (\(task.title)) was reopened by a human and is back in ready."
+                body: "Task \(taskId) (\(task.title)) was reopened by a human and is in \(column.rawValue). "
+                    + "It had been closed by \(task.closedBy ?? "an unknown actor"): \(task.closedReason ?? "no reason recorded")"
             )
         }
+    }
+
+    public static let closedLead = "Closed without being done."
+
+    /// SPEC §5: retires a task nobody needs to finish. The task moves to `closed` with the reason on
+    /// the row and in a `progress` row; nothing else on the board, in git or on disk changes.
+    @discardableResult
+    public func close(taskId: String, reason: String, by: BoardActor) throws -> TaskClosure {
+        try db.writer.write { db in
+            let task = try Self.requireTask(db, taskId)
+            let reason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let refusal = try Self.closeRefusal(db, task: task, reason: reason) {
+                throw BoardError.closeRefused(taskId: taskId, reason: refusal)
+            }
+            try TaskStore.close(db, taskId, reason: reason, by: by.described, at: .nowMillis)
+            _ = try ProgressStore.append(
+                db, taskId: taskId, sessionId: nil, kind: .note,
+                text: "\(Self.closedLead) Closed by \(by.described) from \(task.column.rawValue): \(reason)"
+            )
+            let waiting = try Task.fetchAll(
+                db,
+                sql: """
+                SELECT t.* FROM task t JOIN task_dep d ON d.task_id = t.id
+                WHERE d.depends_on = ? AND t.column_name NOT IN ('done', 'closed')
+                ORDER BY t.ordering, t.id
+                """,
+                arguments: [taskId]
+            )
+            return TaskClosure(task: try Self.requireTask(db, taskId), waitingDependents: waiting)
+        }
+    }
+
+    static func closeRefusal(_ db: Database, task: Task, reason: String) throws -> String? {
+        if reason.isEmpty {
+            return "A reason is required: say why the task no longer needs doing."
+        }
+        switch task.column {
+        case .done:
+            return "Task \(task.id) is in done: it was finished and accepted, so there is nothing to close."
+        case .closed:
+            return "Task \(task.id) is already closed: \(task.closedReason ?? "no reason recorded")"
+        default:
+            break
+        }
+        if task.origin == .integration {
+            return "Task \(task.id) is an epic's integration task. It ends through integration, or close the epic "
+                + "with close_epic."
+        }
+        if let holder = try SessionStore.activeHolder(db, taskId: task.id) {
+            return "Task \(task.id) has an active session, \(holder.sessionId) (\(holder.state.rawValue)). Stop it with "
+                + "stop_worker first."
+        }
+        return nil
     }
 
     /// Deletes the task and leaves a `decision` report behind, so an orchestrator holding the id
@@ -837,6 +909,8 @@ public struct Board: Sendable {
         switch task.column {
         case .done:
             return "The task is in done; ending this session changed nothing on it."
+        case .closed:
+            return "The task is closed; ending this session changed nothing on it."
         case .ready where try ProgressStore.openReviewFindings(db, taskId: task.id) != nil:
             return "The task is back in ready with a reviewer's findings; ending this session changed nothing on it."
         case .ready where try SessionStore.activeHolder(db, taskId: task.id) == nil:
@@ -846,12 +920,12 @@ public struct Board: Sendable {
         }
     }
 
-    /// SPEC §7, §10 Status: no session belongs running on a task in `done`, or in `ready` with no
+    /// SPEC §7, §10 Status: no session belongs running on a task in `done` or `closed`, or in `ready` with no
     /// other session on it, so `reconcile` and `SessionStart` never set one running there.
     public func isSettled(taskId: String, apartFrom sessionId: String) throws -> Bool {
         try db.reader.read { db in
             switch try Task.fetchOne(db, key: taskId)?.column {
-            case .done:
+            case .done, .closed:
                 return true
             case .ready:
                 let held = try Bool.fetchOne(
@@ -1237,7 +1311,7 @@ public struct Board: Sendable {
         let unfinished = try Task
             .fetchAll(
                 db,
-                sql: "SELECT * FROM task WHERE epic_id = ? AND column_name != 'done' ORDER BY ordering",
+                sql: "SELECT * FROM task WHERE epic_id = ? AND column_name NOT IN ('done', 'closed') ORDER BY ordering",
                 arguments: [epicId]
             )
             .map { EpicUnfinishedTask(id: $0.id, title: $0.title, column: $0.column) }
@@ -1284,19 +1358,16 @@ public struct Board: Sendable {
         }
     }
 
-    /// True when the epic holds at least one task and every one of them is in `done`.
+    /// True when every task in the epic is `done` or `closed` and at least one is `done` (SPEC §5.2).
     public func epicReadyForIntegration(epicId: String) throws -> Bool {
         try db.reader.read { db in
             guard try Epic.exists(db, key: epicId) else {
                 throw BoardError.epicNotFound(epicId)
             }
-            let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM task WHERE epic_id = ?", arguments: [epicId]) ?? 0
-            let unfinished = try Int.fetchOne(
-                db,
-                sql: "SELECT COUNT(*) FROM task WHERE epic_id = ? AND column_name != 'done'",
-                arguments: [epicId]
-            ) ?? 0
-            return total > 0 && unfinished == 0
+            let columns = try TaskColumn.fetchAll(
+                db, sql: "SELECT column_name FROM task WHERE epic_id = ?", arguments: [epicId]
+            )
+            return EpicLane.taskCount(columns: columns).readyForIntegration
         }
     }
 
@@ -1341,6 +1412,17 @@ public struct Board: Sendable {
             sql: "SELECT id FROM task WHERE column_name = 'ready' AND id IN (\(placeholders)) ORDER BY ordering",
             arguments: StatementArguments(changed)
         )
+    }
+}
+
+public struct TaskClosure: Sendable, Equatable {
+    public var task: Task
+    /// Unfinished tasks that depend on the closed one. None of them becomes ready because of it.
+    public var waitingDependents: [Task]
+
+    public init(task: Task, waitingDependents: [Task]) {
+        self.task = task
+        self.waitingDependents = waitingDependents
     }
 }
 
