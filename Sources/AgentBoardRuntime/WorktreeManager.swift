@@ -20,6 +20,8 @@ public struct WorktreeInfo: Sendable, Equatable {
 public struct WorktreeRemovalReport: Sendable, Equatable {
     /// Stderr from `WorktreeRemove` hooks that exited non-zero; hook failures never abort removal.
     public var hookDiagnostics: [String]
+    /// The project's teardown hook failed, timed out or could not start. Removal went ahead regardless.
+    public var teardownFailure: String? = nil
 }
 
 public struct DiffSummary: Sendable, Equatable {
@@ -91,6 +93,8 @@ public struct WorktreeManager: Sendable {
     /// Git and the repository hooks it fires run under the login-shell PATH, not launchd's (SPEC §2).
     /// Blocks on the first lookup, so only call into this type off the main thread.
     public var environment: @Sendable () -> [String: String]
+    /// The project's teardown hook, run in each worktree just before `remove` deletes it.
+    public var teardown: WorktreeTeardownCommand?
 
     public init(
         repoPath: URL,
@@ -98,13 +102,15 @@ public struct WorktreeManager: Sendable {
         hookSettingsURL: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/settings.json"),
         attribution: CommitAttributionSource,
-        environment: @escaping @Sendable () -> [String: String] = { ChildEnvironment.sanitized() }
+        environment: @escaping @Sendable () -> [String: String] = { ChildEnvironment.sanitized() },
+        teardown: WorktreeTeardownCommand? = nil
     ) {
         self.repoPath = repoPath
         self.worktreeRoot = worktreeRoot
         self.hookSettingsURL = hookSettingsURL
         self.attribution = attribution
         self.environment = environment
+        self.teardown = teardown
     }
 
     /// Reuses `branch` if it already exists so a retry sees what the previous attempt built.
@@ -321,12 +327,65 @@ public struct WorktreeManager: Sendable {
         try git(["worktree", "move", worktree.path, destination.path])
     }
 
-    /// Never forced: git refuses the removal rather than destroying uncommitted work.
+    /// Git refuses the removal rather than destroy uncommitted work. The teardown hook runs first
+    /// (SPEC §3.1 "Removing a worktree"), and whatever it leaves in a worktree that was clean before
+    /// it is forced past, so a hook can never be what keeps a worktree.
     @discardableResult
     public func remove(path: URL) throws -> WorktreeRemovalReport {
+        var cleanBeforeTeardown = false
+        var teardownFailure: String?
+        if let teardown {
+            cleanBeforeTeardown = (try? hasUncommittedChanges(worktree: path)) == false
+            teardownFailure = runTeardown(teardown, in: path)
+        }
         let diagnostics = runWorktreeRemoveHooks(worktreePath: path)
-        try git(["worktree", "remove", path.path])
-        return WorktreeRemovalReport(hookDiagnostics: diagnostics)
+        try git(["worktree", "remove"] + (cleanBeforeTeardown ? ["--force"] : []) + [path.path])
+        return WorktreeRemovalReport(hookDiagnostics: diagnostics, teardownFailure: teardownFailure)
+    }
+
+    static let teardownOutputKept = 2_000
+
+    /// Nil when the hook exited 0. Runs as the leader of its own process group, which a timeout kills whole.
+    func runTeardown(_ teardown: WorktreeTeardownCommand, in worktree: URL) -> String? {
+        var env = environment()
+        env["PWD"] = worktree.path
+        let label = "The teardown hook `\(teardown.command)` in \(worktree.path)"
+        let result: BoundedCommand.Result
+        do {
+            result = try BoundedCommand.run(
+                executable: "/bin/zsh", arguments: ["-c", teardown.command], cwd: worktree, environment: env,
+                timeout: TimeInterval(teardown.timeoutSeconds)
+            )
+        } catch {
+            return "\(label) could not start: \(error)"
+        }
+        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tail = output.isEmpty ? "" : "\nOutput:\n" + String(output.suffix(Self.teardownOutputKept))
+        switch result.ending {
+        case .exited(0):
+            return nil
+        case .exited(let status):
+            return "\(label) exited \(status), so what it cleans up may still be on disk.\(tail)"
+        case .timedOut, .canceled:
+            return "\(label) did not finish within \(teardown.timeoutSeconds)s, so its process group was "
+                + "killed and what it cleans up may still be on disk.\(tail)"
+        }
+    }
+
+    /// `git status --porcelain` paths: the new name for a rename, as git shows it.
+    public func uncommittedPaths(worktree: URL) throws -> [String] {
+        let fields = try gitChecked(["status", "--porcelain=v1", "-z"], cwd: worktree).stdout
+            .split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
+        var paths: [String] = []
+        var index = fields.startIndex
+        while index < fields.endIndex {
+            let entry = fields[index]
+            index += 1
+            guard entry.count > 3 else { continue }
+            paths.append(String(entry.dropFirst(3)))
+            if entry.prefix(2).contains(where: { $0 == "R" || $0 == "C" }) { index += 1 }
+        }
+        return paths
     }
 
     /// `git branch -d` measures merged against the current checkout's HEAD, which is rarely one of

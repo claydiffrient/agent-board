@@ -233,6 +233,8 @@ private final class CountingShellSupervisor: WorkerSupervising {
     func requestIntegration(epicId: String) async throws {}
     func epicClosurePlan(epicId: String, as closure: EpicClosure) throws -> EpicClosurePlan { throw StubError.notWired }
     func closeEpic(epicId: String, as closure: EpicClosure) async throws { throw StubError.notWired }
+    func heldWorktrees(epicId: String) throws -> [HeldWorktree] { [] }
+    func removeEpicWorktrees(epicId: String) async throws { throw StubError.notWired }
     func openPullRequest(epicId: String) async throws -> PullRequestOutcome { throw StubError.notWired }
     func requestShutdown(projectId: String, requestedBy: String, reason: String?) async throws -> ShutdownOrder {
         throw StubError.notWired

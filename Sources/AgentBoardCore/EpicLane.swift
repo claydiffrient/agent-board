@@ -19,16 +19,21 @@ public enum EpicLaneAction: String, Sendable, Equatable, CaseIterable {
     case openPullRequest
     case closeAsDone
     case abandon
+    /// Removes the worktrees a done or abandoned epic left on disk (SPEC §5.2).
+    case removeWorktrees
 
-    /// The two that end the epic by hand. The header tucks these behind a menu so the lane never
-    /// grows a destructive button next to an ordinary one.
+    /// The two that end the epic by hand.
     public var closure: EpicClosure? {
         switch self {
         case .closeAsDone: return .done
         case .abandon: return .abandoned
-        case .requestIntegration, .openPullRequest: return nil
+        case .requestIntegration, .openPullRequest, .removeWorktrees: return nil
         }
     }
+
+    /// The header tucks destructive actions behind a menu so the lane never grows one next to an
+    /// ordinary button.
+    public var isInMenu: Bool { closure != nil || self == .removeWorktrees }
 }
 
 public enum EpicLane {
@@ -55,9 +60,9 @@ public enum EpicLane {
         case .integrating:
             return [.closeAsDone, .abandon]
         case .done:
-            return [.openPullRequest]
+            return [.openPullRequest, .removeWorktrees]
         case .abandoned:
-            return []
+            return [.removeWorktrees]
         }
     }
 

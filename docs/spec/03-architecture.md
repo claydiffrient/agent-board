@@ -192,6 +192,52 @@ steps 3-8 has nowhere to be thrown: it terminates the session, puts the task
 back in `ready` flagged failed, and queues a `failed` report, which is also what
 happens to a setup still running when Agent Board quits.
 
+**Removing a worktree.** Every path that removes a task or epic worktree goes
+through `WorktreeManager.remove`: accepting a task, discarding one, the
+orphan reaper `reconcile` runs, and **Remove worktrees** on a done or
+abandoned epic's lane (§5.2). Archiving removes nothing, and closing an epic
+removes nothing, so neither runs anything. Before git deletes the directory,
+`remove` runs the project's **teardown hook** (`worktreeTeardownCommand`, §4)
+when one is set: `/bin/zsh -c <command>` with the worktree as its working
+directory and `PWD`, under `ChildEnvironment.sanitized()`, off the main
+thread, as the leader of its own process group (`BoundedCommand`). It exists
+because a tool that builds for a worktree outside it leaves that build behind
+when only the directory goes: on Derivita, Bazel's output base under
+`/private/var/tmp/_bazel_<user>/<md5 of the workspace path>`, 2–12 GB per
+worktree. Agent Board knows nothing about Bazel; Derivita sets
+`[ "$(bazel info workspace)" = "$PWD" ] && bazel clean --expunge`, whose guard
+stops `--expunge` wiping the main checkout's output base if it ever ran there.
+With no hook set, removal is exactly what it was. Claude Code's own
+`WorktreeRemove` hooks from `~/.claude/settings.json` still run after it.
+
+A hook never decides whether the worktree goes. One that exits non-zero, or
+cannot start, is recorded and removal continues; one that outlives
+`worktreeTeardownTimeoutSeconds` (default 600, clamped to 1 second through 24
+hours) has its whole process group sent `SIGTERM`, then `SIGKILL` five seconds
+later, and removal continues. The deadline is measured on `CLOCK_UPTIME_RAW`,
+so a sleeping Mac does not use it up. Ten minutes covers `bazel clean
+--expunge` deleting a 12 GB output base with room to spare, and still ends a
+hook that waits forever, as Bazel does on an output base another command
+holds. A hook that leaves files in a worktree that was clean before it ran is
+forced past (`git worktree remove --force`), so its leftovers cannot be what
+keeps the worktree; a worktree that was dirty before is never forced. The
+failure, with the end of the hook's output, goes on the task's progress and
+into the decision report for the removal (§5).
+
+The hook does not run where `remove` does not: on a worktree kept for
+uncommitted changes (§5), and on the rollback of a failed `git worktree add`
+(step 2), which removes with `git worktree remove --force` directly. That
+worktree's setup never finished, so the hook has nothing reliable to read —
+`bazel info workspace` in a half-checked-out tree can start a server and
+create the very output base it is meant to remove — and the retry adopts the
+branch, not anything the hook would clean.
+
+The hook lives in Project settings, not in a file in the repository. A repo
+file is read from whichever branch is checked out, so any branch — including
+one a worker wrote — could choose a command the board runs with the human's
+privileges on removal, and run it in a checkout the human never reviewed. The
+setting is entered by the human in the app and is the only source.
+
 `--strict-mcp-config` is deliberate: without it a worker sees `repo-tasks`,
 `solo`, and the other globally configured servers, and has two contradictory
 task systems in its tool list. A per-project allowlist of extra servers to

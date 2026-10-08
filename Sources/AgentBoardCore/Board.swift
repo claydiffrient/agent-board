@@ -745,13 +745,18 @@ public struct Board: Sendable {
 
     /// Deletes the task and leaves a `decision` report behind, so an orchestrator holding the id
     /// learns it is gone rather than dispatching it.
+    /// `cleanup` is what removing its worktrees could not do (SPEC §5); the task's progress goes
+    /// with the task, so the report is the only place it is kept.
     @discardableResult
-    public func discard(taskId: String) throws -> Report {
+    public func discard(taskId: String, cleanup: [String] = []) throws -> Report {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
+            var body = "Task \(taskId) (\(task.title)) was discarded by a human and removed from the board. Do not dispatch it."
+            if !cleanup.isEmpty {
+                body += "\n\n\(Self.worktreeCleanupLead)\n" + cleanup.map { "- \($0)" }.joined(separator: "\n")
+            }
             let report = try ReportStore.insert(
-                db, projectId: task.projectId, taskId: nil, sessionId: nil, kind: .decision,
-                body: "Task \(taskId) (\(task.title)) was discarded by a human and removed from the board. Do not dispatch it."
+                db, projectId: task.projectId, taskId: nil, sessionId: nil, kind: .decision, body: body
             )
             try TaskStore.delete(db, taskId)
             return report
@@ -1221,6 +1226,9 @@ public struct Board: Sendable {
                     "If any of that work still matters, take it out of the epic with "
                         + "set_epic(task_id) and no epic_id, and it stands alone on the board."
                 )
+            }
+            if let held = HeldWorktree.paragraph(try Self.heldWorktrees(db, epicId: epicId)) {
+                lines.append(held)
             }
             lines.append("Closed by: \(by.recorded)")
             return try ReportStore.insert(

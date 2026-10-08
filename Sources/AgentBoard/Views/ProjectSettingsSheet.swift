@@ -26,7 +26,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
         case .general: [.repository, .workspace, .archive]
         case .agents: [.models, .review, .autonomy, .roster]
         case .limits: [.caps]
-        case .workflow: [.verification, .isolation, .publishing]
+        case .workflow: [.verification, .teardown, .isolation, .publishing]
         case .notifications: [.notifications]
         case .advanced: [.autoMode, .extraMcpServers]
         }
@@ -34,7 +34,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
 }
 
 enum ProjectSettingsSection: String, CaseIterable, Identifiable {
-    case repository, workspace, caps, models, review, verification, isolation, publishing
+    case repository, workspace, caps, models, review, verification, teardown, isolation, publishing
     case archive, notifications, autonomy, autoMode, extraMcpServers, roster
 
     var id: Self { self }
@@ -47,6 +47,7 @@ enum ProjectSettingsSection: String, CaseIterable, Identifiable {
         case .models: "Models"
         case .review: "Review"
         case .verification: "Verification"
+        case .teardown: "Worktree teardown"
         case .isolation: "Isolation"
         case .publishing: "Publishing"
         case .archive: "Archive"
@@ -253,6 +254,15 @@ struct ProjectSettingsSheet: View {
             Text("How this project builds and tests itself. Handed to every worker and to the integrator; left empty, they work it out from the repo and report what they ran.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        case .teardown:
+            TextField("Teardown command", text: Binding(
+                get: { settings.worktreeTeardownCommand ?? "" },
+                set: { settings.worktreeTeardownCommand = $0.isEmpty ? nil : $0 }
+            ), prompt: Text("e.g. [ \"$(bazel info workspace)\" = \"$PWD\" ] && bazel clean --expunge"))
+            TextField("Teardown timeout (seconds)", value: $settings.worktreeTeardownTimeoutSeconds, format: .number)
+            Text("Runs in a task's or epic's worktree, as its working directory, just before Agent Board removes it, to clean up what tools built for it elsewhere: a Bazel output base, a Docker volume. Left empty, removal deletes the worktree and nothing else. A failure or timeout never stops the removal; it is recorded on the task and in the decision report. It does not run on a worktree kept for uncommitted changes.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .isolation:
             Picker("Worktree strategy", selection: $settings.worktreeStrategy) {
                 ForEach(WorktreeStrategy.allCases, id: \.self) { strategy in
@@ -421,6 +431,8 @@ struct ProjectSettingsSheet: View {
         var updated = settings
         updated.buildCommand = VerificationCommands(build: settings.buildCommand).build
         updated.testCommand = VerificationCommands(test: settings.testCommand).test
+        updated.worktreeTeardownCommand = settings.worktreeTeardown?.command
+        updated.worktreeTeardownTimeoutSeconds = WorktreeTeardownCommand.clampedTimeout(settings.worktreeTeardownTimeoutSeconds)
         updated.archivePolicy = ArchivePolicy.make(mode: archiveMode, days: archiveDays)
         updated.notifications.mute = muteChoice.mute(existing: settings.notifications.mute)
         let trimmedJSON = autoModeJSON.trimmingCharacters(in: .whitespacesAndNewlines)

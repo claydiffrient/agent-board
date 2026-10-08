@@ -102,6 +102,9 @@ extension Board {
                 text += " Could not verify whether it carried " + carriage.unverified.joined(separator: ", ")
                     + ": \(unverifiedReason)."
             }
+            if let held = HeldWorktree.paragraph(try Self.heldWorktrees(db, epicId: epicId)) {
+                text += "\n\n" + held
+            }
             try Self.recordOnEpic(db, epic: epic, text: text, kind: .status)
             return true
         }

@@ -296,7 +296,9 @@ public final class OrchestratorToolHandler: ToolHandler {
             name: "get_epic",
             description: "One epic in full: its goal, integration branch, newest pull request, its tasks grouped by column, "
                 + "whether it is ready for integration, and `next_step` when the epic is waiting on you to open its "
-                + "pull request or on that pull request to merge (null otherwise).",
+                + "pull request or on that pull request to merge (null otherwise). A done or abandoned epic also "
+                + "lists `held_worktrees`: the worktrees of it and its integration task still on disk, which only "
+                + "a human removes.",
             inputSchema: ToolSchema.object(properties: ["id": ToolSchema.string()], required: ["id"])
         ),
         ToolDescriptor(
@@ -1049,7 +1051,17 @@ public final class OrchestratorToolHandler: ToolHandler {
             columns[column.rawValue] = .array(try epicTasks.filter { $0.column == column }.map(renderTaskSummary))
         }
         let counts = try taskCounts(epic)
-        return .json(.object([
+        var held: [String: JSONValue] = [:]
+        if epic.state.isTerminal {
+            held["held_worktrees"] = .array(try board.heldWorktrees(epicId: epic.id).map { worktree in
+                .object([
+                    "path": .string(worktree.path),
+                    "task_id": .optional(worktree.taskId),
+                    "integration": .bool(worktree.isIntegration),
+                ])
+            })
+        }
+        return .json(.object(held.merging([
             "id": .string(epic.id),
             "title": .string(epic.title),
             "goal": .optional(epic.goal),
@@ -1062,7 +1074,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "ready_for_integration": .bool(try board.epicReadyForIntegration(epicId: epic.id)),
             "next_step": .optional(Board.nextStep(for: epic)),
             "columns": .object(columns),
-        ]))
+        ]) { $1 }))
     }
 
     private func requestIntegration(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
