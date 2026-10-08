@@ -361,6 +361,8 @@ public struct Board: Sendable {
         /// wherever it has been moved to since the first call.
         public var column: TaskColumn
         public var wasAlreadyComplete: Bool
+        /// The epic this integration left `integrated`, waiting on its pull request (SPEC §5.2).
+        public var awaitingPullRequest: Epic? = nil
 
         /// Never true on a resend: the first call already ran the acceptance path.
         public var autoAccept: Bool { routing == .autoAccept && !wasAlreadyComplete }
@@ -391,7 +393,9 @@ public struct Board: Sendable {
                 db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .complete, body: summary
             )
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
-            let mergedEpicId = try Self.epicMergedBy(db, task)
+            let integratedEpic = try Self.epicIntegratedBy(db, task)
+            let awaitingPullRequest = integratedEpic?.shipsByPullRequest == true ? integratedEpic : nil
+            let mergedEpicId = awaitingPullRequest == nil ? integratedEpic?.id : nil
             let sweepsOnMerge = try mergedEpicId != nil
                 && Self.settings(db, projectId: task.projectId).archivePolicy == .afterEpicMerge
             // Under afterEpicMerge the integration task lands in `done` rather than `review`: the epic
@@ -408,6 +412,10 @@ public struct Board: Sendable {
                     _ = try ArchiveSweep.archiveEpic(db, epicId: mergedEpicId, at: .nowMillis)
                 }
             }
+            if let awaitingPullRequest {
+                try EpicStore.setState(db, awaitingPullRequest.id, .integrated)
+                try Self.announceIntegrated(db, epic: awaitingPullRequest)
+            }
             let level = try ReviewPolicy.level(db, task: task)
             let routing = try ReviewPolicy.routing(db, task: task, completedBy: sessionId)
             switch routing {
@@ -423,7 +431,8 @@ public struct Board: Sendable {
                 try Self.leaveReviewToPerson(db, taskId: taskId, reason: reason)
             }
             return CompletionOutcome(
-                report: report, level: level, routing: routing, column: column, wasAlreadyComplete: false
+                report: report, level: level, routing: routing, column: column, wasAlreadyComplete: false,
+                awaitingPullRequest: awaitingPullRequest
             )
         }
     }
@@ -1253,13 +1262,13 @@ public struct Board: Sendable {
         }
     }
 
-    /// The epic this report finishes, if the task is the synthetic integrator task and the epic is
+    /// The epic this report integrates, if the task is the synthetic integrator task and the epic is
     /// still `integrating`; nil for every ordinary task.
-    static func epicMergedBy(_ db: Database, _ task: Task) throws -> String? {
+    static func epicIntegratedBy(_ db: Database, _ task: Task) throws -> Epic? {
         guard task.origin == .integration, let epicId = task.epicId,
-              try Epic.fetchOne(db, key: epicId)?.state == .integrating
+              let epic = try Epic.fetchOne(db, key: epicId), epic.state == .integrating
         else { return nil }
-        return epicId
+        return epic
     }
 
     static func settings(_ db: Database, projectId: String) throws -> ProjectSettings {

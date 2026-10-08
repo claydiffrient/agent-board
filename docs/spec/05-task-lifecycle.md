@@ -194,13 +194,15 @@ nobody reviewed.
     merged. `landing_detail` leads with its URL.
 
   **Integrating standalone tasks by pull request.** Workflow → Publishing's
-  "Integrate standalone tasks by" is *Pull request* or *Local merge*. A project
+  "Integrate standalone tasks and epics by" is *Pull request* or *Local merge*. A project
   that never chose stores neither, and the accept resolves it by running
   `git remote get-url origin` off the main actor: a repository with an `origin`
   integrates by pull request, and one without — or a missing repository or
   git — by local merge. The picker's first entry is that default, labelled with
   what it resolved to ("Pull request (default: has origin)"); a stored choice
-  always wins. Only `gh` opens and checks pull requests, so an `origin` on a
+  always wins. The same resolved choice decides whether an integrated epic
+  waits on its pull request (§5.2 step 4), which is why the picker reads
+  "Integrate standalone tasks and epics by". Only `gh` opens and checks pull requests, so an `origin` on a
   host other than GitHub still resolves to *Pull request*: its tasks wait at
   `awaiting_pull_request`, and an approved `open_pull_request` pushes the
   branch to that `origin` and then fails with `gh`'s "none of the git remotes
@@ -468,7 +470,39 @@ than one that is finished; they merge nothing and are not part of this sequence.
    integrator gets a real board card, token scope and report channel like any
    worker; if the spawn fails, that task is deleted and the epic is left where
    it was.
-4. The integrator reports. Under the default `afterEpicMerge` archive policy
+4. The integrator reports. What its report does to the epic depends on how
+   the project ships an epic to its base branch. That is the same choice that
+   decides standalone tasks (§5, "Integrating standalone tasks by pull
+   request"): the stored setting, or, when none is stored, whether the
+   repository has an `origin`. `spawnIntegrator` resolves it — the `origin`
+   check runs git, which `Board` cannot — and records it on the epic as
+   `ships_by_pull_request` (§4), so the report is settled by what was true when
+   the integrator started.
+
+   **A project that ships epics by pull request.** Integration only merged the
+   task branches into the epic branch; nothing has reached the base branch and
+   nobody has reviewed it. `Board.complete` moves the epic to `integrated`, not
+   `done`, and archives nothing. The integration task goes to `review` and is
+   routed like any other completion. An `integrated` epic is open in every
+   sense a `pull_request_open` one is: `create_task` and `set_epic` accept it,
+   its new tasks branch from the epic branch, accepting one merges into that
+   branch, its lane stays on the board, and it can be integrated again. The
+   orchestrator is told the next step in two places: a `decision` report from
+   the same transaction says the epic is integrated, that it stays open, and
+   to call `open_pull_request(epic_id)`; and `get_epic` returns that step as
+   `next_step` for as long as the epic is `integrated` (for a
+   `pull_request_open` epic, `next_step` says to wait for the merge and to
+   `push_branch` anything accepted since). The integrator's own
+   `report_complete` answer says the epic stays open. Step 5 takes it from
+   there: recording the pull request moves it to `pull_request_open`, and the
+   merge makes it `done` and runs the `afterEpicMerge` archive. The lane offers
+   **Open PR** on an `integrated` epic. Before this, integration closed the
+   epic in these projects too: it refused new tasks before its branch was
+   pushed, archived tasks that had not reached `main`, and hid the lane.
+
+   **A project that merges epics locally**, and any epic whose integrator
+   predates `ships_by_pull_request`, behaves as follows. Under the default
+   `afterEpicMerge` archive policy
    (§4), the epic's merge is itself the trigger: `Board.complete` moves the
    epic to `done` and archives every `done` task of it, the synthetic
    `origin=integration` task included, inside the same transaction. **That
@@ -480,8 +514,8 @@ than one that is finished; they merge nothing and are not part of this sequence.
    leaves it in `review` for a human, exactly as before this feature existed.
    `Board.complete` does this only for an epic still `integrating`; an
    integrator finishing on a `pull_request_open` epic leaves the epic there and
-   its task in `review`, so approving integration never marks an epic `done`
-   while its pull request is unmerged.
+   its task in `review`, whichever way the project ships, so approving
+   integration never marks an epic `done` while its pull request is unmerged.
 5. The PR from the epic branch → base is opened either **by you**, from
    the button on the epic, or by the orchestrator calling `open_pull_request`
    (§6) — which does not open one either. It creates an approval row, exactly
@@ -492,7 +526,8 @@ than one that is finished; they merge nothing and are not part of this sequence.
    reading a terminal, and reaches the orchestrator as a `decision` report.
    It is also kept on the approval (`published_url`), and recording it moves
    the epic to `pull_request_open` from any state but `abandoned` — whether or
-   not `request_integration` ran first, and including a `done` epic.
+   not `request_integration` ran first, and including an `integrated` or a
+   `done` epic.
 
    A `pull_request_open` epic is not closed. `create_task` and `set_epic`
    accept it, its new tasks branch from the epic branch, and accepting one

@@ -50,6 +50,8 @@ public enum EpicLane {
         switch state {
         case .planning, .active, .pullRequestOpen:
             return (readyForIntegration ? [.requestIntegration] : []) + [.closeAsDone, .abandon]
+        case .integrated:
+            return [.openPullRequest, .closeAsDone, .abandon]
         case .integrating:
             return [.closeAsDone, .abandon]
         case .done:

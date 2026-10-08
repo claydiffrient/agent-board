@@ -94,6 +94,8 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var createdAt: Int64
     /// Overrides the project's level for this epic's tasks. nil inherits.
     public var reviewLevel: ReviewLevel?
+    /// Resolved when the integrator is spawned (SPEC §5.2); nil until then, which completes as a local merge.
+    public var shipsByPullRequest: Bool?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -104,11 +106,12 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case state
         case createdAt = "created_at"
         case reviewLevel = "review_level"
+        case shipsByPullRequest = "ships_by_pull_request"
     }
 
     public init(
         id: String, projectId: String, title: String, goal: String?, branch: String,
-        state: EpicState, createdAt: Int64, reviewLevel: ReviewLevel? = nil
+        state: EpicState, createdAt: Int64, reviewLevel: ReviewLevel? = nil, shipsByPullRequest: Bool? = nil
     ) {
         self.id = id
         self.projectId = projectId
@@ -118,6 +121,7 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         self.state = state
         self.createdAt = createdAt
         self.reviewLevel = reviewLevel
+        self.shipsByPullRequest = shipsByPullRequest
     }
 
     public static func newId() -> String { BoardId.new() }

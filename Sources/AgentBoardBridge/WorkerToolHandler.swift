@@ -488,15 +488,22 @@ public final class WorkerToolHandler: ToolHandler {
         }
         return ToolResult(
             text: "\(recorded) \(noReview), so the task went straight to Done and its "
-                + "worktree has been removed. Stop here; do not start further work."
+                + "worktree has been removed. \(Self.awaitingPullRequestLine(outcome))Stop here; do not start further work."
         )
     }
 
     private static func completionResult(_ outcome: Board.CompletionOutcome) -> ToolResult {
         ToolResult(
             text: "\(Self.recordedLine(outcome)) The task is now in \(outcome.column.rawValue.capitalized). "
-                + "Stop here; do not start further work."
+                + "\(awaitingPullRequestLine(outcome))Stop here; do not start further work."
         )
+    }
+
+    private static func awaitingPullRequestLine(_ outcome: Board.CompletionOutcome) -> String {
+        outcome.awaitingPullRequest.map {
+            "Epic \($0.id) is integrated but stays open until its pull request merges; the orchestrator "
+                + "has been told to open it. "
+        } ?? ""
     }
 
     private static func recordedLine(_ outcome: Board.CompletionOutcome) -> String {
