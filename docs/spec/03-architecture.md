@@ -224,7 +224,8 @@ keeps the worktree; a worktree that was dirty before is never forced. The
 failure, with the end of the hook's output, goes on the task's progress and
 into the decision report for the removal (§5).
 
-The hook does not run where `remove` does not: on a worktree kept for
+The hook never runs in the project's own checkout, which git refuses to
+remove anyway. It does not run where `remove` does not: on a worktree kept for
 uncommitted changes (§5), and on the rollback of a failed `git worktree add`
 (step 2), which removes with `git worktree remove --force` directly. That
 worktree's setup never finished, so the hook has nothing reliable to read —

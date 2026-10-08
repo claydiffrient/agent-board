@@ -334,7 +334,8 @@ public struct WorktreeManager: Sendable {
     public func remove(path: URL) throws -> WorktreeRemovalReport {
         var cleanBeforeTeardown = false
         var teardownFailure: String?
-        if let teardown {
+        // Git refuses to remove the main checkout, but only after the hook would have run in it.
+        if let teardown, !Self.samePath(path, repoPath) {
             cleanBeforeTeardown = (try? hasUncommittedChanges(worktree: path)) == false
             teardownFailure = runTeardown(teardown, in: path)
         }

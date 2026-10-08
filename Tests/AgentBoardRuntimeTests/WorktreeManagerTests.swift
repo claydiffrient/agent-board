@@ -446,6 +446,15 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(payload["cwd"], repo.path)
     }
 
+    /// SPEC §3.1 "Removing a worktree": with no hook set, removal is never forced.
+    func testWithNoTeardownHookADirtyWorktreeIsStillRefused() throws {
+        let path = try manager.create(name: "dirty", branch: "agentboard/dirty", base: "main")
+        try "line\n".write(to: path.appendingPathComponent("stray.txt"), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try manager.remove(path: path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.appendingPathComponent("stray.txt").path))
+    }
+
     /// SPEC §3.1 "Removing a worktree": a failing hook that also dirties the worktree still cannot keep it.
     func testAFailingTeardownHookIsReportedAndTheWorktreeStillGoes() throws {
         let path = try manager.create(name: "torn", branch: "agentboard/torn", base: "main")
