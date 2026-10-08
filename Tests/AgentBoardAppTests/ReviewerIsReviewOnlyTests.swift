@@ -74,9 +74,11 @@ final class ReviewerIsReviewOnlyTests: XCTestCase {
         XCTAssertFalse(spawned.prompt.contains("Commit on the current branch"), "the reviewer was told to commit")
         XCTAssertFalse(spawned.prompt.contains("report_complete"))
         XCTAssertTrue(spawned.prompt.contains("`reopen_task(findings)`"))
+        XCTAssertTrue(spawned.prompt.contains("never file a finding about what the worker did or did not disclose"))
+        XCTAssertTrue(spawned.prompt.contains("Run every build and test in the foreground"))
         let supportDir = fixture.supportDir.path
         for denied in [
-            "Edit", "Write", "NotebookEdit", "Bash(git commit*)",
+            "Edit", "Write", "NotebookEdit", "Bash(git commit*)", "ScheduleWakeup",
             "Read(//**/agentboard.sqlite*)", "Bash(*agentboard.sqlite*)",
             "Read(/\(supportDir)/**)", "Bash(*\(supportDir)*)",
         ] {
