@@ -320,6 +320,22 @@ spawn are reached — so a resend inserts no second row, moves no task, sets no
 reviewer, starts no second reviewer and fires no second event. The answer names
 the first report's id and the column the task actually sits in.
 
+**A report from a session Agent Board already ended moves nothing.** A session
+the board failed, stopped or completed can still be running, because Claude Code
+resumes a stopped `--bg` session by itself (§8.5), and by the time it reports
+another session may have finished the task. A session `Board.terminate` ended
+has its grant revoked, so its `report_complete` gets a 401 and never reaches
+the board. For the rest, `Board.complete` reads the session row inside the same
+transaction. When the row is no longer active, the report is
+kept as a `decision` headed "Late report_complete from a session Agent Board had
+already ended", and the task's column, landing, archive state, review routing and
+epic are left as they are. The answer says the session had already ended and
+names the column the task stays in, and the stop still follows it. A resend finds
+that decision report and inserts no second one. On 2026-10-07 the idle-capped
+first integrator of task 006dfd78 reported two minutes after the second
+integrator had closed the epic and archived the task, and pulled the archived
+task back into `review` with its landing cleared.
+
 A rostered reviewer under `agent` review gets its own token scope (§6), narrower
 than a worker's: `get_my_task`, `log_progress`, `accept_task(verdict)` and
 `reopen_task(findings)` over the one task its token names, and nothing else — no

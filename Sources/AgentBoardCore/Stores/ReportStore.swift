@@ -50,6 +50,14 @@ public struct ReportStore: Sendable {
         )
     }
 
+    static func lateCompletion(_ db: Database, taskId: String, sessionId: String, headline: String) throws -> Report? {
+        try Report.fetchOne(
+            db,
+            sql: "SELECT * FROM report WHERE task_id = ? AND session_id = ? AND kind = ? AND substr(body, 1, ?) = ? ORDER BY id LIMIT 1",
+            arguments: [taskId, sessionId, ReportKind.decision.rawValue, headline.count, headline]
+        )
+    }
+
     public func latest(taskId: String) throws -> Report? {
         try db.reader.read { db in
             try Report.fetchOne(

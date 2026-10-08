@@ -157,6 +157,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// A resume starts the process before it moves the task back to `running`, so until then its
     /// session looks like a stray one on a settled task to `reconcile`.
     @ObservationIgnored private var resuming: Set<String> = []
+    /// When a human last opened a terminal on each session. `claude attach` resumes a stopped one.
+    @ObservationIgnored private var attachRequestedAt: [String: Int64] = [:]
 
     nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
@@ -1714,6 +1716,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? {
         guard let shortId = try? sessions.get(sessionId)?.shortId else { return nil }
+        attachRequestedAt[sessionId] = .nowMillis
         return runtime.attachCommand(shortId: shortId)
     }
 
@@ -2566,6 +2569,27 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func workerCompleted(projectId: String, sessionId: String) async {
         guard let session = try? sessions.get(sessionId), let shortId = session.shortId else { return }
         try? await stopAgent(session, shortId: shortId)
+    }
+
+    /// SPEC §8.5: a session the board ended is stopped again when Claude Code resumes it on its own,
+    /// as it does to deliver a background command's notification. A board resume in flight and a
+    /// human who attached after the session ended are the two restarts that are meant.
+    func endedSessionRestarted(projectId: String, sessionId: String) async {
+        guard !resuming.contains(sessionId),
+              let session = try? sessions.get(sessionId),
+              session.state == .failed || session.state == .completed
+                  || !((try? grants.hasLiveGrant(sessionId: sessionId)) ?? true),
+              let shortId = session.shortId
+        else { return }
+        if let attached = attachRequestedAt[sessionId], attached >= session.endedAt ?? 0 { return }
+        try? await stopAgent(session, shortId: shortId)
+        if let taskId = session.taskId {
+            _ = try? ProgressStore(db).append(
+                taskId: taskId, sessionId: sessionId, kind: .status,
+                text: "Claude Code resumed \(session.displayShortId), which Agent Board had already ended "
+                    + "(\(session.state.rawValue)); it was stopped again."
+            )
+        }
     }
 
     /// Stops the agent of every session this board's own rows say is finished — the backlog left by

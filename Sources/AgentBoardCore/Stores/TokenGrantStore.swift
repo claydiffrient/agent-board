@@ -66,6 +66,20 @@ public struct TokenGrantStore: Sendable {
         }
     }
 
+    public func lookup(token: String) throws -> TokenGrant? {
+        try db.reader.read { db in try TokenGrant.fetchOne(db, key: token) }
+    }
+
+    public func hasLiveGrant(sessionId: String) throws -> Bool {
+        try db.reader.read { db in
+            try Bool.fetchOne(
+                db,
+                sql: "SELECT EXISTS (SELECT 1 FROM token_grant WHERE session_id = ? AND revoked_at IS NULL)",
+                arguments: [sessionId]
+            ) ?? false
+        }
+    }
+
     public func revoke(token: String) throws {
         try db.writer.write { db in
             try db.execute(
