@@ -51,6 +51,29 @@ final class WorktreeTeardownHookTests: XCTestCase {
         XCTAssertTrue(report.body.contains("output-base-locked"), report.body)
     }
 
+    /// The orphan reaper sees an accepted task's worktree as an orphan while its hook is still running.
+    func testReconcileDuringASlowAcceptHookNeitherRunsItAgainNorReportsACleanupFinding() async throws {
+        let marker = fixture.supportDir.appendingPathComponent("teardown-marker")
+        try setTeardown("echo ran >> '\(marker.path)'; sleep 2")
+        let task = try makeTask()
+        let worktree = try XCTUnwrap(try fixture.worktreeWorker(task: task).worktreePath)
+
+        try await fixture.supervisor.accept(taskId: task.id)
+        let started = Date()
+        while !FileManager.default.fileExists(atPath: marker.path), Date().timeIntervalSince(started) < 10 {
+            try await _Concurrency.Task.sleep(nanoseconds: 50_000_000)
+        }
+        await fixture.supervisor.reconcile(projectId: fixture.project.id)
+        await fixture.supervisor.waitForTeardowns()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "ran\n", "the hook ran more than once")
+        let progress = try ProgressStore(fixture.db).list(taskId: task.id).map(\.text)
+        XCTAssertFalse(progress.contains { $0.hasPrefix(Board.worktreeCleanupLead) }, "\(progress)")
+        let reports = try ReportStore(fixture.db).unconsumed(projectId: fixture.project.id).map(\.body)
+        XCTAssertFalse(reports.contains { $0.contains(Board.worktreeCleanupLead) }, "\(reports)")
+    }
+
     /// Task 51c0040b kept its worktree over a `yarn.lock` its setup left behind, and nothing said so.
     func testAcceptNamesTheDirtyPathsOfAKeptWorktreeAndDoesNotRunTheHookThere() async throws {
         let marker = fixture.supportDir.appendingPathComponent("teardown-marker")
