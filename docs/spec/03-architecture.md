@@ -224,6 +224,15 @@ keeps the worktree; a worktree that was dirty before is never forced. The
 failure, with the end of the hook's output, goes on the task's progress and
 into the decision report for the removal (§5).
 
+A hook runs at most once in a worktree. Each removal first claims its paths in
+the supervisor's in-flight set, and none of the others touches a claimed path:
+the reaper adds them to the worktrees it keeps, an accept or discard that finds
+one of its own already claimed leaves it and its branch to the claimant, and
+**Remove worktrees** names it as kept. Without that, the reaper — which sees an
+accepted task's worktree as an orphan as soon as its sessions stop — would
+start a second hook beside the accept's, and two `git worktree remove` calls
+would race, the loser reporting a removal that never failed.
+
 The hook never runs in the project's own checkout, which git refuses to
 remove anyway. It does not run where `remove` does not: on a worktree kept for
 uncommitted changes (§5), and on the rollback of a failed `git worktree add`

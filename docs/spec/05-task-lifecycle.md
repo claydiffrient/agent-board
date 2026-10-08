@@ -282,7 +282,11 @@ worktree. Anything dirty or unmerged is left alone and reported. The teardown
 hook runs before each removal (§3.1); a failure goes on the progress of the
 task whose session held the worktree, in a `decision` report of its own, since
 no other report marks the removal. A kept orphan stays a status-bar notice:
-the reaper finds it again on every pass. Epic
+the reaper finds it again on every pass. With a hook set, the removals run in
+the background after `reconcile` has decided what to remove, so a pass that
+finds orphans returns at once instead of waiting up to the hook timeout for
+each; the next pass skips whatever is still being removed (§3.1, "A hook runs
+at most once"). Epic
 integration worktrees and `agentboard/epic-*` branches are out of scope. So is
 a shared branch (`agentboard/shared*`): it has no worktree under this reaping
 either way, and it is deleted only by acceptance finding it fully accepted and
@@ -612,9 +616,14 @@ moved to another epic held an 11.5 GB output base. `Board.heldWorktrees`
 lists them: every recorded `worktree_path` of a session on a task in the epic,
 its integration task included, plus the epic's integration checkout, each kept
 only while the directory exists and never the project's own checkout. The
-`decision` report `close_epic` and the lane's close write, and the one the
-merge check writes when the epic's pull request merges, list them with their
-paths and owning tasks; `get_epic` returns them as `held_worktrees` for a
+`decision` report `close_epic` and the lane's close write, the one the
+merge check writes when the epic's pull request merges, and the one an
+integration task's `report_complete` writes when it takes the epic to `done`
+by direct merge, list them with their paths and owning tasks. That last report
+leaves out the integration checkout while the integration task goes to
+`review`, because accepting it removes that checkout and reports anything it
+keeps; under `afterEpicMerge` the task is archived instead of accepted, so the
+checkout is listed. `get_epic` returns them as `held_worktrees` for a
 `done` or `abandoned` epic. The human removes them with **Remove worktrees** on
 the epic lane's menu (§10): each goes through `WorktreeManager.remove`, so the
 teardown hook runs first. One a live session holds, or one with uncommitted

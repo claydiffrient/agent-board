@@ -416,6 +416,14 @@ public struct Board: Sendable {
             try FileLockStore.releaseAll(db, sessionId: sessionId)
             if let mergedEpicId {
                 try EpicStore.setState(db, mergedEpicId, .done)
+                // SPEC §5.2: accepting the integration task removes its own checkout and reports what it keeps.
+                let held = try Self.heldWorktrees(db, epicId: mergedEpicId).filter { sweepsOnMerge || !$0.isIntegration }
+                if let held = HeldWorktree.paragraph(held), let epic = try Epic.fetchOne(db, key: mergedEpicId) {
+                    _ = try ReportStore.insert(
+                        db, projectId: task.projectId, taskId: nil, sessionId: nil, kind: .decision,
+                        body: "Epic \(epic.id) (\(epic.title)) is done.\n\n" + held
+                    )
+                }
                 if sweepsOnMerge {
                     _ = try ArchiveSweep.archiveEpic(db, epicId: mergedEpicId, at: .nowMillis)
                 }
