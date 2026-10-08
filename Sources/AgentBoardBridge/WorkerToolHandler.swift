@@ -491,8 +491,8 @@ public final class WorkerToolHandler: ToolHandler {
             )
         }
         return ToolResult(
-            text: "\(recorded) \(noReview), so the task went straight to Done and its "
-                + "worktree has been removed. \(Self.awaitingPullRequestLine(outcome))Stop here; do not start further work."
+            text: "\(recorded) \(noReview), so the task went straight to Done and Agent Board "
+                + "removes its worktree. \(Self.awaitingPullRequestLine(outcome))Stop here; do not start further work."
         )
     }
 

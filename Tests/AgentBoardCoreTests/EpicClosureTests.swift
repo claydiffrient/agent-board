@@ -195,6 +195,37 @@ final class EpicClosureTests: XCTestCase {
         XCTAssertTrue(report.body.contains("Every task in the epic was already finished."), report.body)
     }
 
+    /// SPEC §5.2: under afterEpicMerge nothing accepts the integration task, so its checkout is listed too.
+    func testAnEpicDoneByDirectMergeReportsTheWorktreesStillOnDisk() throws {
+        let f = try Fixture.make()
+        let (epic, created) = try f.board.createEpic(
+            projectId: f.project.id, title: "Ship it", goal: nil, tasks: [NewEpicTask(title: "One")]
+        )
+        try f.tasks.move(created[0].id, to: .done)
+        let kept = try heldDirectory()
+        let checkout = try heldDirectory()
+        defer { [kept, checkout].forEach { try? FileManager.default.removeItem(at: $0) } }
+        try f.sessions.insert(f.session(state: .completed, taskId: created[0].id, worktreePath: kept.path))
+        try f.epics.setState(epic.id, .integrating)
+        let integration = try f.board.createIntegrationTask(epicId: epic.id)
+        let integrator = f.session(taskId: integration.id, worktreePath: checkout.path)
+        try f.sessions.insert(integrator)
+
+        try f.board.complete(taskId: integration.id, sessionId: integrator.sessionId, summary: "merged everything")
+
+        let decision = try XCTUnwrap(
+            try f.reports.unconsumed(projectId: f.project.id).first { $0.kind == .decision && $0.body.contains("is done") }
+        )
+        XCTAssertTrue(decision.body.contains("- \(kept.path) — task \(created[0].id)"), decision.body)
+        XCTAssertTrue(decision.body.contains("- \(checkout.path) — integration task \(integration.id)"), decision.body)
+    }
+
+    private func heldDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("held-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
     // MARK: The plan the confirmation reads
 
     func testPlanListsUnfinishedTasksInBoardOrder() throws {

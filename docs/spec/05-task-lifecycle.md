@@ -103,14 +103,31 @@ nobody reviewed.
   does not block the decision; only an agent still listed as live that refuses
   to stop aborts the accept or reopen before anything is written. The accept
   then lands the task's branch, below, and only after that is every attempt's
-  worktree removed (firing the
-  existing `WorktreeRemove` hook, which reclaims Bazel `output_base` on
-  Derivita), with `agentboard/<task-id>` deleted once it is merged into the
-  base or epic branch. An unmerged branch, or a worktree with uncommitted
-  changes, is kept and the reason surfaced in the status bar. Landing comes
+  worktree removed, running the project's teardown hook first (§3.1, "Removing
+  a worktree") and then any `WorktreeRemove` hook in `~/.claude/settings.json`,
+  with `agentboard/<task-id>` deleted once it is merged into the
+  base or epic branch. An unmerged branch is kept and the reason surfaced in
+  the status bar. Landing comes
   first because removing a large worktree can take over a minute, and until the
   merge runs a dependent cut from the target branch lacks this work. A member of
   a shared branch has no worktree to remove, so its teardown still runs first.
+
+  A worktree with uncommitted changes is kept — the teardown hook does not run
+  in it — and so is one git refuses to remove. Whenever that happens, for any
+  reason, or a teardown hook fails or times out, the acceptance's `decision`
+  report says so under **Worktree cleanup:**, naming the worktree and, for a
+  dirty one, its uncommitted paths (the first 20, then a count), so the
+  orchestrator can act on a leftover like a `yarn.lock` its setup wrote. The
+  same lines go on the task's progress. With a teardown hook set, the removal
+  runs after the accept returns rather than inside it — the hook may run for
+  minutes and the accept may be answering an MCP call (`report_complete` under
+  a no-review level, a rostered reviewer's `accept_task`), which Claude Code
+  abandons after 60 seconds. Its findings are appended to the acceptance
+  report while the orchestrator has not read it, and otherwise queued as a
+  `decision` report of their own. With no hook, the removal runs inside the
+  accept, as it always has. Discarding a task removes its worktrees the same
+  way before the task is deleted; the task's progress goes with it, so its
+  findings are kept only in the discard's `decision` report.
 
   The merge takes the task's branch into the branch meant to carry it:
   `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling
@@ -261,7 +278,15 @@ nobody reviewed.
 
 Reconcile also reaps worktrees under the project's worktree root that no active
 session owns, and deletes merged `agentboard/*` branches that no longer have a
-worktree. Anything dirty or unmerged is left alone and reported. Epic
+worktree. Anything dirty or unmerged is left alone and reported. The teardown
+hook runs before each removal (§3.1); a failure goes on the progress of the
+task whose session held the worktree, in a `decision` report of its own, since
+no other report marks the removal. A kept orphan stays a status-bar notice:
+the reaper finds it again on every pass. With a hook set, the removals run in
+the background after `reconcile` has decided what to remove, so a pass that
+finds orphans returns at once instead of waiting up to the hook timeout for
+each; the next pass skips whatever is still being removed (§3.1, "A hook runs
+at most once"). Epic
 integration worktrees and `agentboard/epic-*` branches are out of scope. So is
 a shared branch (`agentboard/shared*`): it has no worktree under this reaping
 either way, and it is deleted only by acceptance finding it fully accepted and
@@ -581,3 +606,27 @@ than one that is finished; they merge nothing and are not part of this sequence.
    workflow and the approval is already a human gate; the approval row names
    how many tasks are unfinished, so the mistake is visible to the person
    deciding rather than pre-empted for them.
+
+**Worktrees a closed epic leaves behind.** Nothing reaps an epic's integration
+worktree (`<worktree-root>/epic-<epic-id>`, on the epic branch), and a task
+worktree kept for uncommitted changes stays where it is. Once an epic is
+`done` or `abandoned` nothing will push from its branch again, so whatever is
+still on disk for it is a leak: on Derivita, an integration worktree whose work
+moved to another epic held an 11.5 GB output base. `Board.heldWorktrees`
+lists them: every recorded `worktree_path` of a session on a task in the epic,
+its integration task included, plus the epic's integration checkout, each kept
+only while the directory exists and never the project's own checkout. The
+`decision` report `close_epic` and the lane's close write, the one the
+merge check writes when the epic's pull request merges, and the one an
+integration task's `report_complete` writes when it takes the epic to `done`
+by direct merge, list them with their paths and owning tasks. That last report
+leaves out the integration checkout while the integration task goes to
+`review`, because accepting it removes that checkout and reports anything it
+keeps; under `afterEpicMerge` the task is archived instead of accepted, so the
+checkout is listed. `get_epic` returns them as `held_worktrees` for a
+`done` or `abandoned` epic. The human removes them with **Remove worktrees** on
+the epic lane's menu (§10): each goes through `WorktreeManager.remove`, so the
+teardown hook runs first. One a live session holds, or one with uncommitted
+changes, is kept and named; no branch is deleted. A `decision` report lists
+what was removed and what was not, and each finding also goes on its task's
+progress.
