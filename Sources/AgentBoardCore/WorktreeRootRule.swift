@@ -32,4 +32,12 @@ public enum WorktreeRootRule {
     public static func isValid(_ path: String) -> Bool {
         (try? validate(path)) != nil
     }
+
+    /// The stored root as a directory, with a leading `~` meaning `home` (SPEC §4). Foundation expands
+    /// `~/` against the real home but resolves a bare `~` against the working directory.
+    public static func url(_ path: String, home: URL) -> URL {
+        if path == "~" { return home }
+        if path.hasPrefix("~/") { return home.appendingPathComponent(String(path.dropFirst(2))) }
+        return URL(fileURLWithPath: path)
+    }
 }

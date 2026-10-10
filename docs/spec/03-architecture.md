@@ -81,7 +81,9 @@ For a task `T` in project `P`:
    detached `claude --bg` worker that outlives the app is still found on the
    next launch.
    - **`worktree`** always places, and always worktrees: `git worktree add
-     <worktrees>/<task-id> -b agentboard/<task-id> <base>` where `<base>` is
+     <worktrees>/<task-id> -b agentboard/<task-id> <base>`, where
+     `<worktrees>` is `project.worktree_root` with a leading `~` expanded
+     against the board's home (§4), and `<base>` is
      the epic branch, or for a standalone task the start point step 1 chose
      from the project base branch. This
      is every project's behavior from before this setting existed. Git exits
