@@ -184,7 +184,7 @@ struct ProjectSettingsSheet: View {
         case .repository:
             LabeledContent("Path", value: project.repoPath)
             TextField("Base branch", text: $baseBranch)
-            TextField("Worktree root", text: $worktreeRoot)
+            WorktreeRootRow(root: $worktreeRoot, projectId: project.id)
             if let complaint = worktreeRootComplaint {
                 Text(complaint)
                     .font(.caption)
