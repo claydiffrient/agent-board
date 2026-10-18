@@ -527,7 +527,11 @@ or `<AGENTBOARD_SUPPORT_DIR>/worktrees/<project-id>` under the override. A root
 containing whitespace is refused, at registration and in Project Settings,
 because repo setup that shells out without quoting the path breaks on it. A
 leading `~` means the board's home directory wherever the root becomes a path
-(`WorktreeRootRule.url`); it is stored as typed.
+(`WorktreeRootRule.url`). Project Settings never takes a typed root: **Choose…**
+opens a folder chooser and **Use Default** restores the registration default,
+and either stores a standardized absolute path. A `~` root can still come from
+a row written before that, and the sheet abbreviates the home folder to `~` for
+display only.
 
 Projects registered before that default still carry the old one,
 `~/Library/Application Support/AgentBoard/worktrees/<project-id>`, which the
