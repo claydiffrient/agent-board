@@ -64,7 +64,7 @@ final class TaskBoardFinishedEpicRenderTests: XCTestCase {
         }
         let mount = OffscreenMount(
             TaskBoardView(project: project).environment(renderEnvironment(db: db, router: router)),
-            size: CGSize(width: 1900, height: 540)
+            size: CGSize(width: 2200, height: 540)
         )
         mounts.append(mount)
         guard let hidden else { return try mount.capture() }
