@@ -12,6 +12,7 @@ public struct EpicTaskCount: Sendable, Equatable {
     }
 
     public var label: String {
+        if closed > 0, closed == total { return "\(closed) closed" }
         let tally = "\(done)/\(total - closed) done"
         return closed == 0 ? tally : "\(tally) · \(closed) closed"
     }

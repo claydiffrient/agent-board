@@ -796,7 +796,8 @@ public struct Board: Sendable {
     public static let closedLead = "Closed without being done."
 
     /// SPEC §5: retires a task nobody needs to finish. The task moves to `closed` with the reason on
-    /// the row and in a `progress` row; nothing else on the board, in git or on disk changes.
+    /// the row and in a `progress` row, and a pending spawn approval for it is denied; nothing else on
+    /// the board, in git or on disk changes.
     @discardableResult
     public func close(taskId: String, reason: String, by: BoardActor) throws -> TaskClosure {
         try db.writer.write { db in
@@ -806,6 +807,9 @@ public struct Board: Sendable {
                 throw BoardError.closeRefused(taskId: taskId, reason: refusal)
             }
             try TaskStore.close(db, taskId, reason: reason, by: by.described, at: .nowMillis)
+            if let approval = try ApprovalStore.pendingSpawn(db, taskId: taskId) {
+                _ = try ApprovalStore.resolve(db, approval.id, .denied)
+            }
             _ = try ProgressStore.append(
                 db, taskId: taskId, sessionId: nil, kind: .note,
                 text: "\(Self.closedLead) Closed by \(by.described) from \(task.column.rawValue): \(reason)"

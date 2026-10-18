@@ -219,7 +219,8 @@ and when, with the same **Reopen**. Nothing can be dragged into or out of
 Closed and the **Move to** menu leaves it out — only the orchestrator's
 `close_task` enters it, with a reason, and only Reopen leaves it. A closed card
 can be archived from its context menu like a done one; the toolbar's Archive
-button stays done-only. An epic lane's tally reads "2/3 done · 1 closed".
+button stays done-only. An epic lane's tally reads "2/3 done · 1 closed", or
+just "3 closed" when every task in it is closed.
 
 **Finished epics leave the board.** With Show Archived off, a `done` or
 `abandoned` epic whose tasks are all archived, or that has no tasks, gets no

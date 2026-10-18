@@ -302,7 +302,9 @@ nobody reviewed.
   §5.2's own path ends; and any task an active session holds, worker or
   rostered reviewer — stop it first. A stranded task in `running` with no live
   session can be closed. No spawn takes a closed task, and a session on one is
-  settled: `reconcile` and `SessionStart` never revive it (§7).
+  settled: `reconcile` and `SessionStart` never revive it (§7). A spawn
+  approval still waiting for the task is resolved `denied` in the same
+  transaction, so the human queue does not keep an item nobody can approve.
 
   Closing needs no human approval, with autonomy on or off. It deletes,
   publishes and spends nothing, a human reverses it in one click, and the card

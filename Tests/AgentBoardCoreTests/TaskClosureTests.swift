@@ -54,6 +54,9 @@ final class TaskClosureTests: XCTestCase {
     func testCloseThenReopenRestoresTheTaskAndKeepsTheReasonInItsHistory() throws {
         let f = try Fixture.make()
         let task = try f.task("obsolete", column: .ready)
+        guard case .approvalPending = try f.board.requestSpawn(taskId: task.id, requestedBy: "orch") else {
+            return XCTFail("autonomy is off, so a spawn should wait for approval")
+        }
 
         try f.board.close(taskId: task.id, reason: "Done in Paper", by: .orchestrator(sessionId: nil))
         let closed = try XCTUnwrap(f.tasks.get(task.id))
@@ -62,6 +65,7 @@ final class TaskClosureTests: XCTestCase {
         XCTAssertEqual(closed.closedBy, "the orchestrator")
         XCTAssertNotNil(closed.closedAt)
         XCTAssertNil(closed.landing)
+        XCTAssertNil(try ApprovalStore(f.db).pendingSpawn(taskId: task.id), "closing withdraws the waiting spawn")
         guard case .refused = try f.board.requestSpawn(taskId: task.id, requestedBy: "orch") else {
             return XCTFail("a closed task must not be spawnable")
         }
@@ -73,6 +77,11 @@ final class TaskClosureTests: XCTestCase {
         XCTAssertNil(reopened.closedAt)
         XCTAssertTrue(report.body.contains("Done in Paper"), report.body)
         XCTAssertTrue(try f.progress.list(taskId: task.id).contains { $0.text.contains("Done in Paper") })
+    }
+
+    func testALaneHeaderLeavesClosedTasksOutOfTheTallyAndDropsAnEmptyOne() {
+        XCTAssertEqual(EpicTaskCount(done: 1, total: 3, closed: 1).label, "1/2 done · 1 closed")
+        XCTAssertEqual(EpicTaskCount(done: 0, total: 2, closed: 2).label, "2 closed")
     }
 
     func testAnEpicWhoseOtherTasksAreDoneIsReadyForIntegrationOnlyWithOneDone() throws {
