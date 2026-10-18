@@ -53,9 +53,9 @@ final class NotesSearchRenderTests: XCTestCase {
         let mounted = try mount(Self.all, rows: 3)
         let unsearched = mounted.capture
         type("sweep", into: mounted.mount)
-        let searched = try mounted.mount.capture { _ in mounted.mount.rowCount == 1 }
+        let searched = try settledCapture(mounted.mount, rows: 1)
         type("", into: mounted.mount)
-        let cleared = try mounted.mount.capture { _ in mounted.mount.rowCount == 3 }
+        let cleared = try settledCapture(mounted.mount, rows: 3)
 
         let typed = Mounted(mount: mounted.mount, capture: searched, searchBarBottom: mounted.searchBarBottom)
         XCTAssertEqual(belowSearchBar(typed, try mount([Self.sweep], rows: 1)).count, 0)
@@ -109,18 +109,43 @@ final class NotesSearchRenderTests: XCTestCase {
         let mount = OffscreenMount(NotesView(project: project).environment(renderEnvironment(db: db)))
         mounts.append(mount)
         mount.window.layoutIfNeeded()
-        try waitForRows(notes.count, in: mount)
+        // Typed before the notes ever arrive, so the List's first real content is already the
+        // filtered set: `runSearch` queries the database directly, not `notes.value`, so it finds
+        // the right matches even while the list is still empty. Typing only after the unfiltered
+        // rows had already settled (the previous order here) made the List remove a row live —
+        // an animated transition whose tail a capture can settle on early, mismatching a mount that
+        // was never animated at all. Filtering from the first paint means every mount in this file
+        // only ever inserts rows, never removes one, so there is no transition left to race.
         if !query.isEmpty { type(query, into: mount) }
+        try waitForRows(rows, in: mount)
         let field = try searchField(in: mount)
         let frame = field.convert(field.bounds, to: nil)
         return Mounted(
-            mount: mount, capture: try mount.capture { _ in mount.rowCount == rows },
+            mount: mount, capture: try settledCapture(mount, rows: rows),
             searchBarBottom: mount.window.frame.height - frame.minY + 12
         )
     }
 
-    /// The notes arrive by `ValueObservation` after the window is up; typing before they do would
-    /// search an empty list.
+    /// `OffscreenMount.capture` forces exactly one fresh window-server surface (`demandAFreshSurface`,
+    /// a resize) before polling for pixel stability, then trusts whatever it settles on. That one
+    /// refresh is measured elsewhere in this suite to reliably show the window's state at the moment
+    /// it fires — but nothing calls it again afterward, so a capture that locks onto a stale-but-
+    /// self-consistent surface (the window server simply never recomposited again) reads as settled
+    /// pixel-for-pixel while never matching what `rowCount` already confirms the real AppKit tree
+    /// shows. A second, independent `capture()` call forces its own fresh resize at a strictly later
+    /// moment; requiring it to agree with the first catches that gap without touching the shared
+    /// helper every other render-test file also depends on.
+    private func settledCapture(_ mount: OffscreenMount, rows: Int) throws -> Capture {
+        var last = try mount.capture { _ in mount.rowCount == rows }
+        for _ in 0..<3 {
+            let next = try mount.capture { _ in mount.rowCount == rows }
+            if last.diff(next, columns: 0..<last.width).count == 0 { return next }
+            last = next
+        }
+        XCTFail("two independent captures of the same settled list never agreed")
+        return last
+    }
+
     private func waitForRows(_ count: Int, in mount: OffscreenMount) throws {
         let clock = SuspendingClock()
         let deadline = clock.now.advanced(by: .seconds(10))
