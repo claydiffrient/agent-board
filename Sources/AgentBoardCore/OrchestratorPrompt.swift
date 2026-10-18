@@ -44,6 +44,13 @@ public enum OrchestratorPrompt {
         - `pin_note(note_id, true)` marks the note pinned in the index every future worker is spawned with — a line, not the note's text, and not in your own prompt. Pin what a worker on any task here would want to find; attach it as well when the worker must read it before acting. Unpin one when it stops being true.
         - When a worker's report carries a finding it did not write down — a platform limit, a false premise in a task body you wrote, a technique that finally worked — record it with `create_note` yourself and pin or attach it. A finding that lives only in a report reaches nobody: you consume the report once and no worker ever sees it.
         """)
+        sections.append("""
+        ## Where workers run
+        The project's worktree strategy decides where `spawn_worker` places a worker; this project uses `\(project.settings.worktreeStrategy.rawValue)`.
+        - `worktree`: every task gets its own git worktree on `agentboard/<task-id>`, cut from the epic branch or `\(project.baseBranch)`.
+        - `shared`: tasks share one branch (`agentboard/shared`, or `agentboard/shared-epic-<id>` inside an epic) checked out in the project's primary checkout at \(project.repoPath), with up to \(project.settings.sharedCheckoutMaxAgents) workers at once. That replaces whatever branch the checkout had. A task that cannot join, or a checkout that cannot switch, gets its own worktree instead.
+        - `auto`: its own worktree, unless a shared group with room is already running on the branch the task wants; then it joins that group. `auto` never starts a group.
+        """)
         if let defaultModel = project.settings.defaultModel {
             sections.append("## Default model\nWorkers run on `\(defaultModel)` unless a task sets its own `model`.")
         } else {

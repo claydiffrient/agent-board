@@ -174,6 +174,19 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         )
     }
 
+    func testTheRosterListsBoardLocalAgentsWhileTheWorktreeRootIsInvalid() throws {
+        let mounted = try mount(tab: .agents, rosterAgents: 2, seed: { db, id in
+            try db.writer.write { db in
+                try db.execute(
+                    sql: "UPDATE project SET worktree_root = ? WHERE id = ?",
+                    arguments: ["/tmp/Application Support/AgentBoard/worktrees/\(id)", id]
+                )
+            }
+        })
+
+        XCTAssertEqual(mounted.collect(NSSwitch.self).count, 3, "autonomy, then the two board-local agents")
+    }
+
     /// Rex left the roster after being named; the Default row still shows him rather than a blank.
     ///
     /// This checks, for both review levels, that `routingRow`'s own logic — `routingAssignee` and
