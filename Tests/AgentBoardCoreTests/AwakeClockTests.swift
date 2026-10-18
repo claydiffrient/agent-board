@@ -28,13 +28,19 @@ final class AwakeClockTests: XCTestCase {
     // MARK: - CLOCK_UPTIME_RAW on this machine
 
     /// The claim the whole fix rests on, checked against the real clocks rather than taken on
-    /// faith: `CLOCK_UPTIME_RAW` never runs ahead of a clock that counts through a suspend, and it
-    /// cannot exceed the wall time since boot. On a machine that has slept it is strictly behind
-    /// both, and the gap is printed so a run on a never-slept machine is still legible.
+    /// faith: `CLOCK_UPTIME_RAW` never runs ahead of `CLOCK_MONOTONIC_RAW` — they share a tick
+    /// source, so the comparison holds exactly even on a boot that hasn't slept, unlike
+    /// `CLOCK_MONOTONIC` (NTP-corrected) which the raw clocks can drift several seconds ahead of
+    /// within hours. On a machine that has slept, `uptime` is strictly behind, and the gap is
+    /// printed so a run on a never-slept machine is still legible.
     func testUptimeRawDoesNotCountSystemSleep() {
         var monotonic = timespec()
         clock_gettime(CLOCK_MONOTONIC, &monotonic)
         let monotonicSeconds = TimeInterval(monotonic.tv_sec) + TimeInterval(monotonic.tv_nsec) / 1_000_000_000
+
+        var monotonicRaw = timespec()
+        clock_gettime(CLOCK_MONOTONIC_RAW, &monotonicRaw)
+        let monotonicRawSeconds = TimeInterval(monotonicRaw.tv_sec) + TimeInterval(monotonicRaw.tv_nsec) / 1_000_000_000
 
         var boot = timeval()
         var size = MemoryLayout<timeval>.size
@@ -43,12 +49,11 @@ final class AwakeClockTests: XCTestCase {
 
         let uptime = DarwinClock().uptimeSeconds
         XCTAssertGreaterThan(uptime, 0)
-        XCTAssertLessThanOrEqual(uptime, monotonicSeconds + 1)
-        XCTAssertLessThanOrEqual(uptime, wallSinceBoot + 1)
+        XCTAssertLessThanOrEqual(uptime, monotonicRawSeconds)
         print(
             "PROBE clocks: wall-since-boot \(Int(wallSinceBoot))s, CLOCK_MONOTONIC "
-            + "\(Int(monotonicSeconds))s, CLOCK_UPTIME_RAW \(Int(uptime))s, "
-            + "slept \(Int(monotonicSeconds - uptime))s"
+            + "\(Int(monotonicSeconds))s, CLOCK_MONOTONIC_RAW \(Int(monotonicRawSeconds))s, "
+            + "CLOCK_UPTIME_RAW \(Int(uptime))s, slept \(Int(monotonicRawSeconds - uptime))s"
         )
     }
 
