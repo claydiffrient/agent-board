@@ -446,6 +446,45 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(payload["cwd"], repo.path)
     }
 
+    /// SPEC §3.1 "Removing a worktree": with no hook set, removal is never forced.
+    func testWithNoTeardownHookADirtyWorktreeIsStillRefused() throws {
+        let path = try manager.create(name: "dirty", branch: "agentboard/dirty", base: "main")
+        try "line\n".write(to: path.appendingPathComponent("stray.txt"), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try manager.remove(path: path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.appendingPathComponent("stray.txt").path))
+    }
+
+    /// SPEC §3.1 "Removing a worktree": a failing hook that also dirties the worktree still cannot keep it.
+    func testAFailingTeardownHookIsReportedAndTheWorktreeStillGoes() throws {
+        let path = try manager.create(name: "torn", branch: "agentboard/torn", base: "main")
+        manager.teardown = WorktreeTeardownCommand(command: "touch stray.txt; echo boom; exit 7")
+
+        let report = try manager.remove(path: path)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        let failure = try XCTUnwrap(report.teardownFailure)
+        XCTAssertTrue(failure.contains("exited 7"), failure)
+        XCTAssertTrue(failure.contains("boom"), failure)
+    }
+
+    func testATimedOutTeardownHookIsKilledWithItsProcessGroupAndTheWorktreeStillGoes() throws {
+        let path = try manager.create(name: "slow", branch: "agentboard/slow", base: "main")
+        let pidFile = sandbox.appendingPathComponent("grandchild.pid")
+        manager.teardown = WorktreeTeardownCommand(
+            command: "sleep 60 & echo $! > '\(pidFile.path)'; wait", timeoutSeconds: 1
+        )
+
+        let report = try manager.remove(path: path)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        XCTAssertTrue(try XCTUnwrap(report.teardownFailure).contains("did not finish within 1s"))
+        let pid = try XCTUnwrap(pid_t(String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        let deadline = Date().addingTimeInterval(5)
+        while kill(pid, 0) == 0, Date() < deadline { usleep(50_000) }
+        XCTAssertNotEqual(kill(pid, 0), 0, "the hook's background child outlived the timeout")
+    }
+
     func testMissingHookSettingsRunsNoHooks() throws {
         XCTAssertEqual(WorktreeManager.worktreeRemoveHooks(settingsAt: sandbox.appendingPathComponent("nope.json")), [])
         let path = try manager.create(name: "plain", branch: "agentboard/plain", base: "main")

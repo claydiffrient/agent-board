@@ -118,6 +118,7 @@ final class StubSupervisor: WorkerSupervising {
     func pauseAll(projectId: String) async throws { throw StubError.notWired }
     func accept(taskId: String) async throws { throw StubError.notWired }
     func reopen(taskId: String) async throws { throw StubError.notWired }
+    func rerunReview(taskId: String) async throws { throw StubError.notWired }
     func discard(taskId: String) async throws { throw StubError.notWired }
     func reconcile(projectId: String) async {}
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? { nil }
@@ -134,6 +135,8 @@ final class StubSupervisor: WorkerSupervising {
     func requestIntegration(epicId: String) async throws { throw StubError.notWired }
     func epicClosurePlan(epicId: String, as closure: EpicClosure) throws -> EpicClosurePlan { throw StubError.notWired }
     func closeEpic(epicId: String, as closure: EpicClosure) async throws { throw StubError.notWired }
+    func heldWorktrees(epicId: String) throws -> [HeldWorktree] { [] }
+    func removeEpicWorktrees(epicId: String) async throws { throw StubError.notWired }
     func openPullRequest(epicId: String) async throws -> PullRequestOutcome { throw StubError.notWired }
     func requestShutdown(projectId: String, requestedBy: String, reason: String?) async throws -> ShutdownOrder {
         throw StubError.notWired

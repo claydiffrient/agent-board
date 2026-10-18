@@ -419,6 +419,14 @@ public struct Board: Sendable {
             try FileLockStore.releaseAll(db, sessionId: sessionId)
             if let mergedEpicId {
                 try EpicStore.setState(db, mergedEpicId, .done)
+                // SPEC §5.2: accepting the integration task removes its own checkout and reports what it keeps.
+                let held = try Self.heldWorktrees(db, epicId: mergedEpicId).filter { sweepsOnMerge || !$0.isIntegration }
+                if let held = HeldWorktree.paragraph(held), let epic = try Epic.fetchOne(db, key: mergedEpicId) {
+                    _ = try ReportStore.insert(
+                        db, projectId: task.projectId, taskId: nil, sessionId: nil, kind: .decision,
+                        body: "Epic \(epic.id) (\(epic.title)) is done.\n\n" + held
+                    )
+                }
                 if sweepsOnMerge {
                     _ = try ArchiveSweep.archiveEpic(db, epicId: mergedEpicId, at: .nowMillis)
                 }
@@ -700,6 +708,29 @@ public struct Board: Sendable {
     }
 
     public static let reviewerStalledLead = "Reviewer stopped without a verdict."
+    public static let reviewerRemindedLead = "Reviewer's turn ended without a verdict."
+
+    /// SPEC §5.1: the first verdict-less end of a reviewer's turn is answered by continuing it once
+    /// with `ReviewPrompt.verdictOwed`. True when that reminder is owed now; the `status` row it
+    /// writes is what makes it once per session.
+    public func remindReviewerOfVerdict(taskId: String, sessionId: String) throws -> Bool {
+        try db.writer.write { db in
+            guard let task = try Task.fetchOne(db, key: taskId), task.column == .review,
+                  let session = try AgentSession.fetchOne(db, key: sessionId), session.state.isActive
+            else { return false }
+            let reminded = try Bool.fetchOne(
+                db,
+                sql: "SELECT EXISTS(SELECT 1 FROM progress WHERE task_id = ? AND session_id = ? AND text GLOB ?)",
+                arguments: [taskId, sessionId, Self.reviewerRemindedLead + "*"]
+            ) ?? false
+            guard !reminded else { return false }
+            _ = try ProgressStore.append(
+                db, taskId: taskId, sessionId: sessionId, kind: .status,
+                text: "\(Self.reviewerRemindedLead) Agent Board asked it once to finish with accept_task or reopen_task."
+            )
+            return true
+        }
+    }
 
     /// SPEC §5.1: a reviewer's turn ended with its task still in `review`. Nothing accepts the task;
     /// one `blocked` report per reviewer session tells the orchestrator. Nil when the task has left
@@ -817,13 +848,18 @@ public struct Board: Sendable {
 
     /// Deletes the task and leaves a `decision` report behind, so an orchestrator holding the id
     /// learns it is gone rather than dispatching it.
+    /// `cleanup` is what removing its worktrees could not do (SPEC §5); the task's progress goes
+    /// with the task, so the report is the only place it is kept.
     @discardableResult
-    public func discard(taskId: String) throws -> Report {
+    public func discard(taskId: String, cleanup: [String] = []) throws -> Report {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
+            var body = "Task \(taskId) (\(task.title)) was discarded by a human and removed from the board. Do not dispatch it."
+            if !cleanup.isEmpty {
+                body += "\n\n\(Self.worktreeCleanupLead)\n" + cleanup.map { "- \($0)" }.joined(separator: "\n")
+            }
             let report = try ReportStore.insert(
-                db, projectId: task.projectId, taskId: nil, sessionId: nil, kind: .decision,
-                body: "Task \(taskId) (\(task.title)) was discarded by a human and removed from the board. Do not dispatch it."
+                db, projectId: task.projectId, taskId: nil, sessionId: nil, kind: .decision, body: body
             )
             try TaskStore.delete(db, taskId)
             return report
@@ -1295,6 +1331,9 @@ public struct Board: Sendable {
                     "If any of that work still matters, take it out of the epic with "
                         + "set_epic(task_id) and no epic_id, and it stands alone on the board."
                 )
+            }
+            if let held = HeldWorktree.paragraph(try Self.heldWorktrees(db, epicId: epicId)) {
+                lines.append(held)
             }
             lines.append("Closed by: \(by.recorded)")
             return try ReportStore.insert(

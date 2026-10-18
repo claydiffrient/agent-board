@@ -101,7 +101,7 @@ of orchestrator scope: it is the authority to move one named task out of
 
 | Tool | Effect |
 |---|---|
-| `get_my_task()` | The task under review and its comment thread. No report and no `progress` rows (§5.1) |
+| `get_my_task()` | The task under review and its comment thread. No report and no `progress` rows (§5.1): the report is withheld on purpose, and the tool's description tells the reviewer never to file a finding about what the worker did or did not disclose |
 | `log_progress(text)` | Appends to `progress` |
 | `add_comment(body)` | Appends to the task's comment thread as `reviewer`, named from the roster. Touches no file, so it never trips the checkout check |
 | `accept_task(verdict)` | Writes the verdict to `progress`, then runs the ordinary acceptance (§5.1). Refused, with the task left in `review`, if the reviewer changed its checkout |

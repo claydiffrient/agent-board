@@ -90,7 +90,12 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
    shows its type pill beside that line. While a
    reviewer is live, Accept and Reopen ask first ("Rita is reviewing this task.
    Accepting now stops Rita's review."), because either one stops the reviewer
-   (§5).
+   (§5). A row whose reviewer stopped without a verdict also offers **Re-run
+   review** between them: it stops that reviewer's session and starts a fresh
+   one from the same roster agent on the same task, which stays in `review`
+   (`WorkerSupervising.rerunReview`). Reopen stays, but it sends finished work
+   back to `ready` as a redo, so it is no longer the only way out of a stalled
+   review.
 4. **Proposals** — worker-proposed tasks awaiting promotion.
 5. **Messages** — every §9.3 message this project sent or received, newest
    first, bold until the receiving orchestrator pulls it. Each row deletes on
@@ -280,6 +285,11 @@ written, the specific leftover tasks and their columns, that they stay put, and
 that the branches and worktrees survive. Its copy and the write's guards read
 the same `EpicClosurePlan` (`AgentBoardCore.EpicClosure`, unit-tested apart
 from SwiftUI), so the dialog cannot promise something `Board.closeEpic` refuses.
+
+Once an epic is `done` or `abandoned` the same `…` menu offers **Remove
+worktrees…** instead (§5.2): its confirmation lists every worktree the epic and
+its integration task still have on disk, or says none is, and removing runs the
+project's teardown hook in each (§3.1). No branch is deleted.
 
 Closing is **refused**, not forced, while any session in the epic is still
 active — the integrator's included, since it is bound to a synthetic task inside
@@ -510,8 +520,8 @@ vanished entirely would leave nobody to ask about a port that appeared since.
 
 **Project settings** — a sheet from the sidebar row's gear, in six tabs:
 **General** (Repository, Workspace, Archive), **Agents** (Models, Review,
-Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Isolation,
-Publishing), **Notifications**, and **Advanced** (the `autoMode` classifier JSON,
+Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Worktree
+teardown, Isolation, Publishing), **Notifications**, and **Advanced** (the `autoMode` classifier JSON,
 Extra MCP servers). Tabs group by what a setting governs, not by how often it is
 touched. Every section is in exactly one tab; a section in none would be a stored
 setting with no UI. **Delete Project…** sits outside the tabs, at the left of the

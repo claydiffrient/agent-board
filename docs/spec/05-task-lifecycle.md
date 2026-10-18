@@ -105,14 +105,31 @@ nobody reviewed.
   does not block the decision; only an agent still listed as live that refuses
   to stop aborts the accept or reopen before anything is written. The accept
   then lands the task's branch, below, and only after that is every attempt's
-  worktree removed (firing the
-  existing `WorktreeRemove` hook, which reclaims Bazel `output_base` on
-  Derivita), with `agentboard/<task-id>` deleted once it is merged into the
-  base or epic branch. An unmerged branch, or a worktree with uncommitted
-  changes, is kept and the reason surfaced in the status bar. Landing comes
+  worktree removed, running the project's teardown hook first (§3.1, "Removing
+  a worktree") and then any `WorktreeRemove` hook in `~/.claude/settings.json`,
+  with `agentboard/<task-id>` deleted once it is merged into the
+  base or epic branch. An unmerged branch is kept and the reason surfaced in
+  the status bar. Landing comes
   first because removing a large worktree can take over a minute, and until the
   merge runs a dependent cut from the target branch lacks this work. A member of
   a shared branch has no worktree to remove, so its teardown still runs first.
+
+  A worktree with uncommitted changes is kept — the teardown hook does not run
+  in it — and so is one git refuses to remove. Whenever that happens, for any
+  reason, or a teardown hook fails or times out, the acceptance's `decision`
+  report says so under **Worktree cleanup:**, naming the worktree and, for a
+  dirty one, its uncommitted paths (the first 20, then a count), so the
+  orchestrator can act on a leftover like a `yarn.lock` its setup wrote. The
+  same lines go on the task's progress. With a teardown hook set, the removal
+  runs after the accept returns rather than inside it — the hook may run for
+  minutes and the accept may be answering an MCP call (`report_complete` under
+  a no-review level, a rostered reviewer's `accept_task`), which Claude Code
+  abandons after 60 seconds. Its findings are appended to the acceptance
+  report while the orchestrator has not read it, and otherwise queued as a
+  `decision` report of their own. With no hook, the removal runs inside the
+  accept, as it always has. Discarding a task removes its worktrees the same
+  way before the task is deleted; the task's progress goes with it, so its
+  findings are kept only in the discard's `decision` report.
 
   The merge takes the task's branch into the branch meant to carry it:
   `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling
@@ -308,7 +325,15 @@ nobody reviewed.
 
 Reconcile also reaps worktrees under the project's worktree root that no active
 session owns, and deletes merged `agentboard/*` branches that no longer have a
-worktree. Anything dirty or unmerged is left alone and reported. Epic
+worktree. Anything dirty or unmerged is left alone and reported. The teardown
+hook runs before each removal (§3.1); a failure goes on the progress of the
+task whose session held the worktree, in a `decision` report of its own, since
+no other report marks the removal. A kept orphan stays a status-bar notice:
+the reaper finds it again on every pass. With a hook set, the removals run in
+the background after `reconcile` has decided what to remove, so a pass that
+finds orphans returns at once instead of waiting up to the hook timeout for
+each; the next pass skips whatever is still being removed (§3.1, "A hook runs
+at most once"). Epic
 integration worktrees and `agentboard/epic-*` branches are out of scope. So is
 a shared branch (`agentboard/shared*`): it has no worktree under this reaping
 either way, and it is deleted only by acceptance finding it fully accepted and
@@ -396,11 +421,31 @@ task is the point: a person reading a task that reached `done` without them can
 see who approved it and why.
 
 A reviewer whose turn ends (its `Stop` hook) with the task still in `review` gave
-no verdict. Nothing accepts the task: its Pending reviews row reads `<reviewer>
-stopped without a verdict` (§10), and one `blocked` report per reviewer session
-tells the orchestrator. The session is left idle, not stopped, because a turn can
-end while a build the reviewer started in the background still runs; the
-orchestrator can message it or `stop_worker` it.
+no verdict. The first time that happens in a reviewer session, the hook answers
+with `hookSpecificOutput.additionalContext` carrying `ReviewPrompt.verdictOwed`,
+which continues the turn: give the verdict now, read whatever a background
+command has written instead of waiting for it, and name what did not finish.
+A `status` row headed "Reviewer's turn ended without a verdict." records the
+reminder and makes it once per session (`Board.remindReviewerOfVerdict`). If the
+turn ends again with no verdict, nothing accepts the task: its Pending reviews
+row reads `<reviewer> stopped without a verdict` (§10), and one `blocked` report
+per reviewer session tells the orchestrator. The session is left idle, not
+stopped; the orchestrator can message it or `stop_worker` it, and the human can
+Accept, Re-run review or Reopen from the row.
+
+Every missing verdict measured before the reminder existed had one cause. Seven
+reviews between 2026-09-29 and 2026-10-08 each ended on a text-only "still
+waiting on the tests" message while a `swift test` ran in the background: started with
+`run_in_background`, or a foreground run that outlasted the Bash timeout (120 s
+default, 600 s maximum) and was moved to the background, after which the
+reviewer waited with `ScheduleWakeup`, a `Monitor` or `sleep`. A full run of this
+suite outlasts the 600 s ceiling, so "run it in the foreground" alone cannot
+hold a full run in one tool call. `ReviewPrompt` therefore tells the reviewer to
+run builds and tests in the foreground, filtered to the suites that cover the
+diff and never the whole suite, never to wait on a backgrounded command, and to
+give the verdict and name what did not finish when a check cannot finish; the
+reviewer's `--disallowedTools` also denies `ScheduleWakeup`, `Monitor` and
+`CronCreate`.
 
 A session that ends on a task already in `done`, or back in `ready` with a
 reviewer's findings or with no other session on it, left nothing unfinished:
@@ -436,7 +481,11 @@ A reviewer's inputs are the task — title, body, acceptance criteria and its
 comment thread — and the diff on the task's branch. Nothing else: not the
 worker's report, not the task's `progress` rows (the worker's own notes and any
 hand-off summary), not project notes, not the board database. It checks the
-worker's claims by reading and running the code. `ReviewPrompt` says so; its
+worker's claims by reading and running the code. The report is withheld on
+purpose, so the review does not lean on the worker's own account; because the
+reviewer cannot see what the report disclosed, `ReviewPrompt` and the reviewer's
+`get_my_task` description tell it never to file a finding about what the worker
+did or did not disclose. `ReviewPrompt` says so; its
 `get_my_task` returns the task and its comments and nothing from `report` or
 `progress`; its scope has no note tools, and `NoteResourceHandler` lists no
 `note://` resource to a `reviewer` token and refuses to read one.
@@ -630,3 +679,27 @@ than one that is finished; they merge nothing and are not part of this sequence.
    workflow and the approval is already a human gate; the approval row names
    how many tasks are unfinished, so the mistake is visible to the person
    deciding rather than pre-empted for them.
+
+**Worktrees a closed epic leaves behind.** Nothing reaps an epic's integration
+worktree (`<worktree-root>/epic-<epic-id>`, on the epic branch), and a task
+worktree kept for uncommitted changes stays where it is. Once an epic is
+`done` or `abandoned` nothing will push from its branch again, so whatever is
+still on disk for it is a leak: on Derivita, an integration worktree whose work
+moved to another epic held an 11.5 GB output base. `Board.heldWorktrees`
+lists them: every recorded `worktree_path` of a session on a task in the epic,
+its integration task included, plus the epic's integration checkout, each kept
+only while the directory exists and never the project's own checkout. The
+`decision` report `close_epic` and the lane's close write, the one the
+merge check writes when the epic's pull request merges, and the one an
+integration task's `report_complete` writes when it takes the epic to `done`
+by direct merge, list them with their paths and owning tasks. That last report
+leaves out the integration checkout while the integration task goes to
+`review`, because accepting it removes that checkout and reports anything it
+keeps; under `afterEpicMerge` the task is archived instead of accepted, so the
+checkout is listed. `get_epic` returns them as `held_worktrees` for a
+`done` or `abandoned` epic. The human removes them with **Remove worktrees** on
+the epic lane's menu (§10): each goes through `WorktreeManager.remove`, so the
+teardown hook runs first. One a live session holds, or one with uncommitted
+changes, is kept and named; no branch is deleted. A `decision` report lists
+what was removed and what was not, and each finding also goes on its task's
+progress.

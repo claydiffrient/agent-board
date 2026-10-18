@@ -9,7 +9,7 @@ Generated into each managed session's `--settings`. All post to
 | `PreToolUse` (matcher `Bash`) | Deny `git push`, `gh pr create`, `gh pr merge`; append an `error` progress row (§8) |
 | `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row; reply with a worker's post-compaction brief or queued human comments as `additionalContext` |
 | `Notification` | Set `blocked` + reason on the task and session; the task appears in the orchestrator's **Blocked** section (§10) and raises the project's attention signal, which posts the banner |
-| `Stop` | Mark session idle. **On the orchestrator, this is the trigger for the report notice** (§9) |
+| `Stop` | Mark session idle. **On the orchestrator, this is the trigger for the report notice** (§9). On a reviewer whose task is still in `review`, the first one in the session replies with `additionalContext` asking for the verdict, which continues the turn; a later one raises "Reviewer stopped without a verdict" (§5.1) |
 | `SessionEnd` | Mark stopped/completed; reconcile final spend from the transcript |
 | `WorktreeRemove` | Chain to the user's existing hook, then clear the worktree row |
 
