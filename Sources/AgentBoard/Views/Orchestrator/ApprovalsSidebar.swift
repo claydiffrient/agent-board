@@ -82,7 +82,8 @@ struct ApprovalsSidebar: View {
                             roster: roster.value,
                             now: now,
                             accept: { run { try await env.supervisor.accept(taskId: task.id) } },
-                            reopen: { run { try await env.supervisor.reopen(taskId: task.id) } }
+                            reopen: { run { try await env.supervisor.reopen(taskId: task.id) } },
+                            rerunReview: { run { try await env.supervisor.rerunReview(taskId: task.id) } }
                         )
                     }
                 }
@@ -351,6 +352,7 @@ private struct ReviewRow: View {
     let now: Date
     let accept: () -> Void
     let reopen: () -> Void
+    let rerunReview: () -> Void
 
     @Environment(AppEnvironment.self) private var env
     @State private var changes: DiffSummary?
@@ -400,6 +402,9 @@ private struct ReviewRow: View {
             HStack {
                 Button("Accept") { decide(.accept) }
                     .buttonStyle(.borderedProminent)
+                if hold.endedWithoutVerdict {
+                    Button("Re-run review", action: rerunReview)
+                }
                 Button("Reopen") { decide(.reopen) }
             }
             .controlSize(.small)

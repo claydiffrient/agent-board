@@ -14,6 +14,7 @@ enum SupervisorError: LocalizedError {
     case sessionNotFound(String)
     case sessionHasNoShortId(String)
     case taskNotAssignable(title: String, column: TaskColumn)
+    case noReviewToRerun(title: String)
     case capRefused(String)
     case taskAlreadyHeld(title: String, sessionId: String)
     case worktreeAlreadyHeld(path: String, sessionId: String)
@@ -41,6 +42,8 @@ enum SupervisorError: LocalizedError {
         case .sessionNotFound(let id): return "session \(id) not found"
         case .sessionHasNoShortId(let id): return "session \(id) has no claude short id yet; reconcile first"
         case .taskNotAssignable(let title, let column): return "\"\(title)\" is in \(column.rawValue) and cannot be assigned"
+        case .noReviewToRerun(let title):
+            return "\"\(title)\" is not in review with a rostered reviewer, so there is no review to re-run"
         case .capRefused(let reason): return "spawn refused: \(reason)"
         case .taskAlreadyHeld(let title, let sessionId):
             return "\"\(title)\" is still held by session \(sessionId); a second agent would share its worktree"
@@ -1607,6 +1610,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             try await stopLiveSessions(onTask: taskId, by: .human)
             let report = try board.reopen(taskId: taskId)
             report.projectId.map { announceReports(projectId: $0) }
+        }
+    }
+
+    func rerunReview(taskId: String) async throws {
+        try await recording {
+            guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
+            guard task.column == .review, let reviewerId = task.reviewerAgentId else {
+                throw SupervisorError.noReviewToRerun(title: task.title)
+            }
+            try await stopLiveSessions(onTask: taskId, by: .human)
+            _ = try await spawn(taskId: taskId, rosterAgentId: reviewerId, scope: .reviewer)
         }
     }
 

@@ -227,6 +227,7 @@ final class RenderStubSupervisor: WorkerSupervising {
     func pauseAll(projectId: String) async throws {}
     func accept(taskId: String) async throws {}
     func reopen(taskId: String) async throws {}
+    func rerunReview(taskId: String) async throws {}
     func discard(taskId: String) async throws {}
     func reconcile(projectId: String) async {}
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? { nil }

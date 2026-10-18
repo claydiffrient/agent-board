@@ -21,6 +21,9 @@ protocol WorkerSupervising: AnyObject {
     /// and the task branch deleted once it is merged into the base or epic branch.
     func accept(taskId: String) async throws
     func reopen(taskId: String) async throws
+    /// Stops the task's reviewer session and starts a fresh one from the same roster agent; the task
+    /// stays in `review` (SPEC §10, Pending reviews).
+    func rerunReview(taskId: String) async throws
     /// Stops any active worker, removes every attempt's worktree, deletes the task and its progress.
     /// The branch survives unless it is already merged.
     func discard(taskId: String) async throws

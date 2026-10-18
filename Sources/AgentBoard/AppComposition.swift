@@ -118,6 +118,7 @@ final class StubSupervisor: WorkerSupervising {
     func pauseAll(projectId: String) async throws { throw StubError.notWired }
     func accept(taskId: String) async throws { throw StubError.notWired }
     func reopen(taskId: String) async throws { throw StubError.notWired }
+    func rerunReview(taskId: String) async throws { throw StubError.notWired }
     func discard(taskId: String) async throws { throw StubError.notWired }
     func reconcile(projectId: String) async {}
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? { nil }
