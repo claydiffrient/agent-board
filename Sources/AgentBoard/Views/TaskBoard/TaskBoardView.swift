@@ -19,6 +19,7 @@ struct TaskBoardView: View {
     @State private var errorMessage: String?
     @State private var taskPendingDelete: BoardTask?
     @State private var closurePlan: EpicClosurePlan?
+    @State private var worktreeRemoval: EpicWorktreeRemoval?
     @State private var drafts = TaskDraftCache()
     @State private var collapseChoices: [String: Bool] = [:]
     @State private var showArchived = false
@@ -286,6 +287,7 @@ struct TaskBoardView: View {
         .background(deleteConfirmation)
         .background(archiveConfirmation)
         .background(closeEpicConfirmation)
+        .background(worktreeRemovalConfirmation)
         .overlay {
             if let busyMessage {
                 ZStack {
@@ -466,7 +468,8 @@ struct TaskBoardView: View {
                     onArchive: { archiveDoneTasks(epic) },
                     onRequestIntegration: { requestIntegration(epic) },
                     onOpenPullRequest: { openPullRequest(epic) },
-                    onClose: { planClosure(epic, as: $0) }
+                    onClose: { planClosure(epic, as: $0) },
+                    onRemoveWorktrees: { planWorktreeRemoval(epic) }
                 )
             } else if layout.lanes.count > 1 {
                 Text(lane.title)
@@ -633,6 +636,36 @@ struct TaskBoardView: View {
                 }
             } message: { plan in
                 Text(plan.message)
+            }
+    }
+
+    private func planWorktreeRemoval(_ epic: Epic) {
+        do {
+            worktreeRemoval = EpicWorktreeRemoval(
+                epicId: epic.id, epicTitle: epic.title, held: try env.supervisor.heldWorktrees(epicId: epic.id)
+            )
+        } catch {
+            errorMessage = errorText(error)
+        }
+    }
+
+    private var worktreeRemovalConfirmation: some View {
+        EmptyView()
+            .confirmationDialog(
+                worktreeRemoval?.title ?? "",
+                isPresented: Binding(get: { worktreeRemoval != nil }, set: { if !$0 { worktreeRemoval = nil } }),
+                titleVisibility: .visible,
+                presenting: worktreeRemoval
+            ) { removal in
+                if !removal.held.isEmpty {
+                    Button("Remove worktrees", role: .destructive) {
+                        runSupervised("Removing worktrees…") {
+                            try await env.supervisor.removeEpicWorktrees(epicId: removal.epicId)
+                        }
+                    }
+                }
+            } message: { removal in
+                Text(removal.message)
             }
     }
 

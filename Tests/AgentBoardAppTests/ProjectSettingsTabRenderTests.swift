@@ -440,18 +440,24 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         XCTAssertTrue(mounted.collect(NSTextView.self).isEmpty)
     }
 
-    func testWorkflowHoldsCommandsStrategyAndBranchTemplate() throws {
+    func testWorkflowHoldsCommandsTeardownStrategyAndBranchTemplate() throws {
         let mounted = try mount(tab: .workflow) {
             $0.buildCommand = "make"
+            $0.worktreeTeardownCommand = "make clean"
+            $0.worktreeTeardownTimeoutSeconds = 90
             $0.worktreeStrategy = .shared
             $0.sharedCheckoutMaxAgents = 5
             $0.standaloneIntegration = .localMerge
         }
 
-        XCTAssertEqual(mounted.fields.map(\.stringValue), ["make", "", "5", ""])
+        XCTAssertEqual(mounted.fields.map(\.stringValue), ["make", "", "make clean", "90", "5", ""])
         XCTAssertEqual(
             mounted.fields.map(\.placeholderString),
-            ["e.g. swift build", "e.g. swift test", nil, "e.g. clay/{slug}"]
+            [
+                "e.g. swift build", "e.g. swift test",
+                "e.g. [ \"$(bazel info workspace)\" = \"$PWD\" ] && bazel clean --expunge", nil, nil,
+                "e.g. clay/{slug}",
+            ]
         )
 
         let sheet = try seededSheet(tab: .workflow) {

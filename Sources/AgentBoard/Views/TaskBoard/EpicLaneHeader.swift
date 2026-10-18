@@ -13,12 +13,13 @@ struct EpicLaneHeader: View {
     let onRequestIntegration: () -> Void
     let onOpenPullRequest: () -> Void
     let onClose: (EpicClosure) -> Void
+    let onRemoveWorktrees: () -> Void
 
     private var actions: [EpicLaneAction] {
         EpicLane.actions(state: epic.state, readyForIntegration: count.readyForIntegration)
     }
 
-    private var closures: [EpicClosure] { actions.compactMap(\.closure) }
+    private var menuActions: [EpicLaneAction] { actions.filter(\.isInMenu) }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -43,7 +44,7 @@ struct EpicLaneHeader: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Capsule().fill(Color.secondary.opacity(0.2)))
-            ForEach(actions.filter { $0.closure == nil }, id: \.self) { action in
+            ForEach(actions.filter { !$0.isInMenu }, id: \.self) { action in
                 button(action)
             }
             if archivable > 0 {
@@ -51,10 +52,14 @@ struct EpicLaneHeader: View {
                     .controlSize(.small)
                     .help("Hide this epic's done tasks from the board. Nothing is deleted; with all of them archived the lane leaves the board until Show Archived is on.")
             }
-            if !closures.isEmpty {
+            if !menuActions.isEmpty {
                 Menu {
-                    ForEach(closures, id: \.self) { closure in
-                        Button(closure.buttonLabel, role: .destructive) { onClose(closure) }
+                    ForEach(menuActions, id: \.self) { action in
+                        if let closure = action.closure {
+                            Button(closure.buttonLabel, role: .destructive) { onClose(closure) }
+                        } else {
+                            Button("Remove worktrees…", role: .destructive) { onRemoveWorktrees() }
+                        }
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -62,8 +67,10 @@ struct EpicLaneHeader: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
-                .accessibilityLabel("End \(epic.title)")
-                .help("Finish or abandon this epic without integrating it. Nothing is merged and no branch is deleted.")
+                .accessibilityLabel(epic.state.isTerminal ? "Clean up \(epic.title)" : "End \(epic.title)")
+                .help(epic.state.isTerminal
+                    ? "Remove the worktrees this epic left on disk, running the project's teardown hook. No branch is deleted."
+                    : "Finish or abandon this epic without integrating it. Nothing is merged and no branch is deleted.")
             }
             Spacer()
         }
@@ -83,7 +90,7 @@ struct EpicLaneHeader: View {
             Button("Open PR") { onOpenPullRequest() }
                 .controlSize(.small)
                 .help("Opens a prefilled pull request page in your browser. Agent Board never creates the PR.")
-        case .closeAsDone, .abandon:
+        case .closeAsDone, .abandon, .removeWorktrees:
             EmptyView()
         }
     }

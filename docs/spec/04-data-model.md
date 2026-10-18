@@ -20,7 +20,8 @@ CREATE TABLE project (
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
                                    -- reviewLevel, reviewRouting, buildCommand, testCommand, archivePolicy,
-                                   -- worktreeStrategy, sharedCheckoutMaxAgents, rosterAgentIds
+                                   -- worktreeStrategy, sharedCheckoutMaxAgents, rosterAgentIds,
+                                   -- worktreeTeardownCommand, worktreeTeardownTimeoutSeconds
   created_at      INTEGER NOT NULL,
   workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
 );
@@ -510,6 +511,15 @@ only read back from `agent_session` rows with `role = worker` and no
 `worktree_path`, sharing one `branch` — a detached worker that outlives the app
 is still found in it on the next launch, with no separate row to fall out of
 sync with the sessions it describes.
+
+`worktreeTeardownCommand` is the project's teardown hook, run in a worktree just
+before Agent Board removes it (§3.1, "Removing a worktree"); nil or blank runs
+nothing, which is every project's behavior from before it existed.
+`worktreeTeardownTimeoutSeconds` bounds it: 600 by default, clamped to 1
+through 86,400. Both sit on Project settings' Workflow tab, in a Worktree teardown section
+after Verification, because they are the same kind of setting as the build and
+test commands: a shell command the project chooses and Agent Board runs without
+interpreting it.
 
 `file_lock` exists only for that group: a worktree worker cannot collide with
 anyone, so it never takes one. A lock is claimed by a session's first write to

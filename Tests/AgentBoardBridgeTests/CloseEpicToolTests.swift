@@ -47,6 +47,27 @@ final class CloseEpicToolTests: XCTestCase {
         XCTAssertEqual(try f.tasks.get(review.id)?.column, .review)
     }
 
+    /// SPEC §5.2: the close report and get_epic name the worktrees still on disk, and only those.
+    func testTheCloseReportAndGetEpicListTheWorktreesStillOnDisk() async throws {
+        let epic = try f.epic("Ship it")
+        let task = try f.task("done long ago", column: .done, epicId: epic.id)
+        let onDisk = FileManager.default.temporaryDirectory.appendingPathComponent("held-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: onDisk, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: onDisk) }
+        let gone = "/tmp/never-created-\(UUID().uuidString)"
+        try f.session("first", state: .completed, taskId: task.id, worktreePath: gone)
+        try f.session("second", state: .completed, taskId: task.id, worktreePath: onDisk.path)
+
+        _ = try await f.call("close_epic", ["epic_id": .string(epic.id), "state": .string("abandoned")])
+
+        let decision = try XCTUnwrap(try f.reports.unconsumed(projectId: f.project.id).first { $0.kind == .decision })
+        XCTAssertTrue(decision.body.contains("- \(onDisk.path) — task \(task.id)"), decision.body)
+        XCTAssertFalse(decision.body.contains(gone), decision.body)
+        let held = try await f.callJSON("get_epic", ["id": .string(epic.id)])["held_worktrees"]?.arrayValue
+        XCTAssertEqual(held?.compactMap { $0["path"]?.stringValue }, [onDisk.path])
+        XCTAssertEqual(held?.first?["task_id"], .string(task.id))
+    }
+
     func testQueuesADecisionReportForTheOrchestrator() async throws {
         let epic = try f.epic("Ship it")
         try f.task("leftover", column: .backlog, epicId: epic.id)
