@@ -74,6 +74,34 @@ final class WorktreeTeardownHookTests: XCTestCase {
         XCTAssertFalse(reports.contains { $0.contains(Board.worktreeCleanupLead) }, "\(reports)")
     }
 
+    /// A task that ran on the shared branch and, on another attempt, in a worktree of its own.
+    func testASharedBranchAcceptReturnsBeforeTheHookFinishes() async throws {
+        let marker = fixture.supportDir.appendingPathComponent("teardown-marker")
+        try setTeardown("sleep 5; echo ran >> '\(marker.path)'")
+        let epic = try EpicStore(fixture.db).create(projectId: fixture.project.id, title: "Roster", goal: "ship it")
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        let shared = SharedCheckoutGroup.branch(epicId: epic.id)
+        try SupervisorFixture.git(["branch", shared, epic.branch], cwd: fixture.repo)
+        let task = try fixture.tasks.create(
+            projectId: fixture.project.id, title: "Do the thing", body: nil, acceptance: nil,
+            priority: nil, column: .review, origin: .human, epicId: epic.id
+        )
+        try fixture.sessions.insert(
+            AgentSession(
+                sessionId: "shared-session", shortId: "short-1", projectId: fixture.project.id, taskId: task.id,
+                role: .worker, worktreePath: nil, branch: shared, cwd: fixture.repo.path, state: .completed
+            )
+        )
+        let worktree = try XCTUnwrap(try fixture.worktreeWorker(task: task, attempt: 2).worktreePath)
+
+        try await fixture.supervisor.accept(taskId: task.id)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), "the accept waited for the hook")
+        await fixture.supervisor.waitForTeardowns()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "ran\n", "the hook did not run exactly once")
+    }
+
     /// Task 51c0040b kept its worktree over a `yarn.lock` its setup left behind, and nothing said so.
     func testAcceptNamesTheDirtyPathsOfAKeptWorktreeAndDoesNotRunTheHookThere() async throws {
         let marker = fixture.supportDir.appendingPathComponent("teardown-marker")
