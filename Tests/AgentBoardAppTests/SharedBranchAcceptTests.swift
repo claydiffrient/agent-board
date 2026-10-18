@@ -138,6 +138,27 @@ final class SharedBranchAcceptTests: XCTestCase {
         )
     }
 
+    /// A task's newest attempt decides how its accept lands: alpha was retried from the shared branch
+    /// into a worktree, and beta had a worktree before its shared attempt.
+    func testAnAcceptLandsTheBranchTheTasksNewestAttemptRanOn() async throws {
+        let alphaWorktree = try worktreeSession(alpha, startedAt: .nowMillis + 60_000, attempt: 2)
+        try fixture.commitInto(alphaWorktree.path)
+        let alphaHead = try headOf("agentboard/\(alpha.id)")
+        _ = try worktreeSession(beta, startedAt: .nowMillis - 60_000, attempt: 1)
+        try write("beta.txt", "b\n")
+        try await commit(beta, paths: ["beta.txt"], message: "Add beta")
+        let sharedHead = try headOf(branch)
+
+        try await fixture.supervisor.accept(taskId: alpha.id)
+
+        XCTAssertTrue(try isAncestor(alphaHead, of: epic.branch), "alpha's worktree retry did not land its own branch")
+        XCTAssertFalse(try isAncestor(sharedHead, of: epic.branch), "the shared branch landed with beta unaccepted")
+
+        try await fixture.supervisor.accept(taskId: beta.id)
+
+        XCTAssertTrue(try isAncestor(sharedHead, of: epic.branch), "beta's shared attempt did not land the shared branch")
+    }
+
     // MARK: - Reaping
 
     /// `reconcile`'s sweep is the second path that drops merged `agentboard/*` branches.
@@ -293,6 +314,18 @@ final class SharedBranchAcceptTests: XCTestCase {
                 worktreePath: nil, branch: branch, cwd: fixture.repo.path, state: .completed
             )
         )
+    }
+
+    private func worktreeSession(_ task: BoardTask, startedAt: Int64, attempt: Int) throws -> URL {
+        let worktree = try fixture.manager.create(name: task.id, branch: "agentboard/\(task.id)", base: epic.branch)
+        try fixture.sessions.insert(
+            AgentSession(
+                sessionId: "\(task.id)-worktree", shortId: "\(task.id)-worktree", projectId: fixture.project.id,
+                taskId: task.id, role: .worker, worktreePath: worktree.path, branch: "agentboard/\(task.id)",
+                cwd: worktree.path, state: .completed, startedAt: startedAt, attempt: attempt
+            )
+        )
+        return worktree
     }
 
     private func write(_ path: String, _ contents: String) throws {
