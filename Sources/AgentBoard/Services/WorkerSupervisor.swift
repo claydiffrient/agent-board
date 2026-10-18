@@ -325,7 +325,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         taskId: String, rosterAgentId: String? = nil, scope: AgentBoardCore.TokenScope = .worker
     ) async throws -> WorkerSpawn {
         guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
-        guard task.column != .running, task.column != .done else {
+        guard task.column != .running, task.column != .done, task.column != .closed else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
         }
         guard let project = try projects.get(task.projectId) else {
@@ -791,7 +791,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
 
         let members = try tasks.list(projectId: project.id, epicId: epicId, includeArchived: true)
-            .filter { $0.origin != .integration }
+            .filter { $0.origin != .integration && $0.column != .closed }
         var deps: [String: [String]] = [:]
         for member in members {
             deps[member.id] = try tasks.deps(of: member.id)

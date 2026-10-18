@@ -212,6 +212,16 @@ columns they actually sit in (always `done`), dimmed to 55% opacity with a
 dashed border and an "archived `<when>`" line; from there a card's context menu
 or the inspector unarchives it.
 
+**Closed tasks** (§5) sit in their own **Closed** column after Done, never
+mixed into it: the card is dimmed, its title struck through, with the reason
+under it and a **Reopen** button; the inspector shows the reason, who closed it
+and when, with the same **Reopen**. Nothing can be dragged into or out of
+Closed and the **Move to** menu leaves it out — only the orchestrator's
+`close_task` enters it, with a reason, and only Reopen leaves it. A closed card
+can be archived from its context menu like a done one; the toolbar's Archive
+button stays done-only. An epic lane's tally reads "2/3 done · 1 closed", or
+just "3 closed" when every task in it is closed.
+
 **Finished epics leave the board.** With Show Archived off, a `done` or
 `abandoned` epic whose tasks are all archived, or that has no tasks, gets no
 lane and no jump-rail entry, and the rail itself is dropped when no epic has a

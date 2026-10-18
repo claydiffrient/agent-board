@@ -83,7 +83,7 @@ extension Board {
                 _ = try ArchiveSweep.archiveEpic(db, epicId: epicId, at: .nowMillis)
             }
             let unfinished = try Task.fetchAll(
-                db, sql: "SELECT * FROM task WHERE epic_id = ? AND column_name != 'done' ORDER BY ordering", arguments: [epicId]
+                db, sql: "SELECT * FROM task WHERE epic_id = ? AND column_name NOT IN ('done', 'closed') ORDER BY ordering", arguments: [epicId]
             )
             var text = "Epic \(epicId) (\(epic.title)) is done: pull request #\(pullRequest.number) merged"
                 + (commit.map { " as \($0)" } ?? "") + " (\(pullRequest.url))."

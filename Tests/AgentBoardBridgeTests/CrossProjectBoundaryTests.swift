@@ -22,7 +22,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
 
     /// Tools that accept an id and must throw a `ToolError` when it belongs to another project.
     static let refusesForeignId: Set<String> = [
-        "get_task", "update_task", "move_task", "set_epic", "set_deps", "log_progress",
+        "get_task", "update_task", "move_task", "close_task", "set_epic", "set_deps", "log_progress",
         "spawn_worker", "stop_worker", "archive_task", "unarchive_task", "get_report",
         "promote_proposal", "get_epic", "request_integration", "close_epic", "open_pull_request",
         "read_note", "append_section", "replace_section", "attach_note", "pin_note",
@@ -51,7 +51,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
 
     /// Every tool on any scope that writes a board. The Coordinator must be refused each one.
     static let refusedToCoordinatorAsWrite: Set<String> = [
-        "create_task", "update_task", "move_task", "set_epic", "set_deps", "log_progress", "add_comment",
+        "create_task", "update_task", "move_task", "close_task", "set_epic", "set_deps", "log_progress", "add_comment",
         "spawn_worker", "assign_to_agent", "stop_worker", "archive_task", "unarchive_task", "promote_proposal",
         "create_epic", "request_integration", "close_epic", "push_branch", "open_pull_request", "send_message",
         "attach_note", "pin_note",
@@ -93,7 +93,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
             "a tool was added to the orchestrator surface without a cross-project test in this file"
         )
         XCTAssertEqual(classified.subtracting(surface), [], "this audit names tools that no longer exist")
-        XCTAssertEqual(surface.count, 38)
+        XCTAssertEqual(surface.count, 39)
     }
 
     func testOnlySendMessageAcceptsAnotherProjectsId() async {
@@ -122,6 +122,10 @@ final class CrossProjectBoundaryTests: XCTestCase {
         )
         await XCTAssertToolError(
             try await f.call("move_task", ["id": .string(foreign.id), "column": .string("review")]),
+            containing: "not in this project"
+        )
+        await XCTAssertToolError(
+            try await f.call("close_task", ["task_id": .string(foreign.id), "reason": .string("seized")]),
             containing: "not in this project"
         )
         await XCTAssertToolError(

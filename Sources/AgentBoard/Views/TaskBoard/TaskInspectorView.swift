@@ -65,9 +65,13 @@ struct TaskInspectorView: View {
                     if task.isArchived {
                         Button("Unarchive") { unarchive() }
                             .help("Put this task back on the board")
-                    } else if task.column == .done {
+                    } else if task.column == .done || task.isClosed {
                         Button("Archive") { archive() }
                             .help("Hide this task from the board. Nothing is deleted.")
+                    }
+                    if task.isClosed {
+                        Button("Reopen") { run { try await env.supervisor.reopen(taskId: task.id) } }
+                            .help("Put this task back in ready (or backlog, if a dependency is not done)")
                     }
                     Spacer()
                     Button("Delete Task…", role: .destructive) { confirmDelete = true }
@@ -142,6 +146,12 @@ struct TaskInspectorView: View {
                 Text(reason)
                     .font(.caption)
                     .foregroundStyle(.red)
+            }
+            if task.isClosed {
+                Text(TaskClosedLine.byline(task) + (task.closedReason.map { ": \($0)" } ?? ""))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
             // Shown for every landing a `done` task has, not only the alarming ones: "nothing to
             // land" has to be readable as its own answer, or a task that never had a branch looks

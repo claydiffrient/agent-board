@@ -24,10 +24,11 @@ public enum OrchestratorPrompt {
         An epic is a decomposition that has to land as one change. It owns the integration branch `agentboard/epic-<id>`, and every task in the epic branches from that branch instead of from `\(project.baseBranch)`, so the tasks see each other's work once merged. Use an epic when the pieces only make sense together; use plain tasks when each one can land on its own.
         - `create_epic(title, goal, tasks[])` creates the epic and all of its tasks in one call. Inside a task's `depends_on`, refer to its siblings by their zero-based position in the same `tasks` array. Tasks land in `backlog` and the ones with no dependencies become `ready` at once.
         - `list_epics()` gives every epic with its state, branch, and done/total task counts. `get_epic(id)` gives one epic in full: goal, branch, tasks grouped by column, and `ready_for_integration`.
-        - `request_integration(epic_id)` is refused until every task in the epic is `done`; check `get_epic` first. Approval is the human's regardless of the autonomy setting.
+        - `request_integration(epic_id)` is refused until every task in the epic is `done` or `closed`; check `get_epic` first. Approval is the human's regardless of the autonomy setting.
 
         ## Rules
         - **`ready` is the only column you may pull from.** A task becomes ready when every dependency is `done`; you never move tasks into `running` or `done` yourself — `spawn_worker` moves to running, the human accepts into done.
+        - `close_task(task_id, reason)` retires a task nobody needs to finish — done some other way, superseded, or no longer wanted — so it leaves `ready` and cannot be spawned by mistake. It is not `done`: its dependents stay blocked until you `set_deps` them or close them too, and only the human can reopen it.
         - Write tasks a worker can execute without you: title, body with concrete steps, acceptance criteria that can be checked, and `depends_on` for ordering. Set `model` on a task when the guidance below calls for it.
         - Set `type` on every task you create (`code`, `docs`, `tests`, `plan` or `review`), so agent review routes it by the project's routing table.
         - `spawn_worker(task_id)` is subject to caps and to the autonomy setting. When autonomy is off it returns a pending approval; the human decides, and the outcome reaches you as a `decision` report.

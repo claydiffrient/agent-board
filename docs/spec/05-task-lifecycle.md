@@ -11,6 +11,8 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
                           │      no review / epic review:        │
                           │      complete goes straight here     │
                           └──────────── reopen ──────────────────┘
+
+any column but running/done ──close_task(reason)──> closed ──human Reopen──> ready
 ```
 
 Which of those two edges a completed task takes is the **review level** (§4), a
@@ -271,11 +273,58 @@ nobody reviewed.
 
   A landing recorded before this existed is `NULL`, which claims nothing either
   way; it is not rendered as an alarm.
+- `closed` — a terminal column beside `done` for a task retired without being
+  finished: its work was done some other way, it was superseded, or it is no
+  longer wanted. Only the orchestrator's `close_task(task_id, reason)` (§6)
+  enters it, through `Board.close`, and the reason is required. The reason, the
+  time and who closed it are written to `closed_reason`, `closed_at` and
+  `closed_by` (§4) and to a `progress` row, so the history keeps them after a
+  reopen. Nothing else moves: no branch, worktree, session row, report or
+  comment is touched, as with `close_epic`.
+
+  `closed` is not `done` and nothing that reads `done` reads it. A closed task
+  does **not** satisfy a dependency — readiness asks for `done`, so a dependent
+  stays in `backlog` — and `close_task`'s answer names every unfinished
+  dependent so the orchestrator can `set_deps` it or close it too. There is
+  deliberately no option to let a closed task satisfy its dependents: whether a
+  dependent still needs the work is a per-dependent judgement that `set_deps`
+  already records exactly, and a second meaning of `closed` would be one more
+  thing every reader of the dependency graph has to check. A closed task never
+  has a landing (`landing` is cleared on leaving `done` and never armed for
+  `closed`), is never merged by the accept path or listed for the integrator,
+  is not in At a Glance's counts, and never counts towards an epic's done
+  tally. An epic is ready for integration (§5.2) when every task it holds is
+  `done` or `closed` and at least one is `done`, so a retired task cannot hold
+  an epic open.
+
+  Refused, by `Board.close`: a blank reason; a task in `done` (it is already
+  finished — accepted work is not retired after the fact); a task already
+  `closed`; an epic's integration task (`origin = integration`), which only
+  §5.2's own path ends; and any task an active session holds, worker or
+  rostered reviewer — stop it first. A stranded task in `running` with no live
+  session can be closed. No spawn takes a closed task, and a session on one is
+  settled: `reconcile` and `SessionStart` never revive it (§7). A spawn
+  approval still waiting for the task is resolved `denied` in the same
+  transaction, so the human queue does not keep an item nobody can approve.
+
+  Closing needs no human approval, with autonomy on or off. It deletes,
+  publishes and spends nothing, a human reverses it in one click, and the card
+  stays on the board in its own column with the reason on it rather than being
+  hidden. Gating it would put back the problem it solves — obsolete tasks sitting
+  in `ready`, one mistaken spawn from running — until a human got to the queue.
+
+  A human reopens a closed task from the board (the card's or inspector's
+  **Reopen**). `Board.reopen` clears the `closed_*` fields and any archive, moves it to `ready`
+  — or `backlog`, if a dependency is no longer `done` — and queues a `decision`
+  report quoting the reason it had been closed for. The orchestrator cannot
+  reopen one: `move_task` refuses a closed task, so the human stays the judge of
+  retired work. Neither a human drag nor `move_task` can enter `closed`; only
+  `close_task` writes a reason.
 - `archived` — also a flag, not a column, with `blocked` and `failed` as the
-  precedent: D7's six columns (`proposed`/`backlog`/`ready`/`running`/`review`/
-  `done`) are unchanged by the archive feature. Only a `done` task can be
-  archived (§4), and archiving does not move it — an archived task is still a
-  `done` task, just hidden from the default board query.
+  precedent: D7's columns are unchanged by the archive feature. Only a `done`
+  or `closed` task can be archived (§4), and archiving does not move it — an
+  archived task is still in its terminal column, just hidden from the default
+  board query.
 
 Reconcile also reaps worktrees under the project's worktree root that no active
 session owns, and deletes merged `agentboard/*` branches that no longer have a
@@ -478,8 +527,9 @@ so. No reviewer starts and nothing is flagged as an error.
 Integration is gated on your approval regardless of the autonomy setting, and
 can be requested two ways that land on the same row: the orchestrator's
 `request_integration(epic_id)` tool, or the epic lane's **Request integration**
-button. The tool refuses until `epicReadyForIntegration` holds — the epic is
-non-empty and every task in it is `done` — naming how many tasks remain; the
+button. The tool refuses until `epicReadyForIntegration` holds — every task in
+the epic is `done` or `closed` (§5) and at least one is `done` — naming how many
+tasks remain; the
 button only appears once that is already true, so neither path can jump the
 gate. Either call reaches `Board.requestIntegration`; a repeat request while
 one is already pending returns the existing approval rather than queuing a
@@ -489,7 +539,8 @@ This is the path that ends an epic by *finishing* it. §10's **Close as done**
 and **Abandon** are the other way out, for an epic you are finished with rather
 than one that is finished; they merge nothing and are not part of this sequence.
 
-1. All tasks in the epic reach `done`.
+1. All tasks in the epic reach `done`, or are retired to `closed`. A closed
+   task's branch is not listed for the integrator.
 2. Orchestrator calls `request_integration(epic_id)`. This creates an approval
    row and a macOS notification. Nothing proceeds until you approve.
 3. On approval, Agent Board creates an integration worktree on

@@ -19,6 +19,7 @@ struct TaskCardView: View {
             HStack(alignment: .top) {
                 Text(task.title)
                     .font(.body.weight(.medium))
+                    .strikethrough(task.isClosed)
                     .lineLimit(3)
                 Spacer(minLength: 4)
                 if let priority = task.priority, !priority.isEmpty {
@@ -71,10 +72,14 @@ struct TaskCardView: View {
             if task.column == .review {
                 reviewDetails
             }
+
+            if task.isClosed {
+                closedDetails
+            }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .opacity(task.isArchived ? 0.55 : 1)
+        .opacity(task.isArchived ? 0.55 : task.isClosed ? 0.75 : 1)
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color(nsColor: task.isArchived ? .underPageBackgroundColor : .controlBackgroundColor))
@@ -88,6 +93,25 @@ struct TaskCardView: View {
                 )
         )
         .contentShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// SPEC §10: a closed card says why and offers the only way back out.
+    private var closedDetails: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Divider()
+            Label(TaskClosedLine.byline(task), systemImage: "xmark.circle")
+                .foregroundStyle(.secondary)
+            if let reason = task.closedReason {
+                Text(reason)
+                    .lineLimit(4)
+                    .help(reason)
+            }
+            Button("Reopen", action: onReopen)
+                .controlSize(.small)
+                .help("Put this task back in ready (or backlog, if a dependency is not done)")
+                .padding(.top, 2)
+        }
+        .font(.caption)
     }
 
     private func agentSummary(_ session: AgentSession) -> some View {
@@ -147,6 +171,13 @@ struct TaskCardView: View {
         .task(id: task.id) {
             diffstat = await env.supervisor.worktreeDiffstat(taskId: task.id)
         }
+    }
+}
+
+enum TaskClosedLine {
+    static func byline(_ task: BoardTask) -> String {
+        let who = task.closedBy.map { "Closed by \($0)" } ?? "Closed"
+        return task.closedDate.map { "\(who) \(Format.relative($0))" } ?? who
     }
 }
 

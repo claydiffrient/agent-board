@@ -516,15 +516,19 @@ struct TaskBoardView: View {
                 .onTapGesture { selectedTaskId = TaskSelection.toggled(current: selectedTaskId, tapped: task.id) }
                 .contextMenu {
                     Button("Details") { selectedTaskId = task.id }
-                    Menu("Move to") {
-                        ForEach(TaskColumn.allCases.filter { $0 != task.column }, id: \.self) { target in
-                            Button(target.title) { _ = drop(taskId: task.id, onto: target) }
+                    if task.isClosed {
+                        Button("Reopen") { reopen(task.id) }
+                    } else {
+                        Menu("Move to") {
+                            ForEach(TaskColumn.allCases.filter { $0 != task.column && $0 != .closed }, id: \.self) { target in
+                                Button(target.title) { _ = drop(taskId: task.id, onto: target) }
+                            }
                         }
                     }
                     Divider()
                     if task.isArchived {
                         Button("Unarchive") { unarchive(task.id) }
-                    } else if task.column == .done {
+                    } else if task.column == .done || task.isClosed {
                         Button("Archive") { archive([task.id]) }
                     }
                     Button("Delete Task…", role: .destructive) { taskPendingDelete = task }
@@ -547,8 +551,11 @@ struct TaskBoardView: View {
         }
     }
 
+    /// Closed is entered only by `close_task`, which records a reason, and left only by Reopen (SPEC §10).
     private func drop(taskId: String, onto column: TaskColumn) -> Bool {
-        guard let task = visibleTasks.first(where: { $0.id == taskId }), task.column != column else {
+        guard let task = visibleTasks.first(where: { $0.id == taskId }), task.column != column,
+              column != .closed, !task.isClosed
+        else {
             return false
         }
         switch column {
