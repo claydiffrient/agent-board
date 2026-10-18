@@ -38,6 +38,8 @@ final class AwakeClockTests: XCTestCase {
         clock_gettime(CLOCK_MONOTONIC, &monotonic)
         let monotonicSeconds = TimeInterval(monotonic.tv_sec) + TimeInterval(monotonic.tv_nsec) / 1_000_000_000
 
+        let uptime = DarwinClock().uptimeSeconds
+
         var monotonicRaw = timespec()
         clock_gettime(CLOCK_MONOTONIC_RAW, &monotonicRaw)
         let monotonicRawSeconds = TimeInterval(monotonicRaw.tv_sec) + TimeInterval(monotonicRaw.tv_nsec) / 1_000_000_000
@@ -47,7 +49,6 @@ final class AwakeClockTests: XCTestCase {
         XCTAssertEqual(sysctlbyname("kern.boottime", &boot, &size, nil, 0), 0)
         let wallSinceBoot = Date().timeIntervalSince1970 - TimeInterval(boot.tv_sec)
 
-        let uptime = DarwinClock().uptimeSeconds
         XCTAssertGreaterThan(uptime, 0)
         XCTAssertLessThanOrEqual(uptime, monotonicRawSeconds)
         print(
