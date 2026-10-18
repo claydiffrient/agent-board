@@ -50,36 +50,69 @@ final class TaskTypeRenderTests: XCTestCase {
         XCTAssertFalse(plainRow.contains("Default"), "Default card read as: \(plainRow)")
     }
 
-    /// The read half: the inspector's Type picker shows the task's stored type, read with Vision
-    /// OCR. On macOS 27, in this offscreen/non-active session, a SwiftUI `Picker` no longer
-    /// constructs an `NSPopUpButton` at all — not renamed, not empty, just absent from the AppKit
-    /// view tree, even mounted through a real, on-screen, `makeKeyAndOrderFront`-ed window (see the
-    /// headless UI verification note). The control still *draws*, though — OCR reads "Code" or
-    /// "Default" off the rendered pixels the same way `testATypedCardShowsItsTypeAndADefaultCardShowsNone`
-    /// reads a `TaskTypeChip`'s label above.
+    /// The read half: the inspector's Type picker shows the task's stored type.
     ///
-    /// The header above also draws a `TaskTypeChip` off `task.type` directly — nothing to do with
-    /// the picker or its draft state — and for a `.code` task it reads "Code" too. A first version of
-    /// this test asserted `lines.contains("Code")` anywhere on the page and stayed green even with
-    /// `TaskInspectorView.apply` mutated to force `draftType = nil`, because the header's chip alone
-    /// satisfied it. `typeRow(in:)` isolates the band strictly between the Model row and the
-    /// Revert/Save row, where only the picker draws, so the mutation now fails this test as intended.
-    ///
-    /// Vision groups a label and its value into one line differently per OS. On macOS 27 (this
-    /// machine) "Model" is its own line; on macOS 26 CI it reads as one merged line, "Model Project
-    /// default" (and "Type Code =" for the picker's own row). `isLabelLine`/`rowHasWord` accept
-    /// either grouping — see `LabelLineMatchingTests` for the macOS 26 shape reproduced as a fixture.
+    /// macOS 26 CI still constructs a real `NSPopUpButton` for this picker; `assertTypePickerShows`
+    /// reads `titleOfSelectedItem` off it directly, avoiding the window-server capture race that made
+    /// the OCR-only version intermittent (the capture can settle on a frame drawn before the button
+    /// painted its title). macOS 27 (this machine) never builds the control at all, so this falls back
+    /// to the OCR band below, which stays accurate to the macOS 26 label/value grouping Vision uses
+    /// there — see `isLabelLine`/`rowHasWord` and the headless UI verification note.
     func testTheInspectorTypePickerShowsTheTaskType() throws {
         let typed = try makeTask("Parser checks", type: .code)
         let plain = try makeTask("Lint cleanup", type: nil)
 
-        let typedRow = try typeRow(in: try ocrInspector(task: typed, allTasks: [typed]))
-        XCTAssertTrue(rowHasWord(typedRow, "Code"), "the type picker's row did not show Code: \(typedRow)")
+        try assertTypePickerShows("Code", for: typed, allTasks: [typed])
+        try assertTypePickerShows(
+            "Default", for: plain, allTasks: [plain], otherLabelsAbsent: TaskType.allCases.map(\.label)
+        )
+    }
 
-        let plainRow = try typeRow(in: try ocrInspector(task: plain, allTasks: [plain]))
-        XCTAssertTrue(rowHasWord(plainRow, "Default"), "the type picker's row did not show Default: \(plainRow)")
-        for type in TaskType.allCases {
-            XCTAssertFalse(rowHasWord(plainRow, type.label), "a default task's picker row read as: \(plainRow)")
+    /// The Type picker's `NSPopUpButton`, told apart from `ModelPicker`'s own pop-up (also in this
+    /// view) by its fixed, distinct item set. Nil on macOS 27, where neither is constructed.
+    private func typePickerPopUpButton(in host: NSView) -> NSPopUpButton? {
+        let expectedTitles = ["Default"] + TaskType.allCases.map(\.label)
+        var found: NSPopUpButton?
+        func walk(_ view: NSView) {
+            if let button = view as? NSPopUpButton, button.itemTitles == expectedTitles { found = button }
+            view.subviews.forEach(walk)
+        }
+        walk(host)
+        return found
+    }
+
+    /// One poll loop serves both techniques: a platform that constructs the pop-up button satisfies
+    /// `until` as soon as it exists, with no image decode at all; a platform that does not falls
+    /// through to the same OCR condition this test used before. Running the pop-up check and the OCR
+    /// check as two separate `capture()` calls would settle the window twice on every platform that
+    /// takes the OCR path — doubling this test's cost for no benefit there.
+    private func assertTypePickerShows(
+        _ expected: String, for task: BoardTask, allTasks: [BoardTask], otherLabelsAbsent: [String] = [],
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let view = TaskInspectorView(task: task, allTasks: allTasks, sessions: [], drafts: TaskDraftCache(), onClose: {})
+        let mount = OffscreenMount(view.environment(renderEnvironment(db: db)), size: CGSize(width: 420, height: 1000))
+        defer { mount.close() }
+
+        var lines: [Line] = []
+        _ = try mount.capture(file: file, line: line, until: { _ in
+            if self.typePickerPopUpButton(in: mount.host) != nil { return true }
+            guard let image = CGWindowListCreateImage(
+                .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+                [.boundsIgnoreFraming, .bestResolution]
+            ), let recognized = try? self.recognizedLines(in: image) else { return false }
+            lines = recognized
+            return self.typeRowHasValue(in: recognized)
+        })
+
+        if let popUp = typePickerPopUpButton(in: mount.host) {
+            XCTAssertEqual(popUp.titleOfSelectedItem, expected, file: file, line: line)
+            return
+        }
+        let row = try typeRow(in: lines)
+        XCTAssertTrue(rowHasWord(row, expected), "the type picker's row did not show \(expected): \(row)", file: file, line: line)
+        for label in otherLabelsAbsent {
+            XCTAssertFalse(rowHasWord(row, label), "the picker row for \(expected) also read as \(label): \(row)", file: file, line: line)
         }
     }
 
@@ -134,26 +167,6 @@ final class TaskTypeRenderTests: XCTestCase {
 
         drafts.retain(savedDraft, for: task.id, ifDifferentFrom: savedDraft)
         XCTAssertNil(drafts.draft(for: task.id), "reverting to the saved type should clear the retained draft")
-    }
-
-    /// Waits not just for pixels to stop moving but for the Type row's band to show a value — see
-    /// `typeRowHasValue(in:)`. Without this, `mount.capture()` can agree on a frame drawn before the
-    /// picker's `NSPopUpButton` has painted its selected title, and the row it hands back reads as
-    /// bare `["Type"]`.
-    private func ocrInspector(task: BoardTask, allTasks: [BoardTask]) throws -> [Line] {
-        let view = TaskInspectorView(task: task, allTasks: allTasks, sessions: [], drafts: TaskDraftCache(), onClose: {})
-        let mount = OffscreenMount(view.environment(renderEnvironment(db: db)), size: CGSize(width: 420, height: 1000))
-        defer { mount.close() }
-        var lines: [Line] = []
-        _ = try mount.capture(until: { _ in
-            guard let image = CGWindowListCreateImage(
-                .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
-                [.boundsIgnoreFraming, .bestResolution]
-            ), let recognized = try? self.recognizedLines(in: image) else { return false }
-            lines = recognized
-            return self.typeRowHasValue(in: recognized)
-        })
-        return lines
     }
 
     private func makeTask(_ title: String, type: TaskType?) throws -> BoardTask {
