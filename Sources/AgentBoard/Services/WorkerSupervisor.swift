@@ -1037,7 +1037,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             // on a large repository while a dependent cut from the target lacks this work. A shared
             // branch has no worktree to wait on and lands only once every member is accepted.
             if sharedBranch(of: task) != nil {
-                await finishTeardown(
+                await startTeardown(
                     claimTeardown(of: taskSessions), task: task, project: project, report: acceptanceReport,
                     landingNotice: nil
                 )
@@ -1046,25 +1046,31 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 let before = lastError
                 await landAcceptedBranch(task: task, project: project)
                 let landingNotice = lastError == before ? nil : lastError
-                // Claimed before the background task starts, so a reconcile scheduled ahead of it
-                // already sees these worktrees as taken.
-                let claim = claimTeardown(of: taskSessions)
-                // A teardown hook may run for minutes, and this accept may be answering an MCP call.
-                if project.settings.worktreeTeardown != nil {
-                    inBackground { supervisor in
-                        if await supervisor.finishTeardown(
-                            claim, task: task, project: project, report: acceptanceReport, landingNotice: landingNotice
-                        ) {
-                            supervisor.announceReports(projectId: task.projectId)
-                        }
-                    }
-                } else {
-                    await finishTeardown(
-                        claim, task: task, project: project, report: acceptanceReport, landingNotice: landingNotice
-                    )
-                }
+                await startTeardown(
+                    claimTeardown(of: taskSessions), task: task, project: project, report: acceptanceReport,
+                    landingNotice: landingNotice
+                )
             }
             announceReports(projectId: task.projectId)
+        }
+    }
+
+    /// A teardown hook may run for minutes, and an accept may be answering an MCP call, so behind a
+    /// hook the teardown runs after the caller returns. `claim` is taken before this is called, so a
+    /// reconcile scheduled ahead of the background task already sees those worktrees as taken.
+    private func startTeardown(
+        _ claim: TeardownClaim, task: BoardTask, project: Project, report reportId: Int64?, landingNotice: String?
+    ) async {
+        guard project.settings.worktreeTeardown != nil else {
+            await finishTeardown(claim, task: task, project: project, report: reportId, landingNotice: landingNotice)
+            return
+        }
+        inBackground { supervisor in
+            if await supervisor.finishTeardown(
+                claim, task: task, project: project, report: reportId, landingNotice: landingNotice
+            ) {
+                supervisor.announceReports(projectId: task.projectId)
+            }
         }
     }
 

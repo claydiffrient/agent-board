@@ -110,7 +110,8 @@ nobody reviewed.
   the status bar. Landing comes
   first because removing a large worktree can take over a minute, and until the
   merge runs a dependent cut from the target branch lacks this work. A member of
-  a shared branch has no worktree to remove, so its teardown still runs first.
+  a shared branch has no worktree of its own on that branch, so the removal of
+  any earlier attempt's worktree starts first.
 
   A worktree with uncommitted changes is kept — the teardown hook does not run
   in it — and so is one git refuses to remove. Whenever that happens, for any
@@ -119,10 +120,10 @@ nobody reviewed.
   dirty one, its uncommitted paths (the first 20, then a count), so the
   orchestrator can act on a leftover like a `yarn.lock` its setup wrote. The
   same lines go on the task's progress. With a teardown hook set, the removal
-  runs after the accept returns rather than inside it — the hook may run for
-  minutes and the accept may be answering an MCP call (`report_complete` under
-  a no-review level, a rostered reviewer's `accept_task`), which Claude Code
-  abandons after 60 seconds. Its findings are appended to the acceptance
+  runs after the accept returns rather than inside it, on a shared branch too —
+  the hook may run for minutes and the accept may be answering an MCP call
+  (`report_complete` under a no-review level, a rostered reviewer's
+  `accept_task`), which Claude Code abandons after 60 seconds. Its findings are appended to the acceptance
   report while the orchestrator has not read it, and otherwise queued as a
   `decision` report of their own. With no hook, the removal runs inside the
   accept, as it always has. Discarding a task removes its worktrees the same
