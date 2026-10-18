@@ -74,8 +74,7 @@ final class WorktreeTeardownHookTests: XCTestCase {
         XCTAssertFalse(reports.contains { $0.contains(Board.worktreeCleanupLead) }, "\(reports)")
     }
 
-    /// An earlier attempt with its own worktree, then a retry on the shared branch, as under a
-    /// per-spawn worktree strategy.
+    /// A task that ran on the shared branch and, on another attempt, in a worktree of its own.
     func testASharedBranchAcceptReturnsBeforeTheHookFinishes() async throws {
         let marker = fixture.supportDir.appendingPathComponent("teardown-marker")
         try setTeardown("sleep 5; echo ran >> '\(marker.path)'")
@@ -87,14 +86,13 @@ final class WorktreeTeardownHookTests: XCTestCase {
             projectId: fixture.project.id, title: "Do the thing", body: nil, acceptance: nil,
             priority: nil, column: .review, origin: .human, epicId: epic.id
         )
-        let worktree = try XCTUnwrap(try fixture.worktreeWorker(task: task).worktreePath)
         try fixture.sessions.insert(
             AgentSession(
-                sessionId: "shared-session", shortId: "short-2", projectId: fixture.project.id, taskId: task.id,
-                role: .worker, worktreePath: nil, branch: shared, cwd: fixture.repo.path, state: .completed,
-                attempt: 2
+                sessionId: "shared-session", shortId: "short-1", projectId: fixture.project.id, taskId: task.id,
+                role: .worker, worktreePath: nil, branch: shared, cwd: fixture.repo.path, state: .completed
             )
         )
+        let worktree = try XCTUnwrap(try fixture.worktreeWorker(task: task, attempt: 2).worktreePath)
 
         try await fixture.supervisor.accept(taskId: task.id)
 
