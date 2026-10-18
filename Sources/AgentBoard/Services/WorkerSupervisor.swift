@@ -258,19 +258,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         await server.stop()
     }
 
-    /// Idempotent: a project whose root is already space-free is left alone, so the second launch
-    /// is a no-op.
+    /// A project kept on its old root is reported on every launch until its worktrees are gone (SPEC §4).
     @discardableResult
     func migrateWorktreeRoots() async -> WorktreeRootMigration.Outcome {
-        let migration = WorktreeRootMigration(db: db, worktreeBase: worktreeBase)
+        let migration = WorktreeRootMigration(db: db, worktreeBase: worktreeBase, home: home)
         let outcome = await _Concurrency.Task.detached(priority: .userInitiated) { migration.run() }.value
         for line in outcome.migrated {
             FileHandle.standardError.write(Data("worktree root migrated: \(line)\n".utf8))
         }
-        for line in outcome.skipped + outcome.notices {
+        for line in outcome.skipped {
             FileHandle.standardError.write(Data("worktree root not migrated: \(line)\n".utf8))
         }
-        report(outcome.skipped + outcome.notices)
+        report(outcome.skipped)
         return outcome
     }
 
@@ -2089,7 +2088,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func worktreeManager(for project: Project) -> WorktreeManager {
         WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot),
+            worktreeRoot: WorktreeRootRule.url(project.worktreeRoot, home: home),
             attribution: .ledger(TaskCommitStore(db)),
             teardown: project.settings.worktreeTeardown
         )

@@ -64,7 +64,7 @@ extension Board {
                 isIntegration: (row[3] as TaskOrigin?) == .integration
             )
         }
-        let epicCheckout = URL(fileURLWithPath: project.worktreeRoot)
+        let epicCheckout = WorktreeRootRule.url(project.worktreeRoot, home: FileManager.default.homeDirectoryForCurrentUser)
             .appendingPathComponent(HeldWorktree.epicWorktreeName(epicId: epicId)).path
         candidates.append(HeldWorktree(path: epicCheckout, taskId: nil, taskTitle: nil, isIntegration: true))
 

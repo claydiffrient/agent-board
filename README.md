@@ -44,8 +44,9 @@ space in it breaks any repo whose setup shells out without quoting it. Setting
 `AGENTBOARD_SUPPORT_DIR` still redirects worktrees to `<dir>/worktrees`, which is
 what keeps the headless check below inside its scratch directory. A worktree root
 containing a space is refused, both at project registration and in the project
-settings sheet; projects still recorded on the old spaced root are relocated with
-`git worktree move` at launch, skipping any project with a running session.
+settings sheet. A project still recorded on the old spaced root is moved to the
+new default at launch once git lists no worktree under the old root; until then
+it keeps the old root and the status bar names the worktrees still there.
 
 ## Headless end-to-end check
 

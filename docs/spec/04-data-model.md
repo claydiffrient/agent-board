@@ -521,6 +521,26 @@ after Verification, because they are the same kind of setting as the build and
 test commands: a shell command the project chooses and Agent Board runs without
 interpreting it.
 
+`project.worktree_root` is the directory each task's worktree is cut under
+(§3.1 step 2). Registration sets it to `~/.agentboard/worktrees/<project-id>`,
+or `<AGENTBOARD_SUPPORT_DIR>/worktrees/<project-id>` under the override. A root
+containing whitespace is refused, at registration and in Project Settings,
+because repo setup that shells out without quoting the path breaks on it. A
+leading `~` means the board's home directory wherever the root becomes a path
+(`WorktreeRootRule.url`); it is stored as typed.
+
+Projects registered before that default still carry the old one,
+`~/Library/Application Support/AgentBoard/worktrees/<project-id>`, which the
+space rule rejects. At every launch `WorktreeRootMigration` rewrites such a
+root to the current default, but only if `git worktree list` for the
+project's repository shows no worktree under the old root. Worktrees are not
+moved. A project that still has one keeps its root, and the status bar names
+the project and each remaining worktree, because reconcile's reaper (§5) only
+considers worktrees under the current root and would never see one left
+behind. The pass repeats on each launch and moves the root once those worktrees
+are gone. It is a launch-time pass and not a GRDB migration for that reason: a
+migration runs once and cannot shell out to git.
+
 `file_lock` exists only for that group: a worktree worker cannot collide with
 anyone, so it never takes one. A lock is claimed by a session's first write to
 a path and held until the session ends; `agent_session.blocked_on_path` records
