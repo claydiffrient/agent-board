@@ -84,9 +84,7 @@ struct TerminalHostView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         let terminal = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
-        terminal.nativeForegroundColor = .white
-        terminal.nativeBackgroundColor = NSColor(calibratedRed: 0x1e / 255, green: 0x1e / 255, blue: 0x2e / 255, alpha: 1)
-        terminal.caretColor = .systemGreen
+        TerminalAppearanceStore.shared.attach(terminal)
         terminal.processDelegate = context.coordinator
         context.coordinator.terminal = terminal
         terminal.startProcess(
