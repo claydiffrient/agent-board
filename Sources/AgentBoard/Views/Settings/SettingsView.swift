@@ -10,7 +10,7 @@ struct SettingsView: View {
             TerminalSettingsPane(store: terminalAppearance)
                 .tabItem { Label("Terminal", systemImage: "apple.terminal") }
         }
-        .frame(width: 560)
+        .frame(width: 560, height: 760)
     }
 }
 
