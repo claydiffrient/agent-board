@@ -126,12 +126,55 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     func testGeneralHoldsTheRepositoryFieldsWorkspaceAndArchive() throws {
         let mounted = try mount(tab: .general) { $0.archivePolicy = .afterDays(21) }
 
-        XCTAssertEqual(mounted.fields.map(\.stringValue), ["main", "/tmp/demo-worktrees", "21"])
+        XCTAssertEqual(mounted.fields.map(\.stringValue), ["main", "21"], "the worktree root is never typed")
         XCTAssertTrue(mounted.collect(NSTextView.self).isEmpty)
 
         let sheet = try seededSheet(tab: .general) { $0.archivePolicy = .afterDays(21) }
         let archiveMode: ArchivePolicyMode? = seededState(sheet, "_archiveMode")
         XCTAssertEqual(archiveMode, .afterDays, "the archive picker's seeded state did not carry the stored policy")
+    }
+
+    /// The row's text is read by OCR; whether Save is disabled is not readable here (a SwiftUI
+    /// `Button` is no `NSButton`), so that half rests on `worktreeRootComplaint` gating it.
+    func testTheWorktreeRootRowShowsTheRootUnderTildeWithItsButtonsAndTheSpaceComplaint() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
+        let db = try AppDatabase.inMemory()
+        let projects = ProjectStore(db)
+        let registered = try projects.register(
+            name: "Demo", repoPath: "/tmp/demo-\(UUID().uuidString)", baseBranch: "main",
+            worktreeRoot: "/tmp/demo-worktrees", memoryDir: nil
+        )
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE project SET worktree_root = ? WHERE id = ?",
+                arguments: [home.appendingPathComponent("wt roots/demo").path, registered.id]
+            )
+        }
+        let project = try XCTUnwrap(projects.get(registered.id))
+
+        let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .general, onDeleted: {})
+            .environment(renderEnvironment(db: db))
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 700))
+        defer { mount.close() }
+        var lines: [OCRLine] = []
+        _ = try mount.capture(until: { _ in
+            guard let image = CGWindowListCreateImage(
+                .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+                [.boundsIgnoreFraming, .bestResolution]
+            ), let recognized = try? self.recognizedRoutingLines(in: image) else { return false }
+            lines = recognized
+            return recognized.contains { $0.text.contains("Use Default") }
+        })
+        let page = lines.map(\.text).joined(separator: "\n")
+        let anchor = try XCTUnwrap(lines.first { $0.text.contains("Use Default") }, page)
+        let row = lines
+            .filter { (anchor.box.minY...anchor.box.maxY).contains($0.box.midY) }
+            .map(\.text).joined(separator: " ")
+
+        XCTAssertTrue(row.contains("Choose"), row)
+        XCTAssertTrue(row.contains("roots/demo"), row)
+        XCTAssertFalse(row.contains(home.lastPathComponent), "the home folder is not shown as ~: \(row)")
+        XCTAssertTrue(page.contains("space"), "no complaint about the space: \(page)")
     }
 
     /// The guidance editor used to sit in a `LabeledContent`, which a grouped form lays out as the
