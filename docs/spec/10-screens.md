@@ -145,6 +145,12 @@ than silently respawned; **Start Again** (idle) or **Restart** (hang up and
 relaunch — SIGHUP to the shell's process group, escalating to SIGKILL) is the
 way back. It carries no board authority — D19 (§1).
 
+Every terminal in the app — this screen, Orchestrator Command, the attach window
+and the worktree shell — draws with the one appearance set under **Settings →
+Terminal** (below), applied by `TerminalAppearanceStore.attach` at each
+construction site. An edit repaints every open terminal on the same turn, not
+only the next one opened.
+
 A worker's worktree gets its own shell instead of using this screen: the
 `apple.terminal` button beside the attach button on a session row opens a
 `worktree-shell` window keyed by session id, its working directory the
@@ -646,6 +652,25 @@ menu is empty — and replacing the group deletes both, taking the shortcut with
 it. Neither placement affects the Help search field: AppKit adds that to whatever
 menu is `NSApp.helpMenu` when the menu opens, and it is never an item in the
 built menu.
+
+**Settings** — the standard macOS Settings window, opened with ⌘, from the app
+menu. It has one pane, **Terminal**: the font family (installed monospaced
+families only; a stored family that is no longer installed is listed as "not
+installed" and draws as the monospaced system font), the font size (8–36pt), the
+foreground, background, cursor, cursor text, selection background and selection
+foreground colors, the 16 ANSI colors in two rows of eight, a small preview, and
+**Restore Defaults**, disabled while nothing differs from the defaults. The
+setting is app-wide, not per project — the same person looks at every project's
+terminal — and is stored in `UserDefaults` under `terminal.appearance`. Colors
+16–255 stay SwiftTerm's xterm cube.
+
+The defaults are a snapshot of Clay's Ghostty on 2026-10-19 (theme "Night Owl"),
+not a read of Ghostty's config, so Agent Board does not depend on Ghostty being
+installed or on its config format: Monaspace Neon 12pt, background `#011627`,
+foreground `#d6deeb`, cursor `#7e57c2`, cursor text `#ffffff`, selection
+`#5f7e97` on `#dfe5ee`, and palette `#011627 #ef5350 #22da6e #addb67 #82aaff
+#c792ea #21c7a8 #ffffff` / `#575656 #ef5350 #22da6e #ffeb95 #82aaff #c792ea
+#7fdbca #ffffff`.
 
 ### 10.1 Main window size
 

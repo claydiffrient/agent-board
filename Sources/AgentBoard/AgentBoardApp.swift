@@ -65,6 +65,10 @@ struct AgentBoardApp: App {
             }
         }
         .defaultSize(width: 1000, height: 700)
+
+        Settings {
+            SettingsView(terminalAppearance: .shared)
+        }
     }
 }
 

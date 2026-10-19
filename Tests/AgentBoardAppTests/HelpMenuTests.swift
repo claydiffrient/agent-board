@@ -95,6 +95,13 @@ final class HelpMenuTests: XCTestCase {
         XCTAssertEqual(item["action"] as? String, "menuAction:", "the item is in the menu but wired to nothing")
     }
 
+    func testTheAppMenuCarriesSettingsOnCommandComma() throws {
+        let probe = try probeApp()
+        let items = probe.app.filter { $0["keyEquivalent"] as? String == "," }
+        XCTAssertEqual(items.compactMap { $0["title"] as? String }, ["Settings…"], "\(probe.app.compactMap { $0["title"] as? String })")
+        XCTAssertNotEqual(items.first?["action"] as? String, "", "the item is in the menu but wired to nothing")
+    }
+
     // MARK: driving the app
 
     private func probeApp(invoking item: String? = nil) throws -> Probe {
