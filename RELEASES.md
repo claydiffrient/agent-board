@@ -9,6 +9,48 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.5.0 — 2026-10-20
+
+- **Tasks.** An orchestrator can now close a task it decides is obsolete,
+  with a recorded reason, instead of leaving it to rot on the board or
+  forcing it through review. A closed task moves to a new **Closed** column,
+  doesn't count toward an epic's done tasks, and can only be reopened by a
+  human, from the board.
+- **Reviews.** A rostered reviewer that goes quiet now gets one automatic
+  reminder before its review is marked "stopped without a verdict." Pending
+  reviews gains a **Re-run review** action for one that stalled.
+- **Epics.** An epic that ships by pull request now stays open after
+  integration instead of closing immediately — it still takes tasks, and
+  the orchestrator is told its next step is to open the pull request. The
+  settings picker for this is now labeled "Integrate standalone tasks and
+  epics by."
+- **Worktrees.** A new task branch, and a new epic branch, are now cut from
+  the remote's base when local `main` is behind it, instead of a stale local
+  branch; a failed fetch falls back to the local base and warns. An optional
+  per-project worktree teardown hook, set on Project Settings' Workflow tab,
+  now runs before a worktree is removed — including, in the background,
+  when a shared-branch accept triggers the removal, so the accept itself
+  returns at once. Skipped cleanup is reported rather than silently dropped,
+  and a closed epic now lists which worktrees it still holds.
+  A project's worktree root that was still on the old Application Support
+  default — which Project Settings already refuses as a new value — is moved
+  to `~/.agentboard/worktrees/<id>` automatically at launch, once nothing is
+  checked out under it. A root already stored starting with `~` is still
+  honored and resolves against your home folder. A worktree root is now
+  chosen with a folder picker (**Choose…** or **Use Default**) instead of
+  typed by hand. The orchestrator's briefing now explains where its workers
+  actually run — worktree, shared, or auto.
+- **Sessions.** Ending a worker in Agent Board now revokes its access
+  outright: a session Claude Code revives on its own after that is stopped
+  again, and a report that arrives from it late changes nothing on the
+  board.
+- **Settings.** A new **Settings** window (Agent Board → Settings…, or ⌘,)
+  has a Terminal pane for the font and colors every Agent Board terminal
+  uses — the project Terminal screen, Orchestrator Command, and attach and
+  worktree-shell windows all repaint together when you change it. It
+  defaults to the Night Owl theme in Monaspace Neon at 12pt, replacing the
+  previous white-on-dark Terminal.app palette.
+
 ## 0.4.0 — 2026-09-30
 
 - **Reviews.** Under Agent review, a project can now route each task type —
