@@ -27,19 +27,19 @@ to decide what a user has already seen.
 - **Worktrees.** A new task branch, and a new epic branch, are now cut from
   the remote's base when local `main` is behind it, instead of a stale local
   branch; a failed fetch falls back to the local base and warns. An optional
-  per-project worktree teardown hook, set on Project Settings' new Workflow
-  tab, now runs before a worktree is removed — including, in the background,
+  per-project worktree teardown hook, set on Project Settings' Workflow tab,
+  now runs before a worktree is removed — including, in the background,
   when a shared-branch accept triggers the removal, so the accept itself
   returns at once. Skipped cleanup is reported rather than silently dropped,
   and a closed epic now lists which worktrees it still holds.
   A project's worktree root that was still on the old Application Support
   default — which Project Settings already refuses as a new value — is moved
   to `~/.agentboard/worktrees/<id>` automatically at launch, once nothing is
-  checked out under it. A worktree root can also be written starting with
-  `~` for your home directory, and is now chosen with a folder picker
-  (**Choose…** or **Use Default**) instead of typed by hand. The
-  orchestrator's briefing now explains where its workers actually run —
-  worktree, shared, or auto.
+  checked out under it. A root already stored starting with `~` is still
+  honored and resolves against your home folder. A worktree root is now
+  chosen with a folder picker (**Choose…** or **Use Default**) instead of
+  typed by hand. The orchestrator's briefing now explains where its workers
+  actually run — worktree, shared, or auto.
 - **Sessions.** Ending a worker in Agent Board now revokes its access
   outright: a session Claude Code revives on its own after that is stopped
   again, and a report that arrives from it late changes nothing on the
