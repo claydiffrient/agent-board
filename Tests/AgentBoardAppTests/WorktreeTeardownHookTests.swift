@@ -78,7 +78,10 @@ final class WorktreeTeardownHookTests: XCTestCase {
     /// per-spawn worktree strategy.
     func testASharedBranchAcceptReturnsBeforeTheHookFinishes() async throws {
         let marker = fixture.supportDir.appendingPathComponent("teardown-marker")
-        try setTeardown("sleep 5; echo ran >> '\(marker.path)'")
+        let release = fixture.supportDir.appendingPathComponent("teardown-release")
+        try setTeardown(
+            "for i in $(seq 1 200); do [ -f '\(release.path)' ] && break; sleep 0.05; done; echo ran >> '\(marker.path)'"
+        )
         let epic = try EpicStore(fixture.db).create(projectId: fixture.project.id, title: "Roster", goal: "ship it")
         try fixture.manager.ensureBranch(epic.branch, from: "main")
         let shared = SharedCheckoutGroup.branch(epicId: epic.id)
@@ -105,6 +108,7 @@ final class WorktreeTeardownHookTests: XCTestCase {
             try fixture.git(["merge-base", "--is-ancestor", sharedHead, epic.branch]),
             "the accept did not land the shared branch"
         )
+        try Data().write(to: release)
         await fixture.supervisor.waitForTeardowns()
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
         XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "ran\n", "the hook did not run exactly once")
