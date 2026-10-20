@@ -1413,10 +1413,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// The shared branch `task` ran on, or nil when it had a worktree of its own. Read from its
     /// newest session that carries a branch, so a task retried into a worktree after a shared
-    /// attempt is treated as the worktree task it now is.
+    /// attempt is treated as the worktree task it now is (SPEC §5).
     private func sharedBranch(of task: BoardTask) -> String? {
         guard let rows = try? sessions.forTask(task.id) else { return nil }
-        guard let newest = rows.last(where: { $0.branch != nil }) else { return nil }
+        guard let newest = rows.first(where: { $0.branch != nil }) else { return nil }
         guard newest.worktreePath == nil, let branch = newest.branch,
               branch.hasPrefix(SharedCheckoutGroup.branchPrefix)
         else { return nil }

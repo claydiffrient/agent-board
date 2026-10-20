@@ -74,29 +74,41 @@ final class WorktreeTeardownHookTests: XCTestCase {
         XCTAssertFalse(reports.contains { $0.contains(Board.worktreeCleanupLead) }, "\(reports)")
     }
 
-    /// A task that ran on the shared branch and, on another attempt, in a worktree of its own.
+    /// An earlier attempt with its own worktree, then a retry on the shared branch, as under a
+    /// per-spawn worktree strategy.
     func testASharedBranchAcceptReturnsBeforeTheHookFinishes() async throws {
         let marker = fixture.supportDir.appendingPathComponent("teardown-marker")
-        try setTeardown("sleep 5; echo ran >> '\(marker.path)'")
+        let release = fixture.supportDir.appendingPathComponent("teardown-release")
+        try setTeardown(
+            "for i in $(seq 1 200); do [ -f '\(release.path)' ] && break; sleep 0.05; done; echo ran >> '\(marker.path)'"
+        )
         let epic = try EpicStore(fixture.db).create(projectId: fixture.project.id, title: "Roster", goal: "ship it")
         try fixture.manager.ensureBranch(epic.branch, from: "main")
         let shared = SharedCheckoutGroup.branch(epicId: epic.id)
         try SupervisorFixture.git(["branch", shared, epic.branch], cwd: fixture.repo)
+        try fixture.commitOn(branch: shared, message: "Work on the shared branch")
+        let sharedHead = try fixture.git(["rev-parse", shared]).trimmingCharacters(in: .whitespacesAndNewlines)
         let task = try fixture.tasks.create(
             projectId: fixture.project.id, title: "Do the thing", body: nil, acceptance: nil,
             priority: nil, column: .review, origin: .human, epicId: epic.id
         )
+        let worktree = try XCTUnwrap(try fixture.worktreeWorker(task: task).worktreePath)
         try fixture.sessions.insert(
             AgentSession(
-                sessionId: "shared-session", shortId: "short-1", projectId: fixture.project.id, taskId: task.id,
-                role: .worker, worktreePath: nil, branch: shared, cwd: fixture.repo.path, state: .completed
+                sessionId: "shared-session", shortId: "short-2", projectId: fixture.project.id, taskId: task.id,
+                role: .worker, worktreePath: nil, branch: shared, cwd: fixture.repo.path, state: .completed,
+                attempt: 2
             )
         )
-        let worktree = try XCTUnwrap(try fixture.worktreeWorker(task: task, attempt: 2).worktreePath)
 
         try await fixture.supervisor.accept(taskId: task.id)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), "the accept waited for the hook")
+        XCTAssertNoThrow(
+            try fixture.git(["merge-base", "--is-ancestor", sharedHead, epic.branch]),
+            "the accept did not land the shared branch"
+        )
+        try Data().write(to: release)
         await fixture.supervisor.waitForTeardowns()
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
         XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "ran\n", "the hook did not run exactly once")
