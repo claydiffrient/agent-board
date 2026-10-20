@@ -111,8 +111,11 @@ nobody reviewed.
   base or epic branch. An unmerged branch is kept and the reason surfaced in
   the status bar. Landing comes
   first because removing a large worktree can take over a minute, and until the
-  merge runs a dependent cut from the target branch lacks this work. A member of
-  a shared branch has no worktree of its own on that branch, so the removal of
+  merge runs a dependent cut from the target branch lacks this work. A task's
+  newest attempt that carries a branch decides which branch lands: a task whose
+  newest attempt ran on a shared branch lands as that branch's member, and one
+  retried from a shared branch into a worktree lands `agentboard/<task-id>`. A
+  shared member has no worktree of its own on that branch, so the removal of
   any earlier attempt's worktree starts first.
 
   A worktree with uncommitted changes is kept — the teardown hook does not run
