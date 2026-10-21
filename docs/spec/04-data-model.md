@@ -21,7 +21,8 @@ CREATE TABLE project (
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
                                    -- reviewLevel, reviewRouting, buildCommand, testCommand, archivePolicy,
                                    -- worktreeStrategy, sharedCheckoutMaxAgents, rosterAgentIds,
-                                   -- worktreeTeardownCommand, worktreeTeardownTimeoutSeconds
+                                   -- worktreeTeardownCommand, worktreeTeardownTimeoutSeconds,
+                                   -- prFollowThrough
   created_at      INTEGER NOT NULL,
   workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
 );
@@ -306,6 +307,77 @@ CREATE TABLE comment_delivery (
   comment_id INTEGER NOT NULL REFERENCES task_comment(id) ON DELETE CASCADE,
   PRIMARY KEY (session_id, comment_id)
 );
+
+-- PR follow-through: one row per watched pull request, keyed by its repository and number.
+CREATE TABLE pr_watch (
+  id               TEXT PRIMARY KEY,
+  project_id       TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  repo_owner       TEXT NOT NULL,
+  repo_name        TEXT NOT NULL,
+  number           INTEGER NOT NULL,
+  url              TEXT NOT NULL,
+  title            TEXT NOT NULL,
+  is_draft         INTEGER NOT NULL DEFAULT 0,
+  head_ref         TEXT NOT NULL,
+  head_oid         TEXT NOT NULL,
+  base_ref         TEXT NOT NULL,
+  state            TEXT NOT NULL,     -- watching | settling | triaging | fixing | checking | publishing |
+                                      -- awaiting_ci | ready_to_verify | verified | stale | parked | merged | closed
+  round            INTEGER NOT NULL DEFAULT 0,
+  review_decision  TEXT,              -- GitHub's reviewDecision, as read
+  checks_state     TEXT,
+  mergeable        TEXT,
+  labels_json      TEXT NOT NULL DEFAULT '[]',
+  paused           INTEGER NOT NULL DEFAULT 0,
+  last_polled_at   INTEGER,
+  last_feedback_at INTEGER,           -- the last poll that brought a new, changed or reopened item
+  verified_at      INTEGER,
+  est_cost_usd     REAL NOT NULL DEFAULT 0,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,  -- moves only when something other than last_polled_at changes
+  UNIQUE (project_id, repo_owner, repo_name, number)
+);
+CREATE INDEX pr_watch_state ON pr_watch(state);
+
+-- One piece of feedback on a watched PR, keyed by GitHub node id.
+CREATE TABLE pr_item (
+  id                    INTEGER PRIMARY KEY,
+  watch_id              TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+  github_node_id        TEXT NOT NULL,
+  kind                  TEXT NOT NULL,   -- thread | review | check | conflict | verify_failure
+  author                TEXT,
+  body                  TEXT NOT NULL,
+  path                  TEXT,
+  line                  INTEGER,
+  url                   TEXT,
+  state                 TEXT NOT NULL,   -- open | handled | dismissed
+  verdict               TEXT,            -- fix | answer | already_done | follow_up | decision; null until triaged
+  approach              TEXT,
+  decision_question     TEXT,
+  decision_options_json TEXT,
+  decision_answer       TEXT,
+  fix_task_id           TEXT REFERENCES task(id) ON DELETE SET NULL,
+  followup_grade        TEXT,            -- fixed | partly | not_fixed | moot
+  reply_body            TEXT,
+  reply_url             TEXT,
+  round                 INTEGER NOT NULL DEFAULT 0,
+  created_at            INTEGER NOT NULL,
+  updated_at            INTEGER NOT NULL,
+  UNIQUE (watch_id, github_node_id)
+);
+CREATE INDEX pr_item_watch_state ON pr_item(watch_id, state);
+
+CREATE TABLE pr_round (
+  id              INTEGER PRIMARY KEY,
+  watch_id        TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+  number          INTEGER NOT NULL,
+  base_head_oid   TEXT NOT NULL,     -- the PR head the round's branch was cut from
+  pushed_head_oid TEXT,
+  outcome         TEXT,
+  started_at      INTEGER NOT NULL,
+  ended_at        INTEGER,
+  UNIQUE (watch_id, number)
+);
 ```
 
 Every `epic.state` value is written by exactly one place, and nothing writes one
@@ -455,6 +527,20 @@ is Same as Default, and a Default row with an unknown `kind` reads as Any
 reviewer; neither fails the rest of `settings_json`.
 The table is read only under `agent`; the integration-task and shared-checkout
 overrides (§5, §5.1) still apply over it, and there are no per-epic rows.
+
+`PRWatchStore.upsert` records one poll of a pull request. A new watch starts in
+`watching`. Items are matched by `github_node_id`, so the same snapshot twice
+changes nothing but `last_polled_at`. An open item that the snapshot reports
+resolved, or leaves out, becomes `handled`; a resolved item never seen before is
+not stored. A `handled` or `dismissed` item whose body changed — a new reply —
+reopens to `open` with its verdict and grade cleared. `settings_json.prFollowThrough`
+holds every work-specific value — `enabled`, `verificationLabel`,
+`requireApproval`, `settleMinutes`, `roundCap`, `dailyBudgetUSD`,
+`verifyCommand`, `postFactualReplies`, `roles` (`triage`, `fixer`, `reviewer`,
+`followupCheck`, each `{rosterAgentId, model}`) and `privateTerms` — and an
+absent key, or an absent field inside it, decodes to off or empty:
+`enabled` false, `requireApproval` true, `settleMinutes` 10, `roundCap` 3, the
+rest nil or `[]`.
 
 `settings_json.reviewLevel` is one of `none`, `agent`, `task` or `epic` and
 defaults to **`task`**, so a project that predates the setting behaves exactly as

@@ -465,12 +465,83 @@ enum Schema {
     ALTER TABLE task ADD COLUMN closed_by TEXT;
     """
 
+    /// PR follow-through (SPEC §4). Items are keyed by GitHub node id so a poll is idempotent.
+    static let prFollowThrough = """
+    CREATE TABLE pr_watch (
+      id               TEXT PRIMARY KEY,
+      project_id       TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+      repo_owner       TEXT NOT NULL,
+      repo_name        TEXT NOT NULL,
+      number           INTEGER NOT NULL,
+      url              TEXT NOT NULL,
+      title            TEXT NOT NULL,
+      is_draft         INTEGER NOT NULL DEFAULT 0,
+      head_ref         TEXT NOT NULL,
+      head_oid         TEXT NOT NULL,
+      base_ref         TEXT NOT NULL,
+      state            TEXT NOT NULL,
+      round            INTEGER NOT NULL DEFAULT 0,
+      review_decision  TEXT,
+      checks_state     TEXT,
+      mergeable        TEXT,
+      labels_json      TEXT NOT NULL DEFAULT '[]',
+      paused           INTEGER NOT NULL DEFAULT 0,
+      last_polled_at   INTEGER,
+      last_feedback_at INTEGER,
+      verified_at      INTEGER,
+      est_cost_usd     REAL NOT NULL DEFAULT 0,
+      created_at       INTEGER NOT NULL,
+      updated_at       INTEGER NOT NULL,
+      UNIQUE (project_id, repo_owner, repo_name, number)
+    );
+    CREATE INDEX pr_watch_state ON pr_watch(state);
+
+    CREATE TABLE pr_item (
+      id                    INTEGER PRIMARY KEY,
+      watch_id              TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+      github_node_id        TEXT NOT NULL,
+      kind                  TEXT NOT NULL,
+      author                TEXT,
+      body                  TEXT NOT NULL,
+      path                  TEXT,
+      line                  INTEGER,
+      url                   TEXT,
+      state                 TEXT NOT NULL,
+      verdict               TEXT,
+      approach              TEXT,
+      decision_question     TEXT,
+      decision_options_json TEXT,
+      decision_answer       TEXT,
+      fix_task_id           TEXT REFERENCES task(id) ON DELETE SET NULL,
+      followup_grade        TEXT,
+      reply_body            TEXT,
+      reply_url             TEXT,
+      round                 INTEGER NOT NULL DEFAULT 0,
+      created_at            INTEGER NOT NULL,
+      updated_at            INTEGER NOT NULL,
+      UNIQUE (watch_id, github_node_id)
+    );
+    CREATE INDEX pr_item_watch_state ON pr_item(watch_id, state);
+
+    CREATE TABLE pr_round (
+      id              INTEGER PRIMARY KEY,
+      watch_id        TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+      number          INTEGER NOT NULL,
+      base_head_oid   TEXT NOT NULL,
+      pushed_head_oid TEXT,
+      outcome         TEXT,
+      started_at      INTEGER NOT NULL,
+      ended_at        INTEGER,
+      UNIQUE (watch_id, number)
+    );
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
         "approval", "shutdown_order", "shutdown_delivery", "workspace", "file_lock", "message",
         "task_commit",
         "roster_agent", "project_roster_agent", "task_comment", "comment_delivery", "coordinator",
-        "coordinator_request", "request_event", "request_epic",
+        "coordinator_request", "request_event", "request_epic", "pr_watch", "pr_item", "pr_round",
     ]
 }

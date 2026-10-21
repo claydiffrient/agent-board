@@ -178,6 +178,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("task_closed") { db in
             try db.execute(sql: Schema.taskClosed)
         }
+        migrator.registerMigration("pr_follow_through") { db in
+            try db.execute(sql: Schema.prFollowThrough)
+        }
         return migrator
     }
 }
