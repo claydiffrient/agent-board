@@ -48,14 +48,6 @@ final class NotificationRoutingMountTests: XCTestCase {
         }
 
         func close() { window.orderOut(nil) }
-
-        func settle(turns: Int = 80) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
     }
 
     private func register(_ db: AppDatabase, _ name: String) throws -> Project {
@@ -75,11 +67,11 @@ final class NotificationRoutingMountTests: XCTestCase {
         let router = NotificationRouter()
         let mount = Mount(db: db, supervisor: supervisor, router: router, collapse: collapse.state)
         defer { mount.close() }
-        mount.settle()
+        pumpBriefly(mount.window)
         XCTAssertEqual(supervisor.focusedProjects, [], "nothing is selected before the click")
 
         router.open(NotificationRoute(projectId: beta.id, subject: .approvals))
-        mount.settle(turns: 40)
+        pump(mount.window) { supervisor.focusedProjects.last == beta.id }
 
         XCTAssertEqual(
             supervisor.focusedProjects.last, beta.id,
@@ -98,10 +90,10 @@ final class NotificationRoutingMountTests: XCTestCase {
         let router = NotificationRouter()
         let mount = Mount(db: db, supervisor: supervisor, router: router, collapse: collapse.state)
         defer { mount.close() }
-        mount.settle()
+        pumpBriefly(mount.window)
 
         router.open(NotificationRoute(projectId: "p-deleted", subject: .approvals))
-        mount.settle(turns: 40)
+        pumpBriefly(mount.window)
 
         XCTAssertEqual(supervisor.focusedProjects, [], "a route to a missing project must be dropped")
     }

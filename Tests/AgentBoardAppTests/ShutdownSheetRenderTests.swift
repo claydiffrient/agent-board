@@ -25,14 +25,6 @@ final class ShutdownSheetRenderTests: XCTestCase {
         let supervisor: RenderStubSupervisor
         let window: NSWindow
         let host: NSView
-
-        func settle(turns: Int = 40) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
     }
 
     private func mount(
@@ -96,7 +88,7 @@ final class ShutdownSheetRenderTests: XCTestCase {
             ],
             reported: ShutdownProgress(orderId: "x", total: 3, acknowledged: 1, overdue: ["bbbbbbbb-0002"])
         )
-        mounted.settle()
+        pump(mounted.window) { mounted.supervisor.progressReads > 0 }
         XCTAssertGreaterThan(
             mounted.supervisor.progressReads, 0,
             "the sheet's body never read the supervisor's observable progress"
@@ -115,12 +107,12 @@ final class ShutdownSheetRenderTests: XCTestCase {
             ],
             reported: ShutdownProgress(orderId: "x", total: 2, acknowledged: 1)
         )
-        mounted.settle()
+        pump(mounted.window) { mounted.supervisor.progressReads > 0 }
         let before = mounted.supervisor.progressReads
         XCTAssertGreaterThan(before, 0)
 
         _ = try Board(mounted.db).acknowledgeShutdown(sessionId: "bbbbbbbb-0002", note: "done")
-        mounted.settle()
+        pump(mounted.window) { mounted.supervisor.progressReads > before }
 
         XCTAssertGreaterThan(
             mounted.supervisor.progressReads, before,
@@ -147,7 +139,7 @@ final class ShutdownSheetRenderTests: XCTestCase {
             ],
             reported: ShutdownProgress(orderId: "x", total: 2, acknowledged: 1)
         )
-        mounted.settle()
+        pump(mounted.window) { mounted.supervisor.progressReads > 0 }
 
         var windows: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(

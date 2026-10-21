@@ -131,16 +131,10 @@ final class PortsPanelLiveTests: XCTestCase {
 
         func close() { window.orderOut(nil) }
 
-        func settle(turns: Int = 80) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
-
+        /// A short dwell before shooting: `settled(_:)` below is what actually waits out a slow
+        /// render, by requiring two of these captures to agree; this only has to cover one frame.
         func capture() throws -> NSBitmapImageRep {
-            settle()
+            pumpBriefly(window, turns: 9)
             let image = try XCTUnwrap(
                 CGWindowListCreateImage(
                     .null, .optionIncludingWindow, CGWindowID(window.windowNumber),

@@ -78,16 +78,10 @@ final class StatusPortsSectionLiveTests: XCTestCase {
 
         func close() { window.orderOut(nil) }
 
-        func settle(turns: Int = 80) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
-
+        /// A short dwell before shooting: `settled(_:)` below is what actually waits out a slow
+        /// render, by requiring two of these captures to agree; this only has to cover one frame.
         func capture() throws -> NSBitmapImageRep {
-            settle()
+            pumpBriefly(window, turns: 9)
             let image = try XCTUnwrap(
                 CGWindowListCreateImage(
                     .null, .optionIncludingWindow, CGWindowID(window.windowNumber),
@@ -294,7 +288,7 @@ final class StatusPortsSectionLiveTests: XCTestCase {
 
         let paneOnly = Mount(StatusView(project: mine).environment(env), width: 900, height: 500)
         defer { paneOnly.close() }
-        paneOnly.settle()
+        pumpBriefly(paneOnly.window)
         XCTAssertEqual(counter.count, 1, "the Status pane swept the process table on its own")
 
         let both = Mount(
@@ -305,7 +299,7 @@ final class StatusPortsSectionLiveTests: XCTestCase {
             width: 900, height: 700
         )
         defer { both.close() }
-        both.settle()
+        pump(both.window) { counter.count == 2 }
 
         XCTAssertEqual(
             counter.count, 2,
@@ -362,10 +356,10 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         defer { both.close() }
         both.window.layoutIfNeeded()
         type(":3000", into: both)
-        both.settle()
+        pumpBriefly(both.window)
         for text in [":30", "node", "dev server", ""] {
             type(text, into: both)
-            both.settle(turns: 10)
+            pumpBriefly(both.window, turns: 10)
         }
 
         XCTAssertEqual(
