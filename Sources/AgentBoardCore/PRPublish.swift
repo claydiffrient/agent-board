@@ -92,7 +92,9 @@ extension PRWatchStore {
                         )
                         try item.insert(db)
                     }
-                } else if !PRWatchTransition.checksGreen(watch.checksState) {
+                } else if !PRWatchTransition.checksGreen(
+                    watch.checksState, headSeenAt: watch.headChangedAt ?? watch.createdAt, now: now
+                ) {
                     return nil
                 }
             } else if watch.headOid == round.baseHeadOid {

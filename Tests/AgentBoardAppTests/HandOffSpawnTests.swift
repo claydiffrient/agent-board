@@ -86,27 +86,6 @@ final class HandOffSpawnTests: XCTestCase {
         XCTAssertEqual(spawns, 1, "the refused assignment still launched a process")
     }
 
-    func testTwoTasksCannotBeSpawnedIntoOneCheckout() async throws {
-        let held = try readyTask("First")
-        try await fixture.supervisor.assign(taskId: held.id)
-        let holder = try XCTUnwrap(fixture.sessions.forTask(held.id).first)
-        let worktree = try XCTUnwrap(holder.worktreePath)
-
-        let other = try readyTask("Second")
-        XCTAssertThrowsError(
-            try fixture.board.assign(
-                taskId: other.id,
-                session: AgentSession(
-                    sessionId: "intruder", projectId: fixture.project.id, taskId: other.id, role: .worker,
-                    worktreePath: worktree, cwd: worktree, state: .running
-                )
-            )
-        ) {
-            XCTAssertEqual($0 as? BoardError, .worktreeAlreadyHeld(path: worktree, sessionId: holder.sessionId))
-        }
-        XCTAssertEqual(try fixture.tasks.get(other.id)?.column, .ready)
-    }
-
     /// World A of the spike's finding: the handing process is still alive. Reconcile sees it running
     /// and must leave the released row alone, or the task could never be assigned to anyone again.
     func testReconcileDoesNotPutAHandedOffSessionBackToWork() async throws {

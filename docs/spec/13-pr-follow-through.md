@@ -62,11 +62,28 @@ triage.
   failed checks and their log tails as items.
 - **readyToVerify** *(phase 1)* — `reviewDecision == APPROVED` (when
   `requireApproval`), checks green, no open item or decision, and the
-  verification label absent. Checks are green when the head commit's
-  `statusCheckRollup` is `SUCCESS` or absent: a repository with no checks
-  configured has no rollup, and nothing on it is failing. `PENDING`,
-  `FAILURE`, `ERROR` and `EXPECTED` are not green. New feedback arriving here first sends the PR
-  back to settling.
+  verification label absent. The checks on the head commit reduce to one
+  of success, pending or failure, and only success is green:
+  - When the base branch requires checks — the contexts its branch
+    protection (`refUpdateRule.requiredStatusCheckContexts`) or a ruleset's
+    required status checks name — only those count. A required check that
+    has not reported yet is pending, so a PR is never ready in the moment
+    after a push before CI has registered anything.
+  - Otherwise every reported check counts, along with the
+    `statusCheckRollup` state.
+  - Failure outweighs pending, and pending outweighs success. A commit
+    status is pending while `PENDING` or `EXPECTED` and failed on `ERROR`
+    or `FAILURE`. A check run is pending until `COMPLETED`, passes on
+    `SUCCESS` or `SKIPPED`, and fails on any other conclusion, `NEUTRAL`
+    included.
+  - A head with no rollup is green only when the base branch requires no
+    checks and none has registered within a grace period of 5 minutes after
+    the head changed (`head_changed_at`, or the watch's `created_at` for the
+    head watching began on). A repository with no CI at all becomes ready
+    once the grace period has passed.
+  The required checks and each check's result come from the same per-repo
+  `gh api graphql` query as the rest of the poll, so no `gh` call is added
+  per PR. New feedback arriving here first sends the PR back to settling.
 - **verified** *(phase 1 reads the label; phase 3's freeze is what it is
   frozen against)* — the verification label is present. The PR is frozen:
   Agent Board never pushes to it again, and any new feedback on it becomes a

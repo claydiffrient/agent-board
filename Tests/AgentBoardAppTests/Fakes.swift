@@ -361,12 +361,26 @@ struct SupervisorFixture {
         )
     }
 
+    /// Built once per `swift test` process and copied into place for every `gitRepo: true` fixture,
+    /// rather than paying `git init`/`add`/`commit` — three subprocesses, about 0.14s each on CI —
+    /// per test. `copyItem` relocates cleanly: nothing here sets an absolute path inside `.git`
+    /// (no `core.worktree`, no hooks, no submodules).
+    private static let repoTemplate: URL = {
+        let template = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentboard-tests-template-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: template, withIntermediateDirectories: true)
+        try! git(["init", "-q", "-b", "main"], cwd: template)
+        try! "hello\n".write(to: template.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try! git(["add", "."], cwd: template)
+        try! commit("Initial commit", cwd: template)
+        return template
+    }()
+
     static func initRepo(at repo: URL) throws {
-        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        try git(["init", "-q", "-b", "main"], cwd: repo)
-        try "hello\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
-        try git(["add", "."], cwd: repo)
-        try commit("Initial commit", cwd: repo)
+        try FileManager.default.createDirectory(
+            at: repo.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try FileManager.default.copyItem(at: repoTemplate, to: repo)
     }
 
     @discardableResult

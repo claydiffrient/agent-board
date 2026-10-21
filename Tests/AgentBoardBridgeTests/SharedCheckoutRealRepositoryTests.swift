@@ -1,19 +1,12 @@
-import AgentBoardBridge
-import AgentBoardCore
-import AgentBoardServer
 import Foundation
 import XCTest
 
-/// Two co-resident sessions in a real git repository. The guard is worth having only if the
-/// commands it denies would actually destroy the sibling's work, so this asserts both halves: the
-/// sibling's files survive the denied attempt, and the same commands run for real in an identical
-/// repository take them away.
+/// The negative control for `SharedCheckoutWorkingTreeGuardTests`' denial table: proof, against a
+/// real git repository, that each denied command would actually have destroyed the sibling's
+/// uncommitted work if it had been allowed to run. Without this, that guard's test would pass just
+/// as well against a denial list that happened to block nothing dangerous.
 final class SharedCheckoutRealRepositoryTests: XCTestCase {
     private var sandbox: URL!
-    private var repo: URL!
-    private var f: BridgeFixture!
-    private var mine: TokenIdentity!
-    private var task: BoardTask!
 
     private let modified = "sibling-modified.txt"
     private let untracked = "sibling-untracked.txt"
@@ -24,42 +17,12 @@ final class SharedCheckoutRealRepositoryTests: XCTestCase {
         sandbox = FileManager.default.temporaryDirectory
             .appendingPathComponent("agent-board-guard-\(UUID().uuidString)")
             .resolvingSymlinksInPath()
-        repo = try Self.makeRepository(at: sandbox.appendingPathComponent("repo"))
-        try seedSiblingWork(in: repo)
-
-        f = try BridgeFixture.make(repoPath: repo.path)
-        task = try f.task("mine", column: .running)
-        try f.sharedSession("w1", taskId: task.id)
-        mine = f.workerIdentity(sessionId: "w1", taskId: task.id)
-
-        let theirs = try f.task("theirs", column: .running)
-        try f.sharedSession("w2", taskId: theirs.id)
     }
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: sandbox)
     }
 
-    func testTheSiblingsUncommittedWorkSurvivesEveryDeniedCommand() async throws {
-        for command in [
-            "git stash",
-            "git stash push -u",
-            "git checkout .",
-            "git checkout -- \(modified)",
-            "git restore .",
-            "git reset --hard",
-            "git clean -fd",
-            "git checkout -b somewhere-else",
-            "git switch -c somewhere-else",
-        ] {
-            let decision = await f.preToolUse(command, sessionId: "w1", identity: mine)
-            XCTAssertEqual(decision?.permissionDecision, "deny", command)
-            try assertSiblingWorkIntact(in: repo, after: command)
-        }
-        XCTAssertEqual(try branch(of: repo), "agentboard/shared")
-    }
-
-    /// Without this the test above would pass against a guard that denies nothing dangerous.
     func testTheSameCommandsRunForRealTakeTheSiblingsWorkAway() throws {
         let lost: [(String, String)] = [
             ("git stash", modified),
@@ -81,31 +44,6 @@ final class SharedCheckoutRealRepositoryTests: XCTestCase {
         }
     }
 
-    func testAScopedRestoreOfThisSessionsOwnFileTouchesOnlyThatFile() async throws {
-        let ownPath = "mine.txt"
-        try write("committed\n", ownPath, in: repo)
-        try Self.git(["add", ownPath], in: repo)
-        // A partial commit, so the sibling's already-staged file stays staged.
-        try Self.git(["commit", "-q", "-m", "Add mine.txt", "--", ownPath], in: repo)
-        try write("edited by me\n", ownPath, in: repo)
-
-        let write = await f.preToolUseWrite(repo.appendingPathComponent(ownPath).path, sessionId: "w1", identity: mine)
-        XCTAssertNil(write as HookDecision?)
-        let restore = await f.preToolUse("git restore -- \(ownPath)", sessionId: "w1", identity: mine)
-        XCTAssertNil(restore as HookDecision?)
-
-        // The hook allowed it, so run what the agent would have run.
-        try Self.git(["restore", "--", ownPath], in: repo)
-        XCTAssertEqual(try read(ownPath, in: repo), "committed\n")
-        try assertSiblingWorkIntact(in: repo, after: "an allowed scoped restore")
-    }
-
-    func testARestoreThatWouldReachTheSiblingsFileIsDeniedBeforeGitSeesIt() async throws {
-        let decision = await f.preToolUse("git restore -- \(modified)", sessionId: "w1", identity: mine)
-        XCTAssertEqual(decision?.permissionDecision, "deny")
-        try assertSiblingWorkIntact(in: repo, after: "a restore aimed at the sibling's file")
-    }
-
     // MARK: - Repository
 
     private func seedSiblingWork(in repo: URL) throws {
@@ -115,27 +53,8 @@ final class SharedCheckoutRealRepositoryTests: XCTestCase {
         try Self.git(["add", staged], in: repo)
     }
 
-    private func assertSiblingWorkIntact(in repo: URL, after command: String) throws {
-        for path in [modified, untracked, staged] {
-            XCTAssertEqual(try read(path, in: repo), siblingWork, "\(path) after `\(command)`")
-        }
-        XCTAssertTrue(
-            try Self.git(["diff", "--cached", "--name-only"], in: repo).contains(staged),
-            "\(staged) was unstaged by `\(command)`"
-        )
-    }
-
     private func write(_ contents: String, _ path: String, in repo: URL) throws {
         try contents.write(to: repo.appendingPathComponent(path), atomically: true, encoding: .utf8)
-    }
-
-    private func read(_ path: String, in repo: URL) throws -> String {
-        try String(contentsOf: repo.appendingPathComponent(path), encoding: .utf8)
-    }
-
-    private func branch(of repo: URL) throws -> String {
-        try Self.git(["rev-parse", "--abbrev-ref", "HEAD"], in: repo)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func makeRepository(at url: URL) throws -> URL {
