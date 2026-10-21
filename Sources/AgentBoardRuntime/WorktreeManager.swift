@@ -475,6 +475,34 @@ public struct WorktreeManager: Sendable {
 
     /// Leaves out, and prunes, every dead linked entry (`isDead`).
     private func worktreeAdminDirectories() throws -> (common: URL, linked: [URL]) {
+        let (common, linked) = try linkedAdminEntries()
+        return (common, try linked.filter { admin in
+            guard try Self.isDead(admin) else { return true }
+            try? FileManager.default.removeItem(at: admin)
+            return false
+        })
+    }
+
+    /// `git worktree add` refuses a path that a dead entry still registers, and does not prune it
+    /// itself. Only that path's entry is touched, and one that cannot be read is left for git to refuse.
+    private func pruneDeadRegistration(at path: URL) {
+        guard let linked = try? linkedAdminEntries().linked else { return }
+        let target = Self.canonical(path)
+        for admin in linked where (try? Self.isDead(admin)) == true {
+            guard let gitdir = try? Self.adminFile("gitdir", in: admin, required: false),
+                  Self.canonical(Self.gitFile(gitdir, admin: admin).deletingLastPathComponent()) == target
+            else { continue }
+            try? FileManager.default.removeItem(at: admin)
+        }
+    }
+
+    /// Resolves only the parent, which exists: git records the resolved spelling of a path that may be gone.
+    private static func canonical(_ url: URL) -> String {
+        url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
+            .appendingPathComponent(url.lastPathComponent).path
+    }
+
+    private func linkedAdminEntries() throws -> (common: URL, linked: [URL]) {
         let common = URL(fileURLWithPath: try gitChecked(
             ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd: repoPath
         ).stdout.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -483,15 +511,13 @@ public struct WorktreeManager: Sendable {
         let linked: [URL]
         do {
             linked = try FileManager.default
-                .contentsOfDirectory(at: linkedRoot, includingPropertiesForKeys: [.isDirectoryKey])
-                .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+                .contentsOfDirectory(at: linkedRoot, includingPropertiesForKeys: nil)
         } catch {
             throw UnreadableWorktreeRecord(directory: linkedRoot.path, detail: error.localizedDescription)
         }
-        return (common, try linked.filter { admin in
-            guard try Self.isDead(admin) else { return true }
-            try? FileManager.default.removeItem(at: admin)
-            return false
+        return (common, try linked.filter { entry in
+            guard let mode = try Self.mode(entry, admin: linkedRoot) else { return false }
+            return mode & S_IFMT == S_IFDIR
         })
     }
 
@@ -507,10 +533,15 @@ public struct WorktreeManager: Sendable {
     /// False only when `lstat` says the path is not there. `FileManager.fileExists` also returns
     /// false when a parent cannot be searched, which would read a live worktree as dead.
     private static func exists(_ file: URL, admin: URL) throws -> Bool {
+        try mode(file, admin: admin) != nil
+    }
+
+    /// `lstat`'s mode, nil only for ENOENT or ENOTDIR; any other failure throws.
+    private static func mode(_ file: URL, admin: URL) throws -> mode_t? {
         var info = stat()
-        if lstat(file.path, &info) == 0 { return true }
+        if lstat(file.path, &info) == 0 { return info.st_mode }
         let code = errno
-        if code == ENOENT || code == ENOTDIR { return false }
+        if code == ENOENT || code == ENOTDIR { return nil }
         throw UnreadableWorktreeRecord(directory: admin.path, detail: "\(file.path): \(String(cString: strerror(code)))")
     }
 
@@ -800,6 +831,7 @@ public struct WorktreeManager: Sendable {
     /// Git leaves the worktree on disk when the hook fails, and a retry adopts any worktree it finds,
     /// so a worktree this call created is removed again (the branch is kept) — SPEC §3.1 step 2.
     private func addWorktree(_ args: [String], at path: URL) throws {
+        pruneDeadRegistration(at: path)
         let existed = FileManager.default.fileExists(atPath: path.path)
         let result = try gitRaw(args, cwd: repoPath)
         guard result.status != 0 else { return }

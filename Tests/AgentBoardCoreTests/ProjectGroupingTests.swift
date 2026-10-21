@@ -20,9 +20,9 @@ final class ProjectGroupingTests: XCTestCase {
         let work = makeWorkspace("w-work", "Work", 2)
         let sections = ProjectGrouping.sections(
             projects: [
-                makeProject("derivita-ui", workspaceId: work.id),
+                makeProject("example-ui", workspaceId: work.id),
                 makeProject("agent-board", workspaceId: personal.id),
-                makeProject("Derivita", workspaceId: work.id),
+                makeProject("Example", workspaceId: work.id),
                 makeProject("clayd.dev", workspaceId: personal.id),
             ],
             workspaces: [work, personal]
@@ -30,7 +30,7 @@ final class ProjectGroupingTests: XCTestCase {
 
         XCTAssertEqual(sections.map(\.workspace?.name), ["Personal", "Work"])
         XCTAssertEqual(sections[0].projects.map(\.name), ["agent-board", "clayd.dev"])
-        XCTAssertEqual(sections[1].projects.map(\.name), ["derivita-ui", "Derivita"])
+        XCTAssertEqual(sections[1].projects.map(\.name), ["example-ui", "Example"])
     }
 
     func testUngroupedProjectsComeLast() {

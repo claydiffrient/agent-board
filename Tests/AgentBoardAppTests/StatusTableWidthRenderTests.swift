@@ -11,7 +11,7 @@ final class StatusTableWidthRenderTests: XCTestCase {
     func testAtTheMinimumDetailWidthTheActionsColumnIsOnScreenWithoutScrollingSideways() throws {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
-            name: "derivita-ui", repoPath: "/tmp/status-width-\(UUID().uuidString)", baseBranch: "main",
+            name: "example-ui", repoPath: "/tmp/status-width-\(UUID().uuidString)", baseBranch: "main",
             worktreeRoot: "/tmp/status-width-worktrees", memoryDir: nil
         )
         // Stopped, so every row carries Resume, the widest action; enough rows to need a vertical scroller.

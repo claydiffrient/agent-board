@@ -147,7 +147,7 @@ nobody reviewed.
   makes the merge commit with both parents, and `update-ref` moves the target
   only if it is still where the merge started. `merge-tree --write-tree` needs
   git 2.38; macOS 14, the oldest the app supports, ships 2.39. A temporary
-  worktree was used before, and it fired `post-checkout`: Derivita's runs its
+  worktree was used before, and it fired `post-checkout`: on a work project this runs its
   setup script, which fails under launchd's `PATH`, so every non-fast-forward
   merge there failed and left its worktree holding the epic branch. Merges into
   one target branch run one at a time, in the order their accepts arrived, so
@@ -352,8 +352,9 @@ or names a `.git` file that is gone, which is what `git worktree prune` removes.
 Left in place, git would keep refusing to delete its branch or check it out
 anywhere else. A `gitdir` that cannot be read is not dead but unreadable, since
 whether its worktree is gone is unknown. The same holds when the admin entry or
-the worktree directory cannot be searched: only a positive "no such file" makes
-a registration dead. A linked entry with no `HEAD`
+the worktree directory cannot be searched, and when `.git/worktrees` can be
+listed but not searched, so its entries cannot be told apart from stray files:
+only a positive "no such file" makes a registration dead or drops an entry. A linked entry with no `HEAD`
 names no branch, as git reads it. One unreadable record blocks every branch's
 check, so the sweep names that directory once in the status bar, with how many
 branches it kept. The delete itself is guarded by the tip that was checked. The teardown
@@ -615,6 +616,18 @@ than one that is finished; they merge nothing and are not part of this sequence.
    integrator gets a real board card, token scope and report channel like any
    worker; if the spawn fails, that task is deleted and the epic is left where
    it was.
+   Respawning that task — `spawn_worker` on it once an idle cap or a stop has
+   ended its integrator, or a spawn approval for it — goes through
+   `spawnIntegrator` too, never the ordinary task spawn: the same epic
+   checkout on the epic branch, the same task with the next attempt number,
+   and a prompt recomposed from the branches as they stand. A failed respawn
+   keeps the task. `assign_to_agent` on an integration task is refused, with
+   guidance to call `spawn_worker` or `request_integration` instead:
+   integrators are not rostered, and a roster spawn would take the ordinary
+   path. Before `git worktree add`, `WorktreeManager` prunes a dead
+   registration (§5) of the path it is about to create, since git refuses
+   that path and does not prune it itself; an epic checkout whose directory
+   is gone but still registered is recreated rather than refused.
 4. The integrator reports. What its report does to the epic depends on how
    the project ships an epic to its base branch. That is the same choice that
    decides standalone tasks (§5, "Integrating standalone tasks by pull
@@ -715,7 +728,7 @@ than one that is finished; they merge nothing and are not part of this sequence.
 worktree (`<worktree-root>/epic-<epic-id>`, on the epic branch), and a task
 worktree kept for uncommitted changes stays where it is. Once an epic is
 `done` or `abandoned` nothing will push from its branch again, so whatever is
-still on disk for it is a leak: on Derivita, an integration worktree whose work
+still on disk for it is a leak: on a work project, an integration worktree whose work
 moved to another epic held an 11.5 GB output base. `Board.heldWorktrees`
 lists them: every recorded `worktree_path` of a session on a task in the epic,
 its integration task included, plus the epic's integration checkout, each kept

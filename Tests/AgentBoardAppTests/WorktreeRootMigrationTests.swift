@@ -139,11 +139,11 @@ final class DefaultWorktreeRootTests: XCTestCase {
     /// against the supervisor's own `home`.
     func testATildeRootResolvesUnderTheHomeDirectory() async throws {
         var project = fixture.project
-        project.worktreeRoot = "~/.agentboard/derivita-ui/"
+        project.worktreeRoot = "~/.agentboard/example-ui/"
 
         let root = fixture.supervisor.worktreeManager(for: project).worktreeRoot
 
-        XCTAssertEqual(root.path, fixture.fakeHome.appendingPathComponent(".agentboard/derivita-ui").path)
+        XCTAssertEqual(root.path, fixture.fakeHome.appendingPathComponent(".agentboard/example-ui").path)
     }
 
     func testAWorkerSpawnedUnderTheOverrideCutsItsWorktreeThereAndNotUnderTheHomeDirectory() async throws {
