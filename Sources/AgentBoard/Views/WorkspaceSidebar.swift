@@ -94,10 +94,12 @@ enum SidebarSelection: Hashable {
     case roster
     /// The Coordinator belongs to no project (SPEC §8.2), so it sits with the pinned rows.
     case coordinator
+    /// Cross-project too (SPEC §13.4): every watched pull request, with a project filter.
+    case pullRequests
     case project(String)
 
     /// The rows above every workspace section, in sidebar order.
-    static let pinned: [SidebarSelection] = [.atAGlance, .roster, .coordinator]
+    static let pinned: [SidebarSelection] = [.atAGlance, .roster, .coordinator, .pullRequests]
 
     var projectId: String? {
         if case .project(let id) = self { return id }

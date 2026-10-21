@@ -574,6 +574,82 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(mounted.frame(of: scroll).height, 280)
     }
 
+    func testPRFollowThroughHoldsWatchVerificationRepliesAndThePublishGuard() throws {
+        let configure: (inout ProjectSettings) -> Void = {
+            $0.prFollowThrough = PRFollowThroughSettings(
+                enabled: true, verificationLabel: "verified-example", requireApproval: false,
+                settleMinutes: 15, roundCap: 2, verifyCommand: "example-verify {url}",
+                postFactualReplies: true, privateTerms: ["Globex"]
+            )
+        }
+        let mounted = try mount(tab: .prFollowThrough, configure: configure)
+
+        XCTAssertEqual(
+            mounted.fields.map(\.stringValue),
+            ["15", "2", "", "verified-example", "example-verify {url}", ""]
+        )
+        XCTAssertEqual(
+            mounted.fields.map(\.placeholderString),
+            [nil, nil, "Spawn caps", "e.g. verified", "e.g. open {url}", "Press Return to add"]
+        )
+        XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off, .on])
+
+        let (db, project) = try storedProject(configure)
+        let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
+            .environment(renderEnvironment(db: db))
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 900))
+        defer { mount.close() }
+        let wanted = ["Watch", "Verification", "Replies", "Publish guard", "Globex"]
+        var lines: [String] = []
+        _ = try mount.capture(until: { _ in
+            guard let image = CGWindowListCreateImage(
+                .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+                [.boundsIgnoreFraming, .bestResolution]
+            ), let recognized = try? self.recognizedRoutingLines(in: image) else { return false }
+            lines = recognized.map(\.text)
+            return wanted.allSatisfy { word in lines.contains { $0.contains(word) } }
+        })
+        for word in wanted {
+            XCTAssertTrue(lines.contains { $0.contains(word) }, "no \(word) on the tab: \(lines)")
+        }
+    }
+
+    func testPRFollowThroughSaveKeepsAPendingTermAndReloadsFromTheStore() throws {
+        let draft = PRFollowThroughSettings(
+            enabled: true, verificationLabel: "  ", settleMinutes: -5, roundCap: 0, dailyBudgetUSD: 0,
+            verifyCommand: " example-verify {url} ", privateTerms: ["Globex", " initech "]
+        )
+        let saved = ProjectSettingsSheet.savedFollowThrough(draft, pendingTerm: "GLOBEX")
+        XCTAssertEqual(saved.privateTerms, ["Globex", "initech"], "a case-variant of a listed term guards nothing new")
+        XCTAssertEqual(
+            ProjectSettingsSheet.savedFollowThrough(draft, pendingTerm: " Umbrella ").privateTerms,
+            ["Globex", "initech", "Umbrella"]
+        )
+        XCTAssertNil(saved.verificationLabel)
+        XCTAssertNil(saved.dailyBudgetUSD)
+        XCTAssertEqual(saved.verifyCommand, "example-verify {url}")
+        XCTAssertEqual(saved.settleMinutes, 0)
+        XCTAssertEqual(saved.roundCap, 1)
+
+        let (_, project) = try storedProject { $0.prFollowThrough = saved }
+        let sheet = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
+        let seeded: ProjectSettings? = seededState(sheet, "_settings")
+        XCTAssertEqual(seeded?.prFollowThrough, saved)
+    }
+
+    private func storedProject(_ configure: (inout ProjectSettings) -> Void) throws -> (AppDatabase, Project) {
+        let db = try AppDatabase.inMemory()
+        let projects = ProjectStore(db)
+        let project = try projects.register(
+            name: "Demo", repoPath: "/tmp/demo-\(UUID().uuidString)", baseBranch: "main",
+            worktreeRoot: "/tmp/demo-worktrees", memoryDir: nil
+        )
+        var settings = project.settings
+        configure(&settings)
+        try projects.updateSettings(project.id, settings)
+        return (db, try XCTUnwrap(projects.get(project.id)))
+    }
+
     /// A grouped form ends every field on the row's trailing edge; a `.frame(width:)` on one field
     /// would pull it off that line.
     func testEveryTabsFieldsEndOnOneTrailingEdge() throws {

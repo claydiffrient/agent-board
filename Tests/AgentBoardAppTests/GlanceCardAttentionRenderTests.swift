@@ -25,9 +25,11 @@ final class GlanceCardAttentionRenderTests: XCTestCase {
         ProjectAttention(id: glance.id, name: glance.name, causes: causes)
     }
 
-    private func pixels(_ glance: ProjectGlance, _ attention: ProjectAttention?, width: CGFloat) throws -> Data {
+    private func pixels(
+        _ glance: ProjectGlance, _ attention: ProjectAttention?, width: CGFloat, readyToVerify: Int = 0
+    ) throws -> Data {
         let hosting = NSHostingView(
-            rootView: ProjectGlanceCard(glance: glance, attention: attention)
+            rootView: ProjectGlanceCard(glance: glance, attention: attention, readyToVerify: readyToVerify)
                 .frame(width: width, alignment: .leading)
                 .background(Color(nsColor: .controlBackgroundColor))
         )
@@ -55,6 +57,17 @@ final class GlanceCardAttentionRenderTests: XCTestCase {
             try pixels(alpha, nil, width: 220),
             "a project needing attention must not draw the same as one that does not"
         )
+    }
+
+    /// SPEC §10: a card shows its own count of PRs ready to verify, and an idle board with one
+    /// waiting is not idle. One and two must draw differently too, or the count is not drawn.
+    func testACardDrawsItsOwnCountOfPullRequestsReadyToVerify() throws {
+        let alpha = glance("Alpha")
+        let none = try pixels(alpha, nil, width: 220)
+        let one = try pixels(alpha, nil, width: 220, readyToVerify: 1)
+        let two = try pixels(alpha, nil, width: 220, readyToVerify: 2)
+        XCTAssertNotEqual(one, none)
+        XCTAssertNotEqual(two, one)
     }
 
     /// A project needing attention but carrying no causes is not needing attention. The card must
