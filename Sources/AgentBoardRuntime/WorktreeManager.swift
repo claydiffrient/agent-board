@@ -390,22 +390,58 @@ public struct WorktreeManager: Sendable {
     }
 
     /// `git branch -d` measures merged against the current checkout's HEAD, which is rarely one of
-    /// `bases`, so ancestry is checked here and the ref is then dropped directly.
+    /// `bases`, so ancestry is checked here and the ref is then dropped directly — guarded by the tip
+    /// that was checked, so a commit landing in between keeps the branch.
     public func deleteBranchIfMerged(_ branch: String, into bases: [String]) throws -> BranchDeletion {
         guard try branchExists(branch) else { return .noSuchBranch(branch) }
-        if let holder = try list().first(where: { $0.branch == branch }) {
-            return .kept(branch: branch, reason: "it is still checked out at \(holder.path.path)")
+        let holder: String?
+        do {
+            holder = try worktreeHolding(branch)
+        } catch {
+            return .kept(branch: branch, reason: "whether a worktree holds it could not be read (\(error))")
+        }
+        if let holder {
+            return .kept(branch: branch, reason: "it is still checked out at \(holder)")
         }
         let known = try bases.filter { try commitExists($0) }
         guard !known.isEmpty else {
             return .kept(branch: branch, reason: "none of \(bases.joined(separator: ", ")) exist in this repository")
         }
-        guard try known.contains(where: { try isAncestor("refs/heads/\(branch)", of: $0) }) else {
+        let tip = try resolve("refs/heads/\(branch)")
+        guard try known.contains(where: { try isAncestor(tip, of: $0) }) else {
             return .kept(branch: branch, reason: "it is not merged into \(known.joined(separator: " or "))")
         }
         recordReapedTip(branch)
-        try git(["update-ref", "-d", "refs/heads/\(branch)"])
+        try git(["update-ref", "-d", "refs/heads/\(branch)", tip])
         return .deleted(branch)
+    }
+
+    /// The worktree whose HEAD, or in-progress rebase, names `branch`, read from git's admin files
+    /// (SPEC §5). Not from `git worktree list`: that exits 0 when it cannot read a worktree's
+    /// `gitdir` or `HEAD`, and leaves the worktree or its branch out. Throws when any HEAD is unreadable.
+    private func worktreeHolding(_ branch: String) throws -> String? {
+        let common = URL(fileURLWithPath: try gitChecked(
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd: repoPath
+        ).stdout.trimmingCharacters(in: .whitespacesAndNewlines))
+        let linkedRoot = common.appendingPathComponent("worktrees")
+        let linked = FileManager.default.fileExists(atPath: linkedRoot.path)
+            ? try FileManager.default.contentsOfDirectory(at: linkedRoot, includingPropertiesForKeys: [.isDirectoryKey])
+                .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            : []
+        let ref = "refs/heads/\(branch)"
+        for admin in [common] + linked {
+            let head = try String(contentsOf: admin.appendingPathComponent("HEAD"), encoding: .utf8)
+            let rebasing = ["rebase-merge/head-name", "rebase-apply/head-name"].compactMap {
+                try? String(contentsOf: admin.appendingPathComponent($0), encoding: .utf8)
+            }
+            let named = [head.replacingOccurrences(of: "ref: ", with: "")] + rebasing
+            guard named.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == ref }) else { continue }
+            if admin == common { return repoPath.path }
+            let gitdir = try? String(contentsOf: admin.appendingPathComponent("gitdir"), encoding: .utf8)
+            return gitdir.map { URL(fileURLWithPath: $0.trimmingCharacters(in: .whitespacesAndNewlines)).deletingLastPathComponent().path }
+                ?? admin.path
+        }
+        return nil
     }
 
     /// The ledger is best effort: it must never be the reason a branch survives or a spawn fails.
