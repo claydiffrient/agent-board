@@ -444,11 +444,12 @@ public struct WorktreeManager: Sendable {
     /// "checked out" test counts — read from git's admin files (SPEC §5). Not from `git worktree
     /// list`: that exits 0 when it cannot read a worktree's `gitdir` or `HEAD`, and leaves the
     /// worktree or its branch out. Throws `UnreadableWorktreeRecord` when any record is unreadable.
+    /// A linked entry with no HEAD names nothing, as git reads it.
     private func worktreeHolding(_ branch: String) throws -> String? {
         let admins = try worktreeAdminDirectories()
         let ref = "refs/heads/\(branch)"
         for admin in [admins.common] + admins.linked {
-            let head = try Self.adminFile("HEAD", in: admin, required: true) ?? ""
+            let head = try Self.adminFile("HEAD", in: admin, required: admin == admins.common) ?? ""
             let named = [head.replacingOccurrences(of: "ref: ", with: "")]
                 + (try ["rebase-merge/head-name", "rebase-apply/head-name"].compactMap {
                     try Self.adminFile($0, in: admin, required: false)
@@ -468,20 +469,35 @@ public struct WorktreeManager: Sendable {
         return try [repoPath] + admins.linked.map { try Self.worktreePath(admin: $0) }
     }
 
+    /// Leaves out, and prunes, every dead linked entry (`isDead`).
     private func worktreeAdminDirectories() throws -> (common: URL, linked: [URL]) {
         let common = URL(fileURLWithPath: try gitChecked(
             ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd: repoPath
         ).stdout.trimmingCharacters(in: .whitespacesAndNewlines))
         let linkedRoot = common.appendingPathComponent("worktrees")
         guard FileManager.default.fileExists(atPath: linkedRoot.path) else { return (common, []) }
+        let linked: [URL]
         do {
-            let linked = try FileManager.default
+            linked = try FileManager.default
                 .contentsOfDirectory(at: linkedRoot, includingPropertiesForKeys: [.isDirectoryKey])
                 .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            return (common, linked)
         } catch {
             throw UnreadableWorktreeRecord(directory: linkedRoot.path, detail: error.localizedDescription)
         }
+        return (common, try linked.filter { admin in
+            guard try Self.isDead(admin) else { return true }
+            try? FileManager.default.removeItem(at: admin)
+            return false
+        })
+    }
+
+    /// SPEC §5: an unlocked entry whose `gitdir` is missing or names a `.git` file that is gone —
+    /// what `git worktree prune` removes. Git still refuses to check its branch out anywhere else or
+    /// delete it, so it is pruned. An unreadable `gitdir` throws: whether its worktree is gone is unknown.
+    private static func isDead(_ admin: URL) throws -> Bool {
+        guard !FileManager.default.fileExists(atPath: admin.appendingPathComponent("locked").path) else { return false }
+        guard let gitdir = try adminFile("gitdir", in: admin, required: false) else { return true }
+        return !FileManager.default.fileExists(atPath: gitFile(gitdir, admin: admin).path)
     }
 
     /// Nil when an optional file is absent; a file that exists and cannot be read always throws.
@@ -495,10 +511,15 @@ public struct WorktreeManager: Sendable {
         }
     }
 
-    /// `gitdir` holds the path of the worktree's `.git` file.
     private static func worktreePath(admin: URL) throws -> URL {
-        let gitdir = try adminFile("gitdir", in: admin, required: true) ?? ""
-        return URL(fileURLWithPath: gitdir.trimmingCharacters(in: .whitespacesAndNewlines)).deletingLastPathComponent()
+        try gitFile(adminFile("gitdir", in: admin, required: true) ?? "", admin: admin).deletingLastPathComponent()
+    }
+
+    /// `gitdir` holds the path of the worktree's `.git` file, relative to `admin` under
+    /// `worktree.useRelativePaths`.
+    private static func gitFile(_ gitdir: String, admin: URL) -> URL {
+        let path = gitdir.trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.hasPrefix("/") ? URL(fileURLWithPath: path) : admin.appendingPathComponent(path).standardizedFileURL
     }
 
     /// The ledger is best effort: it must never be the reason a branch survives or a spawn fails.

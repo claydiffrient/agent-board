@@ -224,14 +224,17 @@ final class WorktreeCleanupTests: XCTestCase {
 
     func testReconcileNamesTheUnreadableWorktreeRecordThatStopsTheBranchSweep() async throws {
         try fixture.manager.ensureBranch("agentboard/stale-task", from: "main")
-        let ghost = URL(fileURLWithPath: fixture.project.repoPath).appendingPathComponent(".git/worktrees/ghost")
-        try FileManager.default.createDirectory(at: ghost, withIntermediateDirectories: true)
+        _ = try fixture.manager.create(name: "unreadable", branch: "agentboard/unreadable", base: "main")
+        let admin = URL(fileURLWithPath: fixture.project.repoPath).appendingPathComponent(".git/worktrees/unreadable")
+        let head = admin.appendingPathComponent("HEAD").path
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: head)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: head) }
 
         await fixture.supervisor.reconcile(projectId: fixture.project.id)
 
         XCTAssertTrue(try fixture.manager.branchExists("agentboard/stale-task"))
         let notice = try XCTUnwrap(fixture.supervisor.lastError, "the sweep stopped reaping without saying why")
-        XCTAssertTrue(notice.contains(ghost.path), notice)
+        XCTAssertTrue(notice.contains(admin.path), notice)
     }
 
     func testReconcileKeepsATaskBranchThatIsStillCheckedOut() async throws {

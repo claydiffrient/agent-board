@@ -544,7 +544,8 @@ space rule rejects. At every launch `WorktreeRootMigration` rewrites such a
 root to the current default, but only if the project's repository has no
 worktree registered under the old root. That is read from each
 `.git/worktrees/<id>/gitdir`, not `git worktree list`, which leaves out an entry
-it cannot read; an unreadable one keeps the root. Worktrees are not
+it cannot read; an unreadable one keeps the root, and a dead one (§5) is pruned
+and does not. Worktrees are not
 moved. A project that still has one keeps its root, and the status bar names
 the project and each remaining worktree, because reconcile's reaper (§5) only
 considers worktrees under the current root and would never see one left

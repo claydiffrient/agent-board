@@ -404,6 +404,32 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertTrue(start.warning?.contains("remote.origin.url") == true, "\(String(describing: start.warning))")
     }
 
+    /// A registration whose directory is gone is what `git worktree prune` removes, and one with no
+    /// HEAD names no branch, so neither holds the epic branch it was created on.
+    func testARegistrationWhoseDirectoryOrHeadIsGoneDoesNotStopAFastForward() throws {
+        for lost in ["directory", "head"] {
+            let epic = "agentboard/epic-\(lost)"
+            try manager.ensureBranch(epic, from: "main")
+            let work = try manager.create(name: "task-\(lost)", branch: "agentboard/task-\(lost)", base: epic)
+            try addCommit("\(lost).txt", in: work)
+            let taskHead = try manager.headCommit(worktree: work)
+            try manager.remove(path: work)
+            let integration = try manager.createForBranch(name: "epic-\(lost)", branch: epic)
+            let admin = try adminDirectory(of: integration)
+            try FileManager.default.removeItem(at: lost == "head" ? admin.appendingPathComponent("HEAD") : integration)
+
+            let outcome = try manager.merge(
+                taskBranch: "agentboard/task-\(lost)", into: epic, taskTitle: "Add the widget", targetTitle: "Widgets"
+            )
+
+            XCTAssertEqual(outcome, .fastForwarded(head: taskHead), lost)
+            XCTAssertEqual(
+                FileManager.default.fileExists(atPath: admin.path), lost == "head",
+                "only the registration whose directory is gone is pruned (\(lost))"
+            )
+        }
+    }
+
     /// `agentboard/epic-1` checked out in its integration worktree, behind a task branch that would fast-forward it.
     private func epicWithMergeableTask() throws -> URL {
         try manager.ensureBranch("agentboard/epic-1", from: "main")
