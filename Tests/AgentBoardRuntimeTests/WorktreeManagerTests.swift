@@ -360,6 +360,29 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore, "merge moved a branch under a worktree it could not read")
     }
 
+    /// `FileManager.fileExists` reads a file under a directory it cannot search as absent, which
+    /// would make a live registration look dead and get pruned.
+    func testARegistrationBehindADirectoryThatCannotBeSearchedIsNotDead() throws {
+        let integration = try epicWithMergeableTask()
+        let admin = try adminDirectory(of: integration)
+        let epicBefore = try revParse("agentboard/epic-1")
+        for sealed in [admin, integration] {
+            try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: sealed.path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sealed.path) }
+
+            XCTAssertThrowsError(try manager.merge(
+                taskBranch: "agentboard/task", into: "agentboard/epic-1", taskTitle: "Add the widget", targetTitle: "Widgets"
+            ), sealed.path) { error in
+                XCTAssertTrue(error is UnreadableWorktreeRecord, "\(error)")
+            }
+            guard case .keptUnreadable = try manager.deleteBranchIfMerged("agentboard/epic-1", into: ["main"]) else {
+                return XCTFail("the sweep did not fail closed on \(sealed.path)")
+            }
+        }
+        XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: admin.appendingPathComponent("HEAD").path), "a live registration was pruned")
+    }
+
     func testMergeTreatsATargetBeingBisectedAsCheckedOut() throws {
         let integration = try epicWithMergeableTask()
         try git(["bisect", "start"], cwd: integration)

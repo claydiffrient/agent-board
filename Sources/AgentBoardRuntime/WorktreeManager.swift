@@ -475,7 +475,7 @@ public struct WorktreeManager: Sendable {
             ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd: repoPath
         ).stdout.trimmingCharacters(in: .whitespacesAndNewlines))
         let linkedRoot = common.appendingPathComponent("worktrees")
-        guard FileManager.default.fileExists(atPath: linkedRoot.path) else { return (common, []) }
+        guard try Self.exists(linkedRoot, admin: linkedRoot) else { return (common, []) }
         let linked: [URL]
         do {
             linked = try FileManager.default
@@ -495,15 +495,25 @@ public struct WorktreeManager: Sendable {
     /// what `git worktree prune` removes. Git still refuses to check its branch out anywhere else or
     /// delete it, so it is pruned. An unreadable `gitdir` throws: whether its worktree is gone is unknown.
     private static func isDead(_ admin: URL) throws -> Bool {
-        guard !FileManager.default.fileExists(atPath: admin.appendingPathComponent("locked").path) else { return false }
+        guard try !exists(admin.appendingPathComponent("locked"), admin: admin) else { return false }
         guard let gitdir = try adminFile("gitdir", in: admin, required: false) else { return true }
-        return !FileManager.default.fileExists(atPath: gitFile(gitdir, admin: admin).path)
+        return try !exists(gitFile(gitdir, admin: admin), admin: admin)
+    }
+
+    /// False only when `lstat` says the path is not there. `FileManager.fileExists` also returns
+    /// false when a parent cannot be searched, which would read a live worktree as dead.
+    private static func exists(_ file: URL, admin: URL) throws -> Bool {
+        var info = stat()
+        if lstat(file.path, &info) == 0 { return true }
+        let code = errno
+        if code == ENOENT || code == ENOTDIR { return false }
+        throw UnreadableWorktreeRecord(directory: admin.path, detail: "\(file.path): \(String(cString: strerror(code)))")
     }
 
     /// Nil when an optional file is absent; a file that exists and cannot be read always throws.
     private static func adminFile(_ name: String, in admin: URL, required: Bool) throws -> String? {
         let file = admin.appendingPathComponent(name)
-        guard required || FileManager.default.fileExists(atPath: file.path) else { return nil }
+        guard try required || exists(file, admin: admin) else { return nil }
         do {
             return try String(contentsOf: file, encoding: .utf8)
         } catch {

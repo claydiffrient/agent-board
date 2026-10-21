@@ -347,7 +347,9 @@ pruned before the check: one that is not locked and whose `gitdir` is missing
 or names a `.git` file that is gone, which is what `git worktree prune` removes.
 Left in place, git would keep refusing to delete its branch or check it out
 anywhere else. A `gitdir` that cannot be read is not dead but unreadable, since
-whether its worktree is gone is unknown, and a linked entry with no `HEAD`
+whether its worktree is gone is unknown. The same holds when the admin entry or
+the worktree directory cannot be searched: only a positive "no such file" makes
+a registration dead. A linked entry with no `HEAD`
 names no branch, as git reads it. One unreadable record blocks every branch's
 check, so the sweep names that directory once in the status bar, with how many
 branches it kept. The delete itself is guarded by the tip that was checked. The teardown
