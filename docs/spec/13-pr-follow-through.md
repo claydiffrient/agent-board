@@ -57,13 +57,16 @@ back into items.
   failed checks and their log tails as items.
 - **readyToVerify** *(phase 1)* — `reviewDecision == APPROVED` (when
   `requireApproval`), checks green, no open item or decision, and the
-  verification label absent. New feedback arriving here first sends the PR
+  verification label absent. Checks are green when the head commit's
+  `statusCheckRollup` is `SUCCESS` or absent: a repository with no checks
+  configured has no rollup, and nothing on it is failing. `PENDING`,
+  `FAILURE`, `ERROR` and `EXPECTED` are not green. New feedback arriving here first sends the PR
   back to settling.
 - **verified** *(phase 1 reads the label; phase 3's freeze is what it is
   frozen against)* — the verification label is present. The PR is frozen:
   Agent Board never pushes to it again, and any new feedback on it becomes a
-  decision item rather than restarting the round. Removing the label returns
-  it to watching.
+  decision item rather than restarting the round. Removing the label
+  re-evaluates it: readyToVerify if it still qualifies, otherwise watching.
 - **stale** *(phase 4)* — the head moved out from under the round. Drop the
   round's worktree and go to settling.
 - **parked** *(phase 2 for the stacked/forked cases; phase 4 for the
@@ -88,9 +91,14 @@ author's latest review and that review is not an approval, since a review is
 never resolved and an approving body is not feedback. Phase 1 moves a watch
 only among watching, readyToVerify and verified, by the rules above, and a
 watch whose PR has left the open list settles to merged or closed by
-`gh pr view`. A `gh` that is missing or not logged in records one
-`pr_poll_problem` row per enabled project, which raises that project's attention
-badge until a poll succeeds; it is written once, not on every poll.
+`gh pr view`. A PR converted back to draft still appears in the search, marked
+draft; its watch is deleted with its items, and undrafting it brings it back
+through the search as a new watch. A `gh` that is missing or not logged in
+records one `pr_poll_problem` row per enabled project, which raises that
+project's attention badge until a poll succeeds; it is written once, not on
+every poll. Any other search failure (network, rate limit) is logged; after 10
+in a row it records the same row with a reason saying the search is failing,
+and the next successful search clears it.
 
 Items are keyed by the GitHub node id of the thread or check they came from,
 so each is handled once per round; a new reply on a thread already handled

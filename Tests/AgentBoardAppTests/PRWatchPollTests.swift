@@ -30,14 +30,16 @@ final class PRWatchPollTests: XCTestCase {
     }
 
     private func pullRequest(
-        _ number: Int = 12, labels: [String] = [], threads: [[String: Any]] = [], reviews: [[String: Any]] = []
+        _ number: Int = 12, labels: [String] = [], checks: String? = "SUCCESS", threads: [[String: Any]] = [],
+        reviews: [[String: Any]] = []
     ) -> [String: Any] {
-        [
+        let rollup: Any = checks.map { ["state": $0] } ?? NSNull()
+        return [
             "number": number, "url": "https://github.com/\(repository)/pull/\(number)", "title": "Add widgets",
             "isDraft": false, "headRefName": "add-widgets", "headRefOid": "c0ffee", "baseRefName": "main",
             "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
             "labels": ["nodes": labels.map { ["name": $0] }],
-            "commits": ["nodes": [["commit": ["statusCheckRollup": ["state": "SUCCESS"]]]]],
+            "commits": ["nodes": [["commit": ["statusCheckRollup": rollup]]]],
             "reviewThreads": ["nodes": threads],
             "reviews": ["nodes": reviews],
         ]
@@ -75,6 +77,17 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertEqual(try onlyWatch().state, .verified)
     }
 
+    func testNoConfiguredChecksCountAsGreenButPendingChecksDoNot() async throws {
+        try enable()
+        answer(pullRequest(checks: nil))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+
+        answer(pullRequest(checks: "PENDING"))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .watching)
+    }
+
     func testAnUnresolvedThreadKeepsItWatchingWithOneOpenItem() async throws {
         try enable()
         answer(pullRequest(threads: [
@@ -98,6 +111,20 @@ final class PRWatchPollTests: XCTestCase {
 
         XCTAssertEqual(try watches.live(projectId: fixture.project.id), [])
         XCTAssertEqual(fixture.gh.calls, [PullRequestWatchReader.searchArguments])
+    }
+
+    func testAPullRequestConvertedBackToDraftStopsBeingWatched() async throws {
+        try enable()
+        answer(pullRequest())
+        await fixture.supervisor.pollPRWatches()
+        _ = try onlyWatch()
+
+        fixture.gh.answerSearch([AuthoredPullRequest(repository: repository, number: 12, url: url, title: "Add widgets", isDraft: true)])
+        let before = fixture.gh.calls.count
+        await fixture.supervisor.pollPRWatches()
+
+        XCTAssertEqual(try watches.live(projectId: fixture.project.id), [])
+        XCTAssertEqual(Array(fixture.gh.calls.dropFirst(before)), [PullRequestWatchReader.searchArguments])
     }
 
     func testNoEnabledProjectRunsNoGhCommand() async throws {
@@ -128,6 +155,25 @@ final class PRWatchPollTests: XCTestCase {
         let cause = try XCTUnwrap(try attention.attention(projectId: fixture.project.id)?.cause(.prPollUnavailable))
         XCTAssertEqual(cause.count, 1)
         XCTAssertTrue(cause.text.contains("gh auth login"), cause.text)
+
+        answer(pullRequest())
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try attention.attention(projectId: fixture.project.id)?.has(.prPollUnavailable), false)
+    }
+
+    func testRepeatedSearchFailuresRaiseAttentionThatSaysItIsFailing() async throws {
+        try enable()
+        let attention = ProjectAttentionStore(fixture.db)
+        fixture.gh.failSearch(status: 1, stderr: "API rate limit exceeded")
+        for _ in 1..<WorkerSupervisor.prWatchFailuresBeforeAttention {
+            await fixture.supervisor.pollPRWatches()
+        }
+        XCTAssertEqual(try attention.attention(projectId: fixture.project.id)?.has(.prPollUnavailable), false)
+
+        await fixture.supervisor.pollPRWatches()
+        let cause = try XCTUnwrap(try attention.attention(projectId: fixture.project.id)?.cause(.prPollUnavailable))
+        XCTAssertTrue(cause.text.contains("failed"), cause.text)
+        XCTAssertFalse(cause.text.contains("gh auth login"), cause.text)
 
         answer(pullRequest())
         await fixture.supervisor.pollPRWatches()

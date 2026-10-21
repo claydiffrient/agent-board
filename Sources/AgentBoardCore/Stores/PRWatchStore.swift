@@ -121,6 +121,10 @@ public struct PRWatchStore: Sendable {
         }
     }
 
+    public func delete(watchId: String) throws {
+        _ = try db.writer.write { try PRWatch.deleteOne($0, key: watchId) }
+    }
+
     /// Every watch of `projectId` that is not merged or closed.
     public func live(projectId: String) throws -> [PRWatch] {
         try db.reader.read { db in

@@ -331,9 +331,14 @@ public enum PRWatchTransition {
         let labeled = !label.isEmpty
             && snapshot.labels.contains { $0.caseInsensitiveCompare(label) == .orderedSame }
         let ready = (!settings.requireApproval || snapshot.reviewDecision == "APPROVED")
-            && snapshot.checksState == "SUCCESS"
+            && checksGreen(snapshot.checksState)
             && openItems == 0
         let target: PRWatchState = labeled ? .verified : ready ? .readyToVerify : .watching
         return target == state ? nil : target
+    }
+
+    /// A PR with no checks configured has no rollup, and nothing on it is failing.
+    static func checksGreen(_ rollup: String?) -> Bool {
+        rollup == nil || rollup == "SUCCESS"
     }
 }
