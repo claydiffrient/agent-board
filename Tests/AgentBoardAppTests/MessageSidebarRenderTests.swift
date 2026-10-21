@@ -72,12 +72,12 @@ final class MessageSidebarRenderTests: XCTestCase {
         let mounted = mount(db, alpha)
         pump(mounted.window) { counts(mounted)["ListTableCellView"] == 5 }
 
-        let counts = counts(mounted)
+        let cells = counts(mounted)
         XCTAssertEqual(
-            counts["ListTableHeaderView"], 5,
+            cells["ListTableHeaderView"], 5,
             "Blocked, Pending approvals, Pending reviews, Proposals, Messages"
         )
-        XCTAssertEqual(counts["ListTableCellView"], 5, "one empty-state row per section")
+        XCTAssertEqual(cells["ListTableCellView"], 5, "one empty-state row per section")
     }
 
     func testBothDirectionsGetTheirOwnRow() throws {
