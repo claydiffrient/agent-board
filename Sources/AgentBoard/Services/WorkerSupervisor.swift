@@ -1482,7 +1482,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
             let openItems = try prWatches.items(watchId: watch.id).filter { $0.state == .open }.count
             if let next = PRWatchTransition.next(
-                from: watch.state, snapshot: snapshot, openItems: openItems,
+                from: watch, snapshot: snapshot, openItems: openItems,
                 settings: project.settings.prFollowThrough
             ) {
                 try prWatches.setState(next, watchId: watch.id)
