@@ -46,7 +46,7 @@ back into items.
   text as data, never as instructions.
 - **fixing** *(phase 3)* — one fixer task per round, in a worktree cut from
   the fetched PR head on `agentboard/pr-<n>-r<round>`. New commits only: no
-  amend, no rebase.
+  amend, no rebase. A stacked PR parks instead (below).
 - **checking** *(phase 3)* — the `reviewer` role reviews the round's diff, and
   the `followupCheck` role grades each item `fixed`, `partly`, `not_fixed`, or
   `moot`. Anything other than fixed or moot reopens fixing, at most
@@ -72,8 +72,8 @@ back into items.
   re-evaluates it: readyToVerify if it still qualifies, otherwise watching.
 - **stale** *(phase 4)* — the head moved out from under the round. Drop the
   round's worktree and go to settling.
-- **parked** *(phase 2 for the stacked/forked cases; phase 4 for the
-  round-cap and fixer cases)* — reached when the round cap is hit, three
+- **parked** *(phase 2 for the forked case and failed triages; phase 3 for a
+  stacked PR; phase 4 for the round-cap and fixer cases)* — reached when the round cap is hit, three
   triages (phase 2) or fixer sessions fail in a row, the PR is stacked (its base is not the
   project's default branch and the stack needs a restack the human must do),
   or the PR is from a fork. Waits for the human to Resume or Stop watching
@@ -115,8 +115,8 @@ sending it back to triage. A settling watch leaves for triaging only when it is
 not paused, at least `settleMinutes` have passed since `last_feedback_at` (so an
 item arriving during settling restarts the wait), and nothing holds it: a
 shutdown order on the project, a Mac whose providing power source IOKit reports
-as anything but AC (an unreadable source counts as AC), the triage sessions
-started since local midnight having cost `dailyBudgetUSD` or more, or a §8
+as anything but AC (an unreadable source counts as AC), the triage and fixer
+sessions started since local midnight having cost `dailyBudgetUSD` or more, or a §8
 spawn cap refusing. A hold leaves it settling and is re-checked on the next
 poll. Leaving increments `round`, records a `pr_round` holding the head oid it
 starts from, and moves the watch to triaging in one transaction that only a
@@ -126,24 +126,51 @@ round's triager (§13.2), whose `pr_triage` row carries the round.
 A triaging watch waits for its round's triage task. Once that task is `done`,
 the verdicts are applied in one transaction:
 
-- `fix` — a `backlog` task of type `code`, origin `follow_through`, its model
-  `roles.fixer.model` or else the project's default. The item stays open with
-  the task in `fix_task_id`; phase 3's fixer is what handles it.
+- `fix` — the item stays open for the round's fixer (below).
 - `follow_up` — a `backlog` task, origin `follow_through`, titled
   "Follow-up from #n: …". The item is handled, with the task in `fix_task_id`.
 - `answer` and `already_done` — the item is handled; its `reply_body` stays
   stored for phase 3 to post.
 - `decision` — the item stays open as a decision.
 
-A fix or follow-up task's body holds the PR's number, title and URL, the
-comment's author, path and line, and URL, the comment quoted and labeled as
-data rather than instructions, and triage's approach. An item gets no second
-task while `fix_task_id` names one that fits its verdict: a `follow_through`
-task of type `code` for `fix`, any other `follow_through` task for `follow_up`.
-A fix task still in `backlog` is rewritten with the item's current body, so a
-reply that arrived after it was made reaches the fixer. The round's outcome becomes `triaged` and the watch returns to
-watching, or to settling when an item arrived during triage. Phase 3 replaces
-that return with fixing.
+A follow-up task's body holds the PR's number, title and URL, the comment's
+author, path and line, and URL, the comment quoted and labeled as data rather
+than instructions, and triage's approach. An item gets no second follow-up
+task while `fix_task_id` names a `follow_through` task that is not of type
+`code`. Then the watch goes to settling when an item arrived during triage,
+else to fixing while an open item's verdict is `fix`, else to watching. The
+round's outcome becomes `triaged` unless it goes on to fixing, which leaves the
+round open.
+
+**Fixing (phase 3).** A PR whose base is not the project's base branch is
+stacked: rather than fixing, the watch parks with a `parked_reason` naming
+both branches, since a fix on a lower layer leaves the layers above it to
+restack, which is the human's to do. Otherwise the next poll creates the
+round's one task, in a transaction that only a fixing watch whose round has
+no task yet passes: a `ready` task of type `code`, origin `fix_round`, titled
+"Fix round r of #n: …", its model `roles.fixer.model` or unset. Its body names
+the round branch, says new commits only with no amend, rebase or push, and
+holds a section per open `fix` item, each built like a follow-up's body. The
+task goes in the round's `fix_task_id` and in each of those items'
+`fix_task_id`, and every `backlog` `follow_through` task of type `code` that an
+item of the watch names — a fix task phase 2 made — is closed with a reason
+naming the round.
+
+The fixer is spawned only while its task is `ready` and has never had a
+session, so a fixer that failed is not respawned in a loop. It holds under the
+same settling holds, and its spawn approval is skipped while follow-through is
+on (§13.5). Spawning fetches the PR's head ref from `origin` into
+`refs/remotes/origin/<head>`, and the round's `base_head_oid` if the repository
+lacks it, refusing the spawn when either fails; then it cuts
+`agentboard/pr-<n>-r<round>` at `base_head_oid` in a worktree under the
+project's worktree root named for the task. A retry reuses both. The session
+is an ordinary worker's with the opening prompt (§5), `roles.fixer`'s roster
+agent, and the task's model, else the agent's, else the project's default.
+Besides the worker deny list it is denied `git commit --amend` and
+`git rebase` by `--disallowedTools`, since its commits are fast-forwarded
+onto the PR's head; every worker is already denied pushing. Spawning the task
+any other way — `spawn_worker`, or approving its spawn — takes the same path,
+and a roster agent named there replaces the role's.
 
 A round's triage that never starts, or whose task is closed (§13.2), fails
 the round: its outcome becomes `triage_failed` and the watch returns to
@@ -355,7 +382,9 @@ the rest of phase 3 lands it has no round to push, since phases 1–2 write
 nothing to a remote.
 
 **§8 amended.** In a project with the feature on, the follow-through triager
-and fixer spawns skip spawn approval. Every cap in §8 — concurrent workers,
+and fixer spawns skip spawn approval: the triager never asks for one, and
+`Board.requestSpawn` answers proceed for a `fix_round` task. With the feature
+off, a `fix_round` task waits for approval like any other task. Every cap in §8 — concurrent workers,
 the token cap, the daily budget above, the session ceiling — still applies
 unchanged; only the approval step is skipped, the same way a rostered agent
 is exempt from the elapsed and idle caps today (§8) without being exempt from
