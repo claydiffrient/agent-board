@@ -296,6 +296,9 @@ public final class StoreHookSink: HookSink {
         if scope == .reviewer {
             return (try? ReviewPrompt.postCompactionBrief(db: db, session: session)) ?? nil
         }
+        if scope == .triager {
+            return (try? TriagePrompt.postCompactionBrief(db: db, session: session)) ?? nil
+        }
         guard let taskId, let task = try? tasks.get(taskId) else { return nil }
         let epic = task.epicId.flatMap { try? epics.get($0) } ?? nil
         let injected = (try? notes.notesForSpawn(
@@ -413,7 +416,7 @@ public final class StoreHookSink: HookSink {
                         taskId: taskId,
                         sessionId: session?.sessionId,
                         kind: .error,
-                        text: "Blocked \(violation.rawValue): \(event.toolCommand ?? "")"
+                        text: "Blocked \(violation.rawValue): \(event.toolCommand ?? event.toolFilePath ?? "")"
                     )
                 }
                 return .deny(.deny(violation.reason(for: identity.scope)))

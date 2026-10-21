@@ -137,6 +137,29 @@ public struct WorktreeManager: Sendable {
         return path
     }
 
+    /// A worktree with a detached HEAD at `commit`, for a session that reads a revision and owns no branch.
+    public func createDetached(name: String, commit: String) throws -> URL {
+        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
+        let path = worktreeRoot.appendingPathComponent(name)
+        try addWorktree(["worktree", "add", "--detach", path.path, commit], at: path)
+        return path
+    }
+
+    /// Fetches `branch` from `remote` into its remote-tracking ref and returns the commit it names
+    /// there. Throws when the fetch fails, rather than answering with a stale tip.
+    public func fetchRemoteTip(
+        _ branch: String, remote: String = "origin", timeout: TimeInterval = baseFetchTimeout
+    ) throws -> String {
+        let tracking = "refs/remotes/\(remote)/\(branch)"
+        let args = ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/\(branch):\(tracking)"]
+        let fetched = try gitRaw(args, cwd: repoPath, timeout: timeout)
+        guard fetched.status == 0 else { throw AgentRuntimeError(Self.failure(args, fetched)) }
+        guard let tip = try refCommit(tracking) else {
+            throw AgentRuntimeError("\(remote) has no branch \(branch)")
+        }
+        return tip
+    }
+
     /// Puts the project's own checkout on the shared branch, cutting it from `base` the first time.
     /// Throws rather than switching when the checkout carries uncommitted work or git refuses the
     /// switch — that work belongs to whoever is using the repository, and the caller falls back to

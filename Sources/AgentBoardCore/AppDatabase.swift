@@ -187,6 +187,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("pr_watch_head") { db in
             try db.execute(sql: Schema.prWatchHead)
         }
+        migrator.registerMigration("pr_triage") { db in
+            try db.execute(sql: Schema.prTriage)
+        }
         return migrator
     }
 }

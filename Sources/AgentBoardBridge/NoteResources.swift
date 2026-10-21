@@ -20,7 +20,7 @@ public struct NoteResourceHandler: ResourceHandler {
     }
 
     public func resources(for identity: TokenIdentity) async throws -> [ResourceDescriptor] {
-        guard identity.scope != .reviewer else { return [] }
+        guard identity.scope != .reviewer, identity.scope != .triager else { return [] }
         let headings = try notes.headings(projectId: identity.projectId)
         return try notes.list(projectId: identity.projectId).map { note in
             ResourceDescriptor(
@@ -32,10 +32,14 @@ public struct NoteResourceHandler: ResourceHandler {
         }
     }
 
-    /// A rostered reviewer reads no notes (SPEC §5.1): it judges the task and its diff alone.
+    /// A rostered reviewer reads no notes (SPEC §5.1): it judges the task and its diff alone. A
+    /// triager likewise judges its pull request's items and diff alone (SPEC §6).
     public func read(_ uri: String, identity: TokenIdentity) async throws -> [ResourceContents] {
         guard identity.scope != .reviewer else {
             throw ResourceError(uri: uri, message: "A reviewer reads no notes; review the task and its diff.")
+        }
+        guard identity.scope != .triager else {
+            throw ResourceError(uri: uri, message: "A triager reads no notes; triage the items and the diff.")
         }
         let noteId = try Self.noteId(from: uri, projectId: identity.projectId)
         guard let (note, sections) = try notes.read(noteId), note.projectId == identity.projectId else {

@@ -53,7 +53,7 @@ CREATE TABLE task (
   failed         INTEGER NOT NULL DEFAULT 0,
   failure_reason TEXT,
   ordering       REAL NOT NULL,
-  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration
+  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration | triage
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
@@ -120,7 +120,7 @@ CREATE TABLE token_grant (
   token       TEXT PRIMARY KEY,      -- random, per session
   session_id  TEXT REFERENCES agent_session(session_id),  -- NULL until `claude --bg` returns the id
   project_id  TEXT REFERENCES project(id),  -- NULL for the Coordinator's grant only (§8.2)
-  scope       TEXT NOT NULL,         -- orchestrator | worker | reviewer | coordinator
+  scope       TEXT NOT NULL,         -- orchestrator | worker | reviewer | coordinator | triager
   task_id     TEXT,                  -- worker: the only task it may mutate
   created_at  INTEGER NOT NULL,
   revoked_at  INTEGER,
@@ -387,6 +387,17 @@ CREATE TABLE pr_poll_problem (
   detail     TEXT NOT NULL,
   since      INTEGER NOT NULL
 );
+
+-- One triage run (§13.2): the synthetic `triage` task its session is bound to, the watch it
+-- triages, and the diff it was spawned to read. A triager grant reaches its watch only through this.
+CREATE TABLE pr_triage (
+  task_id    TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
+  watch_id   TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+  base_oid   TEXT NOT NULL,   -- origin's tip of the PR's base branch, fetched at spawn
+  head_oid   TEXT NOT NULL,   -- the PR head the triager's detached checkout is at
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX pr_triage_watch ON pr_triage(watch_id);
 ```
 
 Every `epic.state` value is written by exactly one place, and nothing writes one

@@ -29,10 +29,17 @@ enum SupervisorError: LocalizedError {
     case epicStillOpen(String)
     case globalShutdownIncomplete([String])
     case dependencyNotOnBranch(dependencyId: String, title: String, commit: String, branch: String, landing: TaskLanding?)
+    case watchNotFound(String)
+    case triageTaskNotAssignable(title: String)
+    case pullRequestNotFetched(String)
 
     var errorDescription: String? {
         switch self {
         case .approvalNotFound(let id): return "approval \(id) not found"
+        case .watchNotFound(let id): return "watched pull request \(id) not found"
+        case .triageTaskNotAssignable(let title):
+            return "\"\(title)\" is a pull request triage; only Agent Board's follow-through starts one"
+        case .pullRequestNotFetched(let reason): return "the pull request could not be fetched: \(reason)"
         case .rosterAgentNotUsable(let id, let projectName):
             return "roster agent \(id) is not in \(projectName)'s usable set; enable it for this project first"
         case .epicCloseRefused(let reason): return reason
@@ -337,6 +344,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         taskId: String, rosterAgentId: String? = nil, scope: AgentBoardCore.TokenScope = .worker
     ) async throws -> WorkerSpawn {
         guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
+        // A worker or reviewer grant on a triage task would hold authority over the PR's checkout that
+        // the triager scope exists to withhold.
+        guard task.origin != .triage else { throw SupervisorError.triageTaskNotAssignable(title: task.title) }
         guard task.column != .running, task.column != .done, task.column != .closed else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
         }
@@ -736,7 +746,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 token: grant.token,
                 autoModeJSON: project.settings.autoModeJSON,
                 extraMcpServers: nil,
-                fileLocks: plan.worktreePath == nil
+                fileLocks: plan.worktreePath == nil,
+                readOnly: plan.scope == .triager
             )
             let request = SpawnRequest(
                 cwd: plan.cwd,
@@ -745,11 +756,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 configFiles: configFiles,
                 // A deny-list, layered on: a rostered agent can only ever have less authority than a
                 // plain worker, and an empty list is exactly a plain worker's.
-                disallowedTools: SpawnRequest.defaultDisallowedTools
-                    + (plan.scope == .reviewer
-                        ? SpawnRequest.reviewerDisallowedTools
-                            + SpawnRequest.reviewerBoardDeny(supportDir: appSupportDir, home: home)
-                        : [])
+                disallowedTools: Self.disallowedTools(scope: plan.scope, supportDir: appSupportDir, home: home)
                     + (plan.rosterAgent?.disallowedTools ?? []),
                 tools: plan.rosterAgent?.tools,
                 model: plan.model
@@ -773,6 +780,102 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             try? grants.revoke(token: grant.token)
             throw error
+        }
+    }
+
+    nonisolated static func disallowedTools(scope: AgentBoardCore.TokenScope, supportDir: URL, home: URL) -> [String] {
+        switch scope {
+        case .reviewer:
+            return SpawnRequest.defaultDisallowedTools + SpawnRequest.reviewerDisallowedTools
+                + SpawnRequest.reviewerBoardDeny(supportDir: supportDir, home: home)
+        case .triager:
+            return SpawnRequest.triagerDisallowedTools
+                + SpawnRequest.reviewerBoardDeny(supportDir: supportDir, home: home)
+        case .worker, .orchestrator, .coordinator:
+            return SpawnRequest.defaultDisallowedTools
+        }
+    }
+
+    /// SPEC §13.2. The triager is an ordinary worker session, so every §8 cap counts it, in a
+    /// detached checkout of the PR head fetched from origin, bound to a synthetic `triage` task so its
+    /// card and progress log are real. Nothing but the supervisor calls this.
+    @discardableResult
+    func spawnTriager(watchId: String) async throws -> AgentSession {
+        guard let watch = try prWatches.get(watchId) else { throw SupervisorError.watchNotFound(watchId) }
+        guard let project = try projects.get(watch.projectId) else {
+            throw SupervisorError.projectNotFound(watch.projectId)
+        }
+        guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        try requireNoShutdown(projectId: project.id)
+        if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
+            throw SupervisorError.capRefused(reason)
+        }
+        let role = project.settings.prFollowThrough.roles.triage
+        let agent = try role?.rosterAgentId.map { id -> RosterAgent in
+            guard let agent = try roster.usableAgent(id, forProject: project.id) else {
+                throw SupervisorError.rosterAgentNotUsable(id: id, projectName: project.name)
+            }
+            return agent
+        }
+
+        let manager = worktreeManager(for: project)
+        let headOid = watch.headOid
+        let baseRef = watch.baseRef
+        let baseOid: String
+        do {
+            baseOid = try await offMain { () -> String in
+                guard try manager.fetchCommitIfMissing(headOid, from: "origin") else {
+                    throw AgentRuntimeError("origin has no commit \(headOid)")
+                }
+                return try manager.fetchRemoteTip(baseRef)
+            }
+        } catch {
+            throw SupervisorError.pullRequestNotFetched(describe(error))
+        }
+
+        let task = try board.createTriageTask(watchId: watch.id, baseOid: baseOid, headOid: headOid)
+        let triage = PRTriage(
+            taskId: task.id, watchId: watch.id, baseOid: baseOid, headOid: headOid, createdAt: task.createdAt
+        )
+        _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(task.id))
+        var assigned: AgentSession?
+        do {
+            let worktree = try await offMain { try manager.createDetached(name: task.id, commit: headOid) }
+            let placeholder = try board.assign(
+                taskId: task.id,
+                session: AgentSession(
+                    sessionId: "setup-\(UUID().uuidString)", projectId: project.id, taskId: task.id, role: .worker,
+                    worktreePath: worktree.path, cwd: worktree.path, state: .setup, attempt: 1,
+                    rosterAgentId: agent?.id
+                )
+            )
+            assigned = placeholder
+            beginSetup(
+                LaunchPlan(
+                    project: project,
+                    taskId: task.id,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
+                    branch: headOid,
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: TriagePrompt.compose(
+                        watch: watch, triage: triage, workingDirectory: worktree.path, agent: agent?.identity
+                    ),
+                    model: role?.model ?? agent?.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    scope: .triager
+                ),
+                placeholder: placeholder,
+                port: port
+            )
+            return placeholder
+        } catch {
+            if assigned == nil { try? tasks.delete(task.id) }
+            throw SupervisorError.spawnFailed(
+                worktree: manager.worktreeRoot.appendingPathComponent(task.id).path, underlying: describe(error)
+            )
         }
     }
 
@@ -2941,6 +3044,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func workerCompleted(projectId: String, sessionId: String) async {
         guard let session = try? sessions.get(sessionId), let shortId = session.shortId else { return }
         try? await stopAgent(session, shortId: shortId)
+        await tearDownFinishedTriage(session)
+    }
+
+    /// SPEC §13.2: a triage lands nothing, and its detached checkout of the PR head always has commits
+    /// outside the project's bases, so the orphan sweep would keep it forever.
+    private func tearDownFinishedTriage(_ session: AgentSession) async {
+        guard let taskId = session.taskId, let task = try? tasks.get(taskId), task.origin == .triage,
+              task.column == .done, let project = try? projects.get(task.projectId),
+              let taskSessions = try? sessions.forTask(taskId), !taskSessions.contains(where: \.state.isActive)
+        else { return }
+        await startTeardown(
+            claimTeardown(of: taskSessions), task: task, project: project, report: nil, landingNotice: nil
+        )
     }
 
     /// SPEC §8.5: a session the board ended is stopped again when Claude Code resumes it on its own,
