@@ -206,7 +206,8 @@ final class GlobalShutdownSupervisorTests: XCTestCase {
             ),
             appSupportDir: fixture.supportDir,
             worktreeBase: fixture.worktreeBase,
-            projectsRoot: fixture.supportDir.appendingPathComponent("claude-projects")
+            projectsRoot: fixture.supportDir.appendingPathComponent("claude-projects"),
+            gh: fixture.gh
         )
         sink.target = restarted
         await restarted.start()

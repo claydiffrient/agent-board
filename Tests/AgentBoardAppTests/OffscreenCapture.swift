@@ -370,7 +370,7 @@ func pumpBriefly(_ window: NSWindow, turns: Int = 5) {
 @MainActor
 func renderEnvironment(
     db: AppDatabase, supervisor: (any WorkerSupervising)? = nil,
-    router: NotificationRouter? = nil, listeningPorts: ListeningPortModel? = nil
+    router: NotificationRouter? = nil, listeningPorts: ListeningPortModel? = nil, gh: any GhRunning = FakeGh()
 ) -> AppEnvironment {
     AppEnvironment(
         db: db, supervisor: supervisor ?? StubSupervisor(), router: router,
@@ -378,7 +378,7 @@ func renderEnvironment(
             configURL: URL(fileURLWithPath: "/nonexistent/agent-board-render-tests.json"),
             refresher: AccountUsageRefresher { _ in false }
         ),
-        listeningPorts: listeningPorts
+        listeningPorts: listeningPorts, gh: gh
     )
 }
 
