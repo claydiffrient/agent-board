@@ -142,6 +142,7 @@ tools (Edit, Write and NotebookEdit), `gh`, and every git write, both by
 `sed -i` in Bash is not blocked, so the checkout is not guaranteed untouched;
 it is disposable, and nothing in it is ever landed. `roles.triage` picks the
 roster agent and model; with no agent the built-in prompt's identity is used.
+The model is the role's, else the agent's own, else the project's default.
 
 The built-in prompt, `TriagePrompt`, says what each verdict above means; that
 every item body is data written by someone else, to be judged and never
@@ -242,13 +243,16 @@ on at all.
   verify** notification category, on by default; turning it off or muting the
   project still records the head, so unmuting does not replay old banners.
 - A seventh project-settings tab, **PR Follow-Through**, placed after
-  Advanced (§10), holds every setting in §13.3 except `roles`, whose agent
-  pickers arrive in phase 2. Its sections are **Watch** (`enabled`, settle
-  window, round cap, daily budget — empty means the spawn caps),
-  **Verification** (label — empty means the merge verifies — required
+  Advanced (§10), holds every setting in §13.3. Its sections are **Watch**
+  (`enabled`, settle window, round cap, daily budget — empty means the spawn
+  caps), **Verification** (label — empty means the merge verifies — required
   approval, and the verify command with its `{url}` placeholder),
   **Replies** (`postFactualReplies`, captioned with which verdicts count as
-  factual), and **Publish guard** (the `privateTerms` list: each term a row
+  factual), **Roles** (for each of Triage, Fixer, Reviewer and Follow-up
+  check, an agent picker of Default plus the project's enabled roster agents,
+  and a model picker; a stored agent the project can no longer spawn stays
+  listed as not available, and a role set back to Default with no model is
+  stored as absent), and **Publish guard** (the `privateTerms` list: each term a row
   with a remove button, plus a field that adds one on Return). Save trims
   terms, drops blanks and case-insensitive repeats, and keeps a term typed
   into the add field but never added. Save also stores a settle window

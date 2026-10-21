@@ -99,6 +99,46 @@ final class TriagerSpawnTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree), "the triage checkout outlived the triage")
     }
 
+    private func lastSpawn() async throws -> SpawnRequest {
+        let spawns = await fixture.runtime.spawns
+        return try XCTUnwrap(spawns.last)
+    }
+
+    func testTheTriageRoleChoosesTheTriagersIdentityAndModel() async throws {
+        let watch = try watchPullRequest(head: try pushPullRequestHead())
+        var settings = fixture.project.settings
+        settings.defaultModel = "project-model"
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+
+        _ = try await fixture.supervisor.spawnTriager(watchId: watch.id)
+        await fixture.supervisor.waitForSetup()
+        let byDefault = try await lastSpawn()
+        XCTAssertTrue(byDefault.prompt.hasPrefix("# You are triaging review feedback"), byDefault.prompt)
+        XCTAssertEqual(byDefault.model, "project-model")
+
+        let tess = try RosterStore(fixture.db).create(
+            name: "Tess", role: "triager", systemPrompt: "Grade with the house lens.", model: "agent-model"
+        )
+        try RosterStore(fixture.db).enable(agentId: tess.id, forProject: fixture.project.id)
+        settings.prFollowThrough.roles.triage = PRFollowThroughRole(rosterAgentId: tess.id)
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+
+        _ = try await fixture.supervisor.spawnTriager(watchId: watch.id)
+        await fixture.supervisor.waitForSetup()
+        let rostered = try await lastSpawn()
+        XCTAssertTrue(rostered.prompt.hasPrefix("# You are Tess"), rostered.prompt)
+        XCTAssertTrue(rostered.prompt.contains("Grade with the house lens."))
+        XCTAssertFalse(rostered.prompt.contains("# You are triaging review feedback"))
+        XCTAssertEqual(rostered.model, "agent-model")
+
+        settings.prFollowThrough.roles.triage?.model = "role-model"
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+        _ = try await fixture.supervisor.spawnTriager(watchId: watch.id)
+        await fixture.supervisor.waitForSetup()
+        let overridden = try await lastSpawn()
+        XCTAssertEqual(overridden.model, "role-model")
+    }
+
     func testAStoppedTriageIsClosedWithoutAReportLosesItsCheckoutAndIsNeverResumedAsAWorker() async throws {
         let watch = try watchPullRequest(head: try pushPullRequestHead())
         let placeholder = try await fixture.supervisor.spawnTriager(watchId: watch.id)

@@ -597,9 +597,9 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let (db, project) = try storedProject(configure)
         let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
             .environment(renderEnvironment(db: db))
-        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 900))
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 1500))
         defer { mount.close() }
-        let wanted = ["Watch", "Verification", "Replies", "Publish guard", "Globex"]
+        let wanted = ["Watch", "Verification", "Replies", "Roles", "Publish guard", "Globex"]
         var lines: [String] = []
         _ = try mount.capture(until: { _ in
             guard let image = CGWindowListCreateImage(
@@ -635,6 +635,43 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let sheet = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
         let seeded: ProjectSettings? = seededState(sheet, "_settings")
         XCTAssertEqual(seeded?.prFollowThrough, saved)
+    }
+
+    func testRolePickersOfferEnabledAgentsAndTheirSelectionsRoundTrip() throws {
+        let db = try AppDatabase.inMemory()
+        let roster = RosterStore(db)
+        let rita = try roster.create(name: "Rita", role: "reviewer", systemPrompt: "")
+        let off = try roster.create(name: "Off", role: "fixer", systemPrompt: "", enabled: false)
+        let gone = try roster.create(name: "Gone", role: "fixer", systemPrompt: "")
+
+        XCTAssertEqual(
+            ProjectSettingsSheet.roleAgentOptions(projectAgents: [rita, off], rosterAgents: [rita, off, gone], current: gone.id),
+            [
+                .init(agentId: nil, title: "Default"), .init(agentId: rita.id, title: "Rita"),
+                .init(agentId: gone.id, title: "Gone (not available)"),
+            ]
+        )
+
+        var roles = PRFollowThroughRoles()
+        for role in ProjectSettingsSheet.FollowThroughRole.allCases {
+            roles[keyPath: role.keyPath] = ProjectSettingsSheet.updating(roles[keyPath: role.keyPath]) {
+                $0.rosterAgentId = rita.id
+            }
+        }
+        roles.fixer = ProjectSettingsSheet.updating(roles.fixer) { $0.model = "claude-sonnet-5-5" }
+        roles.reviewer = ProjectSettingsSheet.updating(roles.reviewer) { $0.rosterAgentId = nil }
+        XCTAssertNil(roles.reviewer, "a role cleared back to Default is stored as absent")
+
+        let draft = PRFollowThroughSettings(roles: roles)
+        let (_, project) = try storedProject {
+            $0.prFollowThrough = ProjectSettingsSheet.savedFollowThrough(draft, pendingTerm: "")
+        }
+        let sheet = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
+        let seeded: ProjectSettings? = seededState(sheet, "_settings")
+        XCTAssertEqual(seeded?.prFollowThrough.roles, PRFollowThroughRoles(
+            triage: .init(rosterAgentId: rita.id), fixer: .init(rosterAgentId: rita.id, model: "claude-sonnet-5-5"),
+            followupCheck: .init(rosterAgentId: rita.id)
+        ))
     }
 
     private func storedProject(_ configure: (inout ProjectSettings) -> Void) throws -> (AppDatabase, Project) {
