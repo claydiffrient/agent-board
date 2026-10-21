@@ -168,7 +168,7 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   itself spawned, not a real-quota ceiling.
 - `~/.claude/projects/<worktree-slug>/memory/` is created empty for each new
   worktree. The existing convention on this machine symlinks it to the canonical
-  project memory dir (confirmed across ~20 Derivita checkouts).
+  project memory dir (confirmed across ~20 checkouts of a work project).
 - **A worker survives its board endpoint going away, and recovers with no
   handshake.** Measured 2026-09-16 against 2.1.273 by `spike/outage-probe/`.
   With the port refused an MCP tool call returns `is_error` in ~3s carrying
