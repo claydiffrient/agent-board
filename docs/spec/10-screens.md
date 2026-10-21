@@ -11,7 +11,10 @@ absent things. When any project needs a human the headline leads with how many
 do — "2 projects need you." — *beside* the review count rather than in place of
 it: the review clause counts tasks in one board column, while attention counts
 projects that cannot proceed, and a pending approval raises the second without
-ever touching the first. Below it, one card per project — every project,
+ever touching the first. In a project with PR follow-through on (§13), the
+headline also carries "N PRs ready to verify" beside the review count, and
+each project's card shows its own count; clicking either opens the Pull
+Requests page filtered to that project. Below it, one card per project — every project,
 including idle ones — grouped into the same workspace sections in the same order
 as the sidebar, so a project sits in the same relative place in both. A card
 carries the project name and its running, in-review and ready counts, or reads
@@ -410,6 +413,17 @@ three sections:
 - **Sessions** — **New Session**, the active session, and the history; clicking
   a history entry resumes it. Each shows its start and its spend.
 
+**Pull Requests** — a pinned sidebar row directly below Coordinator
+(`SidebarSelection`), opening a cross-project page rather than a project tab,
+for the pull requests a project with PR follow-through turned on is watching
+(§13). The page groups them as **Ready to verify**, **Needs you**, **In
+progress**, **Waiting on reviewers**, **Verified**, and **Parked**, with a
+project filter. Row actions: **Mark verified**, **Walk me through it** (only
+once the project sets a `verifyCommand`), **Open PR**, **Pause**. The row's
+badge counts Ready to verify plus open decisions; a decision also raises the
+owning project's attention dot. See §13 for the state machine, verdicts, and
+settings behind all of it.
+
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
 section. Each section header carries a copy button that puts that section on the
@@ -525,11 +539,11 @@ not free. The header still costs that one line rather than collapsing to zero,
 because it carries the refresh button — the sweep is hourly, and a panel that
 vanished entirely would leave nobody to ask about a port that appeared since.
 
-**Project settings** — a sheet from the sidebar row's gear, in six tabs:
+**Project settings** — a sheet from the sidebar row's gear, in seven tabs:
 **General** (Repository, Workspace, Archive), **Agents** (Models, Review,
 Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Worktree
-teardown, Isolation, Publishing), **Notifications**, and **Advanced** (the `autoMode` classifier JSON,
-Extra MCP servers). Tabs group by what a setting governs, not by how often it is
+teardown, Isolation, Publishing), **Notifications**, **Advanced** (the `autoMode` classifier JSON,
+Extra MCP servers), and **PR Follow-Through** (§13), after Advanced. Tabs group by what a setting governs, not by how often it is
 touched. Every section is in exactly one tab; a section in none would be a stored
 setting with no UI. **Delete Project…** sits outside the tabs, at the left of the
 Cancel/Save row, so it is reachable from every tab. The sheet is at least 780pt
