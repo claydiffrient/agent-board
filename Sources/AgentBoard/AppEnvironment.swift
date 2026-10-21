@@ -1,4 +1,5 @@
 import AgentBoardCore
+import AgentBoardRuntime
 import Observation
 
 @Observable
@@ -28,6 +29,8 @@ final class AppEnvironment {
     /// Where disk archetypes are read from (SPEC §4). `.none` unless the app wires the real ones, so
     /// a preview or render test never lists the machine's own `~/.claude/agents`.
     let agentDefinitions: AgentDefinitionDirectories
+    /// What the Pull Requests page's Mark verified runs `gh` through; a test hands in a fake.
+    let gh: any GhRunning
 
     var roster: RosterStore { RosterStore(db, definitions: agentDefinitions) }
 
@@ -38,7 +41,8 @@ final class AppEnvironment {
         releaseNotes: ReleaseNotesAnnouncer = ReleaseNotesAnnouncer(),
         startup: _Concurrency.Task<Void, Never>? = nil,
         listeningPorts: ListeningPortModel? = nil,
-        agentDefinitions: AgentDefinitionDirectories = .none
+        agentDefinitions: AgentDefinitionDirectories = .none,
+        gh: any GhRunning = SystemGh()
     ) {
         self.db = db
         self.supervisor = supervisor
@@ -51,5 +55,6 @@ final class AppEnvironment {
         self.listeningPorts = listeningPorts
         sweepPreview = SweepPreview(supervisor: supervisor)
         self.agentDefinitions = agentDefinitions
+        self.gh = gh
     }
 }

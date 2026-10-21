@@ -71,7 +71,9 @@ Per project, overridable:
   So does every outward-facing publish: `push_branch` and `open_pull_request`
   (§6) create an approval row and return it. Both are visible to collaborators
   and CI the moment they happen and cannot be taken back, which is why neither
-  is reachable through the autonomy setting.
+  is reachable through the autonomy setting. An approved publish still runs
+  the publish guard first (§13.5): one that would send any of the project's
+  private terms is refused and records the term and where it was found.
 - **Workers never push.** Unchanged by the D8 amendment (§1). Enforced twice, by
   two controls that fail independently:
   1. `--disallowedTools "Bash(git push*)" "Bash(gh pr create*)" "Bash(gh pr

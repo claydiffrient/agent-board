@@ -9,7 +9,7 @@ enum MainWindowLayout {
     static let minimumDetailWidth: CGFloat = 761
     static let sidebarMinimumWidth: CGFloat = 180
     static let sidebarIdealWidth: CGFloat = 220
-    /// Seven 32pt sidebar rows: the three pinned rows, a section header and three projects.
+    /// Seven 32pt sidebar rows: the four pinned rows, a section header and two projects.
     static let sidebarListReserve: CGFloat = 224
     static let minimumSize = CGSize(width: sidebarIdealWidth + minimumDetailWidth, height: 600)
 }
@@ -21,8 +21,10 @@ struct MainWindow: View {
     @State private var workspaces = Observed<[Workspace]>([])
     @State private var attention = Observed<[ProjectAttention]>([])
     @State private var coordinatorQueue = Observed<[Report]>([])
+    @State private var pullRequestCounts = Observed<[String: PRBadgeCount]>([:])
     @State private var showCoordinatorSettings = false
     @State private var selection: SidebarSelection = .atAGlance
+    @State private var pullRequestFilter: String?
     @State private var settingsProject: Project?
     @State private var workspaceEdit: WorkspaceEdit?
     @State private var workspaceToDelete: Workspace?
@@ -64,6 +66,9 @@ struct MainWindow: View {
         .task {
             await coordinatorQueue.run(ReportStore(env.db).observeUnconsumedForCoordinator(), in: env.db.reader)
         }
+        .task {
+            await pullRequestCounts.run(PRWatchStore(env.db).observeBadgeCounts(), in: env.db.reader)
+        }
         .task { await announceReleaseNotes() }
         .sheet(item: $settingsProject) { project in
             ProjectSettingsSheet(project: project, workspaces: workspaces.value) {
@@ -98,6 +103,8 @@ struct MainWindow: View {
             RosterView(activity: LiveRosterActivity(db: env.db))
         case .coordinator:
             CoordinatorView()
+        case .pullRequests:
+            PullRequestsView(projects: projects.value, projectFilter: $pullRequestFilter)
         case .atAGlance, .project:
             if let project = projects.value.first(where: { $0.id == selection.projectId }) {
                 ProjectDetailView(project: project)
@@ -106,7 +113,8 @@ struct MainWindow: View {
                 AtAGlanceView(
                     projects: projects.value, workspaces: workspaces.value,
                     attention: attention.value, unreadReplies: CoordinatorRow.unreadReplies(coordinatorQueue.value),
-                    select: select
+                    pullRequestCounts: pullRequestCounts.value,
+                    select: select, showPullRequests: showPullRequests
                 )
             }
         }
@@ -124,11 +132,22 @@ struct MainWindow: View {
 
     /// A banner click selects its project through `select`, the same funnel the sidebar uses, so
     /// the orchestrator starts exactly as it does on a click. The screen is `ProjectDetailView`'s.
+    /// A pull request's banner opens the Pull Requests page filtered to its project instead.
     private func openRoutedProject() {
         guard let route = env.router.route,
               projects.value.contains(where: { $0.id == route.projectId })
         else { return }
-        select(.project(route.projectId))
+        if case .pullRequest = route.subject {
+            showPullRequests(projectId: route.projectId)
+        } else {
+            select(.project(route.projectId))
+        }
+    }
+
+    /// Nil lists every project.
+    private func showPullRequests(projectId: String?) {
+        pullRequestFilter = projectId
+        select(.pullRequests)
     }
 
     private var sections: [ProjectSection] {
@@ -208,6 +227,8 @@ struct MainWindow: View {
                 unreadReplies: CoordinatorRow.unreadReplies(coordinatorQueue.value),
                 openSettings: { showCoordinatorSettings = true }
             )
+        case .pullRequests:
+            PullRequestsRow(count: PullRequestsRow.count(pullRequestCounts.value))
         case .project: EmptyView()
         }
     }
@@ -403,7 +424,7 @@ struct ProjectDetailView: View {
         }
         .navigationTitle(project.name)
         .task(id: env.router.sequence) {
-            if let route = env.router.take(.screen, projectId: project.id) { screen = route.screen }
+            if let routed = env.router.take(.screen, projectId: project.id)?.screen { screen = routed }
         }
         .toolbar {
             ToolbarItem(placement: .principal) {

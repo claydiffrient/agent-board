@@ -19,6 +19,8 @@ struct NotificationRoute: Equatable, Hashable {
         case terminal
         /// An epic on the project's Task Board, which scrolls to its lane.
         case epic(String)
+        /// A watched pull request: its row on the Pull Requests page, filtered to the project.
+        case pullRequest(String)
         /// The banner names no subject beyond its project.
         case project
     }
@@ -41,15 +43,18 @@ struct NotificationRoute: Equatable, Hashable {
         case .blockedWorker: .blockedTask(id)
         case .strandedReports: .reports
         case .overdueShutdown: .shutdown
+        case .prPollUnavailable: .project
         }
     }
 
     /// Approvals, blocked tasks and the shutdown sheet all live on the Orchestrator screen — the
     /// approvals sidebar carries both the pending queue and the blocked-task section — and the
     /// console is what drains queued reports. A session with no task appears only in the Status
-    /// roster, and the shell console only on Terminal, so those two land elsewhere.
-    var screen: ProjectDetailView.Screen {
+    /// roster, and the shell console only on Terminal, so those two land elsewhere. A pull request
+    /// lands on the cross-project Pull Requests page, which is no project screen.
+    var screen: ProjectDetailView.Screen? {
         switch subject {
+        case .pullRequest: nil
         case .session: .status
         case .terminal: .terminal
         case .epic: .board
@@ -91,6 +96,7 @@ extension NotificationRoute.Subject {
         case .shutdown: "shutdown"
         case .terminal: "terminal"
         case .epic: "epic"
+        case .pullRequest: "pullRequest"
         case .project: "project"
         }
     }
@@ -100,6 +106,7 @@ extension NotificationRoute.Subject {
         case .blockedTask(let id): id
         case .session(let id): id
         case .epic(let id): id
+        case .pullRequest(let id): id
         case .approvals, .reports, .shutdown, .terminal, .project: nil
         }
     }
@@ -113,6 +120,7 @@ extension NotificationRoute.Subject {
         case "shutdown": self = .shutdown
         case "terminal": self = .terminal
         case "epic": self = id.map(Self.epic) ?? .project
+        case "pullRequest": self = id.map(Self.pullRequest) ?? .project
         default: self = .project
         }
     }

@@ -89,15 +89,7 @@ public struct PullRequestOpener: Sendable {
     }
 
     public func remoteURL(_ name: String = "origin") throws -> String {
-        let result = try ProcessRunner.run(
-            executable: URL(fileURLWithPath: WorktreeManager.gitPath),
-            arguments: ["remote", "get-url", name],
-            cwd: repoPath
-        )
-        guard result.status == 0 else {
-            throw AgentRuntimeError("no git remote named \(name) in \(repoPath.path)")
-        }
-        return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        try BranchPublisher(repoPath: repoPath).requireRemote(name)
     }
 
     private func fallback(baseBranch: String, headBranch: String, reason: String) throws -> PullRequestOutcome {

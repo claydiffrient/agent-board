@@ -15,15 +15,30 @@ extension ProjectGlance {
 /// counts projects that cannot proceed without a human — a project with a pending approval and an
 /// empty review column raises one and not the other. Repointing the familiar review number at the
 /// attention total would silently change what it means.
+///
+/// Pull requests ready to verify (SPEC §13.4) follow the review clause and add nothing at zero.
 public enum GlanceHeadline {
-    public static func text(workingSessions: Int, tasksInReview: Int, projectsNeedingYou: Int) -> String {
+    public static func text(
+        workingSessions: Int, tasksInReview: Int, projectsNeedingYou: Int, prsReadyToVerify: Int = 0
+    ) -> String {
+        let counts = [agents(workingSessions), review(tasksInReview), Self.prsReadyToVerify(prsReadyToVerify)]
+            .compactMap { $0 }.joined(separator: ", ")
         if projectsNeedingYou > 0 {
-            return "\(Self.projectsNeedingYou(projectsNeedingYou)). \(agents(workingSessions)), \(review(tasksInReview))."
+            return "\(Self.projectsNeedingYou(projectsNeedingYou)). \(counts)."
         }
-        if workingSessions == 0 && tasksInReview == 0 {
+        if workingSessions == 0 && tasksInReview == 0 && prsReadyToVerify == 0 {
             return "Nothing running, and nothing is waiting on you."
         }
-        return "\(agents(workingSessions)), \(review(tasksInReview))."
+        return "\(counts)."
+    }
+
+    /// Nil at zero, so the clause is absent rather than reassuring.
+    public static func prsReadyToVerify(_ count: Int) -> String? {
+        switch count {
+        case ...0: nil
+        case 1: "1 PR ready to verify"
+        default: "\(count) PRs ready to verify"
+        }
     }
 
     /// Leads the sentence when it is non-zero: it is the only clause the human has to act on.

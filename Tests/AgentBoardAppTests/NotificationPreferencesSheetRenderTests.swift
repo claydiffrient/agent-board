@@ -68,7 +68,10 @@ final class NotificationPreferencesSheetRenderTests: XCTestCase {
     func testTheCategoryLabelsTheSheetBuildsItsSwitchesFrom() {
         XCTAssertEqual(
             NotificationCategory.allCases.map(\.title),
-            ["Approvals waiting", "Blocked workers", "Cap breaches and stalls", "Worker failures"]
+            [
+                "Approvals waiting", "Blocked workers", "Cap breaches and stalls", "Worker failures",
+                "Pull requests ready to verify",
+            ]
         )
     }
 }

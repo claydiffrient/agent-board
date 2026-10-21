@@ -128,6 +128,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let fileLocks: FileLockStore
     @ObservationIgnored private let attention: ProjectAttentionStore
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
+    @ObservationIgnored private let pullRequestWatch: PullRequestWatchReader
+    @ObservationIgnored private let prWatches: PRWatchStore
+    /// Millis of the last PR follow-through poll; 0 means none yet.
+    @ObservationIgnored private var lastPRWatchPoll: Int64 = 0
+    @ObservationIgnored private var prWatchPollInFlight = false
+    @ObservationIgnored private var prWatchSearchFailures = 0
     /// Millis of the last pull request merge check; 0 means none yet, so the first tick after
     /// launch checks.
     @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
@@ -170,6 +176,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var resuming: Set<String> = []
     /// When a human last opened a terminal on each session. `claude attach` resumes a stopped one.
     @ObservationIgnored private var attachRequestedAt: [String: Int64] = [:]
+    /// The last integration each project's `origin` resolved to, kept for when git fails to read it.
+    @ObservationIgnored private var integrationDefaults: [String: StandaloneIntegration] = [:]
 
     nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
@@ -177,6 +185,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// cadence rather than paying for a scan every 5 seconds — or a second timer.
     static let archiveSweepIntervalMillis: Int64 = 5 * 60 * 1000
     static let pullRequestCheckIntervalMillis: Int64 = 10 * 60 * 1000
+    static let prWatchPollIntervalMillis: Int64 = 60 * 1000
+    static let prWatchFailuresBeforeAttention = 10
     /// Sessions that ended this recently still get one more transcript read so final spend lands.
     static let finalSpendWindowMillis: Int64 = 15_000
 
@@ -224,6 +234,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         fileLocks = FileLockStore(db)
         attention = ProjectAttentionStore(db)
         pullRequestStates = PullRequestStateReader(gh: gh)
+        pullRequestWatch = PullRequestWatchReader(gh: gh)
+        prWatches = PRWatchStore(db)
     }
 
     private var sessionConfigDir: URL { appSupportDir.appendingPathComponent("sessions") }
@@ -784,6 +796,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
         }
+        let shipsByPullRequest = try await standaloneIntegration(of: project) == .pullRequest
 
         let manager = worktreeManager(for: project)
         let worktreeName = HeldWorktree.epicWorktreeName(epicId: epicId)
@@ -819,9 +832,6 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             )
         }
         let branches = IntegrationPlan.classify(ordered, facts: facts)
-        let settings = project.settings
-        let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
-        let shipsByPullRequest = (try? await offMain { publisher.standaloneIntegration(settings) }) == .pullRequest
 
         let task = try board.createIntegrationTask(epicId: epicId)
         var assigned: AgentSession?
@@ -1166,6 +1176,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    /// SPEC §5: the stored choice, else what `origin` resolves to. A git failure keeps this project's
+    /// last resolved answer and, with none, throws rather than guess local merge.
+    private func standaloneIntegration(of project: Project) async throws -> StandaloneIntegration {
+        if let stored = project.settings.standaloneIntegration { return stored }
+        let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
+        do {
+            let resolved = try await offMain { try publisher.defaultStandaloneIntegration() }
+            integrationDefaults[project.id] = resolved
+            return resolved
+        } catch {
+            guard let previous = integrationDefaults[project.id] else { throw error }
+            return previous
+        }
+    }
+
     private func mergeTaskBranch(task: BoardTask, epic: Epic?, project: Project, into target: String) async {
         let manager = worktreeManager(for: project)
         let taskBranch = Self.taskBranchPrefix + task.id
@@ -1175,9 +1200,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let epicBranch = epic?.branch
         var byPullRequest = false
         if epic == nil {
-            let settings = project.settings
-            let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
-            byPullRequest = (try? await offMain { publisher.standaloneIntegration(settings) }) == .pullRequest
+            do {
+                byPullRequest = try await standaloneIntegration(of: project) == .pullRequest
+            } catch {
+                recordLanding(
+                    task: task, epic: epic, landing: .unlanded,
+                    detail: "`\(taskBranch)` was not merged into `\(target)`: Agent Board could not read the "
+                        + "project's origin remote to choose between pull request and local merge. \(describe(error))",
+                    advice: "Merge `\(taskBranch)` into `\(target)` by hand or open a pull request for it, and "
+                        + "choose an integration in the project's Publishing settings so the next accept need not ask git."
+                )
+                return
+            }
         }
         let outcome: BranchMerge?
         do {
@@ -1334,6 +1368,114 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         if taskId == nil { touched.formUnion(await refreshEpicPullRequests(projectId: projectId)) }
         for projectId in touched { announceReports(projectId: projectId) }
+    }
+
+    /// SPEC §13.1, phase 1: watches the user's open, non-draft pull requests in every project with
+    /// PR follow-through on, mapping each repository to the project whose `origin` names it. Writes
+    /// each poll through `PRWatchStore` and moves only watching, readyToVerify and verified, bannering
+    /// a PR's arrival in readyToVerify once per head oid (§13.4); a watch
+    /// whose PR left the open list settles to merged or closed by `gh pr view`, and one whose PR went
+    /// back to draft is deleted. No project enabled means no `gh` call at all.
+    func pollPRWatches() async {
+        guard !prWatchPollInFlight else { return }
+        let enabled = ((try? projects.list()) ?? []).filter { $0.settings.prFollowThrough.enabled }
+        guard !enabled.isEmpty else {
+            try? prWatches.clearPollProblems()
+            return
+        }
+        prWatchPollInFlight = true
+        defer { prWatchPollInFlight = false }
+
+        var projectByRepo: [String: Project] = [:]
+        for project in enabled {
+            let repo = URL(fileURLWithPath: project.repoPath)
+            guard let remote = try? await offMain({ try BranchPublisher(repoPath: repo).requireRemote() }),
+                  let slug = PullRequestLaunch.githubSlug(remoteURL: remote)?.lowercased(),
+                  projectByRepo[slug] == nil
+            else { continue }
+            projectByRepo[slug] = project
+        }
+        guard let anyProject = projectByRepo.values.first else { return }
+
+        let reader = pullRequestWatch
+        let authored: [AuthoredPullRequest]
+        do {
+            let cwd = URL(fileURLWithPath: anyProject.repoPath)
+            authored = try await offMain { try reader.authored(cwd: cwd) }
+            prWatchSearchFailures = 0
+            try? prWatches.clearPollProblems()
+        } catch let failure as PullRequestWatchFailure where failure.ghUnavailable {
+            try? prWatches.setPollProblem(failure.description, projectIds: Set(enabled.map(\.id)))
+            return
+        } catch {
+            prWatchSearchFailures += 1
+            NSLog("PR watch poll failed (%d in a row): %@", prWatchSearchFailures, describe(error))
+            if prWatchSearchFailures >= Self.prWatchFailuresBeforeAttention {
+                try? prWatches.setPollProblem(
+                    "`gh search prs` has failed \(prWatchSearchFailures) times in a row: \(describe(error))",
+                    projectIds: Set(enabled.map(\.id))
+                )
+            }
+            return
+        }
+
+        func key(_ repository: String, _ number: Int) -> String { "\(repository.lowercased())#\(number)" }
+        let drafts = Set(authored.filter(\.isDraft).map { key($0.repository, $0.number) })
+        let open = authored.filter { !$0.isDraft && projectByRepo[$0.repository.lowercased()] != nil }
+        let stillOpen = Set(open.map { key($0.repository, $0.number) })
+        for (slug, prs) in Dictionary(grouping: open, by: { $0.repository.lowercased() }) {
+            guard let project = projectByRepo[slug] else { continue }
+            let parts = prs[0].repository.split(separator: "/").map(String.init)
+            guard parts.count == 2 else { continue }
+            let cwd = URL(fileURLWithPath: project.repoPath)
+            let numbers = prs.map(\.number)
+            guard let snapshots = try? await offMain({
+                try reader.snapshots(owner: parts[0], name: parts[1], numbers: numbers, cwd: cwd)
+            }) else { continue }
+            for snapshot in snapshots {
+                applyPRSnapshot(snapshot, project: project)
+            }
+        }
+
+        let states = pullRequestStates
+        for project in enabled {
+            for watch in (try? prWatches.live(projectId: project.id)) ?? [] {
+                let watchKey = key("\(watch.repoOwner)/\(watch.repoName)", watch.number)
+                if stillOpen.contains(watchKey) { continue }
+                if drafts.contains(watchKey) {
+                    try? prWatches.delete(watchId: watch.id)
+                    continue
+                }
+                let cwd = URL(fileURLWithPath: project.repoPath)
+                let url = watch.url
+                switch try? await offMain({ try states.state(of: url, cwd: cwd) }) {
+                case .merged: try? prWatches.setState(.merged, watchId: watch.id)
+                case .closed: try? prWatches.setState(.closed, watchId: watch.id)
+                case .open, nil: break
+                }
+            }
+        }
+    }
+
+    private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) {
+        do {
+            let watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
+            let openItems = try prWatches.items(watchId: watch.id).filter { $0.state == .open }.count
+            if let next = PRWatchTransition.next(
+                from: watch.state, snapshot: snapshot, openItems: openItems,
+                settings: project.settings.prFollowThrough
+            ) {
+                try prWatches.setState(next, watchId: watch.id)
+            }
+            if let ready = try prWatches.claimReadyNotification(watchId: watch.id) {
+                post(
+                    "Pull request ready to verify", body: "#\(ready.number) \(ready.title)",
+                    projectId: project.id, category: .prReadyToVerify, subject: .pullRequest(ready.id)
+                )
+            }
+        } catch {
+            report(["could not record \(snapshot.url): \(describe(error))"])
+        }
     }
 
     /// SPEC §5.2: settles each PR-open epic against GitHub. Merged makes the epic `done`, lands the
@@ -2357,14 +2499,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.projectNotFound(approval.projectId)
         }
         let request = try approval.publishRequest()
-        let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
+        let publisher = BranchPublisher(
+            repoPath: URL(fileURLWithPath: project.repoPath),
+            privateTerms: project.settings.prFollowThrough.privateTerms
+        )
         let base = request.base ?? project.baseBranch
         do {
             switch approval.kind {
             case .push:
                 let result = try await offMain {
                     try publisher.push(
-                        branch: request.branch, publishedAs: request.publishedBranch, remote: request.remote
+                        branch: request.branch, publishedAs: request.publishedBranch, base: base,
+                        remote: request.remote
                     )
                 }
                 try board.recordPublished(approval: approval, summary: "Push approved: \(result.summary).")
@@ -2921,6 +3067,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if now - lastPullRequestCheck >= Self.pullRequestCheckIntervalMillis {
             lastPullRequestCheck = now
             _Concurrency.Task { await self.refreshPullRequestLandings() }
+        }
+        if now - lastPRWatchPoll >= Self.prWatchPollIntervalMillis {
+            lastPRWatchPoll = now
+            _Concurrency.Task { await self.pollPRWatches() }
         }
         for project in all {
             refreshShutdownProgressIfOrdered(projectId: project.id)
