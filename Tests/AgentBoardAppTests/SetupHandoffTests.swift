@@ -171,6 +171,7 @@ final class SetupHandoffTests: XCTestCase {
         await fixture.runtime.holdSpawn()
         try await fixture.supervisor.assign(taskId: task.id)
         let placeholder = try XCTUnwrap(sessions(for: task).first).sessionId
+        await fixture.runtime.waitUntilSettingUp()
 
         try await fixture.supervisor.stop(sessionId: placeholder)
 
