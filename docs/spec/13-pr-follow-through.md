@@ -55,9 +55,16 @@ back into items.
 - **awaitingCI** *(phase 1 reads green/red; phase 4 adds the log-tail items on
   red)* — green goes to watching; red goes straight to triaging, with the
   failed checks and their log tails as items.
-- **readyToVerify** *(phase 1)* — `reviewDecision == APPROVED` (when
-  `requireApproval`), checks green, no open item or decision, and the
-  verification label absent. Checks are green when the head commit's
+- **readyToVerify** *(phase 1)* — approved (when `requireApproval`), checks
+  green, no open item or decision, and the verification label absent. Approved
+  means at least one reviewer approves and none still blocks, computed per
+  reviewer rather than from GitHub's `reviewDecision`: each reviewer stands by
+  their latest `APPROVED` or `CHANGES_REQUESTED` review (a comment review
+  changes nothing, a dismissal clears it). GitHub keeps a reviewer's
+  `CHANGES_REQUESTED` in force until that reviewer reviews again, even after
+  fixes are pushed and their review is re-requested; here a review request for
+  that reviewer made after their `CHANGES_REQUESTED` clears it, and they count
+  as pending — neither approving nor blocking. Checks are green when the head commit's
   `statusCheckRollup` is `SUCCESS` or absent: a repository with no checks
   configured has no rollup, and nothing on it is failing. `PENDING`,
   `FAILURE`, `ERROR` and `EXPECTED` are not green. New feedback arriving here first sends the PR
@@ -88,7 +95,10 @@ are never watched. A thread becomes an item while it is neither resolved nor
 outdated and its latest comment is not the viewer's; that comment is the item's
 body, so a reply changes it. A review body becomes an item while it is its
 author's latest review and that review is not an approval, since a review is
-never resolved and an approving body is not feedback. Phase 1 moves a watch
+never resolved and an approving body is not feedback. The same query reads
+each PR's reviews with their submission times and its review requests
+(`timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT])`) with theirs, which is
+all the per-reviewer approval above needs. Phase 1 moves a watch
 only among watching, readyToVerify and verified, by the rules above, and a
 watch whose PR has left the open list settles to merged or closed by
 `gh pr view`. A PR converted back to draft still appears in the search, marked

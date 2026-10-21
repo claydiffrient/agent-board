@@ -102,7 +102,10 @@ public struct PullRequestWatchReader: Sendable {
               reviewThreads(first: 100) {
                 nodes { id isResolved isOutdated comments(last: 1) { nodes { author { login } body url path line } } }
               }
-              reviews(last: 50) { nodes { id state body url author { login } } }
+              reviews(last: 50) { nodes { id state body url submittedAt author { login } } }
+              timelineItems(last: 100, itemTypes: [REVIEW_REQUESTED_EVENT]) {
+                nodes { ... on ReviewRequestedEvent { createdAt requestedReviewer { ... on User { login } ... on Bot { login } } } }
+              }
             }
             """
         }
@@ -170,15 +173,56 @@ public struct PullRequestWatchReader: Sendable {
                 githubNodeId: review.id, kind: .review, author: review.author?.login, body: review.body, url: review.url
             ))
         }
+        let standing = standings(of: pr, byViewer: byViewer)
         return PRSnapshot(
             repoOwner: owner, repoName: name, number: pr.number, url: pr.url, title: pr.title, isDraft: pr.isDraft,
             headRef: pr.headRefName, headOid: pr.headRefOid, baseRef: pr.baseRefName,
             reviewDecision: pr.reviewDecision,
+            approvedBy: standing.approvedBy, changesRequestedBy: standing.changesRequestedBy,
             checksState: pr.commits?.nodes.last?.commit.statusCheckRollup?.state,
             mergeable: pr.mergeable,
             labels: pr.labels?.nodes.map(\.name) ?? [],
             items: items
         )
+    }
+}
+
+extension PullRequestWatchReader {
+    /// Each reviewer stands by their latest approving or change-requesting review. GitHub's
+    /// `reviewDecision` keeps a CHANGES_REQUESTED until that reviewer reviews again; here a review
+    /// request made after it clears it, leaving the reviewer pending (SPEC §13.1).
+    fileprivate static func standings(
+        of pr: GraphQLResponse.PullRequest, byViewer: (GraphQLResponse.Author?) -> Bool
+    ) -> (approvedBy: [String], changesRequestedBy: [String]) {
+        let iso = ISO8601DateFormatter()
+        var latest: [String: (login: String, review: GraphQLResponse.Review)] = [:]
+        for review in pr.reviews?.nodes ?? [] {
+            guard let login = review.author?.login, !byViewer(review.author) else { continue }
+            switch review.state {
+            case "APPROVED", "CHANGES_REQUESTED": latest[login.lowercased()] = (login, review)
+            case "DISMISSED": latest[login.lowercased()] = nil
+            default: continue
+            }
+        }
+        var requestedAt: [String: Date] = [:]
+        for request in pr.timelineItems?.nodes ?? [] {
+            guard let login = request.requestedReviewer?.login,
+                  let at = request.createdAt.flatMap({ iso.date(from: $0) })
+            else { continue }
+            requestedAt[login.lowercased()] = max(at, requestedAt[login.lowercased()] ?? at)
+        }
+        var approvedBy: [String] = []
+        var changesRequestedBy: [String] = []
+        for (key, entry) in latest.sorted(by: { $0.key < $1.key }) {
+            if entry.review.state == "APPROVED" {
+                approvedBy.append(entry.login)
+                continue
+            }
+            let submitted = entry.review.submittedAt.flatMap { iso.date(from: $0) }
+            if let submitted, let requested = requestedAt[key], requested > submitted { continue }
+            changesRequestedBy.append(entry.login)
+        }
+        return (approvedBy, changesRequestedBy)
     }
 }
 
@@ -215,7 +259,15 @@ private struct GraphQLResponse: Decodable {
         let state: String
         let body: String
         let url: String?
+        let submittedAt: String?
         let author: Author?
+    }
+
+    /// A team request has no login and never matches a reviewer.
+    struct ReviewRequest: Decodable {
+        struct Reviewer: Decodable { let login: String? }
+        let createdAt: String?
+        let requestedReviewer: Reviewer?
     }
 
     struct PullRequest: Decodable {
@@ -232,6 +284,7 @@ private struct GraphQLResponse: Decodable {
         let commits: Nodes<CommitNode>?
         let reviewThreads: Nodes<Thread>?
         let reviews: Nodes<Review>?
+        let timelineItems: Nodes<ReviewRequest>?
     }
 
     let data: Payload?

@@ -224,6 +224,9 @@ public struct PRSnapshot: Sendable, Equatable {
     public var headOid: String
     public var baseRef: String
     public var reviewDecision: String?
+    /// Reviewers whose standing review approves, and those whose standing review still blocks (SPEC §13.1).
+    public var approvedBy: [String]
+    public var changesRequestedBy: [String]
     public var checksState: String?
     public var mergeable: String?
     public var labels: [String]
@@ -232,6 +235,7 @@ public struct PRSnapshot: Sendable, Equatable {
     public init(
         repoOwner: String, repoName: String, number: Int, url: String, title: String, isDraft: Bool = false,
         headRef: String, headOid: String, baseRef: String, reviewDecision: String? = nil,
+        approvedBy: [String] = [], changesRequestedBy: [String] = [],
         checksState: String? = nil, mergeable: String? = nil, labels: [String] = [], items: [PRSnapshotItem] = []
     ) {
         self.repoOwner = repoOwner
@@ -244,6 +248,8 @@ public struct PRSnapshot: Sendable, Equatable {
         self.headOid = headOid
         self.baseRef = baseRef
         self.reviewDecision = reviewDecision
+        self.approvedBy = approvedBy
+        self.changesRequestedBy = changesRequestedBy
         self.checksState = checksState
         self.mergeable = mergeable
         self.labels = labels
@@ -350,7 +356,8 @@ public enum PRWatchTransition {
         let labeled = settings.markVerifiedLabel.map { label in
             snapshot.labels.contains { $0.caseInsensitiveCompare(label) == .orderedSame }
         } ?? false
-        let ready = (!settings.requireApproval || snapshot.reviewDecision == "APPROVED")
+        let approved = !snapshot.approvedBy.isEmpty && snapshot.changesRequestedBy.isEmpty
+        let ready = (!settings.requireApproval || approved)
             && checksGreen(snapshot.checksState)
             && openItems == 0
         let target: PRWatchState = labeled ? .verified : ready ? .readyToVerify : .watching
