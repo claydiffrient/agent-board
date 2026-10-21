@@ -369,7 +369,8 @@ above the workspace sections, so it does not join Task Board and Status inside a
 project. Per archetype: name, a source chip (`board-local`, `project`, `user`),
 model, an enabled switch, and the task it is mid-way through. A board-local one
 also shows its role and can be added, edited and deleted; the editor covers
-name, role, system prompt, model and enabled. A disk one is read-only: it shows
+name, role, system prompt, model, enabled, and plugin directories (one path
+per line, §4). A disk one is read-only: it shows
 its file path and description, and offers Open and Reveal in Finder instead of
 Edit and Delete. Every user definition is listed, plus every project's own, each
 project one noting the user file it replaces. A name clash is marked on both

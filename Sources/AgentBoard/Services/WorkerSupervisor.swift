@@ -706,6 +706,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var scope: AgentBoardCore.TokenScope = .worker
     }
 
+    /// `claude` is spawned without a shell, so nothing else would expand a `~` the user typed.
+    private func expandingHome(_ path: String) -> String {
+        guard path == "~" || path.hasPrefix("~/") else { return path }
+        return home.path + path.dropFirst()
+    }
+
     /// §3.1 steps 3-8, shared by task workers and the epic integrator, and the whole of what runs
     /// after `spawn` has answered: memory symlink, generated settings and MCP config, the agent
     /// itself, and the setup row resolved into the session Claude issued.
@@ -740,7 +746,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         : [])
                     + (plan.rosterAgent?.disallowedTools ?? []),
                 tools: plan.rosterAgent?.tools,
-                model: plan.model
+                model: plan.model,
+                pluginDirs: (plan.rosterAgent?.pluginDirs ?? []).map(expandingHome)
             )
             let spawned = try await runtime.spawn(request)
             let recorded: AgentSession

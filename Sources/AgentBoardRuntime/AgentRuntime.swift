@@ -12,6 +12,7 @@ public struct SpawnRequest: Sendable {
     public var tools: [String]?
     public var appendSystemPrompt: String?
     public var model: String?
+    public var pluginDirs: [String]
 
     public static let defaultDisallowedTools = ["Bash(git push*)", "Bash(gh pr create*)", "Bash(gh pr merge*)"]
 
@@ -65,7 +66,8 @@ public struct SpawnRequest: Sendable {
         disallowedTools: [String] = SpawnRequest.defaultDisallowedTools,
         tools: [String]? = nil,
         appendSystemPrompt: String? = nil,
-        model: String? = nil
+        model: String? = nil,
+        pluginDirs: [String] = []
     ) {
         self.cwd = cwd
         self.name = name
@@ -76,6 +78,7 @@ public struct SpawnRequest: Sendable {
         self.tools = tools
         self.appendSystemPrompt = appendSystemPrompt
         self.model = model
+        self.pluginDirs = pluginDirs
     }
 }
 
@@ -126,6 +129,9 @@ public struct BackgroundSessionRuntime: AgentRuntime {
         }
         if let tools = request.tools {
             args += ["--tools", tools.joined(separator: ",")]
+        }
+        for dir in request.pluginDirs {
+            args += ["--plugin-dir", dir]
         }
         if !request.disallowedTools.isEmpty {
             args += ["--disallowedTools"] + request.disallowedTools
