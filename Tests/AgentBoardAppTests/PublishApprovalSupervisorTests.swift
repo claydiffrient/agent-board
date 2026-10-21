@@ -106,6 +106,37 @@ final class PublishApprovalSupervisorTests: XCTestCase {
         XCTAssertTrue(entry.text.contains("no git remote"), entry.text)
     }
 
+    func testAPushWhoseCommitMessageNamesAPrivateTermIsRefusedAndRecordedAsFailed() async throws {
+        try addRemote()
+        var settings = fixture.project.settings
+        settings.prFollowThrough.privateTerms = ["zebracorp"]
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+        let task = try TaskStore(fixture.db).create(
+            projectId: fixture.project.id, title: "t", body: nil, acceptance: nil, priority: nil,
+            column: .review, origin: .human, epicId: nil
+        )
+        let branch = "agentboard/\(task.id)"
+        try SupervisorFixture.git(["checkout", "-q", "-b", branch], cwd: fixture.repo)
+        try SupervisorFixture.git(["commit", "-q", "--allow-empty", "-m", "Import the ZebraCorp roster"], cwd: fixture.repo)
+        let approval = try pushApproval(branch: branch, taskId: task.id)
+
+        do {
+            try await fixture.supervisor.approve(approvalId: approval.id)
+            XCTFail("expected the guard to refuse the push")
+        } catch {
+            XCTAssertEqual(
+                error as? PublishFailure,
+                .privateTerm(term: "zebracorp", site: .commit(subject: "Import the ZebraCorp roster"))
+            )
+        }
+        XCTAssertTrue(try remoteBranches().isEmpty)
+        XCTAssertEqual(try XCTUnwrap(ProgressStore(fixture.db).latest(taskId: task.id)).kind, .error)
+        let bodies = try ReportStore(fixture.db).unconsumed(projectId: fixture.project.id).map(\.body)
+        XCTAssertTrue(
+            bodies.contains { $0.contains("\"zebracorp\"") && $0.contains("Import the ZebraCorp roster") }, "\(bodies)"
+        )
+    }
+
     func testABranchThatWasNeverCreatedFailsWithItsOwnCause() async throws {
         try addRemote()
         let approval = try pushApproval(branch: "agentboard/never-created")

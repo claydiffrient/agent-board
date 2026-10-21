@@ -11,6 +11,8 @@ public enum PublishFailure: Error, CustomStringConvertible, Equatable, Sendable 
     case pushFailed(branch: String, detail: String)
     case pullRequestFailed(detail: String)
     case noPullRequestURL(output: String)
+    case privateTerm(term: String, site: PrivateTermSite)
+    case privateTermCheckFailed(detail: String)
 
     public var description: String {
         switch self {
@@ -30,6 +32,12 @@ public enum PublishFailure: Error, CustomStringConvertible, Equatable, Sendable 
             return "Opening the pull request failed: \(detail)"
         case .noPullRequestURL(let output):
             return "The pull request command succeeded but printed no URL:\n\(output)"
+        case .privateTerm(let term, let site):
+            return "Refused to publish: the private term \"\(term)\" appears in \(site). Nothing was pushed. "
+                + "Remove it, or change the project's private terms in its PR Follow-Through settings."
+        case .privateTermCheckFailed(let detail):
+            return "Refused to publish: the private-term check could not read what would be sent, "
+                + "so nothing was pushed: \(detail)"
         }
     }
 }
@@ -90,6 +98,27 @@ public enum PublishCommand {
 
     public static let ghAuthStatus = ["auth", "status"]
 
+    public static func refExists(_ ref: String) -> [String] {
+        ["rev-parse", "--verify", "--quiet", "\(ref)^{commit}"]
+    }
+
+    public static let emptyTree = ["hash-object", "-t", "tree", "/dev/null"]
+
+    /// Every message on `branch` that `exclude` lacks; a nil `exclude` means the branch's whole history.
+    public static func commitMessages(branch: String, exclude: String?) -> [String] {
+        ["log", "-z", "--format=%B", exclude.map { "\($0)..refs/heads/\(branch)" } ?? "refs/heads/\(branch)"]
+    }
+
+    /// `since` is a ref (diffed from its merge base with the branch) or, with `fromTree`, a tree.
+    public static func diff(branch: String, since: String, fromTree: Bool, nameOnly: Bool) -> [String] {
+        let range = fromTree ? [since, "refs/heads/\(branch)"] : ["\(since)...refs/heads/\(branch)"]
+        let shape = nameOnly
+            ? ["--name-only", "-z", "--diff-filter=d"]
+            : ["--src-prefix=a/", "--dst-prefix=b/"]
+        return ["-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"]
+            + shape + range + ["--"]
+    }
+
     public static func pullRequestCreate(base: String, head: String, title: String, body: String) -> [String] {
         ["pr", "create", "--base", base, "--head", head, "--title", title, "--body", body]
     }
@@ -118,9 +147,12 @@ public enum PublishCommand {
 /// checked before anything leaves the machine, so a refusal names the cause rather than the symptom.
 public struct BranchPublisher: Sendable {
     public var repoPath: URL
+    /// The project's `prFollowThrough.privateTerms` (SPEC §13.5).
+    public var privateTerms: [String]
 
-    public init(repoPath: URL) {
+    public init(repoPath: URL, privateTerms: [String] = []) {
         self.repoPath = repoPath
+        self.privateTerms = privateTerms
     }
 
     private var gitURL: URL { URL(fileURLWithPath: WorktreeManager.gitPath) }
@@ -169,12 +201,48 @@ public struct BranchPublisher: Sendable {
         return gh
     }
 
+    /// SPEC §13.5: throws `privateTerm` when anything this publish would send names one of
+    /// `privateTerms`. What is sent is measured from `<remote>/<base>`; with no such ref, from the
+    /// branch's whole history.
+    public func refusePrivateTerms(
+        branch: String, publishedAs: String? = nil, base: String?, remote: String = "origin",
+        title: String? = nil, body: String? = nil
+    ) throws {
+        guard privateTerms.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+            return
+        }
+        let remoteBase = base.map { "refs/remotes/\(remote)/\($0)" }
+        let exclude = try remoteBase.flatMap { try git(PublishCommand.refExists($0)).status == 0 ? $0 : nil }
+        let since = try exclude ?? checked(PublishCommand.emptyTree).trimmingCharacters(in: .whitespacesAndNewlines)
+        let fromTree = exclude == nil
+        let outgoing = OutgoingPublish(
+            publishedBranch: publishedAs ?? branch,
+            title: title,
+            body: body,
+            commitMessages: try checked(PublishCommand.commitMessages(branch: branch, exclude: exclude)),
+            changedPaths: try checked(PublishCommand.diff(branch: branch, since: since, fromTree: fromTree, nameOnly: true))
+                .split(separator: "\0").map(String.init),
+            diff: try checked(PublishCommand.diff(branch: branch, since: since, fromTree: fromTree, nameOnly: false))
+        )
+        if let match = PrivateTermGuard.firstMatch(terms: privateTerms, in: outgoing) {
+            throw PublishFailure.privateTerm(term: match.term, site: match.site)
+        }
+    }
+
     // MARK: Actions
 
     /// `publishedAs` is the name the branch takes on the remote; the local branch is never renamed.
-    public func push(branch: String, publishedAs: String? = nil, remote: String = "origin") throws -> PushResult {
+    /// `base` bounds what the private-term guard reads.
+    public func push(
+        branch: String, publishedAs: String? = nil, base: String? = nil, remote: String = "origin"
+    ) throws -> PushResult {
         try requireRemote(remote)
         try requireBranch(branch)
+        try refusePrivateTerms(branch: branch, publishedAs: publishedAs, base: base, remote: remote)
+        return try pushChecked(branch: branch, publishedAs: publishedAs, remote: remote)
+    }
+
+    private func pushChecked(branch: String, publishedAs: String?, remote: String) throws -> PushResult {
         let result = try git(PublishCommand.push(remote: remote, branch: branch, published: publishedAs))
         guard result.status == 0 else {
             throw PublishFailure.pushFailed(branch: branch, detail: Self.detail(result))
@@ -193,8 +261,11 @@ public struct BranchPublisher: Sendable {
     ) throws -> PullRequestResult {
         try requireRemote(remote)
         try requireBranch(branch)
+        try refusePrivateTerms(
+            branch: branch, publishedAs: publishedAs, base: base, remote: remote, title: title, body: body
+        )
         let gh = try requireGh()
-        let pushed = try push(branch: branch, publishedAs: publishedAs, remote: remote)
+        let pushed = try pushChecked(branch: branch, publishedAs: publishedAs, remote: remote)
         let head = publishedAs ?? branch
 
         let created = try ProcessRunner.run(
@@ -226,6 +297,12 @@ public struct BranchPublisher: Sendable {
 
     private func git(_ arguments: [String]) throws -> CommandResult {
         try ProcessRunner.run(executable: gitURL, arguments: arguments, cwd: repoPath)
+    }
+
+    private func checked(_ arguments: [String]) throws -> String {
+        let result = try git(arguments)
+        guard result.status == 0 else { throw PublishFailure.privateTermCheckFailed(detail: Self.detail(result)) }
+        return result.stdout
     }
 
     private static func detail(_ result: CommandResult) -> String {

@@ -2350,14 +2350,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.projectNotFound(approval.projectId)
         }
         let request = try approval.publishRequest()
-        let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
+        let publisher = BranchPublisher(
+            repoPath: URL(fileURLWithPath: project.repoPath),
+            privateTerms: project.settings.prFollowThrough.privateTerms
+        )
         let base = request.base ?? project.baseBranch
         do {
             switch approval.kind {
             case .push:
                 let result = try await offMain {
                     try publisher.push(
-                        branch: request.branch, publishedAs: request.publishedBranch, remote: request.remote
+                        branch: request.branch, publishedAs: request.publishedBranch, base: base,
+                        remote: request.remote
                     )
                 }
                 try board.recordPublished(approval: approval, summary: "Push approved: \(result.summary).")

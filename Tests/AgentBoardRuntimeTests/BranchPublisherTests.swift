@@ -142,6 +142,56 @@ final class BranchPublisherRepoTests: XCTestCase {
         XCTAssertEqual(try publisher.requireRemote(), remote.path)
     }
 
+    private func commit(_ file: String, _ contents: String, message: String) throws {
+        try contents.write(to: repo.appendingPathComponent(file), atomically: true, encoding: .utf8)
+        try git(["add", "."], in: repo)
+        try git(["commit", "-m", message], in: repo)
+    }
+
+    func testAPushWhoseDiffNamesAPrivateTermIsRefusedAndReachesNothing() throws {
+        try addRemote()
+        try git(["checkout", "-q", "-b", "agentboard/feature"], in: repo)
+        try commit("config.txt", "endpoint = api.ZebraCorp.internal\n", message: "Add config")
+
+        let guarded = BranchPublisher(repoPath: repo, privateTerms: ["zebracorp"])
+        XCTAssertThrowsError(try guarded.push(branch: "agentboard/feature", base: "main")) { error in
+            XCTAssertEqual(error as? PublishFailure, .privateTerm(term: "zebracorp", site: .file("config.txt")))
+        }
+        XCTAssertTrue(try remoteBranches().isEmpty)
+    }
+
+    func testATermAlreadyOnTheRemoteBaseDoesNotRefuseABranchThatAddsNoneOfItsOwn() throws {
+        try addRemote()
+        try commit("legacy.txt", "zebracorp\n", message: "Add legacy")
+        _ = try publisher.push(branch: "main")
+        try git(["checkout", "-q", "-b", "agentboard/feature"], in: repo)
+        try commit("other.txt", "unrelated\n", message: "Add other")
+
+        let guarded = BranchPublisher(repoPath: repo, privateTerms: ["zebracorp"])
+        _ = try guarded.push(branch: "agentboard/feature", base: "main")
+        XCTAssertEqual(try remoteBranches(), ["agentboard/feature", "main"])
+    }
+
+    func testBlankTermsGuardNothing() throws {
+        try addRemote()
+        try git(["branch", "agentboard/feature"], in: repo)
+        _ = try BranchPublisher(repoPath: repo, privateTerms: ["", "  "]).push(branch: "agentboard/feature", base: "main")
+        XCTAssertEqual(try remoteBranches(), ["agentboard/feature"])
+    }
+
+    func testAPullRequestTitleNamingAPrivateTermIsRefused() throws {
+        try addRemote()
+        try git(["branch", "agentboard/feature"], in: repo)
+        let guarded = BranchPublisher(repoPath: repo, privateTerms: ["zebracorp"])
+        XCTAssertThrowsError(
+            try guarded.refusePrivateTerms(
+                branch: "agentboard/feature", base: "main", title: "Port the ZEBRACORP importer", body: ""
+            )
+        ) { error in
+            XCTAssertEqual(error as? PublishFailure, .privateTerm(term: "zebracorp", site: .pullRequestTitle))
+        }
+    }
+
     private func remoteBranches() throws -> [String] {
         let listed = try git(["for-each-ref", "--format=%(refname:short)", "refs/heads"], in: remote)
         return listed.split(whereSeparator: \.isNewline).map(String.init)

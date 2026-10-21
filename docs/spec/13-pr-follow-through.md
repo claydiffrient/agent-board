@@ -153,11 +153,26 @@ on at all.
 ### 13.5 Guardrails — phase 1 (publish guard) and planned amendments for phase 3
 
 **The publish guard**, live from phase 1 regardless of whether follow-through
-itself is enabled: `BranchPublisher` refuses any push or pull-request body
-whose diff, commit messages, branch name, title, or body contains one of the
-project's `privateTerms`, case-insensitively. This is what lets a public
-project (this one) sit beside a private one in the same install without a
-work-specific name ever reaching a shared remote by accident.
+itself is enabled: `BranchPublisher` refuses any push or pull request that
+would send one of the project's `privateTerms`, matched as a case-insensitive
+substring. This is what lets a public project (this one) sit beside a private
+one in the same install without a work-specific name ever reaching a shared
+remote by accident. Before anything is pushed and before `gh` is touched, it
+reads:
+
+- the published branch name (the remote name, not the local one);
+- the pull request's title and body, for `open_pull_request`;
+- every commit message in `<remote>/<base>..<branch>`;
+- the paths and the added lines of `git diff <remote>/<base>...<branch>`.
+  Removed lines are not read, so a commit that deletes a term is not refused
+  for it.
+
+With no `<remote>/<base>` ref, the branch's whole history and tree are read
+instead. A match fails the approval: nothing is pushed, the card gets an
+error progress row, and the `decision` report names the term and where it was
+found (the file, the commit subject, the branch name, or the title or body).
+An empty list, or one holding only blank entries, is a no-op. A git command
+the guard cannot run refuses the publish rather than skipping the check.
 
 **Planned amendment to D8 (§1), not made here.** Phase 3 will add: the app,
 never a worker, may fast-forward push a round branch to the head ref of an
