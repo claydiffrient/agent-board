@@ -8,7 +8,7 @@ import XCTest
 
 /// Where a port row's owner name sends a click. Pure values, so these hold without a mount; the
 /// end-to-end half — that the route actually selects the project — is
-/// `PortsPanelLiveTests.testAnAttributedOwnerNameSelectsItsProject`.
+/// `NotificationRoutingMountTests.testARoutedBannerSelectsItsProjectTheWayTheSidebarDoes`.
 final class PortOwnerLabelTests: XCTestCase {
     private func port(
         _ number: Int, ownership: PortOwnership, sessionId: String? = nil, projectId: String = "p-1",
@@ -61,12 +61,8 @@ final class PortOwnerLabelTests: XCTestCase {
     }
 }
 
-/// The panel in the real sidebar, captured offscreen.
-///
-/// Mounted in a borderless `NSWindow` at -20000/-20000 and captured with
-/// `CGWindowListCreateImage` — the one route that rasterizes a SwiftUI `List` on a machine with no
-/// display, per the project's headless-verification note. `.titled` is deliberately avoided: AppKit
-/// drags such a window back onto a visible screen.
+/// The panel in the real sidebar, captured offscreen through the project's shared
+/// `OffscreenMount`/`Capture` infrastructure (`OffscreenCapture.swift`).
 ///
 /// What these prove: two mounts of the same board with the same ports are pixel-identical; each
 /// added port adds pixels; an attributed row does not draw like an orphaned one; the rows land
@@ -95,96 +91,7 @@ final class PortsPanelLiveTests: XCTestCase {
 
     /// The sidebar at its 220-point ideal, plus a margin. In points, because a capture's scale is
     /// not the same on every machine.
-    private static let sidebarPoints: CGFloat = 230
-
-    private struct PixelDiff {
-        var count: Int
-        var minX: Int
-        var maxX: Int
-        var minY: Int
-        var maxY: Int
-
-        var box: String { "n=\(count) x=\(minX)...\(maxX) y=\(minY)...\(maxY)" }
-    }
-
-    @MainActor
-    private final class Mount {
-        let window: NSWindow
-        let host: NSView
-
-        static let windowSize = CGSize(width: 1100, height: 700)
-
-        init(db: AppDatabase, supervisor: StubSupervisor, router: NotificationRouter, ports: ListeningPortModel?) {
-            host = NSHostingView(
-                rootView: MainWindow().environment(
-                    renderEnvironment(db: db, supervisor: supervisor, router: router, listeningPorts: ports)
-                )
-            )
-            NSApplication.shared.setActivationPolicy(.accessory)
-            window = NSWindow(
-                contentRect: NSRect(origin: CGPoint(x: -20_000, y: -20_000), size: Self.windowSize),
-                styleMask: [.borderless], backing: .buffered, defer: false
-            )
-            window.contentView = host
-            window.orderBack(nil)
-        }
-
-        func close() { window.orderOut(nil) }
-
-        /// A short dwell before shooting: `settled(_:)` below is what actually waits out a slow
-        /// render, by requiring two of these captures to agree; this only has to cover one frame.
-        func capture() throws -> NSBitmapImageRep {
-            pumpBriefly(window, turns: 9)
-            let image = try XCTUnwrap(
-                CGWindowListCreateImage(
-                    .null, .optionIncludingWindow, CGWindowID(window.windowNumber),
-                    [.boundsIgnoreFraming, .bestResolution]
-                ),
-                "the window server produced no image for the offscreen window"
-            )
-            return NSBitmapImageRep(cgImage: image)
-        }
-    }
-
-    private func diff(_ a: NSBitmapImageRep, _ b: NSBitmapImageRep) -> PixelDiff {
-        var count = 0
-        var minX = Int.max, maxX = -1, minY = Int.max, maxY = -1
-        let sidebarPixels = Int(Self.sidebarPoints * CGFloat(a.pixelsWide) / Mount.windowSize.width)
-        for y in 0..<min(a.pixelsHigh, b.pixelsHigh) {
-            for x in 0..<min(sidebarPixels, a.pixelsWide, b.pixelsWide) {
-                guard let left = a.colorAt(x: x, y: y), let right = b.colorAt(x: x, y: y) else { continue }
-                let apart = abs(left.redComponent - right.redComponent)
-                    + abs(left.greenComponent - right.greenComponent)
-                    + abs(left.blueComponent - right.blueComponent)
-                guard apart > 0.02 else { continue }
-                count += 1
-                minX = min(minX, x); maxX = max(maxX, x)
-                minY = min(minY, y); maxY = max(maxY, y)
-            }
-        }
-        guard count > 0 else { return PixelDiff(count: 0, minX: 0, maxX: 0, minY: 0, maxY: 0) }
-        return PixelDiff(count: count, minX: minX, maxX: maxX, minY: minY, maxY: maxY)
-    }
-
-    /// A capture the window server has stopped changing.
-    ///
-    /// One `capture()` races the window server — the project's headless-verification note records
-    /// `SidebarAttentionLiveTests` failing with the whole sidebar differing because a capture landed
-    /// mid-relayout, and lists "capture twice and require two agreeing captures" as an untried fix.
-    /// This is that fix: keep capturing until two consecutive images are pixel-identical, which is
-    /// what makes every comparison below a statement about content rather than about timing.
-    private func settled(
-        _ mount: Mount, file: StaticString = #filePath, line: UInt = #line
-    ) throws -> NSBitmapImageRep {
-        var previous = try mount.capture()
-        for _ in 0..<8 {
-            let next = try mount.capture()
-            if diff(previous, next).count == 0 { return next }
-            previous = next
-        }
-        XCTFail("the window never stopped changing across 9 captures", file: file, line: line)
-        return previous
-    }
+    private static let sidebarPoints = 0..<230
 
     private func register(_ db: AppDatabase, _ name: String) throws -> Project {
         try ProjectStore(db).register(
@@ -244,9 +151,23 @@ final class PortsPanelLiveTests: XCTestCase {
         return model
     }
 
-    private func mount(_ db: AppDatabase, _ ports: ListeningPortModel?) -> Mount {
-        Mount(db: db, supervisor: StubSupervisor(), router: NotificationRouter(), ports: ports)
+    private func mount(_ db: AppDatabase, _ ports: ListeningPortModel?) -> OffscreenMount {
+        OffscreenMount(
+            MainWindow().environment(
+                renderEnvironment(db: db, supervisor: StubSupervisor(), router: NotificationRouter(), listeningPorts: ports)
+            )
+        )
     }
+
+    /// One project ("Alpha" or "Beta", every test here registers exactly one) beside the pinned rows.
+    private func capture(_ mount: OffscreenMount) throws -> Capture {
+        try mount.capture(
+            points: Self.sidebarPoints,
+            showing: SidebarContent(rows: SidebarSelection.pinned.count + 1, headers: 1)
+        )
+    }
+
+    private func describe(_ box: PixelDiff) -> String { "n=\(box.count) x=\(box.minX)...\(box.maxX) y=\(box.minY)...\(box.maxY)" }
 
     /// The control every other assertion here rests on: nothing in this window moves on its own, so
     /// a pixel difference means the port list changed.
@@ -262,13 +183,16 @@ final class PortsPanelLiveTests: XCTestCase {
         let first = mount(db, try model(db, rows))
         let second = mount(db, try model(db, rows))
         defer { first.close(); second.close() }
-        let left = try settled(first)
-        let right = try settled(second)
-        let drift = diff(left, right)
-        XCTAssertEqual(drift.count, 0, "the ports panel must render deterministically (\(drift.box))")
+        let left = try capture(first)
+        let right = try capture(second)
+        let drift = left.diff(right, columns: left.columns(Self.sidebarPoints))
+        XCTAssertEqual(drift.count, 0, "the ports panel must render deterministically (\(describe(drift)))")
     }
 
-    /// One row per port, and every row above the Add Project button.
+    /// One row per port, and every row above the Add Project button. Also proves the panel's empty
+    /// state costs one header line and not a box, and that a row costs more pixels than that line —
+    /// folding in the suite's former `testAnEmptyPanelCostsOneHeaderLineAndDrawsNoRows`, which built
+    /// the same four mounts to check the same header band.
     ///
     /// Coordinate-free, because nothing in a SwiftUI sidebar is findable by name — `.help()` and
     /// the accessibility tree are both empty here. The stack sits under a list that takes the rest of
@@ -289,54 +213,43 @@ final class PortsPanelLiveTests: XCTestCase {
         let twoMount = mount(db, try model(db, two))
         defer { noPanel.close(); emptyMount.close(); oneMount.close(); twoMount.close() }
 
-        let bare = try settled(noPanel)
-        let empty = try settled(emptyMount)
-        let one_ = try settled(oneMount)
-        let headerBand = diff(bare, empty)
-        let firstRow = diff(empty, one_)
-        let secondRow = diff(one_, try settled(twoMount))
+        let bare = try capture(noPanel)
+        let empty = try capture(emptyMount)
+        let one_ = try capture(oneMount)
+        let headerBand = bare.diff(empty, columns: bare.columns(Self.sidebarPoints))
+        let firstRow = empty.diff(one_, columns: empty.columns(Self.sidebarPoints))
+        let secondRow = one_.diff(try capture(twoMount), columns: one_.columns(Self.sidebarPoints))
 
         XCTAssertGreaterThan(headerBand.count, 0, "the panel header must draw")
+        XCTAssertLessThan(
+            headerBand.height, 60,
+            "an empty panel is one line, not a box (\(describe(headerBand)))"
+        )
         XCTAssertGreaterThan(firstRow.count, 0, "one listening port must draw a row")
+        XCTAssertGreaterThan(
+            firstRow.count, headerBand.count,
+            "a panel holding a port must paint more than an empty one"
+        )
         XCTAssertGreaterThan(secondRow.count, 0, "a second listening port must draw a second row")
 
-        let addProject = try XCTUnwrap(lowestInkedBand(bare), "the sidebar without a panel drew nothing")
+        let addProject = try XCTUnwrap(
+            bare.lowestInkedRows(columns: bare.columns(24..<168)), "the sidebar without a panel drew nothing"
+        )
         XCTAssertLessThan(
             headerBand.maxY, addProject.lowerBound,
             "the panel must sit above Add Project, the lowest thing the sidebar draws without it "
-                + "(header \(headerBand.box), Add Project y=\(addProject))"
+                + "(header \(describe(headerBand)), Add Project y=\(addProject))"
         )
         XCTAssertLessThanOrEqual(
             firstRow.maxY, headerBand.maxY,
             "a port row must grow upward from the panel, leaving Add Project where it was "
-                + "(row \(firstRow.box), header \(headerBand.box))"
+                + "(row \(describe(firstRow)), header \(describe(headerBand)))"
         )
         XCTAssertLessThanOrEqual(
             secondRow.maxY, headerBand.maxY,
             "the second row must stay above Add Project too "
-                + "(row \(secondRow.box), header \(headerBand.box))"
+                + "(row \(describe(secondRow)), header \(describe(headerBand)))"
         )
-    }
-
-    /// The rows of the lowest run of text or glyphs in the sidebar: rows whose pixels across its
-    /// interior are not all one colour. A bezel's straight edge or the card's rounded bottom is one
-    /// colour across that span, so only a label counts.
-    private func lowestInkedBand(_ rep: NSBitmapImageRep) -> ClosedRange<Int>? {
-        let scale = CGFloat(rep.pixelsWide) / Mount.windowSize.width
-        let columns = Int(24 * scale)..<Int(168 * scale)
-        func inked(_ y: Int) -> Bool {
-            guard let first = rep.colorAt(x: columns.lowerBound, y: y) else { return false }
-            return columns.contains { x in
-                guard let pixel = rep.colorAt(x: x, y: y) else { return false }
-                return abs(pixel.redComponent - first.redComponent)
-                    + abs(pixel.greenComponent - first.greenComponent)
-                    + abs(pixel.blueComponent - first.blueComponent) > 0.02
-            }
-        }
-        guard let bottom = (0..<rep.pixelsHigh).reversed().first(where: inked) else { return nil }
-        var top = bottom
-        while top > 0, inked(top - 1) { top -= 1 }
-        return top...bottom
     }
 
     func testAnAttributedRowDoesNotRenderLikeAnOrphanedOne() throws {
@@ -352,39 +265,11 @@ final class PortsPanelLiveTests: XCTestCase {
         )
         defer { attributed.close(); orphaned.close() }
 
+        let left = try capture(attributed)
+        let right = try capture(orphaned)
         XCTAssertGreaterThan(
-            diff(try settled(attributed), try settled(orphaned)).count, 0,
+            left.diff(right, columns: left.columns(Self.sidebarPoints)).count, 0,
             "a named owner and an orphan must not draw the same row"
-        )
-    }
-
-    /// The empty state, as the report describes it: the header line and nothing else. The header
-    /// still costs one line because it carries the refresh button — a panel that vanished entirely
-    /// would leave nobody to ask about a port that appeared since the last hourly sweep.
-    func testAnEmptyPanelCostsOneHeaderLineAndDrawsNoRows() throws {
-        let db = try AppDatabase.inMemory()
-        let alpha = try register(db, "Alpha")
-
-        let withoutPanel = mount(db, nil)
-        let emptyPanel = mount(db, try model(db, []))
-        let onePort = mount(db, try model(db, [
-            ListeningPort(port: 3000, pid: 501, command: "node", sessionId: shellKey(alpha))
-        ]))
-        defer { withoutPanel.close(); emptyPanel.close(); onePort.close() }
-
-        let absent = try settled(withoutPanel)
-        let empty = try settled(emptyPanel)
-        let header = diff(absent, empty)
-        let row = diff(empty, try settled(onePort))
-
-        XCTAssertGreaterThan(header.count, 0, "the header line is drawn even with nothing listening")
-        XCTAssertLessThan(
-            header.maxY - header.minY, 60,
-            "an empty panel is one line, not a box (\(header.box))"
-        )
-        XCTAssertGreaterThan(
-            row.count, header.count,
-            "a panel holding a port must paint more than an empty one"
         )
     }
 
@@ -400,7 +285,7 @@ final class PortsPanelLiveTests: XCTestCase {
         let quietMount = mount(db, quiet)
         let failedMount = mount(db, failed)
         defer { quietMount.close(); failedMount.close() }
-        let before = try settled(failedMount)
+        let before = try capture(failedMount)
 
         let row = try XCTUnwrap(failed.ports.first)
         let stopping = _Concurrency.Task { await failed.stop(row) }
@@ -412,12 +297,13 @@ final class PortsPanelLiveTests: XCTestCase {
 
         XCTAssertEqual(failed.ports.map(\.port), [3000], "the row was dropped for a process still listening")
         XCTAssertNotNil(failed.stopFailure(for: row))
-        let after = try settled(failedMount)
+        let after = try capture(failedMount)
         XCTAssertGreaterThan(
-            diff(before, after).count, 0, "the failure was not drawn on the row"
+            before.diff(after, columns: before.columns(Self.sidebarPoints)).count, 0, "the failure was not drawn on the row"
         )
+        let quiescent = try capture(quietMount)
         XCTAssertGreaterThan(
-            diff(try settled(quietMount), after).count, 0,
+            quiescent.diff(after, columns: quiescent.columns(Self.sidebarPoints)).count, 0,
             "a failed row must not draw like an untouched one"
         )
     }
@@ -451,12 +337,16 @@ final class PortsPanelLiveTests: XCTestCase {
         let orphanMount = mount(db, orphanOnly)
         let mixedMount = mount(db, mixed)
         defer { emptyMount.close(); orphanMount.close(); mixedMount.close() }
-        let empty = try settled(emptyMount)
-        let drawn = try settled(orphanMount)
+        let empty = try capture(emptyMount)
+        let drawn = try capture(orphanMount)
 
-        let foreignRows = diff(drawn, try settled(mixedMount))
-        XCTAssertEqual(foreignRows.count, 0, "a port the board never started drew a row (\(foreignRows.box))")
-        XCTAssertGreaterThan(diff(empty, drawn).count, 0, "the ended session's port drew no row")
+        let mixedCapture = try capture(mixedMount)
+        let foreignRows = drawn.diff(mixedCapture, columns: drawn.columns(Self.sidebarPoints))
+        XCTAssertEqual(foreignRows.count, 0, "a port the board never started drew a row (\(describe(foreignRows)))")
+        XCTAssertGreaterThan(
+            empty.diff(drawn, columns: empty.columns(Self.sidebarPoints)).count, 0,
+            "the ended session's port drew no row"
+        )
     }
 
     private func shellKey(_ project: Project) -> String {

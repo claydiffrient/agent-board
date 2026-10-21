@@ -23,13 +23,10 @@ private final class CountingSweep: @unchecked Sendable {
     }
 }
 
-/// The Status pane's ports section, captured offscreen.
-///
-/// Mounted in a borderless `NSWindow` at -20000/-20000 and captured with `CGWindowListCreateImage`,
-/// per the project's headless-verification note; `settled` requires two consecutive identical
-/// captures so every comparison is a statement about content rather than about timing. Synchronous
-/// throughout, for the reason `PortsPanelLiveTests` records: pumping the run loop from inside an
-/// `async` test body does not flush SwiftUI.
+/// The Status pane's ports section, captured offscreen through the project's shared
+/// `OffscreenMount`/`Capture` infrastructure (`OffscreenCapture.swift`). Synchronous throughout, for
+/// the reason `PortsPanelLiveTests` records: pumping the run loop from inside an `async` test body
+/// does not flush SwiftUI.
 ///
 /// Every session used here ended over an hour ago, so the roster table is its "No Live Sessions"
 /// placeholder and nothing above the section redraws on a clock.
@@ -54,75 +51,7 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         super.tearDown()
     }
 
-    private struct PixelDiff {
-        var count: Int
-        var minY: Int
-        var maxY: Int
-
-        var box: String { "n=\(count) y=\(minY)...\(maxY)" }
-    }
-
-    @MainActor
-    private final class Mount {
-        let window: NSWindow
-
-        init<Root: View>(_ root: Root, width: CGFloat = 900, height: CGFloat = 600) {
-            NSApplication.shared.setActivationPolicy(.accessory)
-            window = NSWindow(
-                contentRect: NSRect(x: -20_000, y: -20_000, width: width, height: height),
-                styleMask: [.borderless], backing: .buffered, defer: false
-            )
-            window.contentView = NSHostingView(rootView: root)
-            window.orderBack(nil)
-        }
-
-        func close() { window.orderOut(nil) }
-
-        /// A short dwell before shooting: `settled(_:)` below is what actually waits out a slow
-        /// render, by requiring two of these captures to agree; this only has to cover one frame.
-        func capture() throws -> NSBitmapImageRep {
-            pumpBriefly(window, turns: 9)
-            let image = try XCTUnwrap(
-                CGWindowListCreateImage(
-                    .null, .optionIncludingWindow, CGWindowID(window.windowNumber),
-                    [.boundsIgnoreFraming, .bestResolution]
-                ),
-                "the window server produced no image for the offscreen window"
-            )
-            return NSBitmapImageRep(cgImage: image)
-        }
-    }
-
-    private func diff(_ a: NSBitmapImageRep, _ b: NSBitmapImageRep) -> PixelDiff {
-        var count = 0
-        var minY = Int.max, maxY = -1
-        for y in 0..<min(a.pixelsHigh, b.pixelsHigh) {
-            for x in 0..<min(a.pixelsWide, b.pixelsWide) {
-                guard let left = a.colorAt(x: x, y: y), let right = b.colorAt(x: x, y: y) else { continue }
-                let apart = abs(left.redComponent - right.redComponent)
-                    + abs(left.greenComponent - right.greenComponent)
-                    + abs(left.blueComponent - right.blueComponent)
-                guard apart > 0.02 else { continue }
-                count += 1
-                minY = min(minY, y); maxY = max(maxY, y)
-            }
-        }
-        guard count > 0 else { return PixelDiff(count: 0, minY: 0, maxY: 0) }
-        return PixelDiff(count: count, minY: minY, maxY: maxY)
-    }
-
-    private func settled(
-        _ mount: Mount, file: StaticString = #filePath, line: UInt = #line
-    ) throws -> NSBitmapImageRep {
-        var previous = try mount.capture()
-        for _ in 0..<8 {
-            let next = try mount.capture()
-            if diff(previous, next).count == 0 { return next }
-            previous = next
-        }
-        XCTFail("the window never stopped changing across 9 captures", file: file, line: line)
-        return previous
-    }
+    private func describe(_ box: PixelDiff) -> String { "n=\(box.count) y=\(box.minY)...\(box.maxY)" }
 
     private func register(_ db: AppDatabase, _ name: String) throws -> Project {
         try ProjectStore(db).register(
@@ -175,14 +104,15 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         return model
     }
 
-    private func pane(_ db: AppDatabase, _ project: Project, _ ports: ListeningPortModel) -> Mount {
-        Mount(
+    private func pane(_ db: AppDatabase, _ project: Project, _ ports: ListeningPortModel) -> OffscreenMount {
+        OffscreenMount(
             StatusView(project: project).environment(
                 AppEnvironment(
                     db: db, supervisor: StubSupervisor(), router: NotificationRouter(),
                     listeningPorts: ports
                 )
-            )
+            ),
+            size: CGSize(width: 900, height: 600)
         )
     }
 
@@ -198,8 +128,10 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         let second = pane(db, mine, try model(db, rows))
         defer { first.close(); second.close() }
 
-        let drift = diff(try settled(first), try settled(second))
-        XCTAssertEqual(drift.count, 0, "the Status pane must render deterministically (\(drift.box))")
+        let left = try first.capture()
+        let right = try second.capture()
+        let drift = left.diff(right, columns: 0..<left.width)
+        XCTAssertEqual(drift.count, 0, "the Status pane must render deterministically (\(describe(drift)))")
     }
 
     /// The pane draws this project's ports and nothing else: adding another project's port to the
@@ -230,13 +162,13 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         let withSecond = pane(db, mine, secondModel)
         defer { base.close(); withForeign.close(); withSecond.close() }
 
-        let baseline = try settled(base)
-        let foreign = diff(baseline, try settled(withForeign))
-        let second = diff(baseline, try settled(withSecond))
+        let baseline = try base.capture()
+        let foreign = baseline.diff(try withForeign.capture(), columns: 0..<baseline.width)
+        let second = baseline.diff(try withSecond.capture(), columns: 0..<baseline.width)
 
         XCTAssertEqual(
             foreign.count, 0,
-            "another project's port drew on this project's Status pane (\(foreign.box))"
+            "another project's port drew on this project's Status pane (\(describe(foreign)))"
         )
         XCTAssertGreaterThan(
             second.count, 0,
@@ -263,8 +195,10 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         let orphaned = pane(db, mine, ports)
         defer { empty.close(); orphaned.close() }
 
+        let left = try empty.capture()
+        let right = try orphaned.capture()
         XCTAssertGreaterThan(
-            diff(try settled(empty), try settled(orphaned)).count, 0,
+            left.diff(right, columns: 0..<left.width).count, 0,
             "an orphan whose ended session names this project must draw a row on its pane"
         )
     }
@@ -286,17 +220,19 @@ final class StatusPortsSectionLiveTests: XCTestCase {
             db: db, supervisor: StubSupervisor(), router: NotificationRouter(), listeningPorts: ports
         )
 
-        let paneOnly = Mount(StatusView(project: mine).environment(env), width: 900, height: 500)
+        let paneOnly = OffscreenMount(
+            StatusView(project: mine).environment(env), size: CGSize(width: 900, height: 500)
+        )
         defer { paneOnly.close() }
         pumpBriefly(paneOnly.window)
         XCTAssertEqual(counter.count, 1, "the Status pane swept the process table on its own")
 
-        let both = Mount(
+        let both = OffscreenMount(
             VStack(spacing: 0) {
                 PortsPanel(ceiling: PortsPanel.ceiling(footerHeight: 0))
                 StatusView(project: mine)
             }.environment(env),
-            width: 900, height: 700
+            size: CGSize(width: 900, height: 700)
         )
         defer { both.close() }
         pump(both.window) { counter.count == 2 }
@@ -338,20 +274,23 @@ final class StatusPortsSectionLiveTests: XCTestCase {
             db: db, supervisor: StubSupervisor(), router: NotificationRouter(), listeningPorts: ports
         )
 
-        let paneOnly = Mount(StatusView(project: mine).environment(env), width: 900, height: 500)
+        let paneOnly = OffscreenMount(
+            StatusView(project: mine).environment(env), size: CGSize(width: 900, height: 500)
+        )
         defer { paneOnly.close() }
         let unsearched = try paneOnly.capture()
         type("nothing matches", into: paneOnly)
-        XCTAssertGreaterThan(diff(unsearched, try paneOnly.capture()).count, 0,
+        let searched = try paneOnly.capture()
+        XCTAssertGreaterThan(unsearched.diff(searched, columns: 0..<unsearched.width).count, 0,
                              "the query must have hidden the port row, or the count below measured nothing")
         XCTAssertEqual(counter.count, 1, "a query in the Status pane swept the process table")
 
-        let both = Mount(
+        let both = OffscreenMount(
             VStack(spacing: 0) {
                 PortsPanel(ceiling: PortsPanel.ceiling(footerHeight: 0))
                 StatusView(project: mine)
             }.environment(env),
-            width: 900, height: 700
+            size: CGSize(width: 900, height: 700)
         )
         defer { both.close() }
         both.window.layoutIfNeeded()
@@ -368,8 +307,8 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         )
     }
 
-    private func type(_ text: String, into mount: Mount) {
-        var queue: [NSView] = mount.window.contentView.map { [$0] } ?? []
+    private func type(_ text: String, into mount: OffscreenMount) {
+        var queue: [NSView] = [mount.host]
         var fields: [NSTextField] = []
         while let view = queue.popLast() {
             if let field = view as? NSTextField, field.isEditable { fields.append(field) }
