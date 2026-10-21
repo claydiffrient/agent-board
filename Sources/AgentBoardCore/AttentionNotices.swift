@@ -35,7 +35,7 @@ extension AttentionReason {
         switch self {
         case .pendingApproval: return .approvals
         case .blockedWorker: return .blockedWorkers
-        case .strandedReports, .overdueShutdown: return nil
+        case .strandedReports, .overdueShutdown, .prPollUnavailable: return nil
         }
     }
 
@@ -50,6 +50,8 @@ extension AttentionReason {
             return count == 1 ? "Report waiting" : "\(count) reports waiting"
         case .overdueShutdown:
             return "Shutdown not acknowledged"
+        case .prPollUnavailable:
+            return "PR watch stopped"
         }
     }
 }

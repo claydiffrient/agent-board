@@ -536,6 +536,15 @@ enum Schema {
     );
     """
 
+    /// One row per enabled project whose last PR poll could not run `gh` (SPEC §13.1).
+    static let prPollProblem = """
+    CREATE TABLE pr_poll_problem (
+      project_id TEXT PRIMARY KEY REFERENCES project(id) ON DELETE CASCADE,
+      detail     TEXT NOT NULL,
+      since      INTEGER NOT NULL
+    );
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
@@ -543,5 +552,6 @@ enum Schema {
         "task_commit",
         "roster_agent", "project_roster_agent", "task_comment", "comment_delivery", "coordinator",
         "coordinator_request", "request_event", "request_epic", "pr_watch", "pr_item", "pr_round",
+        "pr_poll_problem",
     ]
 }

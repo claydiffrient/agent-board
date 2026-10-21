@@ -128,6 +128,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let fileLocks: FileLockStore
     @ObservationIgnored private let attention: ProjectAttentionStore
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
+    @ObservationIgnored private let pullRequestWatch: PullRequestWatchReader
+    @ObservationIgnored private let prWatches: PRWatchStore
+    /// Millis of the last PR follow-through poll; 0 means none yet.
+    @ObservationIgnored private var lastPRWatchPoll: Int64 = 0
+    @ObservationIgnored private var prWatchPollInFlight = false
     /// Millis of the last pull request merge check; 0 means none yet, so the first tick after
     /// launch checks.
     @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
@@ -177,6 +182,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// cadence rather than paying for a scan every 5 seconds — or a second timer.
     static let archiveSweepIntervalMillis: Int64 = 5 * 60 * 1000
     static let pullRequestCheckIntervalMillis: Int64 = 10 * 60 * 1000
+    static let prWatchPollIntervalMillis: Int64 = 60 * 1000
     /// Sessions that ended this recently still get one more transcript read so final spend lands.
     static let finalSpendWindowMillis: Int64 = 15_000
 
@@ -224,6 +230,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         fileLocks = FileLockStore(db)
         attention = ProjectAttentionStore(db)
         pullRequestStates = PullRequestStateReader(gh: gh)
+        pullRequestWatch = PullRequestWatchReader(gh: gh)
+        prWatches = PRWatchStore(db)
     }
 
     private var sessionConfigDir: URL { appSupportDir.appendingPathComponent("sessions") }
@@ -1327,6 +1335,91 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         if taskId == nil { touched.formUnion(await refreshEpicPullRequests(projectId: projectId)) }
         for projectId in touched { announceReports(projectId: projectId) }
+    }
+
+    /// SPEC §13.1, phase 1: watches the user's open, non-draft pull requests in every project with
+    /// PR follow-through on, mapping each repository to the project whose `origin` names it. Writes
+    /// each poll through `PRWatchStore` and moves only watching, readyToVerify and verified; a watch
+    /// whose PR left the open list settles to merged or closed by `gh pr view`. No project enabled
+    /// means no `gh` call at all.
+    func pollPRWatches() async {
+        guard !prWatchPollInFlight else { return }
+        let enabled = ((try? projects.list()) ?? []).filter { $0.settings.prFollowThrough.enabled }
+        guard !enabled.isEmpty else {
+            try? prWatches.clearPollProblems()
+            return
+        }
+        prWatchPollInFlight = true
+        defer { prWatchPollInFlight = false }
+
+        var projectByRepo: [String: Project] = [:]
+        for project in enabled {
+            let repo = URL(fileURLWithPath: project.repoPath)
+            guard let remote = try? await offMain({ try BranchPublisher(repoPath: repo).requireRemote() }),
+                  let slug = PullRequestLaunch.githubSlug(remoteURL: remote)?.lowercased(),
+                  projectByRepo[slug] == nil
+            else { continue }
+            projectByRepo[slug] = project
+        }
+        guard let anyProject = projectByRepo.values.first else { return }
+
+        let reader = pullRequestWatch
+        let authored: [AuthoredPullRequest]
+        do {
+            let cwd = URL(fileURLWithPath: anyProject.repoPath)
+            authored = try await offMain { try reader.authored(cwd: cwd) }
+            try? prWatches.clearPollProblems()
+        } catch let failure as PullRequestWatchFailure where failure.ghUnavailable {
+            try? prWatches.setPollProblem(failure.description, projectIds: Set(enabled.map(\.id)))
+            return
+        } catch {
+            return
+        }
+
+        let open = authored.filter { !$0.isDraft && projectByRepo[$0.repository.lowercased()] != nil }
+        let stillOpen = Set(open.map { "\($0.repository.lowercased())#\($0.number)" })
+        for (slug, prs) in Dictionary(grouping: open, by: { $0.repository.lowercased() }) {
+            guard let project = projectByRepo[slug] else { continue }
+            let parts = prs[0].repository.split(separator: "/").map(String.init)
+            guard parts.count == 2 else { continue }
+            let cwd = URL(fileURLWithPath: project.repoPath)
+            let numbers = prs.map(\.number)
+            guard let snapshots = try? await offMain({
+                try reader.snapshots(owner: parts[0], name: parts[1], numbers: numbers, cwd: cwd)
+            }) else { continue }
+            for snapshot in snapshots {
+                applyPRSnapshot(snapshot, project: project)
+            }
+        }
+
+        let states = pullRequestStates
+        for project in enabled {
+            for watch in (try? prWatches.live(projectId: project.id)) ?? []
+            where !stillOpen.contains("\(watch.repoOwner.lowercased())/\(watch.repoName.lowercased())#\(watch.number)") {
+                let cwd = URL(fileURLWithPath: project.repoPath)
+                let url = watch.url
+                switch try? await offMain({ try states.state(of: url, cwd: cwd) }) {
+                case .merged: try? prWatches.setState(.merged, watchId: watch.id)
+                case .closed: try? prWatches.setState(.closed, watchId: watch.id)
+                case .open, nil: break
+                }
+            }
+        }
+    }
+
+    private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) {
+        do {
+            let watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
+            let openItems = try prWatches.items(watchId: watch.id).filter { $0.state == .open }.count
+            if let next = PRWatchTransition.next(
+                from: watch.state, snapshot: snapshot, openItems: openItems,
+                settings: project.settings.prFollowThrough
+            ) {
+                try prWatches.setState(next, watchId: watch.id)
+            }
+        } catch {
+            report(["could not record \(snapshot.url): \(describe(error))"])
+        }
     }
 
     /// SPEC §5.2: settles each PR-open epic against GitHub. Merged makes the epic `done`, lands the
@@ -2914,6 +3007,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if now - lastPullRequestCheck >= Self.pullRequestCheckIntervalMillis {
             lastPullRequestCheck = now
             _Concurrency.Task { await self.refreshPullRequestLandings() }
+        }
+        if now - lastPRWatchPoll >= Self.prWatchPollIntervalMillis {
+            lastPRWatchPoll = now
+            _Concurrency.Task { await self.pollPRWatches() }
         }
         for project in all {
             refreshShutdownProgressIfOrdered(projectId: project.id)

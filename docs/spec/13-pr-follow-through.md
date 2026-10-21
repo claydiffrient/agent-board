@@ -75,6 +75,23 @@ back into items.
 - **merged** / **closed** *(phase 1)* — terminal states. The round tasks are
   archived.
 
+**The poll (phase 1).** At most every 60s, on the metering tick beside the
+pull-request landing check (§5), `WorkerSupervisor.pollPRWatches` runs only
+when some project has `enabled` on; otherwise no `gh` command runs at all. It
+maps each enabled project to a repository by its `origin` remote, ssh and https
+forms alike, runs one `gh search prs --author=@me --state=open`, and for each
+mapped repository one `gh api graphql` query covering its non-draft PRs. Drafts
+are never watched. A thread becomes an item while it is neither resolved nor
+outdated and its latest comment is not the viewer's; that comment is the item's
+body, so a reply changes it. A review body becomes an item while it is its
+author's latest review and that review is not an approval, since a review is
+never resolved and an approving body is not feedback. Phase 1 moves a watch
+only among watching, readyToVerify and verified, by the rules above, and a
+watch whose PR has left the open list settles to merged or closed by
+`gh pr view`. A `gh` that is missing or not logged in records one
+`pr_poll_problem` row per enabled project, which raises that project's attention
+badge until a poll succeeds; it is written once, not on every poll.
+
 Items are keyed by the GitHub node id of the thread or check they came from,
 so each is handled once per round; a new reply on a thread already handled
 reopens it. The human's own comments, resolved threads, and outdated threads
