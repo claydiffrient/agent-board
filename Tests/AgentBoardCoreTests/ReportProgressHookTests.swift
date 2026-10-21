@@ -64,7 +64,7 @@ final class ProgressStoreTests: XCTestCase {
 }
 
 final class HookEventStoreTests: XCTestCase {
-    func testAppendRecentAndPrune() throws {
+    func testAppendAndRecent() throws {
         let f = try Fixture.make()
         try f.hooks.append(sessionId: "s1", event: "PostToolUse", payload: "{}")
         try f.hooks.append(sessionId: "s1", event: "Stop", payload: "{\"a\":1}")
@@ -74,9 +74,19 @@ final class HookEventStoreTests: XCTestCase {
         let recent = try f.hooks.recent(sessionId: "s1")
         XCTAssertEqual(recent.map(\.event), ["Stop", "PostToolUse"])
         XCTAssertEqual(try f.hooks.recent(sessionId: "s1", limit: 1).map(\.event), ["Stop"])
+    }
 
-        try f.hooks.prune(olderThan: Int64.nowMillis + 1)
-        XCTAssertEqual(try f.hooks.recent(sessionId: "s1").count, 0)
-        XCTAssertEqual(try f.hooks.recent(sessionId: "s2").count, 0)
+    func testPruneAgesOutEndedSessionsAndKeepsActiveOnes() throws {
+        let f = try Fixture.make()
+        try f.sessions.insert(f.session("ended", state: .completed))
+        try f.sessions.insert(f.session("live", state: .idle))
+        try f.hooks.append(sessionId: "ended", event: "PostToolUse", payload: "{}")
+        try f.hooks.append(sessionId: "live", event: "PostToolUse", payload: "{}")
+
+        XCTAssertEqual(try f.hooks.prune(), 0)
+
+        try f.hooks.prune(now: .nowMillis + HookEventStore.retentionMillis + 1)
+        XCTAssertEqual(try f.hooks.recent(sessionId: "ended").count, 0)
+        XCTAssertEqual(try f.hooks.recent(sessionId: "live").count, 1)
     }
 }

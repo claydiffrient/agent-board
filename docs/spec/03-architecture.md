@@ -219,7 +219,7 @@ happens to a setup still running when Agent Board quits.
 
 **Removing a worktree.** Every path that removes a task or epic worktree goes
 through `WorktreeManager.remove`: accepting a task, discarding one, the
-orphan reaper `reconcile` runs, **Remove worktrees** on a done or
+orphan reaper `reconcile` and the metering tick run (§5), **Remove worktrees** on a done or
 abandoned epic's lane (§5.2), and retiring a worktree slot. Archiving removes
 nothing, and closing an epic removes nothing, so neither runs anything. A
 slot is not removed when its task is accepted or discarded: it is *released*

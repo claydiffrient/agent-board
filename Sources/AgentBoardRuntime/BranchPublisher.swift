@@ -203,7 +203,7 @@ public struct BranchPublisher: Sendable {
     /// `gh` present on disk and logged in, as two separate answers.
     @discardableResult
     public func requireGh() throws -> URL {
-        guard let gh = PullRequestOpener.ghExecutable() else { throw PublishFailure.ghMissing }
+        guard let gh = try PullRequestOpener.ghExecutable() else { throw PublishFailure.ghMissing }
         let status = try ProcessRunner.run(
             executable: gh, arguments: PublishCommand.ghAuthStatus, cwd: repoPath, environment: ghEnvironment
         )

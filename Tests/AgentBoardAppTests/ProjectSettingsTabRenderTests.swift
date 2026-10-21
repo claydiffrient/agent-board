@@ -43,14 +43,6 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let window: NSWindow
         let host: NSView
 
-        func settle(turns: Int = 40) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
-
         func collect<V: NSView>(_ type: V.Type) -> [V] {
             var found: [V] = []
             func walk(_ view: NSView) {
@@ -69,8 +61,9 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     private func mount(
         tab: ProjectSettingsTab,
         rosterAgents: Int = 0,
-        configure: (inout ProjectSettings) -> Void = { _ in },
-        seed: (AppDatabase, String) throws -> Void = { _, _ in }
+        seed: (AppDatabase, String) throws -> Void = { _, _ in },
+        until condition: (Mounted) -> Bool = { _ in true },
+        configure: (inout ProjectSettings) -> Void = { _ in }
     ) throws -> Mounted {
         let db = try AppDatabase.inMemory()
         let projects = ProjectStore(db)
@@ -98,9 +91,28 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         )
         window.contentView = host
         window.orderBack(nil)
+        addTeardownBlock { window.orderOut(nil) }
         let mounted = Mounted(window: window, host: host)
-        mounted.settle()
+        settle(mounted, until: condition)
         return mounted
+    }
+
+    /// Pumps until the view tree stops growing (a GRDB `ValueObservation` or `.task` can still be
+    /// adding controls after the first frame) and the caller's own condition holds. Every tab here
+    /// seeds its `@State` synchronously from `configure`, so structural quiescence alone is already
+    /// correct for most of them; `.agents`' roster rows load asynchronously and pass a real `until`.
+    private func settle(
+        _ mounted: Mounted, agreeing: Int = 3, ceiling: Duration = .seconds(10),
+        until condition: (Mounted) -> Bool = { _ in true }
+    ) {
+        var previous = -1
+        var agreed = 0
+        pump(mounted.window, ceiling: ceiling) {
+            let signature = mounted.collect(NSView.self).count
+            agreed = signature == previous ? agreed + 1 : 0
+            previous = signature
+            return agreed >= agreeing && condition(mounted)
+        }
     }
 
     /// Builds the same project a `mount(tab:)` call would, but only constructs the
@@ -124,7 +136,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     }
 
     func testGeneralHoldsTheRepositoryFieldsWorkspaceAndArchive() throws {
-        let mounted = try mount(tab: .general) { $0.archivePolicy = .afterDays(21) }
+        let mounted = try mount(tab: .general, configure: { $0.archivePolicy = .afterDays(21) })
 
         XCTAssertEqual(mounted.fields.map(\.stringValue), ["main", "21"], "the worktree root is never typed")
         XCTAssertTrue(mounted.collect(NSTextView.self).isEmpty)
@@ -181,7 +193,9 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     /// row's trailing half: measured, 358pt wide against the classifier's 665pt, its text drawn
     /// right-aligned (seen in a capture; `NSTextView.alignment` still reported `.natural`).
     func testAgentsGuidanceEditorSpansTheRow() throws {
-        let mounted = try mount(tab: .agents, rosterAgents: 1) {
+        let mounted = try mount(
+            tab: .agents, rosterAgents: 1, until: { $0.collect(NSSwitch.self).count == 2 }
+        ) {
             $0.modelGuidance = Self.guidance
             $0.autonomyEnabled = true
             $0.reviewLevel = .epic
@@ -218,14 +232,18 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     }
 
     func testTheRosterListsBoardLocalAgentsWhileTheWorktreeRootIsInvalid() throws {
-        let mounted = try mount(tab: .agents, rosterAgents: 2, seed: { db, id in
-            try db.writer.write { db in
-                try db.execute(
-                    sql: "UPDATE project SET worktree_root = ? WHERE id = ?",
-                    arguments: ["/tmp/Application Support/AgentBoard/worktrees/\(id)", id]
-                )
-            }
-        })
+        let mounted = try mount(
+            tab: .agents, rosterAgents: 2,
+            seed: { db, id in
+                try db.writer.write { db in
+                    try db.execute(
+                        sql: "UPDATE project SET worktree_root = ? WHERE id = ?",
+                        arguments: ["/tmp/Application Support/AgentBoard/worktrees/\(id)", id]
+                    )
+                }
+            },
+            until: { $0.collect(NSSwitch.self).count == 3 }
+        )
 
         XCTAssertEqual(mounted.collect(NSSwitch.self).count, 3, "autonomy, then the two board-local agents")
     }
@@ -474,14 +492,14 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     }
 
     func testLimitsHoldsTheSixCapsInOrderAndNothingElse() throws {
-        let mounted = try mount(tab: .limits) {
+        let mounted = try mount(tab: .limits, configure: {
             $0.caps.maxConcurrentWorkers = 4
             $0.caps.maxTokensPerAgent = nil
             $0.caps.maxWallClockSeconds = 2400
             $0.caps.maxIdleSeconds = 450
             $0.caps.stallSeconds = 90
             $0.caps.sessionCeiling = 12
-        }
+        })
 
         XCTAssertEqual(
             mounted.fields.map(\.stringValue),
@@ -497,7 +515,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     }
 
     func testWorkflowHoldsCommandsTeardownStrategyAndBranchTemplate() throws {
-        let mounted = try mount(tab: .workflow) {
+        let mounted = try mount(tab: .workflow, configure: {
             $0.buildCommand = "make"
             $0.worktreeTeardownCommand = "make clean"
             $0.worktreeTeardownTimeoutSeconds = 90
@@ -505,7 +523,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
             $0.sharedCheckoutMaxAgents = 5
             $0.worktreeSlots = 2
             $0.standaloneIntegration = .localMerge
-        }
+        })
 
         XCTAssertEqual(mounted.fields.map(\.stringValue), ["make", "", "make clean", "90", "5", "2", ""])
         XCTAssertEqual(
@@ -527,9 +545,9 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     }
 
     func testNotificationsHoldsOneSwitchPerCategoryInItsStoredState() throws {
-        let mounted = try mount(tab: .notifications) {
+        let mounted = try mount(tab: .notifications, configure: {
             $0.notifications.setEnabled(.capsAndStalls, false)
-        }
+        })
 
         XCTAssertEqual(
             mounted.collect(NSSwitch.self).map(\.state),
@@ -545,10 +563,10 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     /// A `TextEditor` takes the system's smart quotes, so a typed `"` became `“` and the field
     /// reported "Not valid JSON." — measured on the old editor: quote and dash substitution both on.
     func testAdvancedClassifierEditorIsMonospacedTallAndTakesNoSmartSubstitutions() throws {
-        let mounted = try mount(tab: .advanced) {
+        let mounted = try mount(tab: .advanced, configure: {
             $0.autoModeJSON = ProjectSettings.defaultAutoModeJSON
             $0.extraMcpServers = ["linear", "github"]
-        }
+        })
 
         let editors = mounted.collect(NSTextView.self)
         XCTAssertEqual(editors.map(\.string), [ProjectSettings.defaultAutoModeJSON])

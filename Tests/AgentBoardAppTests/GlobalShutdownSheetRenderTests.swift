@@ -53,11 +53,8 @@ final class GlobalShutdownSheetRenderTests: XCTestCase {
         )
         window.contentView = host
         window.orderFront(nil)
-        for _ in 0..<40 {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-            window.layoutIfNeeded()
-            window.displayIfNeeded()
-        }
+        addTeardownBlock { window.orderOut(nil) }
+        pump(window) { host.subviews.count > 0 }
 
         let snapshot = try GlobalShutdownStore(db).snapshot()
         XCTAssertEqual(snapshot.projectCount, 2)
@@ -90,7 +87,11 @@ final class GlobalShutdownSheetRenderTests: XCTestCase {
         let supervisor = RenderStubSupervisor(progress: [:])
         supervisor.globalOrders = raised
         let quitter = FakeQuitter()
-        mount(GlobalShutdownSheet(), in: AppEnvironment(db: db, supervisor: supervisor, quitter: quitter))
+        let window = mount(
+            GlobalShutdownSheet(), in: AppEnvironment(db: db, supervisor: supervisor, quitter: quitter),
+            until: { _ in quitter.requests >= 1 }
+        )
+        addTeardownBlock { window.orderOut(nil) }
 
         XCTAssertEqual(quitter.requests, 1, "the sheet never asked the app to quit")
         XCTAssertEqual(supervisor.consolesStopped, 1)
@@ -129,21 +130,27 @@ final class QuitRefusalAlertTests: XCTestCase {
             AtAGlanceView(projects: [], workspaces: [], attention: [], select: { _ in }),
             in: AppEnvironment(db: db, supervisor: RenderStubSupervisor(progress: [:]), quitter: quitter)
         )
+        addTeardownBlock { window.orderOut(nil) }
         XCTAssertNil(window.attachedSheet)
 
         quitter.refusal = "macOS did not quit Agent Board when it was asked to."
-        settle(window)
+        settle(window, until: { $0.attachedSheet != nil })
         XCTAssertNotNil(window.attachedSheet, "the refusal never reached the screen")
     }
 
+    /// `refusal` set from the start polls for the sheet attaching; `nil` has nothing to poll for, so
+    /// it settles on structural quiescence alone — which is the negative case, asserted by the
+    /// caller after this returns.
     private func attachedSheet(refusal: String?) throws -> NSWindow? {
         let db = try AppDatabase.inMemory()
         let quitter = FakeQuitter()
         quitter.refusal = refusal
         let window = mount(
             AtAGlanceView(projects: [], workspaces: [], attention: [], select: { _ in }),
-            in: AppEnvironment(db: db, supervisor: RenderStubSupervisor(progress: [:]), quitter: quitter)
+            in: AppEnvironment(db: db, supervisor: RenderStubSupervisor(progress: [:]), quitter: quitter),
+            until: { refusal == nil || $0.attachedSheet != nil }
         )
+        addTeardownBlock { window.orderOut(nil) }
         return window.attachedSheet
     }
 }
@@ -160,7 +167,9 @@ final class FakeQuitter: AppQuitting {
 
 @MainActor
 @discardableResult
-func mount(_ view: some View, in environment: AppEnvironment, turns: Int = 60) -> NSWindow {
+func mount(
+    _ view: some View, in environment: AppEnvironment, until condition: (NSWindow) -> Bool = { _ in true }
+) -> NSWindow {
     let host = NSHostingView(rootView: view.environment(environment))
     NSApplication.shared.setActivationPolicy(.accessory)
     let window = NSWindow(
@@ -169,15 +178,24 @@ func mount(_ view: some View, in environment: AppEnvironment, turns: Int = 60) -
     )
     window.contentView = host
     window.orderFront(nil)
-    settle(window, turns: turns)
+    settle(window, until: condition)
     return window
 }
 
+/// Pumps until the view tree stops growing and the caller's own condition holds. Structural
+/// quiescence alone is the right default: every caller here seeds its state synchronously, so
+/// nothing async changes the tree after SwiftUI catches up.
 @MainActor
-func settle(_ window: NSWindow, turns: Int = 60) {
-    for _ in 0..<turns {
-        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        window.layoutIfNeeded()
-        window.displayIfNeeded()
+func settle(_ window: NSWindow, agreeing: Int = 3, until condition: (NSWindow) -> Bool = { _ in true }) {
+    var previous = -1
+    var agreed = 0
+    func recursiveCount(_ view: NSView) -> Int {
+        1 + view.subviews.reduce(0) { $0 + recursiveCount($1) }
+    }
+    pump(window) {
+        let signature = window.contentView.map(recursiveCount) ?? 0
+        agreed = signature == previous ? agreed + 1 : 0
+        previous = signature
+        return agreed >= agreeing && condition(window)
     }
 }

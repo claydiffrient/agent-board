@@ -35,9 +35,27 @@ public struct HookEventStore: Sendable {
         }
     }
 
-    public func prune(olderThan cutoff: Int64) throws {
-        try db.writer.write { db in
-            try db.execute(sql: "DELETE FROM hook_event WHERE at < ?", arguments: [cutoff])
+    /// Rows older than this are deleted by `prune(now:)` unless their session is still active.
+    public static let retentionMillis: Int64 = 14 * ArchiveSweep.millisPerDay
+
+    /// Deletes rows older than `retentionMillis`, except those of a session still in an active
+    /// state; a row with no session, or a session with no `agent_session` row, ages out. SPEC §4.
+    @discardableResult
+    public func prune(now: Int64 = .nowMillis) throws -> Int {
+        let active = SessionState.allCases.filter(\.isActive)
+        let cutoff = now - Self.retentionMillis
+        return try db.writer.write { db in
+            try db.execute(
+                sql: """
+                DELETE FROM hook_event
+                WHERE at < ? AND NOT EXISTS (
+                  SELECT 1 FROM agent_session s
+                  WHERE s.session_id = hook_event.session_id AND s.state IN (\(databaseQuestionMarks(count: active.count)))
+                )
+                """,
+                arguments: StatementArguments([cutoff.databaseValue] + active.map(\.databaseValue))
+            )
+            return db.changesCount
         }
     }
 }
