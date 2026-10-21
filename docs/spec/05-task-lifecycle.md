@@ -347,12 +347,21 @@ project: a reconcile waits for a tick reap in progress, and the tick skips a
 project whose reconcile is running. The tick starts each project's reap and
 does not wait for it, so metering, cap and stall checks are never held up by
 git removals. A spawn's new worktree is clean and at its base until its
-worker commits, and it exists for a moment before `Board.assign` writes its
-`setup` session row. The spawn marks the worktree's path as being placed
-before it creates it and clears the mark once the row is written or the spawn
-fails, and a reap keeps every marked path. Because a reap's list of active
-sessions predates its git scan, it rereads the active rows after the scan and
-before it removes anything. The other direction holds as well: a respawn
+worker commits. The spawn marks the worktree's path before it touches git and
+clears the mark when its setup ends (§3.1), and a reap keeps every marked path
+as well as every path an active row names, the `setup` row included. Because a
+reap's list of active sessions predates its git scan, it rereads the active
+rows and the marks after the scan and claims its orphans in the same step, with
+no suspension point between, so a spawn or resume either marked its path first
+or waits on the claim. Resuming a stopped session marks its worktree the same
+way until the session is active again, and is refused when a reap or teardown
+has already claimed that worktree: the removal is already running, and a
+session resumed there would lose its checkout. A resume is also refused while
+another active session holds the task or the worktree, as a spawn is: resuming
+a worker whose rostered reviewer is still reviewing would put two agents in one
+checkout. A resumed session keeps what it was spawned as, read from its grant's
+scope rather than its row's role: a reviewer gets a `reviewer` grant back and its
+task stays in `review`, where a worker's task moves to `running`. The other direction holds as well: a respawn
 reuses the task's worktree when it is still on disk, but not one a reap or
 teardown has already claimed for removal (§3.1). The spawn waits for that
 removal to finish and then creates a fresh worktree at the same path. It waits
@@ -453,7 +462,10 @@ kept as a `decision` headed "Late report_complete from a session Agent Board had
 already ended", and the task's column, landing, archive state, review routing and
 epic are left as they are. The answer says the session had already ended and
 names the column the task stays in, and the stop still follows it. A resend finds
-that decision report and inserts no second one. On 2026-10-07 the idle-capped
+that decision report and inserts no second one. A session whose row is still
+active but which no longer holds the task, because a newer active session is
+working it, is refused outright: the call errors, nothing is recorded, and the
+task stays where the newer session has it. On 2026-10-07 the idle-capped
 first integrator of task 006dfd78 reported two minutes after the second
 integrator had closed the epic and archived the task, and pulled the archived
 task back into `review` with its landing cleared.

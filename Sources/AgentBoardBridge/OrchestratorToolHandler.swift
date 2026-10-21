@@ -200,8 +200,8 @@ public final class OrchestratorToolHandler: ToolHandler {
         ToolDescriptor(
             name: "spawn_worker",
             description: "Assign a `ready` task to a new worker session in its own worktree. Subject to the project's "
-                + "concurrency caps. Returns as soon as the worktree exists and the task is running, while the "
-                + "repository is still being set up — a worker in `setup` holds a concurrency slot but cannot work "
+                + "concurrency caps. Returns as soon as the task is running, while its worktree is still being created "
+                + "and set up, post-checkout hook included — a worker in `setup` holds a concurrency slot but cannot work "
                 + "yet, and a setup that fails puts the task back in ready with a failed report. When autonomy is "
                 + "off, this creates an approval the human must grant; you will learn the decision through "
                 + "list_reports, so do not call again for the same task in the meantime.",
@@ -784,7 +784,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             let warnings = spawn.warnings.isEmpty ? "" : "\n\n" + spawn.warnings.joined(separator: "\n")
             let site = spawn.sharesCheckout
                 ? "It runs in the project's own checkout at \(spawn.worktreePath)"
-                : "Its worktree is ready at \(spawn.worktreePath)"
+                : "Its worktree is being set up at \(spawn.worktreePath)"
             return ToolResult(text: """
             Worker dispatched for \(task.id); the task is now running. \(site) on branch \
             \(spawn.branch), but setup is still running, so the worker cannot do anything yet and \
@@ -833,7 +833,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             let warnings = spawn.warnings.isEmpty ? "" : "\n\n" + spawn.warnings.joined(separator: "\n")
             let site = spawn.sharesCheckout
                 ? "It runs in the project's own checkout at \(spawn.worktreePath)"
-                : "Its worktree is ready at \(spawn.worktreePath)"
+                : "Its worktree is being set up at \(spawn.worktreePath)"
             return ToolResult(text: """
             \(agent.name) was assigned \(task.id); the task is now running. \(site) on branch \
             \(spawn.branch), but setup is still running, so the agent cannot do anything yet and \

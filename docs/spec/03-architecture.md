@@ -117,6 +117,9 @@ For a task `T` in project `P`:
    `/hooks?token=…` (a `command` + `curl` hook for `SessionStart`, see §2), plus
    the project's `autoMode` block. On resume, rewrite this file and the MCP
    config in place with the current port; `--bg --resume` reuses the paths.
+   The rewrite keeps the spawn's hooks, so a shared-checkout worker resumed by a
+   human or by a wind-down order (§8) still gets its file-lock `PreToolUse`
+   entry (§8.4).
 5. Generate `mcp-<session>.json`: one HTTP server entry for `/mcp` with
    `Authorization: Bearer <token>`, where the token carries scope `worker` and
    is bound to `(session, task)`.
@@ -182,11 +185,28 @@ changes a branch or the index, plus `rm` and `mv`) and
 directory, §5.1) after the push/PR block. It refuses a branch with no diff
 against its base before any of that runs (§5.1).
 
-Steps 1-2 are synchronous; `spawn_worker` answers between step 2 and step 3,
-with a row in `agent_session` under a placeholder id and state `setup`, and the
-task already in `running`. Steps 3-8 finish in the background, because on a
+Step 1 and the placement decision in step 2 are synchronous, as is adopting a
+shared checkout; `spawn_worker` answers then, with a row in `agent_session`
+under a placeholder id and state `setup`, its `worktree_path` naming the
+worktree still to be created, and the task already in `running`. The `git
+worktree add` itself, and steps 3-8, finish in the background, because on a
 large repository they outlast the MCP call — a timeout an orchestrator cannot
-tell from a failure turns every dispatch into a guess. A session in `setup`
+tell from a failure turns every dispatch into a guess. The `post-checkout` hook
+is the worst of it: a hook that builds a fresh toolchain output base has run
+for over ten minutes under load, while Claude Code abandons a tool call whose
+answer has not started after 60 seconds. A rostered reviewer is the exception:
+it judges the checkout before its session exists, so its spawn creates or
+reuses the worktree before answering.
+
+One attempt sets up a task at a time. The spawn marks the task's worktree path
+before it runs any git command and clears the mark only when setup ends —
+agent launched, or setup failed and a failed `git worktree add` has removed
+what it created. A second spawn for the task while the mark is held is refused
+with "still setting up", even when the first attempt's session was stopped
+mid-setup: its hook keeps running, and a retry that adopted that worktree would
+have it deleted by the first attempt's rollback, or share a build output base
+keyed on the same path with a hook still writing it. A retry after a reap or
+teardown has claimed the path waits for that removal instead (§5). A session in `setup`
 holds a concurrency slot but does no work, is exempt from the idle cap (the
 clock is measuring setup, not the agent), and is skipped by `reconcile`, whose
 join against `claude agents --json` cannot see a placeholder id. A failure in
