@@ -106,13 +106,13 @@ final class GlanceGroupingTests: XCTestCase {
         let personal = makeWorkspace("w-personal", "Personal", 1)
         let work = makeWorkspace("w-work", "Work", 2)
         let projects = [
-            makeProject("derivita-ui", workspaceId: work.id),
+            makeProject("example-ui", workspaceId: work.id),
             makeProject("agent-board", workspaceId: personal.id),
             makeProject("loose"),
         ]
         let workspaces = [work, personal]
         let summary = GlanceSummary(
-            projects: [glance("agent-board", running: 2), glance("derivita-ui", review: 1), glance("loose")],
+            projects: [glance("agent-board", running: 2), glance("example-ui", review: 1), glance("loose")],
             workingSessions: 2, tasksInReview: 1
         )
 

@@ -1,4 +1,5 @@
 import AgentBoardCore
+import AgentBoardRuntime
 import Foundation
 
 @MainActor
@@ -91,9 +92,16 @@ enum PreviewData {
             try progress.append(taskId: running.id, sessionId: "3f9a1c2e-0000-4000-8000-000000000001", kind: .status, text: "Reading existing form component")
             try progress.append(taskId: running.id, sessionId: "3f9a1c2e-0000-4000-8000-000000000001", kind: .tool, text: "Edit src/components/LoginForm.tsx")
 
-            return Seed(environment: AppEnvironment(db: db, supervisor: StubSupervisor()), project: project)
+            return Seed(environment: AppEnvironment(db: db, supervisor: StubSupervisor(), gh: PreviewGh()), project: project)
         } catch {
             fatalError("Preview seed failed: \(error)")
         }
+    }
+}
+
+/// A preview acts on no one's GitHub account.
+struct PreviewGh: GhRunning {
+    func run(_ arguments: [String], cwd: URL) throws -> CommandResult {
+        throw PullRequestCheckFailure("previews do not run `gh`")
     }
 }

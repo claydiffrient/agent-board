@@ -204,9 +204,9 @@ when one is set: `/bin/zsh -c <command>` with the worktree as its working
 directory and `PWD`, under `ChildEnvironment.sanitized()`, off the main
 thread, as the leader of its own process group (`BoundedCommand`). It exists
 because a tool that builds for a worktree outside it leaves that build behind
-when only the directory goes: on Derivita, Bazel's output base under
+when only the directory goes: on a work project, Bazel's output base under
 `/private/var/tmp/_bazel_<user>/<md5 of the workspace path>`, 2–12 GB per
-worktree. Agent Board knows nothing about Bazel; Derivita sets
+worktree. Agent Board knows nothing about Bazel; that project's setup sets
 `[ "$(bazel info workspace)" = "$PWD" ] && bazel clean --expunge`, whose guard
 stops `--expunge` wiping the main checkout's output base if it ever ran there.
 With no hook set, removal is exactly what it was. Claude Code's own
