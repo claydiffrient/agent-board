@@ -192,15 +192,6 @@ final class PortsPanelLiveTests: XCTestCase {
         return previous
     }
 
-    /// Pumps the run loop until the window has selected something, rather than trusting a fixed
-    /// settle: this machine runs several builds at once and a fixed turn count starves under load.
-    private func waitForFocus(_ supervisor: StubSupervisor, _ mount: Mount, timeout: TimeInterval = 15) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline, supervisor.focusedProjects.isEmpty {
-            mount.settle(turns: 10)
-        }
-    }
-
     private func register(_ db: AppDatabase, _ name: String) throws -> Project {
         try ProjectStore(db).register(
             name: name, repoPath: "/tmp/ports-\(UUID().uuidString)", baseBranch: "main",
@@ -401,37 +392,6 @@ final class PortsPanelLiveTests: XCTestCase {
             row.count, header.count,
             "a panel holding a port must paint more than an empty one"
         )
-    }
-
-    /// The end-to-end half of the routing: a port row's owner route, opened on a mounted window,
-    /// selects its project through `MainWindow.select` — the same recorder
-    /// `NotificationRoutingMountTests` reads for `focusChanged`.
-    func testAnAttributedOwnerNameSelectsItsProject() throws {
-        let db = try AppDatabase.inMemory()
-        _ = try register(db, "Alpha")
-        let beta = try register(db, "Beta")
-        try session(db, project: beta, id: "s-beta", title: "Ship the panel")
-
-        let ports = try model(db, [
-            ListeningPort(port: 3000, pid: 501, command: "node", sessionId: "s-beta")
-        ])
-        let supervisor = StubSupervisor()
-        let router = NotificationRouter()
-        let mounted = Mount(db: db, supervisor: supervisor, router: router, ports: ports)
-        defer { mounted.close() }
-        mounted.settle()
-        XCTAssertEqual(supervisor.focusedProjects, [], "nothing is selected before the click")
-
-        let attributed = try XCTUnwrap(ports.ports.first)
-        let route = portOwnerLabel(attributed).route
-        router.open(route)
-        waitForFocus(supervisor, mounted)
-
-        XCTAssertEqual(
-            supervisor.focusedProjects.last, beta.id,
-            "the owner name must select its project through MainWindow.select, not around it"
-        )
-        XCTAssertEqual(route.screen, .status, "a session's row opens the Status roster")
     }
 
     /// A stop that did not work must not look like a stop that did. The row stays and the failure

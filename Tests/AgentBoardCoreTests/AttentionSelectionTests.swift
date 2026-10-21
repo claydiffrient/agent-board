@@ -140,8 +140,10 @@ final class AttentionSelectionTests: XCTestCase {
         XCTAssertEqual(items.map(\.kind), [.blocked])
     }
 
+    /// `.waitingOnLock` included: a worker waiting on a file lock has made no tool call by design and
+    /// must not be reported stalled for it (`FileLockSupervisorTests` exercises the real wait).
     func testOnlyRunningSessionsCanStall() {
-        for state in [SessionState.idle, .starting, .stopped, .completed, .failed] {
+        for state in [SessionState.idle, .starting, .stopped, .completed, .failed, .waitingOnLock] {
             let session = session("s-\(state.rawValue)", taskId: "t1", state: state, startedAt: now.addingTimeInterval(-900))
             let items = AttentionSelection.needingAttention(
                 tasks: [task("t1")], sessions: [session], awake: .init(now: now), stallThreshold: 120

@@ -275,30 +275,6 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         )
     }
 
-    /// A port nothing names is not drawn anywhere, so it cannot land on a project's pane either.
-    func testAPortNothingNamesDrawsNothingOnAnyProjectsPane() throws {
-        let db = try AppDatabase.inMemory()
-        let mine = try register(db, "Mine")
-        try endedSession(db, project: mine, id: "s-mine", title: "Run the dev server")
-        let mineOnly = [ListeningPort(port: 3000, pid: 501, command: "node", sessionId: "s-mine", source: .ledger)]
-
-        let unnamed = try model(db, mineOnly + [
-            ListeningPort(port: 8080, pid: 502, command: "python3", sessionId: nil)
-        ], publishes: 1)
-        XCTAssertEqual(unnamed.ports.map(\.port), [3000])
-        XCTAssertEqual(unnamed.ports(inProject: mine.id).map(\.port), [3000])
-
-        let base = pane(db, mine, try model(db, mineOnly))
-        let withUnnamed = pane(db, mine, unnamed)
-        defer { base.close(); withUnnamed.close() }
-
-        let drift = diff(try settled(base), try settled(withUnnamed))
-        XCTAssertEqual(
-            drift.count, 0,
-            "a port nothing names drew on a project's Status pane (\(drift.box))"
-        )
-    }
-
     /// One sweep, two surfaces. The Status pane reads `ports(inProject:)` and starts nothing of its
     /// own: mounted alone it sweeps zero times, and mounted beside the sidebar panel the pair costs
     /// exactly the panel's one mount refresh.

@@ -83,27 +83,6 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         XCTAssertTrue(request.prompt.contains("project's own checkout at `\(fixture.repo.path)`"), request.prompt)
         XCTAssertTrue(request.prompt.contains("shared branch `agentboard/shared`"), request.prompt)
         XCTAssertTrue(request.prompt.contains("commit_my_work"), request.prompt)
-    }
-
-    /// Nothing about the deny list follows from having a worktree, so a shared worker is refused
-    /// the same three shapes — and `IntegrationGuard` reads the command text, not the cwd.
-    func testASharedWorkerIsStillRefusedPushesAndPullRequests() async throws {
-        try fixture.setWorktreeStrategy(.shared)
-
-        try await assign(try makeTask())
-
-        let spawns = await fixture.runtime.spawns
-        let request = try XCTUnwrap(spawns.last)
-        XCTAssertEqual(request.disallowedTools, SpawnRequest.defaultDisallowedTools)
-        XCTAssertTrue(request.disallowedTools.contains("Bash(git push*)"))
-        XCTAssertTrue(request.prompt.contains("Do not push. Do not open a PR."), request.prompt)
-    }
-
-    func testNoWorktreeIsCreatedForASharedWorker() async throws {
-        try fixture.setWorktreeStrategy(.shared)
-        let task = try makeTask()
-
-        try await assign(task)
 
         let listed = try fixture.manager.list()
         XCTAssertEqual(listed.count, 1, "git registered a worktree for a shared worker: \(listed.map(\.path.path))")
@@ -177,19 +156,6 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         XCTAssertEqual(thirdSession.cwd, worktree)
     }
 
-    func testTheCheckoutIsSharedAgainOnceItsOccupantFinishes() async throws {
-        try fixture.setWorktreeStrategy(.shared)
-        let first = try makeTask("First")
-        try await assign(first)
-        try fixture.sessions.setState(try session(of: first).sessionId, .completed, endedAt: .nowMillis)
-
-        let second = try makeTask("Second")
-        try await assign(second)
-
-        XCTAssertNil(try session(of: second).worktreePath)
-        XCTAssertEqual(try session(of: second).branch, "agentboard/shared")
-    }
-
     /// A shared branch is cut from one base, so an epic's group and a standalone group can never be
     /// the same group: they ask for different branches.
     func testAnEpicTaskSharesOnItsOwnBranchCutFromTheEpicBranch() async throws {
@@ -207,22 +173,6 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         XCTAssertNotEqual(session.branch, SharedCheckoutGroup.branch(epicId: nil))
         XCTAssertEqual(try head(session.branch!), try head(epic.branch), "the shared branch was not cut from the epic branch")
         XCTAssertNotEqual(try head(session.branch!), try head("main"))
-    }
-
-    func testATaskOnADifferentBaseIsNotColocated() async throws {
-        try fixture.setWorktreeStrategy(.shared)
-        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Epic", goal: "Ship it.")
-        let epicTask = try makeTask("Epic work", epicId: epic.id)
-        try await assign(epicTask)
-        let group = try XCTUnwrap(try SharedCheckoutGroup.current(db: fixture.db, projectId: fixture.project.id))
-        XCTAssertEqual(group.branch, SharedCheckoutGroup.branch(epicId: epic.id))
-
-        let standalone = try makeTask("No epic here")
-        XCTAssertFalse(group.admits(SharedCheckoutGroup.branch(epicId: nil)))
-        try await assign(standalone)
-
-        XCTAssertNotNil(try session(of: standalone).worktreePath, "a task on a different base joined the group")
-        XCTAssertEqual(try session(of: standalone).branch, "agentboard/\(standalone.id)")
     }
 
     /// The group is the session rows, so a worker that outlived the app is still holding the

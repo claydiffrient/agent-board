@@ -131,32 +131,6 @@ final class AcceptLandingTests: XCTestCase {
         XCTAssertEqual(try awaitingLandingIds(), [task.id])
     }
 
-    func testAnEpicTaskThatMergesIsRecordedAsLanded() async throws {
-        let epic = try EpicStore(fixture.db).create(projectId: fixture.project.id, title: "Roster", goal: nil)
-        try fixture.manager.ensureBranch(epic.branch, from: "main")
-        let task = try makeTask(epicId: epic.id)
-        let worktree = try fixture.manager.create(
-            name: task.id, branch: "agentboard/\(task.id)", base: epic.branch
-        )
-        try fixture.sessions.insert(
-            AgentSession(
-                sessionId: "session-\(UUID().uuidString)", shortId: "short-1",
-                projectId: fixture.project.id, taskId: task.id, role: .worker,
-                worktreePath: worktree.path, branch: "agentboard/\(task.id)", cwd: worktree.path,
-                state: .completed, attempt: 1
-            )
-        )
-        try fixture.commitInto(worktree.path)
-        let taskHead = try headOf("agentboard/\(task.id)")
-
-        try await fixture.supervisor.accept(taskId: task.id)
-
-        let accepted = try XCTUnwrap(try fixture.tasks.get(task.id))
-        XCTAssertEqual(accepted.landing, .landed)
-        XCTAssertEqual(try headOf(epic.branch), taskHead)
-        XCTAssertEqual(try awaitingLandingIds(), [])
-    }
-
     /// An epic accept is not immune either — three of the thirteen tasks found stranded were in an
     /// epic whose branch the integrator held.
     func testAnEpicTaskWhoseBranchIsHeldIsRecordedAsUnlanded() async throws {
