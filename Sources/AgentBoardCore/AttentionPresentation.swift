@@ -11,6 +11,9 @@ extension AttentionCause {
                 return "1 worker blocked: \(detail)"
             }
             return count == 1 ? "1 worker blocked" : "\(count) workers blocked"
+        case .pullRequestDecision:
+            if count == 1, let detail { return "1 pull request decision waiting: \(detail)" }
+            return count == 1 ? "1 pull request decision waiting" : "\(count) pull request decisions waiting"
         case .strandedReports:
             let reports = count == 1 ? "1 report" : "\(count) reports"
             return "\(reports) waiting with no orchestrator running"

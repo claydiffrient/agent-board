@@ -569,6 +569,10 @@ enum Schema {
     ALTER TABLE pr_watch ADD COLUMN parked_reason TEXT;
     """
 
+    static let prItemDecisionNotified = """
+    ALTER TABLE pr_item ADD COLUMN decision_notified_at INTEGER;
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",

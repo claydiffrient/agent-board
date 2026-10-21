@@ -122,38 +122,7 @@ extension Board {
                 .order(Column("id"))
                 .fetchAll(db)
             for var item in items {
-                let task = try item.fixTaskId.flatMap { try Task.fetchOne(db, key: $0) }
-                let isFollowThrough = task?.origin == .followThrough
-                switch item.verdict {
-                case .fix?:
-                    if var task, isFollowThrough, task.type == .code {
-                        let body = Self.itemTaskBody(item: item, watch: watch)
-                        guard task.column == .backlog, task.body != body else { continue }
-                        task.body = body
-                        task.updatedAt = now
-                        try task.update(db)
-                        continue
-                    }
-                    item.fixTaskId = try TaskStore.insert(
-                        db, projectId: watch.projectId, title: Self.itemTaskTitle("Fix", item: item, watch: watch),
-                        body: Self.itemTaskBody(item: item, watch: watch), acceptance: nil, priority: nil,
-                        column: .backlog, origin: .followThrough, epicId: nil, model: fixerModel, type: .code
-                    ).id
-                case .followUp?:
-                    if !isFollowThrough || task?.type == .code {
-                        item.fixTaskId = try TaskStore.insert(
-                            db, projectId: watch.projectId,
-                            title: Self.itemTaskTitle("Follow-up", item: item, watch: watch),
-                            body: Self.itemTaskBody(item: item, watch: watch), acceptance: nil, priority: nil,
-                            column: .backlog, origin: .followThrough, epicId: nil
-                        ).id
-                    }
-                    item.state = .handled
-                case .answer?, .alreadyDone?:
-                    item.state = .handled
-                case .decision?, nil:
-                    continue
-                }
+                guard try Self.applyVerdict(db, to: &item, watch: watch, fixerModel: fixerModel, now: now) else { continue }
                 item.updatedAt = now
                 try item.update(db)
             }
@@ -163,6 +132,47 @@ extension Board {
             try watch.update(db)
             return watch.state
         }
+    }
+
+    /// Makes the task `item`'s verdict calls for and sets its state, and returns whether the item
+    /// itself changed (SPEC §13.1). Writes no item; the caller does.
+    static func applyVerdict(
+        _ db: Database, to item: inout PRItem, watch: PRWatch, fixerModel: String?, now: Int64
+    ) throws -> Bool {
+        let task = try item.fixTaskId.flatMap { try Task.fetchOne(db, key: $0) }
+        let isFollowThrough = task?.origin == .followThrough
+        switch item.verdict {
+        case .fix?:
+            if var task, isFollowThrough, task.type == .code {
+                let body = Self.itemTaskBody(item: item, watch: watch)
+                if task.column == .backlog, task.body != body {
+                    task.body = body
+                    task.updatedAt = now
+                    try task.update(db)
+                }
+                return false
+            }
+            item.fixTaskId = try TaskStore.insert(
+                db, projectId: watch.projectId, title: Self.itemTaskTitle("Fix", item: item, watch: watch),
+                body: Self.itemTaskBody(item: item, watch: watch), acceptance: nil, priority: nil,
+                column: .backlog, origin: .followThrough, epicId: nil, model: fixerModel, type: .code
+            ).id
+        case .followUp?:
+            if !isFollowThrough || task?.type == .code {
+                item.fixTaskId = try TaskStore.insert(
+                    db, projectId: watch.projectId,
+                    title: Self.itemTaskTitle("Follow-up", item: item, watch: watch),
+                    body: Self.itemTaskBody(item: item, watch: watch), acceptance: nil, priority: nil,
+                    column: .backlog, origin: .followThrough, epicId: nil
+                ).id
+            }
+            item.state = .handled
+        case .answer?, .alreadyDone?:
+            item.state = .handled
+        case .decision?, nil:
+            return false
+        }
+        return true
     }
 
     static func itemTaskTitle(_ lead: String, item: PRItem, watch: PRWatch) -> String {
@@ -187,7 +197,7 @@ extension Board {
 
         \(quoted)
 
-        Triage's approach:
+        \(item.decisionAnswer == nil ? "Triage's approach:" : "The pull request author's answer to \"\(item.decisionQuestion ?? "")\":")
         \(item.approach ?? "")
         """
     }

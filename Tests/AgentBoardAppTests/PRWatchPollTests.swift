@@ -115,6 +115,52 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertTrue(banners.isEmpty)
     }
 
+    private func decideEveryOpenItem(_ watch: PRWatch) throws {
+        try watches.setVerdicts(try watches.openItems(watchId: watch.id).map { item in
+            PRVerdictInput(
+                itemId: item.id!, verdict: .decision, approach: "Direction.",
+                decisionQuestion: "Keep \(item.githubNodeId)?", decisionOptions: ["Yes", "No"]
+            )
+        }, watchId: watch.id)
+    }
+
+    /// SPEC §13.4: one banner per decision, routed to its row, however many polls see it open.
+    func testEachDecisionBannersOnceAndRoutesToItsRow() async throws {
+        try enable()
+        answer(pullRequest(threads: [thread("T_1", by: "reviewer"), thread("T_2", by: "reviewer")]))
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+        try decideEveryOpenItem(watch)
+        await fixture.supervisor.pollPRWatches()
+        await fixture.supervisor.pollPRWatches()
+
+        XCTAssertEqual(
+            banners.map(\.title), Array(repeating: "Pull request decision waiting — \(fixture.project.name)", count: 2)
+        )
+        XCTAssertEqual(banners.first?.route, NotificationRoute(projectId: fixture.project.id, subject: .pullRequest(watch.id)))
+    }
+
+    /// SPEC §13.1: a paused watch keeps following its pull request, and raises no banner, badge count
+    /// or decision signal while paused.
+    func testAPausedWatchStillTracksItsPullRequestButRaisesNothing() async throws {
+        try enable()
+        answer(pullRequest(checks: "PENDING", threads: [thread("T_1", by: "reviewer")]))
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+        try watches.setPaused(true, watchId: watch.id)
+        try decideEveryOpenItem(watch)
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .watching)
+        XCTAssertNil(try ProjectAttentionStore(fixture.db).attention(projectId: fixture.project.id)?
+            .cause(.pullRequestDecision))
+
+        answer(pullRequest())
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+        XCTAssertTrue(banners.isEmpty, banners.map(\.title).description)
+        XCTAssertNil(try watches.badgeCounts()[fixture.project.id])
+    }
+
     func testNoConfiguredChecksCountAsGreenButPendingChecksDoNot() async throws {
         try enable()
         answer(pullRequest(checks: nil))

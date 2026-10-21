@@ -153,6 +153,7 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
     public var round: Int
     public var createdAt: Int64
     public var updatedAt: Int64
+    public var decisionNotifiedAt: Int64? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -177,6 +178,7 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
         case round
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case decisionNotifiedAt = "decision_notified_at"
     }
 
     public mutating func didInsert(_ inserted: InsertionSuccess) {
@@ -184,6 +186,11 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
     }
 
     public var isOpenDecision: Bool { state == .open && verdict == .decision }
+
+    public var decisionOptions: [String] {
+        guard let json = decisionOptionsJSON else { return [] }
+        return (try? JSONDecoder().decode([String].self, from: Data(json.utf8))) ?? []
+    }
 }
 
 public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Sendable, Equatable {
@@ -308,15 +315,17 @@ public enum PRPageGroup: String, Sendable, CaseIterable, Equatable {
 public struct PRWatchListing: Sendable, Equatable, Identifiable {
     public var watch: PRWatch
     public var openItems: Int
-    public var openDecisions: Int
+    /// The open decision items, oldest first, which the Needs you group lists under the row.
+    public var decisions: [PRItem]
 
-    public init(watch: PRWatch, openItems: Int, openDecisions: Int) {
+    public init(watch: PRWatch, openItems: Int, decisions: [PRItem] = []) {
         self.watch = watch
         self.openItems = openItems
-        self.openDecisions = openDecisions
+        self.decisions = decisions
     }
 
     public var id: String { watch.id }
+    public var openDecisions: Int { decisions.count }
 }
 
 public struct PRWatchGroup: Sendable, Equatable {
@@ -329,7 +338,8 @@ public struct PRWatchGroup: Sendable, Equatable {
     }
 }
 
-/// What a project's Pull Requests badge counts: PRs ready to verify plus open decisions.
+/// What a project's Pull Requests badge counts: PRs ready to verify plus open decisions, in projects
+/// with follow-through on and on watches that are not paused (SPEC §13.4).
 public struct PRBadgeCount: Sendable, Equatable {
     public var readyToVerify: Int
     public var openDecisions: Int

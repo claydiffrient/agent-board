@@ -110,16 +110,31 @@ struct PullRequestsView: View {
     private func row(_ listing: PRWatchListing) -> some View {
         let project = projectsById[listing.watch.projectId]
         let followThrough = project?.settings.prFollowThrough ?? PRFollowThroughSettings()
-        return PullRequestRow(
-            listing: listing,
-            projectName: projectFilter == nil ? project?.name : nil,
-            verificationLabel: followThrough.markVerifiedLabel,
-            canWalkThrough: followThrough.verifyCommand(for: listing.watch.url) != nil,
-            isMarking: marking.contains(listing.id),
-            markVerified: { markVerified(listing.watch, project: project) },
-            walkThrough: { openWindow(id: PRVerifyScene.id, value: listing.watch.id) },
-            togglePause: { togglePause(listing.watch) }
-        )
+        return VStack(alignment: .leading, spacing: 8) {
+            PullRequestRow(
+                listing: listing,
+                projectName: projectFilter == nil ? project?.name : nil,
+                verificationLabel: followThrough.markVerifiedLabel,
+                canWalkThrough: followThrough.verifyCommand(for: listing.watch.url) != nil,
+                isMarking: marking.contains(listing.id),
+                markVerified: { markVerified(listing.watch, project: project) },
+                walkThrough: { openWindow(id: PRVerifyScene.id, value: listing.watch.id) },
+                togglePause: { togglePause(listing.watch) }
+            )
+            ForEach(listing.decisions) { decision in
+                PRDecisionRow(decision: decision) { answer, verdict in
+                    self.answer(decision, with: answer, verdict: verdict, project: project)
+                }
+            }
+        }
+    }
+
+    private func answer(_ decision: PRItem, with answer: String, verdict: PRItemVerdict, project: Project?) {
+        do {
+            try actions.answer(decision, with: answer, verdict: verdict, project: project)
+        } catch {
+            errorMessage = errorText(error)
+        }
     }
 
     private func markVerified(_ watch: PRWatch, project: Project?) {
@@ -165,6 +180,68 @@ struct PullRequestActions {
 
     func setPaused(_ paused: Bool, watch: PRWatch) throws {
         try PRWatchStore(db).setPaused(paused, watchId: watch.id)
+    }
+
+    func answer(_ decision: PRItem, with answer: String, verdict: PRItemVerdict, project: Project?) throws {
+        guard let id = decision.id else { return }
+        let fixer = project?.settings.prFollowThrough.roles.fixer
+        try Board(db).answerDecision(
+            itemId: id, answer: answer, verdict: verdict, fixerModel: fixer?.model ?? project?.settings.defaultModel
+        )
+    }
+}
+
+/// One open decision under its pull request's row (SPEC §13.4): the comment, triage's question, an
+/// option button for each choice, which answers it as a fix, and a reply that answers it in words.
+struct PRDecisionRow: View {
+    let decision: PRItem
+    let answer: (String, PRItemVerdict) -> Void
+
+    @State private var reply = ""
+
+    private var trimmedReply: String { reply.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(excerpt)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Text(decision.decisionQuestion ?? "Triage asked for a decision.")
+                .fontWeight(.semibold)
+            ViewThatFits(in: .horizontal) {
+                HStack { options }
+                VStack(alignment: .leading) { options }
+            }
+            HStack {
+                TextField("Reply instead", text: $reply)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(sendReply)
+                Button("Send reply", action: sendReply)
+                    .disabled(trimmedReply.isEmpty)
+                    .help("Answer the reviewer with this text; no code changes")
+            }
+        }
+        .padding(.leading, 16)
+        .padding(.vertical, 4)
+    }
+
+    private var options: some View {
+        ForEach(decision.decisionOptions, id: \.self) { option in
+            Button(option) { answer(option, .fix) }
+                .help("Fix the comment this way")
+        }
+    }
+
+    private var excerpt: String {
+        let body = decision.body.split(whereSeparator: \.isNewline).joined(separator: " ")
+        return decision.author.map { "\($0): \(body)" } ?? body
+    }
+
+    private func sendReply() {
+        guard !trimmedReply.isEmpty else { return }
+        answer(trimmedReply, .answer)
+        reply = ""
     }
 }
 

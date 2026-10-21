@@ -142,7 +142,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let prWatches: PRWatchStore
     /// Millis of the last PR follow-through poll; 0 means none yet.
     @ObservationIgnored private var lastPRWatchPoll: Int64 = 0
-    @ObservationIgnored private var prWatchPollInFlight = false
+    @ObservationIgnored private var prWatchPoll: _Concurrency.Task<Void, Never>?
     @ObservationIgnored private var prWatchSearchFailures = 0
     /// Consecutive polls on which git could not read a project's `origin`, by project id.
     @ObservationIgnored private var prWatchRemoteFailures: [String: Int] = [:]
@@ -1479,15 +1479,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// SPEC §13.1: watches the user's open, non-draft pull requests in every project with PR
     /// follow-through on, mapping each repository to the project whose `origin` names it, then
     /// advances each watch through settling and triaging. No project enabled means no `gh` call at all.
+    /// A call made while a poll runs waits for it and then polls again, so it always reads state
+    /// written before the call.
     func pollPRWatches() async {
-        guard !prWatchPollInFlight else { return }
+        while let inFlight = prWatchPoll { await inFlight.value }
+        let poll = _Concurrency.Task {
+            await runPRWatchPoll()
+            prWatchPoll = nil
+        }
+        prWatchPoll = poll
+        await poll.value
+    }
+
+    private func runPRWatchPoll() async {
         let enabled = ((try? projects.list()) ?? []).filter { $0.settings.prFollowThrough.enabled }
         guard !enabled.isEmpty else {
             try? prWatches.setPollProblems([:])
             return
         }
-        prWatchPollInFlight = true
-        defer { prWatchPollInFlight = false }
         await refreshPRWatches(enabled)
         await advancePRWatches(enabled)
     }
@@ -1600,7 +1609,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             ) {
                 try prWatches.setState(next, watchId: watch.id)
             }
-            if let ready = try prWatches.claimReadyNotification(watchId: watch.id) {
+            // SPEC §13.4: a paused watch claims its banner without showing it, so resuming replays nothing.
+            if let ready = try prWatches.claimReadyNotification(watchId: watch.id), !ready.paused {
                 post(
                     "Pull request ready to verify", body: "#\(ready.number) \(ready.title)",
                     projectId: project.id, category: .prReadyToVerify, subject: .pullRequest(ready.id)
@@ -1613,6 +1623,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §13.1 and §13.2: a settling watch starts one triager per round once no item has arrived
     /// for `settleMinutes` and nothing holds it, and a triaging one moves on once that triage ends.
+    /// Then each open decision not yet announced banners once (§13.4).
     private func advancePRWatches(_ enabled: [Project]) async {
         for project in enabled {
             for watch in (try? prWatches.live(projectId: project.id)) ?? [] {
@@ -1621,7 +1632,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 case .triaging: settleTriageRound(watch, project: project)
                 default: break
                 }
+                announceDecisions(watchId: watch.id, project: project)
             }
+        }
+    }
+
+    private func announceDecisions(watchId: String, project: Project) {
+        guard let decisions = try? prWatches.claimDecisionNotifications(watchId: watchId), !decisions.isEmpty,
+              let watch = try? prWatches.get(watchId), !watch.paused
+        else { return }
+        for decision in decisions {
+            post(
+                "Pull request decision waiting", body: "#\(watch.number): \(decision.decisionQuestion ?? watch.title)",
+                projectId: project.id, category: .prDecisions, subject: .pullRequest(watch.id)
+            )
         }
     }
 

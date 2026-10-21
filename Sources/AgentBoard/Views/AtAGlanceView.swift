@@ -30,18 +30,14 @@ struct AtAGlanceView: View {
         Dictionary(attention.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
+    /// `PRBadgeCount` already leaves out projects with follow-through off and paused watches, the
+    /// sidebar badge's rule (SPEC §10).
     private var readyToVerify: [String: Int] {
-        Self.readyToVerify(projects: projects, counts: pullRequestCounts)
+        Self.readyToVerify(pullRequestCounts)
     }
 
-    /// Counted only in projects with PR follow-through on (SPEC §10); a project that turned it off
-    /// stops polling, so its watches no longer say anything current.
-    static func readyToVerify(projects: [Project], counts: [String: PRBadgeCount]) -> [String: Int] {
-        var ready: [String: Int] = [:]
-        for project in projects where project.settings.prFollowThrough.enabled {
-            if let count = counts[project.id]?.readyToVerify, count > 0 { ready[project.id] = count }
-        }
-        return ready
+    static func readyToVerify(_ counts: [String: PRBadgeCount]) -> [String: Int] {
+        counts.compactMapValues { $0.readyToVerify > 0 ? $0.readyToVerify : nil }
     }
 
     /// The headline's clause filters to the one project it counts, and lists every project when

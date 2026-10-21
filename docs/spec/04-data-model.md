@@ -358,7 +358,8 @@ CREATE TABLE pr_item (
   approach              TEXT,
   decision_question     TEXT,
   decision_options_json TEXT,
-  decision_answer       TEXT,
+  decision_answer       TEXT,            -- the human's answer from Needs you (§13.4)
+  decision_notified_at  INTEGER,         -- when this decision's banner was claimed; one banner per decision
   fix_task_id           TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the fix or follow-up task triage made of it (§13.1)
   followup_grade        TEXT,            -- fixed | partly | not_fixed | moot
   reply_body            TEXT,

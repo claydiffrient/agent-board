@@ -105,7 +105,19 @@ in a row it records the same row with a reason saying the search is failing,
 and the next successful search clears it. A project with no `origin` is skipped
 without a word. Any other failure to read its `origin` is logged with git's
 stderr, the project goes unpolled, and after 10 in a row it records its own row,
-cleared once `origin` reads again.
+cleared once `origin` reads again. Polls never overlap: one requested while
+another runs waits for it to finish and then runs in full, so it reads every
+write made before it was requested.
+
+**Pause.** A paused watch keeps following its pull request: every poll still
+records its items, head, checks and labels and moves it among watching,
+settling, readyToVerify and verified, so the page stays true and resuming acts
+on the PR as it is now. What pause withholds is everything that acts or asks
+for the human: it never leaves settling for triaging, it is left out of the
+sidebar badge and At a Glance (§13.4), its open decisions do not raise the
+project's attention dot, and it fires no Ready to verify or decision banner.
+Those banners are still claimed while paused, so resuming replays none of
+them.
 
 **Settling and triaging (phase 2).** The same poll, after reading GitHub,
 advances each watch of an enabled project; a failed search does not stop it.
@@ -280,15 +292,36 @@ on at all.
   human's PTY on its behalf. The URL is substituted as written, so one holding
   anything but letters, digits and `:/._-` is refused and the button is
   hidden; a GitHub PR URL never does.
-- The row's badge counts Ready to verify plus open decision items. A decision
-  also raises the owning project's attention dot (§9), the same signal a
-  pending approval raises.
+- **Needs you (phase 2).** Each open decision is listed under its PR's row:
+  the comment's author and text, triage's `decision_question`, one button per
+  `decision_options` entry, and a free-text **Reply instead** field.
+  `Board.answerDecision` stores the answer in `decision_answer` and moves the
+  item to the next round (`round` one past the watch's) with the answer as its
+  `approach`. An option button answers it as a `fix`: the item stays open and
+  gets its backlog code task exactly as a triaged fix does (§13.1), whose body
+  quotes the question the answer was given to. A typed reply answers it as an
+  `answer`: the item is handled, with the reply as its `reply_body`. Either way
+  it is no longer a decision.
+- The row's badge counts Ready to verify plus open decision items, both only in
+  projects with follow-through on and only on watches that are not paused —
+  one rule, read by the badge and At a Glance alike from
+  `PRWatchStore.badgeCounts`. Under the same rule an open decision raises the
+  owning project's attention dot (§9) as `pullRequestDecision`, its detail
+  `#n: <question>` for the most recent one. A parked PR's attention also counts
+  only in a project with follow-through on.
 - At a Glance's headline (§10) gains "N PRs ready to verify" beside the
   review count, each project's card gains its own count, and clicking either
   opens the Pull Requests page filtered to that project (§10 has the
   headline's rule when several projects hold ready PRs).
 - A notification banner fires when a PR enters readyToVerify (once per head
-  oid) and when a decision item arrives. The Ready to verify banner (phase 1)
+  oid) and once per decision item. The decision banner (phase 2) is decided
+  on every poll: `PRWatchStore.claimDecisionNotifications` stamps each open
+  decision's `decision_notified_at` and returns those it stamped, so each
+  decision announces itself once, and a new reply on its thread, which clears
+  the verdict, clears the stamp too. It reads "Pull request decision waiting —
+  <project>", with `#n: <question>` as its body, routes like the Ready to
+  verify banner, and is the **Pull request decisions** category, on by
+  default. The Ready to verify banner (phase 1)
   is decided after each poll's transition: `PRWatchStore.claimReadyNotification`
   records the watch's head in `ready_notified_oid` and fires only when that head
   is not already recorded, so a PR that stays ready across polls, or drops out
