@@ -7,18 +7,21 @@ No count of anything that grows — tests, files, citations — goes in this fil
 ## Build and test
 
 ```
-swift build                              # ~9 min cold; passes with pre-existing warnings only, no errors
-swift test                               # the whole suite, several minutes
+swift build --build-tests                # compiles the suite; ~9 min cold
 swift test --list-tests | wc -l          # the count, without running anything
 swift test --filter <TestTargetName>     # one target, e.g. AgentBoardServerTests
 swift test --filter <SuiteClassName>     # one suite, e.g. ApprovalMigrationTests
 ```
 
-**Measure the baseline yourself before you change anything.** No count is written down here: the suite grows every day and a number in this file would be wrong more often than right. `swift test --list-tests | wc -l` at the start, and `swift test`'s final `Executed N tests, with 0 failures` line at the end, are what you diff against.
+Run only the suites a change touches: `--filter` for the suites covering the changed files, plus that target's full suite when the change touches a Core schema or store. Never run the full `swift test` locally — it takes about 20 minutes, hangs on Vision OCR, and several workers running it at once already drove this Mac's load past 20 and made render tests flaky. CI runs the whole suite across three shards on every PR and is the pass/fail gate.
+
+If plain `swift build` fails in SwiftTerm's `Shaders.metal` (`CompileMetalFile ... failed with a nonzero exit code`) in a fresh worktree, add `--build-system native` to the build and test commands. It's a Metal Toolchain gap that can recur even when `xcodebuild -showComponent MetalToolchain` reports it installed.
 
 Run both unpiped. `swift build | tail` reports the pipeline's exit status rather than swiftpm's, and piping `swift test` through `head` or `tail` throws away the name of whatever failed — redirect to a file and grep it instead.
 
 `--filter` takes a regex matched against the fully-qualified test identifier, so a target name or a suite (XCTestCase subclass) name both work as shown above.
+
+Mutation-check a new guard test once before trusting it: break the line it's supposed to catch, confirm the test fails, then restore the line.
 
 ## Release
 
