@@ -772,6 +772,9 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
     /// Extra `--disallowedTools` patterns layered onto the worker default list. A deny-list: it can
     /// only narrow a rostered session's authority, never widen it, so empty means "a full worker's".
     public var disallowedTools: [String]
+    /// Each passed as `--plugin-dir` at spawn, so the agent can run a skill from a plugin the
+    /// worktree does not install (SPEC §4).
+    public var pluginDirs: [String]
     public var enabled: Bool
     public var createdAt: Int64
     public var updatedAt: Int64
@@ -786,6 +789,7 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
         case systemPrompt = "system_prompt"
         case model
         case disallowedTools = "disallowed_tools"
+        case pluginDirs = "plugin_dirs"
         case enabled
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -793,8 +797,8 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
 
     public init(
         id: String, name: String, role: String, systemPrompt: String, model: String? = nil,
-        disallowedTools: [String] = [], enabled: Bool = true, createdAt: Int64, updatedAt: Int64,
-        tools: [String]? = nil
+        disallowedTools: [String] = [], pluginDirs: [String] = [], enabled: Bool = true,
+        createdAt: Int64, updatedAt: Int64, tools: [String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -802,6 +806,7 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
         self.systemPrompt = systemPrompt
         self.model = model
         self.disallowedTools = disallowedTools
+        self.pluginDirs = pluginDirs
         self.enabled = enabled
         self.createdAt = createdAt
         self.updatedAt = updatedAt

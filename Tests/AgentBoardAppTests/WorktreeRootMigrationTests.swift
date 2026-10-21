@@ -52,6 +52,23 @@ final class WorktreeRootMigrationTests: XCTestCase {
         XCTAssertEqual(try reload().worktreeRoot, newBase.appendingPathComponent(project.id).path)
         XCTAssertTrue(migration.run().isEmpty, "the second launch was not a no-op")
     }
+
+    func testAWorktreeGitCannotReadKeepsTheOldRoot() throws {
+        let manager = WorktreeManager(
+            repoPath: repo, worktreeRoot: URL(fileURLWithPath: project.worktreeRoot), attribution: .unattributable
+        )
+        let worktree = try manager.create(name: "task-1", branch: "agentboard/task-1", base: "main")
+        let admin = try SupervisorFixture.git(["rev-parse", "--absolute-git-dir"], cwd: worktree)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let gitdir = URL(fileURLWithPath: admin).appendingPathComponent("gitdir").path
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: gitdir)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: gitdir) }
+
+        let outcome = migration.run()
+
+        XCTAssertEqual(outcome.migrated, [])
+        XCTAssertEqual(try reload().worktreeRoot, project.worktreeRoot, "the root moved past a worktree git could not read")
+    }
 }
 
 @MainActor

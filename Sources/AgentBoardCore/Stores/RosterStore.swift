@@ -13,12 +13,13 @@ public struct RosterStore: Sendable {
     @discardableResult
     public func create(
         name: String, role: String, systemPrompt: String,
-        model: String? = nil, disallowedTools: [String] = [], enabled: Bool = true
+        model: String? = nil, disallowedTools: [String] = [], pluginDirs: [String] = [], enabled: Bool = true
     ) throws -> RosterAgent {
         let now = Int64.nowMillis
         let agent = RosterAgent(
             id: RosterAgent.newId(), name: name, role: role, systemPrompt: systemPrompt,
-            model: model, disallowedTools: disallowedTools, enabled: enabled, createdAt: now, updatedAt: now
+            model: model, disallowedTools: disallowedTools, pluginDirs: pluginDirs, enabled: enabled,
+            createdAt: now, updatedAt: now
         )
         try db.writer.write { db in try agent.insert(db) }
         return agent
