@@ -251,9 +251,31 @@ final class WorktreeCleanupTests: XCTestCase {
         let held = try XCTUnwrap(try fixture.worktreeWorker(task: makeTask(), state: .running).worktreePath)
 
         await fixture.supervisor.meterTick()
+        await fixture.supervisor.waitForWorktreeSweeps()
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: orphan), "the tick did not reap the orphan")
         XCTAssertTrue(FileManager.default.fileExists(atPath: held), "the tick reaped a live session's worktree")
+    }
+
+    func testAReapBetweenASpawnsWorktreeAndItsSessionRowKeepsTheWorktree() async throws {
+        await fixture.supervisor.start()
+        try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
+        let task = try makeTask()
+        let (created, signalCreated) = AsyncStream<Void>.makeStream()
+        let (resume, signalResume) = AsyncStream<Void>.makeStream()
+        fixture.supervisor.afterCheckoutCreated = {
+            signalCreated.yield()
+            for await _ in resume { break }
+        }
+        let spawn = _Concurrency.Task { try await self.fixture.supervisor.spawnWorker(taskId: task.id) }
+        for await _ in created { break }
+
+        await fixture.supervisor.reconcile(projectId: fixture.project.id)
+
+        XCTAssertEqual(try worktreePaths().count, 1, "a reap removed the worktree a spawn had just created")
+        signalResume.yield()
+        _ = try await spawn.value
+        await fixture.supervisor.waitForSetup()
     }
 
     // MARK: - Helpers
