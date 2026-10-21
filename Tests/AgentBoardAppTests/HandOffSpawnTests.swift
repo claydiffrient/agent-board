@@ -38,6 +38,7 @@ final class HandOffSpawnTests: XCTestCase {
     func testTheSecondRosteredAgentGetsTheWorktreeTheFirstOneLeft() async throws {
         let task = try readyTask()
         try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
         let first = try XCTUnwrap(fixture.sessions.forTask(task.id).first)
         let worktree = try XCTUnwrap(first.worktreePath)
         try fixture.commitInto(worktree)
@@ -47,6 +48,7 @@ final class HandOffSpawnTests: XCTestCase {
         XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .ready)
 
         try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
 
         let sessions = try fixture.sessions.forTask(task.id)
         XCTAssertEqual(sessions.count, 2)
@@ -91,6 +93,7 @@ final class HandOffSpawnTests: XCTestCase {
     func testReconcileDoesNotPutAHandedOffSessionBackToWork() async throws {
         let task = try readyTask()
         try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
         let first = try XCTUnwrap(fixture.sessions.forTask(task.id).first)
         try handOff(task, sessionId: first.sessionId, nextRole: "reviewer")
 

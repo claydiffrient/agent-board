@@ -293,6 +293,24 @@ final class WorktreeCleanupTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: worktree), "the reap removed the respawned worker's checkout")
     }
 
+    func testAResumeIntoAWorktreeAReapHasClaimedLeavesNoLiveSessionWithoutItsCheckout() async throws {
+        await fixture.supervisor.start()
+        try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
+        try setTeardown("sleep 1")
+        let session = try fixture.worktreeWorker(task: makeTask(), state: .stopped)
+        let worktree = try XCTUnwrap(session.worktreePath)
+        await fixture.supervisor.reconcile(projectId: fixture.project.id)
+
+        try? await fixture.supervisor.resume(sessionId: session.sessionId)
+        await fixture.supervisor.waitForTeardowns()
+
+        let resumed = try XCTUnwrap(try fixture.sessions.get(session.sessionId))
+        XCTAssertFalse(
+            resumed.state.isActive && !FileManager.default.fileExists(atPath: worktree),
+            "the reap removed the worktree of a session resumed into it"
+        )
+    }
+
     // MARK: - Helpers
 
     private func setTeardown(_ command: String) throws {

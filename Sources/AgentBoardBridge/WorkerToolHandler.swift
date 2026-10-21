@@ -15,11 +15,13 @@ public final class WorkerToolHandler: ToolHandler {
     private let locks: FileLockStore
     private let taskCommits: TaskCommitStore
     private let scopedCommits: (any ScopedCommitting)?
+    private let commitsInFlight = CommitsInFlight()
+    private let commitAnswerWithin: Duration
     private let events: any BoardEventSink
 
     public init(
         db: AppDatabase, control: any WorkerControl, events: any BoardEventSink,
-        scopedCommits: (any ScopedCommitting)? = nil
+        scopedCommits: (any ScopedCommitting)? = nil, commitAnswerWithin: Duration = .seconds(30)
     ) {
         tasks = TaskStore(db)
         sessions = SessionStore(db)
@@ -33,6 +35,7 @@ public final class WorkerToolHandler: ToolHandler {
         locks = FileLockStore(db)
         taskCommits = TaskCommitStore(db)
         self.scopedCommits = scopedCommits
+        self.commitAnswerWithin = commitAnswerWithin
         self.events = events
     }
 
@@ -413,33 +416,52 @@ public final class WorkerToolHandler: ToolHandler {
         }
         let message = try ToolArguments.requiredString("message", in: arguments)
         let paths = CommitScope.paths(try locks.held(projectId: identity.projectId), sessionId: sessionId)
-        guard !paths.isEmpty else { throw ToolError(ScopedCommitError.noPathsHeld.description) }
-
-        let outcome = try await runner.commit(
-            ScopedCommitRequest(
-                repoPath: project.repoPath,
-                branch: session.branch ?? SharedCheckoutGroup.branch(epicId: task.epicId),
-                taskId: task.id,
-                paths: paths,
-                message: message
-            )
+        let request = ScopedCommitRequest(
+            repoPath: project.repoPath,
+            branch: session.branch ?? SharedCheckoutGroup.branch(epicId: task.epicId),
+            taskId: task.id,
+            paths: paths,
+            message: message
         )
-        switch outcome {
+        let (taskCommits, progress) = (taskCommits, progress)
+        let branchName = session.branch ?? "the shared branch"
+        let (commit, started) = await commitsInFlight.commit(sessionId: sessionId) {
+            guard !paths.isEmpty else { throw ToolError(ScopedCommitError.noPathsHeld.description) }
+            let outcome = try await runner.commit(request)
+            // The ledger row is written here rather than by whichever call reports the commit: the
+            // caller may have its answer already, and a commit with no row has lost its attribution.
+            if case .committed(let sha, let committed) = outcome {
+                try taskCommits.record(taskId: task.id, sha: sha)
+                try progress.append(
+                    taskId: task.id, sessionId: sessionId, kind: .status,
+                    text: "Committed \(String(sha.prefix(8))) on \(branchName), recorded as this task's, "
+                        + "containing only: " + committed.joined(separator: ", ")
+                )
+            }
+            return outcome
+        }
+        guard let result = await CommitsInFlight.outcome(of: commit, within: commitAnswerWithin) else {
+            let which = started ? "This commit" : "Your earlier commit_my_work call"
+            return ToolResult(
+                text: "\(which) is still running, most likely in the repository's commit hooks. Nothing is "
+                    + "committed yet as far as this call knows. Call commit_my_work again to get its outcome; "
+                    + "that call starts no second commit and ignores its message."
+            )
+        }
+        await commitsInFlight.delivered(sessionId: sessionId)
+        let earlier = started ? "" : "This is the outcome of your earlier commit_my_work call; this call "
+            + "committed nothing new, so call it again if you have more to commit. "
+        switch try result.get() {
         case .committed(let sha, let committed):
-            // The ledger row is written here rather than swept up later: a crash between the commit
-            // and a later pass would lose the attribution with nothing in the commit to rebuild it from.
-            try taskCommits.record(taskId: task.id, sha: sha)
-            let text = "Committed \(String(sha.prefix(8))) on \(session.branch ?? "the shared branch"), "
-                + "recorded as this task's, containing only: "
-                + committed.joined(separator: ", ")
-            try progress.append(taskId: task.id, sessionId: sessionId, kind: .status, text: text)
-            return .json(.object([
+            var answer: [String: JSONValue] = [
                 "commit": .string(sha),
                 "paths": .array(committed.map { .string($0) }),
-            ]))
+            ]
+            if !started { answer["note"] = .string(earlier.trimmingCharacters(in: .whitespaces)) }
+            return .json(.object(answer))
         case .nothingToCommit(let claimed):
             return ToolResult(
-                text: "Nothing to commit: the files you have claimed (\(claimed.joined(separator: ", "))) "
+                text: earlier + "Nothing to commit: the files you have claimed (\(claimed.joined(separator: ", "))) "
                     + "hold no change git would record."
             )
         }
@@ -491,8 +513,8 @@ public final class WorkerToolHandler: ToolHandler {
             )
         }
         return ToolResult(
-            text: "\(recorded) \(noReview), so the task went straight to Done and Agent Board "
-                + "removes its worktree. \(Self.awaitingPullRequestLine(outcome))Stop here; do not start further work."
+            text: "\(recorded) \(noReview), so the task went straight to Done. Agent Board lands its branch and "
+                + "removes its worktree after this answer. \(Self.awaitingPullRequestLine(outcome))Stop here; do not start further work."
         )
     }
 
