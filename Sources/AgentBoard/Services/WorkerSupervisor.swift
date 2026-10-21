@@ -146,6 +146,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let attention: ProjectAttentionStore
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
     @ObservationIgnored private let pullRequestWatch: PullRequestWatchReader
+    @ObservationIgnored private let pullRequestReplies: PullRequestReplier
     @ObservationIgnored private let prWatches: PRWatchStore
     /// Millis of the last PR follow-through poll; 0 means none yet.
     @ObservationIgnored private var lastPRWatchPoll: Int64 = 0
@@ -254,6 +255,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         attention = ProjectAttentionStore(db)
         pullRequestStates = PullRequestStateReader(gh: gh)
         pullRequestWatch = PullRequestWatchReader(gh: gh)
+        pullRequestReplies = PullRequestReplier(gh: gh)
         prWatches = PRWatchStore(db)
     }
 
@@ -1852,7 +1854,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) {
         do {
-            let watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
+            var watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
+            if let settled = try prWatches.settleAwaitingCI(watchId: watch.id) { watch.state = settled }
             let open = try prWatches.openItems(watchId: watch.id)
             if let next = PRWatchTransition.next(
                 from: watch.state, snapshot: snapshot, openItems: open.count,
@@ -1861,6 +1864,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             ) {
                 try prWatches.setState(next, watchId: watch.id)
             }
+            try prWatches.applyVerifiedFreeze(watchId: watch.id)
             if let ready = try prWatches.claimReadyNotification(watchId: watch.id) {
                 post(
                     "Pull request ready to verify", body: "#\(ready.number) \(ready.title)",
@@ -1874,15 +1878,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §13.1 and §13.2: a settling watch starts one triager per round once no item has arrived
     /// for `settleMinutes` and nothing holds it, a triaging one moves on once that triage ends, a
-    /// fixing one starts its round's fixer, and a checking one its reviewer and follow-up check.
+    /// fixing one starts its round's fixer, a checking one its reviewer and follow-up check, and a
+    /// publishing one pushes its round.
     private func advancePRWatches(_ enabled: [Project]) async {
         for project in enabled {
             for watch in (try? prWatches.live(projectId: project.id)) ?? [] {
                 switch watch.state {
                 case .settling: await startTriageIfSettled(watch, project: project)
-                case .triaging: settleTriageRound(watch, project: project)
+                case .triaging: await settleTriageRound(watch, project: project)
                 case .fixing: await startFixRound(watch, project: project)
                 case .checking: await advanceCheck(watch, project: project)
+                case .publishing: await publishRound(watch, project: project)
                 default: break
                 }
             }
@@ -1915,7 +1921,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return false
     }
 
-    private func settleTriageRound(_ watch: PRWatch, project: Project) {
+    private func settleTriageRound(_ watch: PRWatch, project: Project) async {
         guard let triage = try? prWatches.triage(watchId: watch.id, round: watch.round),
               let task = try? tasks.get(triage.taskId)
         else {
@@ -1925,7 +1931,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         switch task.column {
         case .done:
             do {
-                try board.applyVerdicts(watchId: watch.id)
+                if let next = try board.applyVerdicts(watchId: watch.id), next != .fixing {
+                    await postFactualReplies(watchId: watch.id, round: watch.round, project: project)
+                }
             } catch {
                 report(["could not apply the triage of \(watch.url): \(describe(error))"])
             }
@@ -2018,6 +2026,109 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             try board.parkCheck(watchId: watch.id, reason: reason ?? "This round has no agent reviewer.")
         case .autoAccept:
             try board.parkCheck(watchId: watch.id, reason: "This round has no agent reviewer.")
+        }
+    }
+
+    /// SPEC §13.1 publishing and §13.5's D8 exception, the one push made without an approval: re-reads
+    /// the PR, freezes on the verification label, goes stale if the head left the round's base, and
+    /// otherwise fast-forwards the checked round branch onto the PR's head ref through `BranchPublisher`.
+    private func publishRound(_ watch: PRWatch, project: Project) async {
+        guard let round = try? prWatches.currentRound(watchId: watch.id), let taskId = round.fixTaskId,
+              let task = try? tasks.get(taskId)
+        else { return }
+        let settings = project.settings.prFollowThrough
+        let repo = URL(fileURLWithPath: project.repoPath)
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let states = pullRequestStates
+        let url = watch.url
+        let remote: PullRequestHead
+        do {
+            remote = try await offMain { try states.head(of: url, cwd: repo) }
+        } catch {
+            NSLog("PR follow-through: could not re-read %@ before publishing: %@", url, describe(error))
+            return
+        }
+        guard remote.isOpen else { return }
+        do {
+            if let label = settings.markVerifiedLabel,
+               remote.labels.contains(where: { $0.caseInsensitiveCompare(label) == .orderedSame }) {
+                try board.freezeRound(watchId: watch.id)
+                await dropRoundWorktree(task, project: project)
+                return
+            }
+            let manager = worktreeManager(for: project)
+            guard let tip = try await offMain({ try manager.refCommit("refs/heads/\(branch)") }) else {
+                try board.parkPublishing(watchId: watch.id, reason: "Round \(round.number)'s branch `\(branch)` is gone.")
+                return
+            }
+            if remote.oid != tip {
+                guard remote.oid == round.baseHeadOid else {
+                    try board.markRoundStale(watchId: watch.id)
+                    await dropRoundWorktree(task, project: project)
+                    return
+                }
+                if let checked = round.checkedHeadOid, checked != tip {
+                    try board.parkPublishing(
+                        watchId: watch.id,
+                        reason: "Round \(round.number)'s branch moved from \(checked) to \(tip) after its check, so it was not pushed."
+                    )
+                    return
+                }
+                let publisher = BranchPublisher(repoPath: repo, privateTerms: settings.privateTerms)
+                let headRef = watch.headRef
+                do {
+                    _ = try await offMain { try publisher.fastForward(branch: branch, onto: headRef) }
+                } catch PublishFailure.notFastForward {
+                    try board.markRoundStale(watchId: watch.id)
+                    await dropRoundWorktree(task, project: project)
+                    return
+                } catch {
+                    try board.parkPublishing(
+                        watchId: watch.id, reason: "Round \(round.number) was not pushed: \(describe(error))"
+                    )
+                    return
+                }
+            }
+            guard try board.recordRoundPublished(watchId: watch.id, pushedHeadOid: tip) != nil else { return }
+        } catch {
+            NSLog("PR follow-through: publishing %@ could not be recorded: %@", url, describe(error))
+            return
+        }
+        await dropRoundWorktree(task, project: project)
+        await postFactualReplies(watchId: watch.id, round: round.number, project: project)
+    }
+
+    private func dropRoundWorktree(_ task: BoardTask, project: Project) async {
+        guard let taskSessions = try? sessions.forTask(task.id), !taskSessions.contains(where: \.state.isActive) else { return }
+        await startTeardown(claimTeardown(of: taskSessions), task: task, project: project, report: nil, landingNotice: nil)
+    }
+
+    /// SPEC §13.2: with `postFactualReplies` on, each of the round's handled thread items gets a reply and
+    /// each review body a PR comment, its URL recorded. Nothing is resolved. A failed post is logged and
+    /// left without a URL.
+    private func postFactualReplies(watchId: String, round number: Int, project: Project) async {
+        guard project.settings.prFollowThrough.postFactualReplies, let watch = try? prWatches.get(watchId),
+              let items = try? prWatches.pendingReplies(watchId: watchId, round: number), !items.isEmpty
+        else { return }
+        let pushed = (try? prWatches.rounds(watchId: watchId))?.first { $0.number == number }?.pushedHeadOid
+        let replier = pullRequestReplies
+        let cwd = URL(fileURLWithPath: project.repoPath)
+        for item in items {
+            guard let id = item.id, let text = item.factualReply(pushedHeadOid: pushed) else { continue }
+            let body = item.kind == .review ? item.url.map { "In reply to \($0):\n\n\(text)" } ?? text : text
+            do {
+                let url: String
+                if item.kind == .thread {
+                    let thread = item.githubNodeId
+                    url = try await offMain { try replier.replyToThread(threadId: thread, body: body, cwd: cwd) }
+                } else {
+                    let (owner, name, pr) = (watch.repoOwner, watch.repoName, watch.number)
+                    url = try await offMain { try replier.comment(owner: owner, name: name, number: pr, body: body, cwd: cwd) }
+                }
+                try prWatches.recordReply(itemId: id, url: url)
+            } catch {
+                NSLog("PR follow-through: the reply to %@ on %@ was not posted: %@", item.githubNodeId, watch.url, describe(error))
+            }
         }
     }
 

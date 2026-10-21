@@ -393,4 +393,8 @@ public enum PRWatchTransition {
     static func checksGreen(_ rollup: String?) -> Bool {
         rollup == nil || rollup == "SUCCESS"
     }
+
+    static func checksFailed(_ rollup: String?) -> Bool {
+        rollup == "FAILURE" || rollup == "ERROR"
+    }
 }

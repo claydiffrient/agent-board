@@ -29,9 +29,10 @@ verified, and merged/closed — everything that does not require a model;
 publishing is specified below but not reachable until phase 3 gives it a push
 to make. **Phase 2** delivers what the settling wait leads to, triaging, and
 parking on a stacked or forked PR or after three failed triages in a row.
-**Phase 3** delivers fixing, checking, and publishing's push. **Phase 4**
-delivers stale, the rest of parked, and feeding CI and verification failures
-back into items.
+**Phase 3** delivers fixing, checking, publishing's push and replies, the
+stale move a publish makes, and the verified freeze. **Phase 4** delivers the
+rest of stale and parked, and feeding CI and verification failures back into
+triage.
 
 - **watching** — polled every 60s. Leaves on new feedback (an unresolved
   thread, a review body, a failed required check, a merge conflict) or when
@@ -55,8 +56,9 @@ back into items.
   if it moved. Otherwise fast-forward pushes the round branch to the PR's head
   ref, then posts factual replies when `postFactualReplies` is on. It never
   resolves threads.
-- **awaitingCI** *(phase 1 reads green/red; phase 4 adds the log-tail items on
-  red)* — green goes to watching; red goes straight to triaging, with the
+- **awaitingCI** *(phase 3 reads green/red; phase 4 adds the log-tail items on
+  red)* — green goes to watching; red goes to watching with a failed-checks
+  decision item, which phase 4 replaces with going straight to triaging, the
   failed checks and their log tails as items.
 - **readyToVerify** *(phase 1)* — `reviewDecision == APPROVED` (when
   `requireApproval`), checks green, no open item or decision, and the
@@ -70,10 +72,10 @@ back into items.
   Agent Board never pushes to it again, and any new feedback on it becomes a
   decision item rather than restarting the round. Removing the label
   re-evaluates it: readyToVerify if it still qualifies, otherwise watching.
-- **stale** *(phase 4)* — the head moved out from under the round. Drop the
-  round's worktree and go to settling.
+- **stale** *(phase 3 for a publish; phase 4 for the rest)* — the head moved
+  out from under the round. Drop the round's worktree and go to settling.
 - **parked** *(phase 2 for the forked case and failed triages; phase 3 for a
-  stacked PR and a round's third failed check; phase 4 for the round-cap and fixer cases)* — reached
+  stacked PR, a round's third failed check, and a refused publish; phase 4 for the round-cap and fixer cases)* — reached
   when the round cap is hit, a round fails its check three times, three
   triages (phase 2) or fixer sessions fail in a row, the PR is stacked (its base is not the
   project's default branch and the stack needs a restack the human must do),
@@ -232,6 +234,47 @@ closes its fix task, and parks the watch with a `parked_reason` holding the
 last findings. A check that cannot start — a spawn that fails, a worktree
 that is gone — parks the watch the same way, with the error.
 
+**Publishing (phase 3).** The one push Agent Board makes without an approval
+(§13.5). The next poll re-reads the PR with
+`gh pr view <url> --json state,headRefOid,labels`, and does nothing while that
+fails or the PR is not open. Then, in order:
+
+- **The verified freeze.** The verification label on the PR ends the round
+  with outcome `frozen` and moves the watch to verified without pushing; the
+  round's fix items become frozen decisions (below) and its worktree is
+  removed. The round branch is kept, so the work is not lost.
+- **Stale.** A head that is neither the round's `base_head_oid` nor the round
+  branch's tip ends the round with outcome `stale`: its fix items go back to
+  triage with no verdict, its worktree is removed, and the watch goes to
+  settling, which triages them against the new head.
+- **The push.** A round branch whose tip is not the `checked_head_oid` its
+  follow-up check judged parks the watch unpushed. Otherwise
+  `BranchPublisher.fastForward` pushes `refs/heads/<round branch>` to
+  `refs/heads/<head ref>` on `origin` with `--porcelain` and neither `--force`
+  nor `--set-upstream`, so git itself refuses anything but a fast-forward. The
+  publish guard (§13.5) reads the commits `origin/<head ref>` lacks first.
+  A `[rejected]` ref is a moved head, and goes stale as above; any other
+  refusal, the guard's included, ends the round `publish_failed` and parks the
+  watch with the error. A head already at the round branch's tip, from a
+  push whose recording was interrupted, is not pushed again.
+
+A push ends the round `published` with the tip in `pushed_head_oid`, marks its
+fix items handled in that round, removes its worktree, moves the watch to
+awaitingCI, and then posts the round's replies (§13.2). An awaitingCI watch is
+settled by the poll once GitHub reports the pushed head: green (§13.1
+readyToVerify's rule) goes to watching, and `FAILURE` or `ERROR` to watching
+with a decision item of kind `check`, keyed `checks:<head oid>`, that stays
+while that head's checks still fail. A head still at `base_head_oid` is GitHub
+not having caught up, and waits; any other head was pushed over the round,
+and goes to watching.
+
+**The verified freeze (phase 3).** On every poll, a verified watch's open items
+with no verdict become decisions whose question says the PR is verified and
+asks the human to handle the feedback or remove the label, so feedback on a
+verified PR never starts a round. Once the watch is no longer verified, those
+frozen decisions lose their verdict, and the next poll sends the watch to
+settling to triage them.
+
 A round's triage that never starts, or whose task is closed (§13.2), fails
 the round: its outcome becomes `triage_failed` and the watch returns to
 settling, so the next poll retries with a new round. The third failed round in
@@ -267,6 +310,18 @@ A reply posts automatically only when the project's `postFactualReplies`
 setting is on, and only for a factual verdict — fix, answer, already_done, or
 follow_up. A decision is never auto-replied, since it is, by definition,
 something argued rather than settled.
+
+**Posting replies (phase 3).** Replies go out after a round's push, or, for a
+round with no fix item, once its verdicts are applied. Each item the round
+handled whose `reply_url` is empty gets one: a fix item "Fixed in `<sha>`."
+with the pushed head's first seven characters, and any other factual item its
+triage `reply_body`; an item with no `reply_body` gets none. A thread item is
+answered on its thread with `gh api graphql`'s
+`addPullRequestReviewThreadReply`; a review body, which has no thread, gets one
+pull-request comment through `gh api repos/<owner>/<name>/issues/<n>/comments`,
+led by a link to the review. The reply's URL is stored in `reply_url`, so
+nothing is posted twice; a failed post is logged and left empty. No thread is
+ever resolved: resolving is the reviewer's call.
 
 **The triage session (phase 2).** `WorkerSupervisor.spawnTriager(watchId)` is
 the only way one starts; the orchestrator has no tool for it. It is held to
@@ -437,9 +492,8 @@ branch to the head ref of an open PR the human authored, without a human
 approval — but only after the reviewer role accepts the round, every item in
 it is graded fixed or moot, and the project's tests pass. Creating a branch,
 opening a PR, any non-fast-forward push, and any push to a verified PR stay
-human-gated or forbidden, unchanged. This is publishing's push, above; until
-the rest of phase 3 lands it has no round to push, since phases 1–2 write
-nothing to a remote.
+human-gated or forbidden, unchanged. This is publishing's push (§13.1),
+`BranchPublisher.fastForward`, and nothing else calls it.
 
 **§8 amended.** In a project with the feature on, the follow-through triager
 and fixer spawns skip spawn approval: the triager never asks for one, and

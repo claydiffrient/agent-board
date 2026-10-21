@@ -364,8 +364,8 @@ CREATE TABLE pr_item (
   followup_grade        TEXT,            -- fixed | partly | not_fixed | moot; the round's follow-up check (§13.1)
   followup_note         TEXT,            -- that grade's evidence, which a failed check hands the fixer
   reply_body            TEXT,
-  reply_url             TEXT,
-  round                 INTEGER NOT NULL DEFAULT 0,
+  reply_url             TEXT,            -- the reply publishing posted (§13.2); null until one is
+  round                 INTEGER NOT NULL DEFAULT 0,  -- the round it arrived in, then the round that handled it, whose replies post it
   created_at            INTEGER NOT NULL,
   updated_at            INTEGER NOT NULL,
   UNIQUE (watch_id, github_node_id)
@@ -377,8 +377,8 @@ CREATE TABLE pr_round (
   watch_id        TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
   number          INTEGER NOT NULL,
   base_head_oid   TEXT NOT NULL,     -- the PR head the round's branch was cut from
-  pushed_head_oid TEXT,
-  outcome         TEXT,              -- triaged | triage_failed | interrupted | check_failed; null while the round runs
+  pushed_head_oid TEXT,              -- the round branch's tip publishing fast-forwarded the PR to
+  outcome         TEXT,              -- triaged | triage_failed | interrupted | check_failed | published | stale | frozen | publish_failed; null while the round runs
   started_at      INTEGER NOT NULL,
   ended_at        INTEGER,
   fix_task_id     TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the round's `fix_round` task (§13.1)

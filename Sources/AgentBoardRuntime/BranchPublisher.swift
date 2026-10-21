@@ -11,6 +11,8 @@ public enum PublishFailure: Error, CustomStringConvertible, Equatable, Sendable 
     case ghNotAuthenticated(detail: String)
     case noSuchBranch(String)
     case pushFailed(branch: String, detail: String)
+    /// The remote ref has commits the branch lacks, so a push without `--force` was refused.
+    case notFastForward(branch: String, onto: String, detail: String)
     case pullRequestFailed(detail: String)
     case noPullRequestURL(output: String)
     case privateTerm(term: String, site: PrivateTermSite)
@@ -33,6 +35,8 @@ public enum PublishFailure: Error, CustomStringConvertible, Equatable, Sendable 
             return "No branch named \"\(branch)\" exists in this repository, so there is nothing to push."
         case .pushFailed(let branch, let detail):
             return "Pushing \(branch) failed: \(detail)"
+        case .notFastForward(let branch, let onto, let detail):
+            return "\(onto) has moved on the remote, so \(branch) is no longer a fast-forward of it: \(detail)"
         case .pullRequestFailed(let detail):
             return "Opening the pull request failed: \(detail)"
         case .noPullRequestURL(let output):
@@ -91,6 +95,12 @@ public enum PublishCommand {
     /// source ref to a differently named destination natively. Nil publishes the local name.
     public static func push(remote: String, branch: String, published: String? = nil) -> [String] {
         ["push", "--set-upstream", remote, "refs/heads/\(branch):refs/heads/\(published ?? branch)"]
+    }
+
+    /// No `--force` and no `--set-upstream`: git refuses anything but a fast-forward of `onto`.
+    /// `--porcelain` makes the rejection a status flag rather than localized prose.
+    public static func fastForward(remote: String, branch: String, onto: String) -> [String] {
+        ["push", "--porcelain", remote, "refs/heads/\(branch):refs/heads/\(onto)"]
     }
 
     public static func branchExists(_ branch: String) -> [String] {
@@ -259,6 +269,25 @@ public struct BranchPublisher: Sendable {
         return said.contains("Everything up-to-date")
             ? .alreadyUpToDate(branch: branch, remote: remote, published: publishedAs)
             : .pushed(branch: branch, remote: remote, published: publishedAs)
+    }
+
+    /// SPEC §13.5's D8 exception: `branch` onto the remote's `onto`, as a fast-forward only. The
+    /// private-term guard reads the commits `<remote>/<onto>` lacks.
+    public func fastForward(branch: String, onto: String, remote: String = "origin") throws -> PushResult {
+        try requireRemote(remote)
+        try requireBranch(branch)
+        try refusePrivateTerms(branch: branch, publishedAs: onto, base: onto, remote: remote)
+        let result = try git(PublishCommand.fastForward(remote: remote, branch: branch, onto: onto))
+        let flags = result.stdout.split(whereSeparator: \.isNewline).filter { $0.contains("refs/heads/\(onto)") }
+        guard result.status == 0 else {
+            if flags.contains(where: { $0.hasPrefix("!") && $0.contains("[rejected]") }) {
+                throw PublishFailure.notFastForward(branch: branch, onto: onto, detail: Self.detail(result))
+            }
+            throw PublishFailure.pushFailed(branch: branch, detail: Self.detail(result))
+        }
+        return flags.contains(where: { $0.hasPrefix("=") })
+            ? .alreadyUpToDate(branch: branch, remote: remote, published: onto)
+            : .pushed(branch: branch, remote: remote, published: onto)
     }
 
     /// The pull request's head is the published name, not the local one — `gh` is only ever handed a

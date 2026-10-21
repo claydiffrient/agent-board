@@ -9,7 +9,8 @@ import XCTest
 /// SPEC §13.1 phases 2 and 3: settling waits out `settleMinutes` and its holds, then starts one
 /// triager per round, whose fix verdicts start one fixer on the round's branch, which the reviewer and
 /// follow-up check roles then check; a triage that ends without verdicts is retried, and the third in a
-/// row parks the watch. Driven through `FakeGh`.
+/// row parks the watch; a round that passes its check is fast-forwarded onto the PR's head ref.
+/// Driven through `FakeGh`.
 @MainActor
 final class PRFollowThroughLoopTests: XCTestCase {
     private var fixture: SupervisorFixture!
@@ -18,15 +19,23 @@ final class PRFollowThroughLoopTests: XCTestCase {
     private let repository = "example-org/app"
     private var url: String { "https://github.com/\(repository)/pull/12" }
     private var watches: PRWatchStore { PRWatchStore(fixture.db) }
+    private var remote: URL { fixture.supportDir.appendingPathComponent("remote.git") }
 
     /// `origin` names GitHub, so the poll maps it, while a fake ssh serves a local bare clone, so the
-    /// triager's and fixer's fetches work. The PR head is a commit the repository already has.
+    /// triager's and fixer's fetches and publishing's push work. The PR head is a commit the repository
+    /// already has.
     override func setUp() async throws {
         fixture = try SupervisorFixture.make(gitRepo: true)
-        let remote = fixture.supportDir.appendingPathComponent("remote.git")
         try SupervisorFixture.git(["clone", "-q", "--bare", fixture.repo.path, remote.path], cwd: fixture.supportDir)
         let ssh = fixture.supportDir.appendingPathComponent("fake-ssh")
-        try "#!/bin/sh\nexec git upload-pack '\(remote.path)'\n".write(to: ssh, atomically: true, encoding: .utf8)
+        try """
+        #!/bin/sh
+        case "$*" in
+          *receive-pack*) exec git receive-pack '\(remote.path)' ;;
+          *) exec git upload-pack '\(remote.path)' ;;
+        esac
+
+        """.write(to: ssh, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ssh.path)
         _ = try fixture.git(["remote", "add", "origin", "git@github.com:\(repository).git"])
         _ = try fixture.git(["config", "core.sshCommand", ssh.path])
@@ -49,12 +58,13 @@ final class PRFollowThroughLoopTests: XCTestCase {
     }
 
     private func enable(
-        settleMinutes: Int = 0, budget: Double? = nil,
+        settleMinutes: Int = 0, budget: Double? = nil, label: String? = nil, replies: Bool = false,
         roles: PRFollowThroughRoles = PRFollowThroughRoles(fixer: PRFollowThroughRole(model: "fixer-model"))
     ) throws {
         var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
         settings.prFollowThrough = PRFollowThroughSettings(
-            enabled: true, settleMinutes: settleMinutes, dailyBudgetUSD: budget, roles: roles
+            enabled: true, verificationLabel: label, settleMinutes: settleMinutes, dailyBudgetUSD: budget,
+            postFactualReplies: replies, roles: roles
         )
         try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
     }
@@ -299,7 +309,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
     private let gradingPlugin = "/plugins/grading"
 
     /// A reviewer role and a follow-up check role, each a board-local roster agent.
-    private func enableChecking() throws {
+    private func enableChecking(label: String? = nil, replies: Bool = false) throws {
         let store = RosterStore(fixture.db)
         let rita = try store.create(name: "Rita", role: "reviewer", systemPrompt: "You review for correctness.")
         let gail = try store.create(
@@ -307,7 +317,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         )
         try store.enable(agentId: rita.id, forProject: fixture.project.id)
         try store.enable(agentId: gail.id, forProject: fixture.project.id)
-        try enable(roles: PRFollowThroughRoles(
+        try enable(label: label, replies: replies, roles: PRFollowThroughRoles(
             fixer: PRFollowThroughRole(model: "fixer-model"), reviewer: PRFollowThroughRole(rosterAgentId: rita.id),
             followupCheck: PRFollowThroughRole(rosterAgentId: gail.id)
         ))
@@ -327,17 +337,25 @@ final class PRFollowThroughLoopTests: XCTestCase {
         try await fixture.identity(token: try XCTUnwrap(fixture.grants.forSession(session.sessionId).first).token)
     }
 
-    /// One `fix` thread, triaged, with its round's fixer running.
-    private func runningFixer() async throws -> BoardTask {
-        answer(threads: [thread("T_fix")])
+    /// One `fix` thread, triaged, with its round's fixer running; with `question`, an `answer` thread too.
+    private func runningFixer(question: Bool = false) async throws -> BoardTask {
+        answer(threads: [thread("T_fix")] + (question ? [thread("T_question", body: "Why 3?")] : []))
         await poll()
-        let item = try XCTUnwrap(try watches.items(watchId: try onlyWatch().id).first)
+        let ids = Dictionary(uniqueKeysWithValues: try watches.items(watchId: try onlyWatch().id).map {
+            ($0.githubNodeId, Double($0.id ?? 0))
+        })
+        var verdicts: [JSONValue] = [.object([
+            "item_id": .number(ids["T_fix"]!), "verdict": .string("fix"), "approach": .string("Rename n to count."),
+        ])]
+        if question {
+            verdicts.append(.object([
+                "item_id": .number(ids["T_question"]!), "verdict": .string("answer"),
+                "approach": .string("Factual."), "reply_body": .string("Three retries."),
+            ]))
+        }
         let result = try await TriagerToolHandler(db: fixture.db, events: sink).call(
             "set_verdicts",
-            arguments: .object(["verdicts": .array([.object([
-                "item_id": .number(Double(item.id ?? 0)), "verdict": .string("fix"),
-                "approach": .string("Rename n to count."),
-            ])])]),
+            arguments: .object(["verdicts": .array(verdicts)]),
             identity: try await identity(of: try runningTriager())
         )
         await result.afterResponse?()
@@ -478,5 +496,90 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(watch.state, .watching)
         XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["triaged"])
         XCTAssertFalse(try fixture.tasks.list(projectId: fixture.project.id).contains { $0.origin == .fixRound })
+    }
+
+    // MARK: - Publishing
+
+    private func rev(_ ref: String, in directory: URL? = nil) throws -> String {
+        try fixture.git(["rev-parse", ref], cwd: directory).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// A round that has passed its check, its watch now publishing, with GitHub reporting the PR open at
+    /// `head` carrying `labels`. Returns the round branch's tip and the round's worktree.
+    private func passedRound(
+        label: String? = nil, replies: Bool = false, question: Bool = false, labels: [String] = []
+    ) async throws -> (tip: String, worktree: String) {
+        try enableChecking(label: label, replies: replies)
+        let fixer = try await runningFixer(question: question)
+        let worktree = try XCTUnwrap(try activeSession(on: fixer.id).worktreePath)
+        try await completeFixer(fixer, file: "fix.txt")
+        await poll()
+        try await review(fixer, accept: true)
+        try await grade("fixed", evidence: "App.swift:3 now says count.")
+        fixture.gh.answer(url, state: "OPEN", head: head, labels: labels)
+        await poll()
+        XCTAssertEqual(try onlyWatch().state, .publishing)
+        return (try rev("HEAD", in: URL(fileURLWithPath: worktree)), worktree)
+    }
+
+    func testAPassedRoundFastForwardsOntoThePRHeadRefAndPostsNoReplyWhileRepliesAreOff() async throws {
+        let (tip, worktree) = try await passedRound()
+        await poll()
+
+        XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), tip)
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .awaitingCI)
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["published"])
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).first?.pushedHeadOid, tip)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+        XCTAssertFalse(fixture.gh.calls.contains { $0.contains { $0.hasPrefix("body=") } }, "\(fixture.gh.calls)")
+
+        head = tip
+        answer(threads: [])
+        await poll()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify, "green checks on the pushed head end the wait")
+    }
+
+    func testWithRepliesOnEachHandledThreadGetsItsFactualReplyAndNoThreadIsResolved() async throws {
+        let (tip, _) = try await passedRound(replies: true, question: true)
+        fixture.gh.answerReplies(url: "\(url)#discussion_r1")
+        await poll()
+
+        let replies = fixture.gh.calls.filter { $0.contains { $0.hasPrefix("query=mutation") } }
+        XCTAssertEqual(replies.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_fix", "thread=T_question"])
+        XCTAssertEqual(replies.map(\.last), ["body=Fixed in \(tip.prefix(7)).", "body=Three retries."])
+        XCTAssertFalse(fixture.gh.calls.joined().contains { $0.contains("resolveReviewThread") })
+        XCTAssertEqual(Set(try watches.items(watchId: try onlyWatch().id).map(\.replyURL)), ["\(url)#discussion_r1"])
+    }
+
+    /// GitHub still reports the round's base, so the push is tried and git refuses it as a non-fast-forward.
+    func testAHeadRefThatMovedUnderTheRoundGoesStaleAndIsNotPushedOver() async throws {
+        let (_, worktree) = try await passedRound()
+        _ = try fixture.git(["checkout", "-q", "--detach", head])
+        _ = try fixture.git(["commit", "-q", "--allow-empty", "-m", "Push from elsewhere"])
+        let moved = try rev("HEAD")
+        _ = try fixture.git(["checkout", "-q", "main"])
+        _ = try fixture.git(["push", "-q", remote.path, "\(moved):refs/heads/add-widgets"])
+        await poll()
+
+        XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), moved)
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .settling)
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["stale"])
+        XCTAssertNil(try watches.items(watchId: watch.id).first?.verdict, "the item goes back to triage")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+    }
+
+    func testAVerificationLabelOnThePRBlocksThePushAndFreezesTheRoundsItemsAsDecisions() async throws {
+        _ = try await passedRound(label: "verified-example", replies: true, labels: ["verified-example"])
+        fixture.gh.answerReplies(url: "\(url)#discussion_r1")
+        await poll()
+
+        XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), head)
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .verified)
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["frozen"])
+        XCTAssertEqual(try watches.items(watchId: watch.id).first?.isOpenDecision, true)
+        XCTAssertFalse(fixture.gh.calls.contains { $0.contains { $0.hasPrefix("body=") } })
     }
 }

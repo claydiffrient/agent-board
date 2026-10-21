@@ -9,7 +9,8 @@ public struct PRWatchStore: Sendable {
     }
 
     /// Records one poll (SPEC §4). Idempotent by node id: an unchanged snapshot moves only
-    /// `last_polled_at`, and a new head oid stamps `head_changed_at`. An open item that resolved or left the snapshot becomes handled.
+    /// `last_polled_at`, and a new head oid stamps `head_changed_at`. An open item that resolved or left the snapshot becomes handled,
+    /// except the failed-checks item of a head whose checks still fail.
     /// An item whose body changed (a new reply) is open and untriaged again; one that reopens also drops its task.
     @discardableResult
     public func upsert(projectId: String, snapshot: PRSnapshot, now: Int64 = .nowMillis) throws -> PRWatch {
@@ -94,7 +95,9 @@ public struct PRWatchStore: Sendable {
                     try item.update(db)
                 }
             }
-            for var gone in stored.values where gone.state == .open {
+            let failingChecks = PRWatchTransition.checksFailed(snapshot.checksState)
+                ? PRItem.checksNodeId(head: snapshot.headOid) : nil
+            for var gone in stored.values where gone.state == .open && gone.githubNodeId != failingChecks {
                 gone.state = .handled
                 gone.updatedAt = now
                 try gone.update(db)

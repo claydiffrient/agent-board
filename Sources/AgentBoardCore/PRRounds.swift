@@ -10,6 +10,14 @@ public enum PRRoundOutcome: String, Sendable, CaseIterable, Equatable, DatabaseV
     case interrupted
     /// The round's check failed `failedChecksBeforePark` times, or could not run, and the watch parked.
     case checkFailed = "check_failed"
+    /// Publishing fast-forwarded the round onto the pull request's head.
+    case published
+    /// The pull request's head moved under the round, so nothing was pushed (SPEC §13.1 stale).
+    case stale
+    /// The verification label was on the pull request when the round came to publish, so nothing was pushed.
+    case frozen
+    /// The push was refused for a reason other than a moved head, and the watch parked.
+    case publishFailed = "publish_failed"
 }
 
 extension PRWatchStore {
@@ -145,6 +153,7 @@ extension Board {
                 case .fix?, .decision?, nil:
                     continue
                 }
+                item.round = watch.round
                 item.updatedAt = now
                 try item.update(db)
             }
