@@ -103,8 +103,12 @@ public struct PullRequestWatchReader: Sendable {
                 nodes { id isResolved isOutdated comments(last: 1) { nodes { author { login } body url path line } } }
               }
               reviews(last: 50) { nodes { id state body url submittedAt author { login } } }
-              timelineItems(last: 100, itemTypes: [REVIEW_REQUESTED_EVENT]) {
-                nodes { ... on ReviewRequestedEvent { createdAt requestedReviewer { ... on User { login } ... on Bot { login } } } }
+              timelineItems(last: 100, itemTypes: [REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT]) {
+                nodes {
+                  __typename
+                  ... on ReviewRequestedEvent { createdAt requestedReviewer { ... on User { login } ... on Bot { login } } }
+                  ... on ReviewRequestRemovedEvent { createdAt requestedReviewer { ... on User { login } ... on Bot { login } } }
+                }
               }
             }
             """
@@ -188,9 +192,9 @@ public struct PullRequestWatchReader: Sendable {
 }
 
 extension PullRequestWatchReader {
-    /// Each reviewer stands by their latest approving or change-requesting review. GitHub's
-    /// `reviewDecision` keeps a CHANGES_REQUESTED until that reviewer reviews again; here a review
-    /// request made after it clears it, leaving the reviewer pending (SPEC §13.1).
+    /// Each reviewer stands by their latest approving or change-requesting review; a review request
+    /// made after a CHANGES_REQUESTED leaves that reviewer pending until a later removal of the
+    /// request. Readiness reads this only when `reviewDecision` is null (SPEC §13.1).
     fileprivate static func standings(
         of pr: GraphQLResponse.PullRequest, byViewer: (GraphQLResponse.Author?) -> Bool
     ) -> (approvedBy: [String], changesRequestedBy: [String]) {
@@ -205,11 +209,16 @@ extension PullRequestWatchReader {
             }
         }
         var requestedAt: [String: Date] = [:]
-        for request in pr.timelineItems?.nodes ?? [] {
-            guard let login = request.requestedReviewer?.login,
-                  let at = request.createdAt.flatMap({ iso.date(from: $0) })
+        var removedAt: [String: Date] = [:]
+        for event in pr.timelineItems?.nodes ?? [] {
+            guard let login = event.requestedReviewer?.login?.lowercased(),
+                  let at = event.createdAt.flatMap({ iso.date(from: $0) })
             else { continue }
-            requestedAt[login.lowercased()] = max(at, requestedAt[login.lowercased()] ?? at)
+            switch event.__typename {
+            case "ReviewRequestedEvent": requestedAt[login] = max(at, requestedAt[login] ?? at)
+            case "ReviewRequestRemovedEvent": removedAt[login] = max(at, removedAt[login] ?? at)
+            default: continue
+            }
         }
         var approvedBy: [String] = []
         var changesRequestedBy: [String] = []
@@ -219,7 +228,8 @@ extension PullRequestWatchReader {
                 continue
             }
             let submitted = entry.review.submittedAt.flatMap { iso.date(from: $0) }
-            if let submitted, let requested = requestedAt[key], requested > submitted { continue }
+            if let submitted, let requested = requestedAt[key], requested > submitted,
+               removedAt[key].map({ $0 < requested }) ?? true { continue }
             changesRequestedBy.append(entry.login)
         }
         return (approvedBy, changesRequestedBy)
@@ -263,9 +273,10 @@ private struct GraphQLResponse: Decodable {
         let author: Author?
     }
 
-    /// A team request has no login and never matches a reviewer.
+    /// A review request or its removal. A team request has no login and never matches a reviewer.
     struct ReviewRequest: Decodable {
         struct Reviewer: Decodable { let login: String? }
+        let __typename: String?
         let createdAt: String?
         let requestedReviewer: Reviewer?
     }

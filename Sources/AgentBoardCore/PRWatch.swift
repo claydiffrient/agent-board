@@ -356,12 +356,20 @@ public enum PRWatchTransition {
         let labeled = settings.markVerifiedLabel.map { label in
             snapshot.labels.contains { $0.caseInsensitiveCompare(label) == .orderedSame }
         } ?? false
-        let approved = !snapshot.approvedBy.isEmpty && snapshot.changesRequestedBy.isEmpty
-        let ready = (!settings.requireApproval || approved)
+        let ready = (!settings.requireApproval || approved(snapshot))
             && checksGreen(snapshot.checksState)
             && openItems == 0
         let target: PRWatchState = labeled ? .verified : ready ? .readyToVerify : .watching
         return target == state ? nil : target
+    }
+
+    /// GitHub's `reviewDecision` carries branch protection's required counts and code owners. Only a
+    /// repository with no review requirement, where it is null, falls back to the per-reviewer standing.
+    static func approved(_ snapshot: PRSnapshot) -> Bool {
+        guard let decision = snapshot.reviewDecision else {
+            return !snapshot.approvedBy.isEmpty && snapshot.changesRequestedBy.isEmpty
+        }
+        return decision == "APPROVED"
     }
 
     /// A PR with no checks configured has no rollup, and nothing on it is failing.

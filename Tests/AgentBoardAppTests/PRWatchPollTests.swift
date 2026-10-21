@@ -33,7 +33,7 @@ final class PRWatchPollTests: XCTestCase {
     }
 
     private func pullRequest(
-        _ number: Int = 12, head: String = "c0ffee", decision: String = "APPROVED", labels: [String] = [],
+        _ number: Int = 12, head: String = "c0ffee", decision: String? = "APPROVED", labels: [String] = [],
         checks: String? = "SUCCESS", threads: [[String: Any]] = [], reviews: [[String: Any]]? = nil,
         requests: [[String: Any]] = []
     ) -> [String: Any] {
@@ -41,7 +41,7 @@ final class PRWatchPollTests: XCTestCase {
         return [
             "number": number, "url": "https://github.com/\(repository)/pull/\(number)", "title": "Add widgets",
             "isDraft": false, "headRefName": "add-widgets", "headRefOid": head, "baseRefName": "main",
-            "reviewDecision": decision, "mergeable": "MERGEABLE",
+            "reviewDecision": decision ?? NSNull(), "mergeable": "MERGEABLE",
             "labels": ["nodes": labels.map { ["name": $0] }],
             "commits": ["nodes": [["commit": ["statusCheckRollup": rollup]]]],
             "reviewThreads": ["nodes": threads],
@@ -54,8 +54,11 @@ final class PRWatchPollTests: XCTestCase {
         ["id": id, "state": state, "body": "", "url": "\(url)#\(id)", "submittedAt": submitted, "author": ["login": author]]
     }
 
-    private func reviewRequest(of reviewer: String, at created: String) -> [String: Any] {
-        ["createdAt": created, "requestedReviewer": ["login": reviewer]]
+    private func reviewRequest(of reviewer: String, at created: String, removed: Bool = false) -> [String: Any] {
+        [
+            "__typename": removed ? "ReviewRequestRemovedEvent" : "ReviewRequestedEvent",
+            "createdAt": created, "requestedReviewer": ["login": reviewer],
+        ]
     }
 
     private func thread(_ id: String, by author: String, resolved: Bool = false, outdated: Bool = false) -> [String: Any] {
@@ -125,25 +128,15 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertTrue(banners.isEmpty)
     }
 
-    func testReRequestingAReviewAfterChangesRequestedStopsThatReviewerBlocking() async throws {
+    /// Branch protection's required counts and code owners live only in GitHub's decision.
+    func testOneApprovalIsNotReadyWhileGitHubStillRequiresReview() async throws {
         try enable()
-        let reviews = [
-            review("R_ok", by: "approver", state: "APPROVED", at: "2026-10-20T09:00:00Z"),
-            review("R_changes", by: "reviewer", state: "CHANGES_REQUESTED", at: "2026-10-20T10:00:00Z"),
-        ]
-        answer(pullRequest(decision: "CHANGES_REQUESTED", reviews: reviews))
+        answer(pullRequest(decision: "REVIEW_REQUIRED"))
         await fixture.supervisor.pollPRWatches()
         XCTAssertEqual(try onlyWatch().state, .watching)
-
-        answer(pullRequest(
-            head: "decaf0", decision: "CHANGES_REQUESTED", reviews: reviews,
-            requests: [reviewRequest(of: "reviewer", at: "2026-10-20T11:00:00Z")]
-        ))
-        await fixture.supervisor.pollPRWatches()
-        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
     }
 
-    func testChangesRequestedWithoutAReRequestStillBlocksAfterAPush() async throws {
+    func testAReRequestedChangesRequestedWaitsOnReviewersWithoutBecomingReady() async throws {
         try enable()
         answer(pullRequest(
             head: "decaf0", decision: "CHANGES_REQUESTED",
@@ -151,7 +144,45 @@ final class PRWatchPollTests: XCTestCase {
                 review("R_ok", by: "approver", state: "APPROVED", at: "2026-10-20T09:00:00Z"),
                 review("R_changes", by: "reviewer", state: "CHANGES_REQUESTED", at: "2026-10-20T10:00:00Z"),
             ],
+            requests: [reviewRequest(of: "reviewer", at: "2026-10-20T11:00:00Z")]
+        ))
+        await fixture.supervisor.pollPRWatches()
+
+        XCTAssertEqual(try onlyWatch().state, .watching)
+        XCTAssertEqual(try watches.page(projectId: fixture.project.id).map(\.group), [.waitingOnReviewers])
+    }
+
+    /// With no review requirement GitHub's decision is null, and each reviewer's standing decides.
+    func testWithNoReviewRequirementOneApprovalIsReadyUntilAReviewerBlocks() async throws {
+        try enable()
+        let approval = review("R_ok", by: "approver", state: "APPROVED", at: "2026-10-20T09:00:00Z")
+        answer(pullRequest(decision: nil, reviews: [approval]))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+
+        answer(pullRequest(
+            decision: nil,
+            reviews: [approval, review("R_changes", by: "reviewer", state: "CHANGES_REQUESTED", at: "2026-10-20T10:00:00Z")],
             requests: [reviewRequest(of: "reviewer", at: "2026-10-20T08:00:00Z")]
+        ))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .watching, "a request older than the CHANGES_REQUESTED does not clear it")
+    }
+
+    func testRemovingAReRequestRestoresTheBlock() async throws {
+        try enable()
+        let reviews = [
+            review("R_ok", by: "approver", state: "APPROVED", at: "2026-10-20T09:00:00Z"),
+            review("R_changes", by: "reviewer", state: "CHANGES_REQUESTED", at: "2026-10-20T10:00:00Z"),
+        ]
+        let request = reviewRequest(of: "reviewer", at: "2026-10-20T11:00:00Z")
+        answer(pullRequest(decision: nil, reviews: reviews, requests: [request]))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+
+        answer(pullRequest(
+            decision: nil, reviews: reviews,
+            requests: [request, reviewRequest(of: "reviewer", at: "2026-10-20T12:00:00Z", removed: true)]
         ))
         await fixture.supervisor.pollPRWatches()
         XCTAssertEqual(try onlyWatch().state, .watching)
