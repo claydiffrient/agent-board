@@ -66,6 +66,69 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertEqual(try store.get(created.id)?.headChangedAt, 2_000)
     }
 
+    private func triage(_ f: Fixture, watchId: String, _ nodeId: String, as verdict: PRItemVerdict) throws {
+        let store = PRWatchStore(f.db)
+        try store.setState(.settling, watchId: watchId)
+        XCTAssertNotNil(try store.beginTriageRound(watchId: watchId))
+        try f.db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE pr_item SET verdict = ?, approach = 'An approach.' WHERE github_node_id = ?",
+                arguments: [verdict, nodeId]
+            )
+        }
+        try f.board.applyVerdicts(watchId: watchId, fixerModel: nil)
+    }
+
+    func testAFollowUpReopenedByAReplyAndRetriagedAsFixGetsACodeTask() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try triage(f, watchId: watch.id, "T1", as: .followUp)
+        let followUp = try XCTUnwrap(store.items(watchId: watch.id).first?.fixTaskId)
+
+        try store.upsert(
+            projectId: f.project.id, snapshot: snapshot(items: [thread("T1", body: "Please do it in this PR.")]), now: 2_000
+        )
+        XCTAssertNil(try store.items(watchId: watch.id).first?.fixTaskId)
+        try triage(f, watchId: watch.id, "T1", as: .fix)
+
+        let item = try XCTUnwrap(store.items(watchId: watch.id).first)
+        XCTAssertEqual(item.state, .open)
+        let fix = try XCTUnwrap(item.fixTaskId.flatMap { try f.tasks.get($0) })
+        XCTAssertNotEqual(fix.id, followUp)
+        XCTAssertEqual(fix.type, .code)
+        XCTAssertEqual(fix.column, .backlog)
+        XCTAssertTrue(fix.body?.contains("Please do it in this PR.") == true, fix.body ?? "")
+    }
+
+    func testAReplyOnADecisionClearsItsVerdictAndAnswerWhetherItWasHandledOrStillOpen() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(
+            projectId: f.project.id, snapshot: snapshot(items: [thread("Answered"), thread("Waiting")]), now: 1_000
+        )
+        try f.db.writer.write { db in
+            try db.execute(sql: """
+                UPDATE pr_item SET verdict = 'decision', decision_question = 'Async?', decision_options_json = '["Yes"]',
+                  decision_answer = 'Yes', reply_body = 'Done.'
+                """)
+            try db.execute(sql: "UPDATE pr_item SET state = 'handled' WHERE github_node_id = 'Answered'")
+        }
+
+        try store.upsert(
+            projectId: f.project.id,
+            snapshot: snapshot(items: [thread("Answered", body: "Reconsider."), thread("Waiting", body: "Reconsider.")]),
+            now: 2_000
+        )
+        for item in try store.items(watchId: watch.id) {
+            XCTAssertEqual(item.state, .open, item.githubNodeId)
+            XCTAssertNil(item.verdict, item.githubNodeId)
+            XCTAssertNil(item.decisionQuestion, item.githubNodeId)
+            XCTAssertNil(item.decisionAnswer, item.githubNodeId)
+            XCTAssertNil(item.replyBody, item.githubNodeId)
+        }
+    }
+
     func testPageGroupsWatchesAndBadgeCountsReadyAndDecisions() throws {
         let f = try Fixture.make()
         let other = try f.otherProject()

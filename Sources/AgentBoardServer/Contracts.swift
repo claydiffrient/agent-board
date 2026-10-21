@@ -8,6 +8,9 @@ public enum TokenScope: String, Sendable, Codable {
     case reviewer
     /// Belongs to no project: reads every project's board and writes to none.
     case coordinator
+    /// Reads one watched pull request's open items and records their verdicts. No checkout writes,
+    /// no `gh`.
+    case triager
 }
 
 public struct TokenIdentity: Sendable, Equatable {

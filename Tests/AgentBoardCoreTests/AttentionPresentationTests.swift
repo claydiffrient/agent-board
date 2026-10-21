@@ -54,7 +54,7 @@ final class AttentionPresentationTests: XCTestCase {
     func testSeverityOrderPutsApprovalsFirstAndShutdownLast() {
         XCTAssertEqual(
             AttentionReason.allCases,
-            [.pendingApproval, .blockedWorker, .strandedReports, .overdueShutdown, .prPollUnavailable]
+            [.pendingApproval, .blockedWorker, .strandedReports, .overdueShutdown, .prPollUnavailable, .parkedPullRequest]
         )
         XCTAssertLessThan(AttentionReason.pendingApproval.severity, AttentionReason.blockedWorker.severity)
         XCTAssertLessThan(AttentionReason.strandedReports.severity, AttentionReason.overdueShutdown.severity)

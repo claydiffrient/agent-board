@@ -14,6 +14,8 @@ public enum AttentionReason: String, Sendable, Codable, CaseIterable, Equatable 
     case overdueShutdown
     /// PR follow-through is on but `gh` is missing or not logged in, so no PR is being watched (SPEC §13.1).
     case prPollUnavailable
+    /// Follow-through parked a pull request, which waits for the human to resume it (SPEC §13.1).
+    case parkedPullRequest
 
     var severity: Int { Self.allCases.firstIndex(of: self)! }
 }
@@ -111,6 +113,7 @@ public struct ProjectAttentionStore: Sendable {
         add(.strandedReports, row["stranded_reports"])
         add(.overdueShutdown, row["overdue_deliveries"])
         add(.prPollUnavailable, row["pr_poll_problems"], detail: row["pr_poll_detail"])
+        add(.parkedPullRequest, row["parked_pull_requests"], detail: row["parked_detail"])
         return ProjectAttention(
             id: row["id"],
             name: row["name"],
@@ -142,7 +145,8 @@ public struct ProjectAttentionStore: Sendable {
     }
 
     /// `blocked_title` is a bare column beside `MIN(updated_at)`: SQLite guarantees it comes from
-    /// the row that produced the minimum, so the detail names the longest-blocked task.
+    /// the row that produced the minimum, so the detail names the longest-blocked task. The parked
+    /// detail names the most recently parked pull request the same way.
     static let sql = """
         SELECT p.id AS id,
                p.name AS name,
@@ -152,7 +156,9 @@ public struct ProjectAttentionStore: Sendable {
                CASE WHEN COALESCE(o.n, 0) > 0 THEN 0 ELSE COALESCE(r.n, 0) END AS stranded_reports,
                COALESCE(s.n, 0) AS overdue_deliveries,
                CASE WHEN pp.project_id IS NULL THEN 0 ELSE 1 END AS pr_poll_problems,
-               pp.detail AS pr_poll_detail
+               pp.detail AS pr_poll_detail,
+               COALESCE(pk.n, 0) AS parked_pull_requests,
+               pk.detail AS parked_detail
         FROM project p
         LEFT JOIN (
             SELECT project_id, COUNT(*) AS n FROM approval
@@ -180,6 +186,11 @@ public struct ProjectAttentionStore: Sendable {
             GROUP BY so.project_id
         ) s ON s.project_id = p.id
         LEFT JOIN pr_poll_problem pp ON pp.project_id = p.id
+        LEFT JOIN (
+            SELECT project_id, COUNT(*) AS n, MAX(updated_at),
+                   '#' || number || ': ' || COALESCE(parked_reason, 'parked') AS detail
+            FROM pr_watch WHERE state = 'parked' GROUP BY project_id
+        ) pk ON pk.project_id = p.id
         ORDER BY p.name COLLATE NOCASE, p.created_at
         """
 }
