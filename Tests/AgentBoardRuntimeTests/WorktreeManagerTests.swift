@@ -130,7 +130,7 @@ final class WorktreeManagerTests: XCTestCase {
 
             let outcome = try manager.deleteBranchIfMerged(branch, into: ["main"])
 
-            guard case .kept = outcome else {
+            guard case .keptUnreadable = outcome else {
                 XCTFail("unreadable \(unreadable): \(outcome)")
                 continue
             }
@@ -343,6 +343,79 @@ final class WorktreeManagerTests: XCTestCase {
             return XCTFail("expected the merge to defer to the checkout, got \(outcome)")
         }
         XCTAssertTrue(WorktreeManager.samePath(URL(fileURLWithPath: path), integration), path)
+    }
+
+    func testMergeRefusesToAdvanceATargetWhoseWorktreeGitCannotRead() throws {
+        let integration = try epicWithMergeableTask()
+        let head = try adminDirectory(of: integration).appendingPathComponent("HEAD").path
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: head)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: head) }
+        let epicBefore = try revParse("agentboard/epic-1")
+
+        XCTAssertThrowsError(try manager.merge(
+            taskBranch: "agentboard/task", into: "agentboard/epic-1", taskTitle: "Add the widget", targetTitle: "Widgets"
+        )) { error in
+            XCTAssertTrue(error is UnreadableWorktreeRecord, "\(error)")
+        }
+        XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore, "merge moved a branch under a worktree it could not read")
+    }
+
+    func testMergeTreatsATargetBeingBisectedAsCheckedOut() throws {
+        let integration = try epicWithMergeableTask()
+        try git(["bisect", "start"], cwd: integration)
+        try git(["checkout", "-q", "--detach"], cwd: integration)
+
+        let outcome = try manager.merge(
+            taskBranch: "agentboard/task", into: "agentboard/epic-1", taskTitle: "Add the widget", targetTitle: "Widgets"
+        )
+
+        guard case .skippedCheckedOut = outcome else {
+            return XCTFail("a branch under bisect was treated as free: \(outcome)")
+        }
+    }
+
+    func testGitReadersThrowWhenGitFailsRatherThanAnsweringAbsent() throws {
+        let notARepo = sandbox.appendingPathComponent("not-a-repo")
+        try FileManager.default.createDirectory(at: notARepo, withIntermediateDirectories: true)
+        let lost = WorktreeManager(
+            repoPath: notARepo, worktreeRoot: worktrees, hookSettingsURL: hookSettings, attribution: .unattributable
+        )
+        XCTAssertThrowsError(try lost.refCommit("refs/heads/main"))
+        XCTAssertThrowsError(try lost.commitExists("main"))
+        XCTAssertThrowsError(try manager.currentBranch(at: notARepo))
+        XCTAssertNil(try manager.refCommit("refs/heads/missing"))
+
+        try git(["remote", "add", "origin", sandbox.appendingPathComponent("gone.git").path], cwd: repo)
+        XCTAssertThrowsError(try manager.fetchCommitIfMissing(String(repeating: "a", count: 40), from: "origin")) { error in
+            XCTAssertTrue("\(error)".contains("does not appear to be a git repository"), "\(error)")
+        }
+    }
+
+    func testFreshestBaseWarnsWhenGitCannotReadTheRemote() throws {
+        try git(["remote", "add", "origin", sandbox.appendingPathComponent("origin.git").path], cwd: repo)
+        let config = try FileHandle(forWritingTo: repo.appendingPathComponent(".git/config"))
+        try config.seekToEnd()
+        try config.write(contentsOf: Data("[remote \"origin\"]\n\turl\n".utf8))
+        try config.close()
+
+        let start = manager.freshestBase("main")
+
+        XCTAssertEqual(start.ref, "main")
+        XCTAssertTrue(start.warning?.contains("remote.origin.url") == true, "\(String(describing: start.warning))")
+    }
+
+    /// `agentboard/epic-1` checked out in its integration worktree, behind a task branch that would fast-forward it.
+    private func epicWithMergeableTask() throws -> URL {
+        try manager.ensureBranch("agentboard/epic-1", from: "main")
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "agentboard/epic-1")
+        try addCommit("feature.txt", in: work)
+        try manager.remove(path: work)
+        return try manager.createForBranch(name: "epic-1", branch: "agentboard/epic-1")
+    }
+
+    private func adminDirectory(of worktree: URL) throws -> URL {
+        URL(fileURLWithPath: try git(["rev-parse", "--absolute-git-dir"], cwd: worktree)
+            .trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     func testMergeReportsAMissingTargetBranchRatherThanCuttingIt() throws {

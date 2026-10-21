@@ -195,7 +195,11 @@ nobody reviewed.
   a working tree holds, which is the ordinary case for the base branch: the
   human's own checkout is on it. `git update-ref` does not refuse such a branch;
   it moves the ref and leaves that working tree reporting every newly-merged
-  file as deleted. So the accept defers instead.
+  file as deleted. So the accept defers instead. "Holds" is decided the way the
+  reaper below decides it, from git's admin files: a worktree whose `HEAD`, an
+  in-progress rebase or an in-progress bisect names the branch. When any of
+  those files cannot be read the merge refuses, and the task is `unlanded` with
+  the unreadable directory named, rather than trusting `git worktree list`.
 
   Because the accept therefore cannot always land the work, every task carries a
   **landing**, written by the accept and cleared when the task leaves `done`:
@@ -334,11 +338,13 @@ session owns, and deletes merged `agentboard/*` branches that no longer have a
 worktree. Anything dirty or unmerged is left alone and reported. A task branch
 cut moments ago sits exactly at its base, so it reads as merged until its
 worker's first commit, and the worktree check alone protects it. That check
-reads each worktree's `HEAD` (and an in-progress rebase's `head-name`) from
-git's own admin files and keeps the branch when any of them cannot be read:
-`git worktree list` exits 0 in that case while leaving the worktree, or its
-branch, out of the list, and a sweep that trusted it deleted a running task's
-branch. The delete itself is guarded by the tip that was checked. The teardown
+reads each worktree's `HEAD` (and an in-progress rebase's `head-name` or
+bisect's `BISECT_START`) from git's own admin files and keeps the branch when
+any of them cannot be read: `git worktree list` exits 0 in that case while
+leaving the worktree, or its branch, out of the list, and a sweep that trusted
+it deleted a running task's branch. One unreadable record blocks every branch's
+check, so the sweep names that directory once in the status bar, with how many
+branches it kept. The delete itself is guarded by the tip that was checked. The teardown
 hook runs before each removal (§3.1); a failure goes on the progress of the
 task whose session held the worktree, in a `decision` report of its own, since
 no other report marks the removal. A kept orphan stays a status-bar notice:

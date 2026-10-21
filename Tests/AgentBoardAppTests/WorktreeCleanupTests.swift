@@ -222,6 +222,18 @@ final class WorktreeCleanupTests: XCTestCase {
         XCTAssertNil(fixture.supervisor.lastError)
     }
 
+    func testReconcileNamesTheUnreadableWorktreeRecordThatStopsTheBranchSweep() async throws {
+        try fixture.manager.ensureBranch("agentboard/stale-task", from: "main")
+        let ghost = URL(fileURLWithPath: fixture.project.repoPath).appendingPathComponent(".git/worktrees/ghost")
+        try FileManager.default.createDirectory(at: ghost, withIntermediateDirectories: true)
+
+        await fixture.supervisor.reconcile(projectId: fixture.project.id)
+
+        XCTAssertTrue(try fixture.manager.branchExists("agentboard/stale-task"))
+        let notice = try XCTUnwrap(fixture.supervisor.lastError, "the sweep stopped reaping without saying why")
+        XCTAssertTrue(notice.contains(ghost.path), notice)
+    }
+
     func testReconcileKeepsATaskBranchThatIsStillCheckedOut() async throws {
         let task = try makeTask()
         try fixture.worktreeWorker(task: task, state: .running)

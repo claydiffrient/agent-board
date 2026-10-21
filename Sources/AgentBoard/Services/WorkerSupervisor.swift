@@ -2177,19 +2177,26 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// Task branches outlive their worktree: every accepted task before this swept them up leaves one
-    /// behind. Only failures are reported, since an unmerged branch is the normal in-flight state.
+    /// behind. Only failures are reported, since an unmerged branch is the normal in-flight state. An
+    /// unreadable worktree record blocks every branch's holder check, so it is named once per sweep.
     private nonisolated static func sweepMergedBranches(_ manager: WorktreeManager, bases: [String]) -> [String] {
         guard let branches = try? manager.localBranches(withPrefix: taskBranchPrefix) else { return [] }
-        return branches
-            .filter { !$0.hasPrefix(EpicStore.branchPrefix) && !$0.hasPrefix(SharedCheckoutGroup.branchPrefix) }
-            .flatMap { branch -> [String] in
-                do {
-                    _ = try manager.deleteBranchIfMerged(branch, into: bases)
-                    return []
-                } catch {
-                    return ["could not delete branch \(branch): \(error)"]
+        var failures: [String] = []
+        var blocked: [String: (record: UnreadableWorktreeRecord, branches: Int)] = [:]
+        for branch in branches
+        where !branch.hasPrefix(EpicStore.branchPrefix) && !branch.hasPrefix(SharedCheckoutGroup.branchPrefix) {
+            do {
+                if case .keptUnreadable(_, let record) = try manager.deleteBranchIfMerged(branch, into: bases) {
+                    blocked[record.directory, default: (record, 0)].branches += 1
                 }
+            } catch {
+                failures.append("could not delete branch \(branch): \(error)")
             }
+        }
+        return failures + blocked.keys.sorted().compactMap { blocked[$0] }.map {
+            "kept \($0.branches) task branch\($0.branches == 1 ? "" : "es") without checking whether they were merged: "
+                + "\($0.record). Fix that directory's permissions, or remove it if its worktree is gone."
+        }
     }
 
     private enum WorktreeTeardown {
@@ -2219,10 +2226,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         _ manager: WorktreeManager, _ branch: String, bases: [String]
     ) -> [String] {
         do {
-            if case .kept(let branch, let reason) = try manager.deleteBranchIfMerged(branch, into: bases) {
-                return ["kept branch \(branch): \(reason)"]
+            switch try manager.deleteBranchIfMerged(branch, into: bases) {
+            case .kept(let branch, let reason): return ["kept branch \(branch): \(reason)"]
+            case .keptUnreadable(let branch, let record): return ["kept branch \(branch): \(record)"]
+            case .deleted, .noSuchBranch: return []
             }
-            return []
         } catch {
             return ["could not delete branch \(branch): \(error)"]
         }

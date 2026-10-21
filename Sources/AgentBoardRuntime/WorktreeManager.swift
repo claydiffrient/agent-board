@@ -44,7 +44,20 @@ public struct DiffSummary: Sendable, Equatable {
 public enum BranchDeletion: Sendable, Equatable {
     case deleted(String)
     case kept(branch: String, reason: String)
+    /// Kept because git's record of some worktree could not be read, so nothing can say it is free.
+    case keptUnreadable(branch: String, record: UnreadableWorktreeRecord)
     case noSuchBranch(String)
+}
+
+/// A worktree admin file (`HEAD`, `gitdir`, rebase or bisect state) that exists but could not be read.
+/// Whatever that worktree holds is unknown, so a check that meets one fails closed.
+public struct UnreadableWorktreeRecord: Error, CustomStringConvertible, Sendable, Equatable {
+    public var directory: String
+    public var detail: String
+
+    public var description: String {
+        "git's record of a worktree in \(directory) could not be read: \(detail)"
+    }
 }
 
 /// What `merge` did to the target branch — an epic branch, or the project's base branch for a
@@ -157,26 +170,34 @@ public struct WorktreeManager: Sendable {
 
     /// The branch checked out at `path`, or nil when its HEAD is detached.
     public func currentBranch(at path: URL) throws -> String? {
-        let result = try gitRaw(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd: path)
-        guard result.status == 0 else { return nil }
-        let name = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? nil : name
+        let args = ["symbolic-ref", "--quiet", "--short", "HEAD"]
+        let result = try gitRaw(args, cwd: path)
+        switch result.status {
+        case 0:
+            let name = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? nil : name
+        case 1: return nil
+        default: throw AgentRuntimeError(Self.failure(args, result))
+        }
     }
 
     public static let baseFetchTimeout: TimeInterval = 10
 
     /// SPEC §3.1 step 1: fetches `base` from `remote` and picks the start point for a branch cut from
-    /// it. Never moves local `base`, and never throws: no remote, or a failed fetch, means local `base`.
+    /// it. Never moves local `base`, and never throws: no remote, or a failed fetch, means local `base`,
+    /// and only git's "no such remote" exit (2) goes without a warning.
     public func freshestBase(
         _ base: String, remote: String = "origin", timeout: TimeInterval = baseFetchTimeout
     ) -> BaseStartPoint {
-        guard (try? gitRaw(PublishCommand.remoteURL(remote), cwd: repoPath))?.status == 0 else {
-            return BaseStartPoint(ref: base)
-        }
         let tracking = "refs/remotes/\(remote)/\(base)"
         let args = ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/\(base):\(tracking)"]
         let problem: String
         do {
+            let remoteURL = try gitRaw(PublishCommand.remoteURL(remote), cwd: repoPath)
+            if remoteURL.status == 2 { return BaseStartPoint(ref: base) }
+            guard remoteURL.status == 0 else {
+                throw AgentRuntimeError(Self.failure(PublishCommand.remoteURL(remote), remoteURL))
+            }
             let fetched = try gitRaw(args, cwd: repoPath, timeout: timeout)
             if fetched.status == 0 { return startPoint(local: "refs/heads/\(base)", remote: tracking, base: base) }
             let stderr = fetched.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -234,7 +255,8 @@ public struct WorktreeManager: Sendable {
     /// write is guarded by the target's old value. A conflict leaves the target branch where it was.
     ///
     /// The one case it will not do is a target branch some working tree holds; see
-    /// `BranchMerge.skippedCheckedOut`.
+    /// `BranchMerge.skippedCheckedOut`. When a worktree's record cannot be read it throws
+    /// `UnreadableWorktreeRecord` instead, and the target is untouched.
     public func merge(
         taskBranch: String,
         into target: String,
@@ -243,8 +265,8 @@ public struct WorktreeManager: Sendable {
     ) throws -> BranchMerge {
         if let settled = try premergeOutcome(taskBranch: taskBranch, into: target) { return settled }
         let targetRef = "refs/heads/\(target)"
-        if let holder = try list().first(where: { $0.branch == target }) {
-            return .skippedCheckedOut(path: holder.path.path)
+        if let holder = try worktreeHolding(target) {
+            return .skippedCheckedOut(path: holder)
         }
         let targetHead = try resolve(targetRef)
         let taskHead = try resolve("refs/heads/\(taskBranch)")
@@ -397,6 +419,8 @@ public struct WorktreeManager: Sendable {
         let holder: String?
         do {
             holder = try worktreeHolding(branch)
+        } catch let record as UnreadableWorktreeRecord {
+            return .keptUnreadable(branch: branch, record: record)
         } catch {
             return .kept(branch: branch, reason: "whether a worktree holds it could not be read (\(error))")
         }
@@ -416,32 +440,65 @@ public struct WorktreeManager: Sendable {
         return .deleted(branch)
     }
 
-    /// The worktree whose HEAD, or in-progress rebase, names `branch`, read from git's admin files
-    /// (SPEC §5). Not from `git worktree list`: that exits 0 when it cannot read a worktree's
-    /// `gitdir` or `HEAD`, and leaves the worktree or its branch out. Throws when any HEAD is unreadable.
+    /// The worktree whose HEAD, in-progress rebase or bisect names `branch` — the states git's own
+    /// "checked out" test counts — read from git's admin files (SPEC §5). Not from `git worktree
+    /// list`: that exits 0 when it cannot read a worktree's `gitdir` or `HEAD`, and leaves the
+    /// worktree or its branch out. Throws `UnreadableWorktreeRecord` when any record is unreadable.
     private func worktreeHolding(_ branch: String) throws -> String? {
+        let admins = try worktreeAdminDirectories()
+        let ref = "refs/heads/\(branch)"
+        for admin in [admins.common] + admins.linked {
+            let head = try Self.adminFile("HEAD", in: admin, required: true) ?? ""
+            let named = [head.replacingOccurrences(of: "ref: ", with: "")]
+                + (try ["rebase-merge/head-name", "rebase-apply/head-name"].compactMap {
+                    try Self.adminFile($0, in: admin, required: false)
+                })
+                + (try Self.adminFile("BISECT_START", in: admin, required: false).map { [$0, "refs/heads/" + $0] } ?? [])
+            guard named.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == ref }) else { continue }
+            if admin == admins.common { return repoPath.path }
+            return try Self.worktreePath(admin: admin).path
+        }
+        return nil
+    }
+
+    /// Every worktree git has registered — the main checkout and each `worktrees/<id>` entry — read
+    /// from the admin files rather than `git worktree list`, which drops an entry it cannot read.
+    public func registeredWorktreePaths() throws -> [URL] {
+        let admins = try worktreeAdminDirectories()
+        return try [repoPath] + admins.linked.map { try Self.worktreePath(admin: $0) }
+    }
+
+    private func worktreeAdminDirectories() throws -> (common: URL, linked: [URL]) {
         let common = URL(fileURLWithPath: try gitChecked(
             ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd: repoPath
         ).stdout.trimmingCharacters(in: .whitespacesAndNewlines))
         let linkedRoot = common.appendingPathComponent("worktrees")
-        let linked = FileManager.default.fileExists(atPath: linkedRoot.path)
-            ? try FileManager.default.contentsOfDirectory(at: linkedRoot, includingPropertiesForKeys: [.isDirectoryKey])
+        guard FileManager.default.fileExists(atPath: linkedRoot.path) else { return (common, []) }
+        do {
+            let linked = try FileManager.default
+                .contentsOfDirectory(at: linkedRoot, includingPropertiesForKeys: [.isDirectoryKey])
                 .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            : []
-        let ref = "refs/heads/\(branch)"
-        for admin in [common] + linked {
-            let head = try String(contentsOf: admin.appendingPathComponent("HEAD"), encoding: .utf8)
-            let rebasing = ["rebase-merge/head-name", "rebase-apply/head-name"].compactMap {
-                try? String(contentsOf: admin.appendingPathComponent($0), encoding: .utf8)
-            }
-            let named = [head.replacingOccurrences(of: "ref: ", with: "")] + rebasing
-            guard named.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == ref }) else { continue }
-            if admin == common { return repoPath.path }
-            let gitdir = try? String(contentsOf: admin.appendingPathComponent("gitdir"), encoding: .utf8)
-            return gitdir.map { URL(fileURLWithPath: $0.trimmingCharacters(in: .whitespacesAndNewlines)).deletingLastPathComponent().path }
-                ?? admin.path
+            return (common, linked)
+        } catch {
+            throw UnreadableWorktreeRecord(directory: linkedRoot.path, detail: error.localizedDescription)
         }
-        return nil
+    }
+
+    /// Nil when an optional file is absent; a file that exists and cannot be read always throws.
+    private static func adminFile(_ name: String, in admin: URL, required: Bool) throws -> String? {
+        let file = admin.appendingPathComponent(name)
+        guard required || FileManager.default.fileExists(atPath: file.path) else { return nil }
+        do {
+            return try String(contentsOf: file, encoding: .utf8)
+        } catch {
+            throw UnreadableWorktreeRecord(directory: admin.path, detail: error.localizedDescription)
+        }
+    }
+
+    /// `gitdir` holds the path of the worktree's `.git` file.
+    private static func worktreePath(admin: URL) throws -> URL {
+        let gitdir = try adminFile("gitdir", in: admin, required: true) ?? ""
+        return URL(fileURLWithPath: gitdir.trimmingCharacters(in: .whitespacesAndNewlines)).deletingLastPathComponent()
     }
 
     /// The ledger is best effort: it must never be the reason a branch survives or a spawn fails.
@@ -449,7 +506,7 @@ public struct WorktreeManager: Sendable {
     private func recordBranchBase(_ branch: String, base: String) {
         guard let taskId = TaskBranchLedger.taskId(ofBranch: branch) else { return }
         let ref = TaskBranchLedger.baseRef(taskId: taskId)
-        guard (try? refCommit(ref)) == nil, let commit = try? refCommit(base) else { return }
+        guard case .success(nil) = Result(catching: { try refCommit(ref) }), let commit = try? refCommit(base) else { return }
         _ = try? setRef(ref, to: commit)
     }
 
@@ -509,10 +566,20 @@ public struct WorktreeManager: Sendable {
     /// Resolves any ref — including the ledger refs outside `refs/heads` — to its commit, or nil
     /// when the ref is not there.
     public func refCommit(_ ref: String) throws -> String? {
-        let result = try gitRaw(["rev-parse", "--verify", "--quiet", "\(ref)^{commit}"], cwd: repoPath)
-        guard result.status == 0 else { return nil }
+        guard let result = try verifyCommit(ref) else { return nil }
         let commit = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         return commit.isEmpty ? nil : commit
+    }
+
+    /// Nil only for git's "no such commit" exit (1); any other failure throws with git's output.
+    private func verifyCommit(_ rev: String) throws -> CommandResult? {
+        let args = ["rev-parse", "--verify", "--quiet", "\(rev)^{commit}"]
+        let result = try gitRaw(args, cwd: repoPath)
+        switch result.status {
+        case 0: return result
+        case 1: return nil
+        default: throw AgentRuntimeError(Self.failure(args, result))
+        }
     }
 
     public func setRef(_ ref: String, to commit: String) throws {
@@ -531,15 +598,17 @@ public struct WorktreeManager: Sendable {
     }
 
     public func commitExists(_ rev: String) throws -> Bool {
-        try gitRaw(["rev-parse", "--verify", "--quiet", "\(rev)^{commit}"], cwd: repoPath).status == 0
+        try verifyCommit(rev) != nil
     }
 
     /// Whether `commit`, a full object id, is in the repository, fetching it from `remote` first when
     /// it is not: a pull request's head can hold commits made on GitHub that were never fetched.
+    /// A failed fetch throws with git's output; git exits 128 for an unknown commit and an
+    /// unreachable remote alike.
     public func fetchCommitIfMissing(_ commit: String, from remote: String) throws -> Bool {
         guard commit.wholeMatch(of: #/[0-9a-f]{40}|[0-9a-f]{64}/#) != nil else { return false }
         if try commitExists(commit) { return true }
-        _ = try gitRaw(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, commit], cwd: repoPath)
+        try gitChecked(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, commit], cwd: repoPath)
         return try commitExists(commit)
     }
 
