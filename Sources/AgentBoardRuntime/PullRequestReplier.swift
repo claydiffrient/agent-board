@@ -40,7 +40,10 @@ public struct PullRequestReplier: Sendable {
         }
         guard let url = (try? JSONDecoder().decode(Response.self, from: Data(stdout.utf8)))?
             .data?.addPullRequestReviewThreadReply?.comment.url
-        else { throw PullRequestCheckFailure("`gh api graphql` printed no reply: \(stdout)") }
+        else {
+            let said = "`gh api graphql` printed no reply: \(stdout)"
+            throw Self.isGone(stdout) ? PullRequestReplyTargetGone(said) : PullRequestCheckFailure(said)
+        }
         return url
     }
 
@@ -63,8 +66,23 @@ public struct PullRequestReplier: Sendable {
             let said = [result.stderr, result.stdout]
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .first { !$0.isEmpty } ?? "exit \(result.status)"
-            throw PullRequestCheckFailure("`gh api` failed: \(said)")
+            let failure = "`gh api` failed: \(said)"
+            if Self.isGone(result.stderr + result.stdout) { throw PullRequestReplyTargetGone(failure) }
+            throw PullRequestCheckFailure(failure)
         }
         return result.stdout
+    }
+
+    static func isGone(_ output: String) -> Bool {
+        ["NOT_FOUND", "HTTP 404", "Could not resolve to a node"].contains { output.contains($0) }
+    }
+}
+
+/// GitHub no longer has what a reply answers: the thread, comment or pull request is gone.
+public struct PullRequestReplyTargetGone: Error, CustomStringConvertible, Equatable, Sendable {
+    public let description: String
+
+    public init(_ description: String) {
+        self.description = description
     }
 }

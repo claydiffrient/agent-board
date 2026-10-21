@@ -342,18 +342,28 @@ something argued rather than settled.
 publishing round goes stale or parks, or, for a round with no fix item, once its
 verdicts are applied. Each time, every handled thread or review item whose
 `reply_url` is empty gets one, whatever round handled it, so an answer from a
-round that never pushed is still replied to at the next of those points. A fix
-item gets "Fixed in `<sha>`." with the first seven characters of the head its
-own round pushed, and only once that round pushed it under its fix task; a fix
-whose round went stale, froze or parked claims nothing. Any other factual item
+round that never pushed is still replied to at the next of those points. Only an
+item whose `handled_at` is at or after `postFactualRepliesSince` qualifies:
+`ProjectStore.updateSettings` stamps that time when `postFactualReplies` turns
+on and clears it when it turns off, so turning replies on never posts the
+backlog triage wrote while they were off, and an item handled before
+`handled_at` existed never posts. A fix item gets "Fixed in `<sha>`." with the
+first seven characters of the head its own round pushed, and only once that
+round pushed it under its fix task, matched with `IS` so a fix task deleted
+after the push still counts; a fix whose round went stale, froze or parked
+claims nothing. Any other factual item
 gets its triage `reply_body`; an item with no `reply_body` gets none. A frozen
 round posts nothing itself; its owed replies wait for the next point. A thread
 item is answered on its thread with `gh api graphql`'s
 `addPullRequestReviewThreadReply`; a review body, which has no thread, gets one
 pull-request comment through `gh api repos/<owner>/<name>/issues/<n>/comments`,
 led by a link to the review. The reply's URL is stored in `reply_url`, so
-nothing is posted twice; a failed post is logged and left empty. No thread is
-ever resolved: resolving is the reviewer's call.
+nothing is posted twice. A failed post is logged and its error kept in
+`reply_error`; it is tried again at the next point, except when `gh` reports
+the comment gone (`NOT_FOUND` or HTTP 404), which sets `reply_abandoned_at` and
+ends the attempts. An item reopened by a new reply loses `reply_url`,
+`reply_error` and `reply_abandoned_at`, so once it is handled again it gets a
+fresh reply. No thread is ever resolved: resolving is the reviewer's call.
 
 **The triage session (phase 2).** `WorkerSupervisor.spawnTriager(watchId)` is
 the only way one starts; the orchestrator has no tool for it. It is held to

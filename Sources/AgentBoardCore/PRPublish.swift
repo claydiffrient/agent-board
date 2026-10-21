@@ -106,20 +106,25 @@ extension PRWatchStore {
     }
 
     /// Every handled thread and review item, from any round, with a factual reply not yet posted (SPEC
-    /// §13.2). A `fix` item qualifies only once its own round pushed it, so a stale or parked round's
-    /// fixes never claim "Fixed in".
+    /// §13.2), handled since `postFactualReplies` was last turned on and not given up on. A `fix` item
+    /// qualifies only once its own round pushed it, so a stale or parked round's fixes never claim
+    /// "Fixed in"; `IS` keeps that match when the round's fix task was deleted and both sides are null.
     public func pendingReplies(watchId: String) throws -> [PRItem] {
         try db.reader.read { db in
             try PRItem.fetchAll(
                 db,
                 sql: """
                 SELECT i.* FROM pr_item i
-                WHERE i.watch_id = ? AND i.state = 'handled' AND i.reply_url IS NULL AND i.kind IN ('thread', 'review')
+                JOIN pr_watch w ON w.id = i.watch_id
+                JOIN project p ON p.id = w.project_id
+                WHERE i.watch_id = ? AND i.state = 'handled' AND i.reply_url IS NULL AND i.reply_abandoned_at IS NULL
+                AND i.kind IN ('thread', 'review')
+                AND i.handled_at >= json_extract(p.settings_json, '$.prFollowThrough.postFactualRepliesSince')
                 AND (
                   (i.verdict IN ('answer', 'already_done', 'follow_up') AND i.reply_body IS NOT NULL)
                   OR (i.verdict = 'fix' AND EXISTS (
                     SELECT 1 FROM pr_round r WHERE r.watch_id = i.watch_id AND r.number = i.round
-                    AND r.pushed_head_oid IS NOT NULL AND r.fix_task_id = i.fix_task_id
+                    AND r.pushed_head_oid IS NOT NULL AND r.fix_task_id IS i.fix_task_id
                   ))
                 )
                 ORDER BY i.id
@@ -132,7 +137,19 @@ extension PRWatchStore {
     public func recordReply(itemId: Int64, url: String, now: Int64 = .nowMillis) throws {
         try db.writer.write { db in
             try db.execute(
-                sql: "UPDATE pr_item SET reply_url = ?, updated_at = ? WHERE id = ?", arguments: [url, now, itemId]
+                sql: "UPDATE pr_item SET reply_url = ?, reply_error = NULL, updated_at = ? WHERE id = ?",
+                arguments: [url, now, itemId]
+            )
+        }
+    }
+
+    /// A post that failed. One whose comment is `gone` from GitHub is abandoned; any other is tried again
+    /// at the next posting point.
+    public func recordReplyFailure(itemId: Int64, error: String, gone: Bool, now: Int64 = .nowMillis) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE pr_item SET reply_error = ?, reply_abandoned_at = ?, updated_at = ? WHERE id = ?",
+                arguments: [error, gone ? now : nil, now, itemId]
             )
         }
     }
@@ -153,10 +170,10 @@ extension Board {
             if let taskId = round.fixTaskId {
                 try db.execute(
                     sql: """
-                    UPDATE pr_item SET state = 'handled', round = ?, updated_at = ?
+                    UPDATE pr_item SET state = 'handled', round = ?, handled_at = ?, updated_at = ?
                     WHERE watch_id = ? AND fix_task_id = ? AND state = 'open' AND verdict = 'fix'
                     """,
-                    arguments: [round.number, now, watchId, taskId]
+                    arguments: [round.number, now, now, watchId, taskId]
                 )
             }
             watch.state = .awaitingCI

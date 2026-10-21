@@ -201,6 +201,59 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertEqual(try store.badgeCounts(), [f.project.id: PRBadgeCount(readyToVerify: 1, openDecisions: 1)])
     }
 
+    private func setReplies(_ f: Fixture, _ on: Bool, now: Int64) throws {
+        var settings = try XCTUnwrap(f.projects.get(f.project.id)).settings
+        settings.prFollowThrough.postFactualReplies = on
+        try f.projects.updateSettings(f.project.id, settings, now: now)
+    }
+
+    private func answer(_ f: Fixture, _ nodeId: String) throws {
+        try f.db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE pr_item SET verdict = 'answer', reply_body = 'Three retries.' WHERE github_node_id = ?",
+                arguments: [nodeId]
+            )
+        }
+    }
+
+    func testTurningRepliesOnOwesNoReplyForAnItemHandledBeforeThen() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1"), thread("T2")]), now: 1_000)
+        try answer(f, "T1")
+        try answer(f, "T2")
+        try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T2")]), now: 2_000)
+
+        try setReplies(f, true, now: 3_000)
+        XCTAssertEqual(try store.pendingReplies(watchId: watch.id).map(\.githubNodeId), [])
+
+        try store.upsert(projectId: f.project.id, snapshot: snapshot(items: []), now: 4_000)
+        try setReplies(f, true, now: 5_000)
+        XCTAssertEqual(try store.pendingReplies(watchId: watch.id).map(\.githubNodeId), ["T2"])
+    }
+
+    /// The round's fix task is deleted after its push, which nulls `fix_task_id` on both the round and the item.
+    func testAPushedFixWhoseTaskWasDeletedStillOwesItsReplyAndAReopenedItemOwesAFreshOne() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        try setReplies(f, true, now: 500)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try triage(f, watchId: watch.id, as: .fix)
+        let task = try XCTUnwrap(f.board.createFixRoundTask(watchId: watch.id, model: nil))
+        try store.setState(.publishing, watchId: watch.id)
+        try f.board.recordRoundPublished(watchId: watch.id, pushedHeadOid: "def456", now: 2_000)
+        try f.tasks.delete(task.id)
+
+        let fixed = try XCTUnwrap(try store.pendingReplies(watchId: watch.id).first)
+        try store.recordReply(itemId: try XCTUnwrap(fixed.id), url: "https://github.com/example-org/app/pull/7#r1")
+        XCTAssertEqual(try store.pendingReplies(watchId: watch.id).map(\.githubNodeId), [])
+
+        try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1", body: "Still not renamed")]), now: 3_000)
+        try answer(f, "T1")
+        try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1", resolved: true)]), now: 4_000)
+        XCTAssertEqual(try store.pendingReplies(watchId: watch.id).map(\.githubNodeId), ["T1"])
+    }
+
     func testFollowThroughTablesMigrateOntoAnExistingDatabase() throws {
         var configuration = Configuration()
         configuration.foreignKeysEnabled = true

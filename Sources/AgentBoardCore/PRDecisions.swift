@@ -40,7 +40,7 @@ extension Board {
             item.decisionAnswer = answer
             item.approach = answer
             item.round = watch.round + 1
-            _ = try Self.applyVerdict(db, to: &item, watch: watch)
+            _ = try Self.applyVerdict(db, to: &item, watch: watch, now: now)
             item.updatedAt = now
             try item.update(db)
             return item

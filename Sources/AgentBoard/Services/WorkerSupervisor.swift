@@ -2157,8 +2157,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// SPEC §13.2: with `postFactualReplies` on, each handled thread item still owed a reply gets one and
-    /// each review body a PR comment, its URL recorded. Nothing is resolved. A failed post is logged and
-    /// left without a URL.
+    /// each review body a PR comment, its URL recorded. Nothing is resolved. A failed post is recorded on
+    /// the item, and abandoned when GitHub says its comment is gone.
     private func postFactualReplies(watchId: String, project: Project) async {
         guard project.settings.prFollowThrough.postFactualReplies, let watch = try? prWatches.get(watchId),
               let items = try? prWatches.pendingReplies(watchId: watchId), !items.isEmpty
@@ -2184,6 +2184,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try prWatches.recordReply(itemId: id, url: url)
             } catch {
                 NSLog("PR follow-through: the reply to %@ on %@ was not posted: %@", item.githubNodeId, watch.url, describe(error))
+                try? prWatches.recordReplyFailure(itemId: id, error: describe(error), gone: error is PullRequestReplyTargetGone)
             }
         }
     }

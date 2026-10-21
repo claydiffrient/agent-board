@@ -160,6 +160,10 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
     public var createdAt: Int64
     public var updatedAt: Int64
     public var decisionNotifiedAt: Int64? = nil
+    public var handledAt: Int64? = nil
+    public var replyError: String? = nil
+    /// Set once the item's comment is gone from GitHub, so its reply is never tried again (SPEC §13.2).
+    public var replyAbandonedAt: Int64? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -186,6 +190,9 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case decisionNotifiedAt = "decision_notified_at"
+        case handledAt = "handled_at"
+        case replyError = "reply_error"
+        case replyAbandonedAt = "reply_abandoned_at"
     }
 
     public mutating func didInsert(_ inserted: InsertionSuccess) {

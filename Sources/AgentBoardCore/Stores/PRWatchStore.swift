@@ -11,7 +11,8 @@ public struct PRWatchStore: Sendable {
     /// Records one poll (SPEC §4). Idempotent by node id: an unchanged snapshot moves only
     /// `last_polled_at`, and a new head oid stamps `head_changed_at`. An open item that resolved or left the snapshot becomes handled,
     /// except the failed-checks item of a head whose checks still fail.
-    /// An item whose body changed (a new reply) is open and untriaged again; one that reopens also drops its task.
+    /// An item whose body changed (a new reply) is open and untriaged again, owing a fresh reply; one that
+    /// reopens also drops its task.
     @discardableResult
     public func upsert(projectId: String, snapshot: PRSnapshot, now: Int64 = .nowMillis) throws -> PRWatch {
         try db.writer.write { db in
@@ -74,7 +75,10 @@ public struct PRWatchStore: Sendable {
                 item.line = incoming.line
                 item.url = incoming.url
                 if incoming.isResolved {
-                    if item.state == .open { item.state = .handled }
+                    if item.state == .open {
+                        item.state = .handled
+                        item.handledAt = now
+                    }
                 } else if bodyChanged {
                     if item.state != .open {
                         item.state = .open
@@ -88,6 +92,9 @@ public struct PRWatchStore: Sendable {
                     item.decisionAnswer = nil
                     item.decisionNotifiedAt = nil
                     item.replyBody = nil
+                    item.replyURL = nil
+                    item.replyError = nil
+                    item.replyAbandonedAt = nil
                     item.followupGrade = nil
                     feedbackArrived = true
                 }
@@ -100,6 +107,7 @@ public struct PRWatchStore: Sendable {
                 ? PRItem.checksNodeId(head: snapshot.headOid) : nil
             for var gone in stored.values where gone.state == .open && gone.githubNodeId != failingChecks {
                 gone.state = .handled
+                gone.handledAt = now
                 gone.updatedAt = now
                 try gone.update(db)
             }

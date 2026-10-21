@@ -173,6 +173,14 @@ final class FakeGh: GhRunning, @unchecked Sendable {
         }
     }
 
+    /// What `gh api graphql` prints when a reply's thread is gone from GitHub.
+    func failRepliesAsGone() {
+        let errors = #"{"data":{"addPullRequestReviewThreadReply":null},"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a node"}]}"#
+        lock.withLock {
+            answers[Self.replyKey] = CommandResult(status: 1, stdout: errors, stderr: "gh: Could not resolve to a node")
+        }
+    }
+
     private static let searchKey = "search prs"
     private static let replyKey = "reply"
     private static let commentKey = "comment"

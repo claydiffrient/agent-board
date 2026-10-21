@@ -589,6 +589,14 @@ enum Schema {
     ALTER TABLE pr_item ADD COLUMN followup_note TEXT;
     """
 
+    /// When an item became handled, which bounds the replies turning `postFactualReplies` on may post,
+    /// and the last failed post, with when one was given up on (SPEC §13.2).
+    static let prItemReplyBounds = """
+    ALTER TABLE pr_item ADD COLUMN handled_at INTEGER;
+    ALTER TABLE pr_item ADD COLUMN reply_error TEXT;
+    ALTER TABLE pr_item ADD COLUMN reply_abandoned_at INTEGER;
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",

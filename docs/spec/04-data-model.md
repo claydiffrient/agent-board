@@ -366,6 +366,9 @@ CREATE TABLE pr_item (
   followup_note         TEXT,            -- that grade's evidence, which a failed check hands the fixer
   reply_body            TEXT,
   reply_url             TEXT,            -- the reply publishing posted (§13.2); null until one is
+  reply_error           TEXT,            -- the last failed post's error (§13.2)
+  reply_abandoned_at    INTEGER,         -- when a post found the comment gone; no reply is tried again
+  handled_at            INTEGER,         -- when it last became handled; bounds the replies §13.2 posts
   round                 INTEGER NOT NULL DEFAULT 0,  -- the round it arrived in, then the round that handled it, whose replies post it
   created_at            INTEGER NOT NULL,
   updated_at            INTEGER NOT NULL,
@@ -576,14 +579,16 @@ changes nothing but `last_polled_at`. An open item that the snapshot reports
 resolved, or leaves out, becomes `handled`; a resolved item never seen before is
 not stored. An unresolved item whose body changed — a new reply — loses
 everything triage gave it: `verdict`, `approach`, the `decision_*` fields,
-`reply_body` and `followup_grade`, so the next round triages it afresh. A
+`reply_body`, `reply_url`, `reply_error`, `reply_abandoned_at` and
+`followup_grade`, so the next round triages it afresh and replies anew. A
 `handled` or `dismissed` one also reopens to `open` and drops `fix_task_id`; the
 task it named stays on the board as the record of the earlier round, and is
 never treated as the item's current task. An item still open keeps its
 `fix_task_id`. `settings_json.prFollowThrough`
 holds every work-specific value — `enabled`, `verificationLabel`,
 `requireApproval`, `settleMinutes`, `roundCap`, `dailyBudgetUSD`,
-`verifyCommand`, `postFactualReplies`, `roles` (`triage`, `fixer`, `reviewer`,
+`verifyCommand`, `postFactualReplies`, `postFactualRepliesSince` (when
+replies were last turned on, §13.2), `roles` (`triage`, `fixer`, `reviewer`,
 `followupCheck`, each `{rosterAgentId, model}`) and `privateTerms` — and an
 absent key, or an absent field inside it, decodes to off or empty:
 `enabled` false, `requireApproval` true, `settleMinutes` 10, `roundCap` 3, the

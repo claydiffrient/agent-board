@@ -548,11 +548,11 @@ final class PRFollowThroughLoopTests: XCTestCase {
     /// round's worktree.
     private func passedRound(
         label: String? = nil, replies: Bool = false, question: Bool = false, labels: [String] = [],
-        remoteHead: String? = nil
+        remoteHead: String? = nil, repliesGone: Bool = false
     ) async throws -> (tip: String, worktree: String) {
         try enableChecking(label: label, replies: replies)
         fixture.gh.answer(url, state: "OPEN", head: remoteHead ?? head, labels: labels)
-        fixture.gh.answerReplies(url: "\(url)#discussion_r1")
+        if repliesGone { fixture.gh.failRepliesAsGone() } else { fixture.gh.answerReplies(url: "\(url)#discussion_r1") }
         let fixer = try await runningFixer(question: question)
         let worktree = try XCTUnwrap(try activeSession(on: fixer.id).worktreePath)
         try await completeFixer(fixer, file: "fix.txt")
@@ -627,23 +627,22 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
     }
 
-    /// `gh pr view` already reports a head that is neither the round's base nor its tip, so no push is tried.
-    /// The round's answer is still replied to, once, and its fix, never pushed, claims nothing.
-    func testAStaleRoundStillPostsItsAnswerReplyExactlyOnce() async throws {
+    private var replyCalls: [[String]] { fixture.gh.calls.filter { $0.contains { $0.hasPrefix("query=mutation") } } }
+
+    /// A round that goes stale at publishing, since `gh pr view` already reports a head that is neither
+    /// its base nor its tip.
+    private func staleRound(repliesGone: Bool = false) async throws -> PRWatch {
         _ = try fixture.git(["checkout", "-q", "--detach", head])
         _ = try fixture.git(["commit", "-q", "--allow-empty", "-m", "Push from elsewhere"])
         let moved = try rev("HEAD")
         _ = try fixture.git(["checkout", "-q", "main"])
-        _ = try await passedRound(replies: true, question: true, remoteHead: moved)
+        _ = try await passedRound(replies: true, question: true, remoteHead: moved, repliesGone: repliesGone)
         await poll()
+        return try onlyWatch()
+    }
 
-        XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), head, "nothing is pushed")
-        let watch = try onlyWatch()
-        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["stale"])
-        var replies: [[String]] { fixture.gh.calls.filter { $0.contains { $0.hasPrefix("query=mutation") } } }
-        XCTAssertEqual(replies.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question"])
-        XCTAssertEqual(replies.map(\.last), ["body=Three retries."])
-
+    /// Re-triages the stale round's fix as an answer, which is the next posting point.
+    private func answerStaleFix(_ watch: PRWatch) async throws {
         await poll()
         let fix = try XCTUnwrap(try watches.items(watchId: watch.id).first { $0.githubNodeId == "T_fix" })
         let result = try await TriagerToolHandler(db: fixture.db, events: sink).call(
@@ -656,10 +655,35 @@ final class PRFollowThroughLoopTests: XCTestCase {
         )
         await result.afterResponse?()
         await poll()
+    }
+
+    /// No push is tried. The round's answer is still replied to, once, and its fix, never pushed, claims nothing.
+    func testAStaleRoundStillPostsItsAnswerReplyExactlyOnce() async throws {
+        let watch = try await staleRound()
+
+        XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), head, "nothing is pushed")
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["stale"])
+        XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question"])
+        XCTAssertEqual(replyCalls.map(\.last), ["body=Three retries."])
+
+        try await answerStaleFix(watch)
 
         XCTAssertEqual(try onlyWatch().state, .watching)
-        XCTAssertEqual(replies.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question", "thread=T_fix"])
-        XCTAssertEqual(replies.map(\.last), ["body=Three retries.", "body=It was renamed upstream."])
+        XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question", "thread=T_fix"])
+        XCTAssertEqual(replyCalls.map(\.last), ["body=Three retries.", "body=It was renamed upstream."])
+    }
+
+    func testAReplyToAThreadGitHubNoLongerHasIsTriedOnceAndRecordedNotRetriedAtTheNextPostingPoint() async throws {
+        let watch = try await staleRound(repliesGone: true)
+        XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question"])
+
+        try await answerStaleFix(watch)
+
+        XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question", "thread=T_fix"])
+        let question = try XCTUnwrap(try watches.items(watchId: watch.id).first { $0.githubNodeId == "T_question" })
+        XCTAssertNil(question.replyURL)
+        XCTAssertNotNil(question.replyAbandonedAt)
+        XCTAssertTrue(question.replyError?.contains("Could not resolve to a node") == true, question.replyError ?? "")
     }
 
     func testAVerificationLabelOnThePRBlocksThePushAndFreezesTheRoundsItemsAsDecisions() async throws {

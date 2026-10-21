@@ -154,7 +154,7 @@ extension Board {
                 .order(Column("id"))
                 .fetchAll(db)
             for var item in items {
-                guard try Self.applyVerdict(db, to: &item, watch: watch) else { continue }
+                guard try Self.applyVerdict(db, to: &item, watch: watch, now: now) else { continue }
                 item.round = watch.round
                 item.updatedAt = now
                 try item.update(db)
@@ -213,7 +213,7 @@ extension Board {
     /// Makes the task `item`'s verdict calls for and sets its state, and returns whether the item
     /// itself changed (SPEC §13.1): a `follow_up` gets its backlog task and is handled, `answer` and
     /// `already_done` are handled, and `fix` and `decision` stay open. Writes no item; the caller does.
-    static func applyVerdict(_ db: Database, to item: inout PRItem, watch: PRWatch) throws -> Bool {
+    static func applyVerdict(_ db: Database, to item: inout PRItem, watch: PRWatch, now: Int64) throws -> Bool {
         switch item.verdict {
         case .followUp?:
             let task = try item.fixTaskId.flatMap { try Task.fetchOne(db, key: $0) }
@@ -225,12 +225,13 @@ extension Board {
                     column: .backlog, origin: .followThrough, epicId: nil
                 ).id
             }
-            item.state = .handled
         case .answer?, .alreadyDone?:
-            item.state = .handled
+            break
         case .fix?, .decision?, nil:
             return false
         }
+        item.state = .handled
+        item.handledAt = now
         return true
     }
 
