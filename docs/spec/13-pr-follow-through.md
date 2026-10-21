@@ -315,7 +315,7 @@ on at all.
   below 0 as 0, a round cap below 1 as 1, and a budget of 0 or less as
   empty.
 
-### 13.5 Guardrails — phase 1 (publish guard) and planned amendments for phase 3
+### 13.5 Guardrails — phase 1 (publish guard) and phase 3 (D8 and §8 amendments)
 
 **The publish guard**, live from phase 1 regardless of whether follow-through
 itself is enabled: `BranchPublisher` refuses any push or pull request that
@@ -345,24 +345,23 @@ name, or the title or body).
 An empty list, or one holding only blank entries, is a no-op. A git command
 the guard cannot run refuses the publish rather than skipping the check.
 
-**Planned amendment to D8 (§1), not made here.** Phase 3 will add: the app,
-never a worker, may fast-forward push a round branch to the head ref of an
-open PR the human authored, without a human approval — but only after the
-reviewer role accepts the round, every item in it is graded fixed or moot,
-and the project's tests pass. Creating a branch, opening a PR, any
-non-fast-forward push, and any push to a verified PR stay human-gated or
-forbidden, unchanged. Until phase 3 lands, publishing's push (§13.1) is not
-reachable: nothing in phases 1–2 writes to a remote.
+**D8 amended (§1).** The app, never a worker, may fast-forward push a round
+branch to the head ref of an open PR the human authored, without a human
+approval — but only after the reviewer role accepts the round, every item in
+it is graded fixed or moot, and the project's tests pass. Creating a branch,
+opening a PR, any non-fast-forward push, and any push to a verified PR stay
+human-gated or forbidden, unchanged. This is publishing's push, above; until
+the rest of phase 3 lands it has no round to push, since phases 1–2 write
+nothing to a remote.
 
-**Planned amendment to §8, not made here.** Phase 3 will add: in a project
-with the feature on, the follow-through triager and fixer spawns skip spawn
-approval. Every cap in §8 — concurrent workers, the token cap, the daily
-budget above, the session ceiling — still applies unchanged; only the
-approval step is skipped, the same way a rostered agent is exempt from the
-elapsed and idle caps today (§8) without being exempt from spend.
+**§8 amended.** In a project with the feature on, the follow-through triager
+and fixer spawns skip spawn approval. Every cap in §8 — concurrent workers,
+the token cap, the daily budget above, the session ceiling — still applies
+unchanged; only the approval step is skipped, the same way a rostered agent
+is exempt from the elapsed and idle caps today (§8) without being exempt from
+spend.
 
 No agent in this feature runs with authority this section doesn't name here:
-a worker still never pushes (§1, §8) until phase 3's amendment lands, and
-even after it lands the fast-forward path above is the only new authority
-granted — every other push and pull-request path keeps its existing human
-gate.
+a worker still never pushes (§1, §8), and the fast-forward path above is the
+only new authority either amendment grants — every other push and
+pull-request path keeps its existing human gate.
