@@ -559,6 +559,14 @@ public struct Board: Sendable {
         }
     }
 
+    /// Moves a session to an inactive state with no report, releasing its file locks in the same write (SPEC §4).
+    public func endSession(_ sessionId: String, _ state: SessionState, endedAt: Int64? = nil) throws {
+        try db.writer.write { db in
+            try SessionStore.setState(db, sessionId, state, endedAt: endedAt)
+            try FileLockStore.releaseAll(db, sessionId: sessionId)
+        }
+    }
+
     @discardableResult
     public func block(taskId: String, sessionId: String, reason: String) throws -> Report {
         try db.writer.write { db in

@@ -137,7 +137,12 @@ nobody reviewed.
   lands while a spawn of the task is still setting up (§3.1) cancels that setup
   and waits for it to end before looking for worktrees: a setup cancelled before
   `git worktree add` creates nothing, and one already running its hook finishes,
-  so the removal finds its worktree. That setup's end queues no report.
+  so the removal finds its worktree. That setup's end queues no report. A spawn
+  that is still computing its checkout when the discard begins has no session
+  for the discard to find, so the spawn checks for the discard itself: it is
+  refused if the discard is under way when it would write its `setup` row, and
+  a reviewer's spawn, which creates its worktree before any row, is refused if
+  the task is being discarded or gone once it is past the teardown's claim.
 
   The merge takes the task's branch into the branch meant to carry it:
   `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling

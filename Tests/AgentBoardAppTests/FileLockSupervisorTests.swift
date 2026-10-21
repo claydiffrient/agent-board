@@ -94,6 +94,27 @@ final class FileLockSupervisorTests: XCTestCase {
         )
     }
 
+    /// A worker that reports failure may keep running, and a discard's stop may never produce a
+    /// SessionEnd, so neither route can leave the release to that hook.
+    func testAFailedOrDiscardedSessionLeavesNoLocks() async throws {
+        let failing = try fixture.workerAtWork("Fails")
+        let discarded = try fixture.workerAtWork("Discarded")
+        for worker in [failing, discarded] {
+            try locks.acquire(
+                projectId: fixture.project.id, path: "\(worker.task.id).swift", sessionId: worker.sessionId,
+                taskId: worker.task.id
+            )
+        }
+
+        try await fixture.callWorkerTool(
+            "update_status", arguments: .object(["state": .string("failed"), "detail": .string("cannot build")]),
+            token: failing.token
+        )
+        try await fixture.supervisor.discard(taskId: discarded.task.id)
+
+        XCTAssertEqual(try locks.held(projectId: fixture.project.id), [])
+    }
+
     /// The idle cap kills a worker that has made no tool call for `maxIdleSeconds`. A worker held at
     /// a lock has made no tool call because Agent Board is holding it, and killing it would throw
     /// away the work the lock exists to protect. The matching stall-indicator guarantee is a pure

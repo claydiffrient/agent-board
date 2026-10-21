@@ -150,6 +150,31 @@ final class WorktreeCleanupTests: XCTestCase {
         XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(task.id)"))
     }
 
+    /// The discard looked for sessions before this spawn wrote one, so only the spawn can stand down.
+    func testASpawnDuringADiscardsTeardownLeavesNoWorktreeOrBranch() async throws {
+        await fixture.supervisor.start()
+        try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
+        let started = fixture.supportDir.appendingPathComponent("teardown-started").path
+        let go = fixture.supportDir.appendingPathComponent("teardown-go").path
+        try setTeardown("touch '\(started)'; until [ -f '\(go)' ]; do sleep 0.05; done")
+        let task = try makeTask()
+        try fixture.worktreeWorker(task: task, state: .failed)
+
+        let discard = _Concurrency.Task { try await fixture.supervisor.discard(taskId: task.id) }
+        for _ in 0..<600 where !FileManager.default.fileExists(atPath: started) {
+            try await _Concurrency.Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: started), "the discard never ran its teardown hook")
+        let spawn = await _Concurrency.Task { try await fixture.supervisor.spawnWorker(taskId: task.id) }.result
+        FileManager.default.createFile(atPath: go, contents: nil)
+        try await discard.value
+        await fixture.supervisor.waitForSetup()
+
+        XCTAssertThrowsError(try spawn.get(), "a spawn began while its task was being discarded")
+        XCTAssertEqual(try worktreePaths(), [], "setup created a worktree for a discarded task")
+        XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(task.id)"))
+    }
+
     // MARK: - Reaper
 
     func testReconcileReapsACleanOrphanedWorktree() async throws {
