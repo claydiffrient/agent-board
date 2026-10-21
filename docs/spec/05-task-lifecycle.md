@@ -339,7 +339,12 @@ nobody reviewed.
 
 Reconcile also reaps worktrees under the project's worktree root that no active
 session owns, and deletes merged `agentboard/*` branches that no longer have a
-worktree. Anything dirty or unmerged is left alone and reported. A task branch
+worktree. Reconcile runs only while a project's Status view is open, so the
+supervisor's metering tick runs the same reap on every project every three
+minutes as well, the first one three minutes after launch, keeping the
+worktrees of the sessions whose rows are active. The two are serialized per
+project: a reconcile waits for a tick reap in progress, and the tick skips a
+project whose reconcile is running. Anything dirty or unmerged is left alone and reported. A task branch
 cut moments ago sits exactly at its base, so it reads as merged until its
 worker's first commit, and the worktree check alone protects it. That check
 reads each worktree's `HEAD` (and an in-progress rebase's `head-name` or

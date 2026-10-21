@@ -155,6 +155,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Millis of the last archive sweep; 0 means none yet, so the first tick after launch sweeps
     /// and picks up whatever came due while the app was closed.
     @ObservationIgnored private var lastArchiveSweep: Int64 = 0
+    /// Millis of the last orphan reap on the tick. `start()` sets it, so the first one waits an interval.
+    @ObservationIgnored private var lastOrphanReap: Int64 = 0
+    /// One `reconcile` or tick reap per project at a time, so two passes never choose orphans at once (SPEC §5).
+    @ObservationIgnored private var worktreeSweeps: [String: _Concurrency.Task<Void, Never>] = [:]
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
     @ObservationIgnored private var stallNotified: Set<String> = []
     /// `<project-id>\u{01}<branch>` for each shared branch whose pre-ledger `Agent-Board-Task`
@@ -188,6 +192,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// The archive policies are day-granular, so they ride the metering tick at a far coarser
     /// cadence rather than paying for a scan every 5 seconds — or a second timer.
     static let archiveSweepIntervalMillis: Int64 = 5 * 60 * 1000
+    static let orphanReapIntervalMillis: Int64 = 3 * 60 * 1000
     static let pullRequestCheckIntervalMillis: Int64 = 10 * 60 * 1000
     static let prWatchPollIntervalMillis: Int64 = 60 * 1000
     static let prWatchFailuresBeforeAttention = 10
@@ -261,6 +266,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         await sweepLeakedAgents()
         await migrateWorktreeRoots()
         refreshSleepAssertion()
+        lastOrphanReap = sleepLedger.reading().nowMillis
         startMetering()
     }
 
@@ -1876,6 +1882,23 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func reconcile(projectId: String) async {
+        while let running = worktreeSweeps[projectId] { await running.value }
+        await startWorktreeSweep(projectId: projectId) { await $0.reconcileNow(projectId: projectId) }.value
+    }
+
+    private func startWorktreeSweep(
+        projectId: String, _ body: @escaping @MainActor (WorkerSupervisor) async -> Void
+    ) -> _Concurrency.Task<Void, Never> {
+        let sweep = _Concurrency.Task { [weak self] in
+            guard let self else { return }
+            await body(self)
+            worktreeSweeps[projectId] = nil
+        }
+        worktreeSweeps[projectId] = sweep
+        return sweep
+    }
+
+    private func reconcileNow(projectId: String) async {
         let listed: [AgentInfo]
         do {
             listed = try await runtime.listSessions()
@@ -2207,6 +2230,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let paths = claim.paths
         return await offMainResult {
             Self.tearDown(manager: manager, paths: paths, branch: branch, bases: bases)
+        }
+    }
+
+    /// The metering tick's reap, so orphans go without the Status view open. It skips a project
+    /// whose `reconcile` is running rather than queue behind it (SPEC §5).
+    private func reapOrphanedWorktreesOnTick(_ all: [Project]) async {
+        for project in all where worktreeSweeps[project.id] == nil {
+            await startWorktreeSweep(projectId: project.id) { supervisor in
+                guard let ours = try? supervisor.sessions.all(projectId: project.id) else { return }
+                let live = Set(ours.filter { $0.state.isActive }.compactMap(\.worktreePath))
+                await supervisor.reapOrphanedWorktrees(projectId: project.id, keeping: live)
+            }.value
         }
     }
 
@@ -3099,6 +3134,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if now - lastPRWatchPoll >= Self.prWatchPollIntervalMillis {
             lastPRWatchPoll = now
             _Concurrency.Task { await self.pollPRWatches() }
+        }
+        if now - lastOrphanReap >= Self.orphanReapIntervalMillis {
+            lastOrphanReap = now
+            await reapOrphanedWorktreesOnTick(all)
         }
         for project in all {
             refreshShutdownProgressIfOrdered(projectId: project.id)

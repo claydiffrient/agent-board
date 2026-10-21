@@ -246,6 +246,16 @@ final class WorktreeCleanupTests: XCTestCase {
         XCTAssertTrue(try fixture.manager.branchExists("agentboard/\(task.id)"))
     }
 
+    func testTheMeteringTickReapsAnOrphanWithNoViewMountedAndKeepsAHeldWorktree() async throws {
+        let orphan = try XCTUnwrap(try fixture.worktreeWorker(task: makeTask(), state: .failed).worktreePath)
+        let held = try XCTUnwrap(try fixture.worktreeWorker(task: makeTask(), state: .running).worktreePath)
+
+        await fixture.supervisor.meterTick()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan), "the tick did not reap the orphan")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: held), "the tick reaped a live session's worktree")
+    }
+
     // MARK: - Helpers
 
     private func makeTask(epicId: String? = nil) throws -> BoardTask {
