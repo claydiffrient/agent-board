@@ -107,7 +107,8 @@ without a word. Any other failure to read its `origin` is logged with git's
 stderr, the project goes unpolled, and after 10 in a row it records its own row,
 cleared once `origin` reads again. Polls never overlap: one requested while
 another runs waits for it to finish and then runs in full, so it reads every
-write made before it was requested.
+write made before it was requested. The 60s tick is the exception: it skips its
+poll while one is still running, so a slow `gh` never queues polls behind it.
 
 **Pause.** A paused watch keeps following its pull request: every poll still
 records its items, head, checks and labels and moves it among watching,

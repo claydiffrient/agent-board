@@ -129,11 +129,13 @@ struct PullRequestsView: View {
         }
     }
 
-    private func answer(_ decision: PRItem, choice: PRDecisionChoice, project: Project?) {
+    private func answer(_ decision: PRItem, choice: PRDecisionChoice, project: Project?) -> Bool {
         do {
             try actions.answer(decision, choice: choice, project: project)
+            return true
         } catch {
             errorMessage = errorText(error)
+            return false
         }
     }
 
@@ -196,7 +198,8 @@ struct PullRequestActions {
 /// answers it in words.
 struct PRDecisionRow: View {
     let decision: PRItem
-    let answer: (PRDecisionChoice) -> Void
+    /// Returns whether the answer was recorded.
+    let answer: (PRDecisionChoice) -> Bool
 
     @State private var reply = ""
 
@@ -229,7 +232,7 @@ struct PRDecisionRow: View {
 
     private var options: some View {
         ForEach(decision.decisionOptions, id: \.self) { option in
-            Button(option.label) { answer(.option(option.label)) }
+            Button(option.label) { _ = answer(.option(option.label)) }
                 .help(option.verdict == .answer ? "Reply: \(option.replyBody ?? "")" : "Fix the comment this way")
         }
     }
@@ -241,8 +244,7 @@ struct PRDecisionRow: View {
 
     private func sendReply() {
         guard !trimmedReply.isEmpty else { return }
-        answer(.reply(trimmedReply))
-        reply = ""
+        if answer(.reply(trimmedReply)) { reply = "" }
     }
 }
 
