@@ -155,9 +155,54 @@ final class BranchPublisherRepoTests: XCTestCase {
 
         let guarded = BranchPublisher(repoPath: repo, privateTerms: ["zebracorp"])
         XCTAssertThrowsError(try guarded.push(branch: "agentboard/feature", base: "main")) { error in
-            XCTAssertEqual(error as? PublishFailure, .privateTerm(term: "zebracorp", site: .file("config.txt")))
+            XCTAssertEqual(error as? PublishFailure, .privateTerm(term: "zebracorp", site: .file("config.txt", commit: "Add config")))
         }
         XCTAssertTrue(try remoteBranches().isEmpty)
+    }
+
+    func testATermAddedAndLaterRemovedIsRefusedAndNamesTheCommitThatAddedIt() throws {
+        try addRemote()
+        try git(["checkout", "-q", "-b", "agentboard/feature"], in: repo)
+        try commit("config.txt", "endpoint = api.zebracorp.internal\n", message: "Add config")
+        try commit("config.txt", "endpoint = api.example.internal\n", message: "Scrub config")
+
+        let guarded = BranchPublisher(repoPath: repo, privateTerms: ["zebracorp"])
+        XCTAssertThrowsError(try guarded.push(branch: "agentboard/feature", base: "main")) { error in
+            XCTAssertEqual(error as? PublishFailure, .privateTerm(term: "zebracorp", site: .file("config.txt", commit: "Add config")))
+        }
+        XCTAssertTrue(try remoteBranches().isEmpty)
+    }
+
+    func testATermInsideAFileGitTreatsAsBinaryIsRefused() throws {
+        try addRemote()
+        _ = try publisher.push(branch: "main")
+        try git(["checkout", "-q", "-b", "agentboard/feature"], in: repo)
+        try XCTUnwrap("names\nzebracorp\n".data(using: .utf16LittleEndian))
+            .write(to: repo.appendingPathComponent("names.txt"))
+        try git(["add", "."], in: repo)
+        try git(["commit", "-m", "Add names"], in: repo)
+
+        let guarded = BranchPublisher(repoPath: repo, privateTerms: ["zebracorp"])
+        XCTAssertThrowsError(try guarded.push(branch: "agentboard/feature", base: "main")) { error in
+            XCTAssertEqual(error as? PublishFailure, .privateTerm(term: "zebracorp", site: .file("names.txt", commit: "Add names")))
+        }
+    }
+
+    func testALineAddedToACRLFFileWithAQuotedPathIsRefusedUnderItsRealName() throws {
+        try addRemote()
+        _ = try publisher.push(branch: "main")
+        try git(["checkout", "-q", "-b", "agentboard/feature"], in: repo)
+        try git(["config", "core.autocrlf", "false"], in: repo)
+        try commit("say \"hi\".txt", "one\r\ntwo\r\n", message: "Add greeting")
+        try commit("say \"hi\".txt", "one\r\ntwo\r\nzebracorp\r\n", message: "Extend greeting")
+
+        let guarded = BranchPublisher(repoPath: repo, privateTerms: ["zebracorp"])
+        XCTAssertThrowsError(try guarded.push(branch: "agentboard/feature", base: "main")) { error in
+            XCTAssertEqual(
+                error as? PublishFailure,
+                .privateTerm(term: "zebracorp", site: .file("say \"hi\".txt", commit: "Extend greeting"))
+            )
+        }
     }
 
     func testATermAlreadyOnTheRemoteBaseDoesNotRefuseABranchThatAddsNoneOfItsOwn() throws {

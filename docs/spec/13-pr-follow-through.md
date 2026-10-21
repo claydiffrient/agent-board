@@ -191,14 +191,20 @@ reads:
 - the published branch name (the remote name, not the local one);
 - the pull request's title and body, for `open_pull_request`;
 - every commit message in `<remote>/<base>..<branch>`;
-- the paths and the added lines of `git diff <remote>/<base>...<branch>`.
-  Removed lines are not read, so a commit that deletes a term is not refused
-  for it.
+- every published commit's changed paths and added lines, read per commit
+  from `git log -p --text <remote>/<base>..<branch>`. A push publishes every
+  commit, and a PR shows each one even when it is squash-merged, so a term
+  one commit adds and a later one removes is still refused. `--text` puts a
+  binary file's contents in the patch, and NULs are dropped before matching
+  so UTF-16 text is caught. A merge commit contributes only what its author
+  changed beyond git's own merge result (`--diff-merges=remerge`). Removed
+  lines are not read, so a commit that deletes a term is not refused for it.
 
-With no `<remote>/<base>` ref, the branch's whole history and tree are read
-instead. A match fails the approval: nothing is pushed, the card gets an
+With no `<remote>/<base>` ref, every commit in the branch's whole history is
+read instead. A match fails the approval: nothing is pushed, the card gets an
 error progress row, and the `decision` report names the term and where it was
-found (the file, the commit subject, the branch name, or the title or body).
+found (the file and the commit that added it, the commit subject, the branch
+name, or the title or body).
 An empty list, or one holding only blank entries, is a no-op. A git command
 the guard cannot run refuses the publish rather than skipping the check.
 
