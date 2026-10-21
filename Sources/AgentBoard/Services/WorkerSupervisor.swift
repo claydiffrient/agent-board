@@ -133,6 +133,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Millis of the last PR follow-through poll; 0 means none yet.
     @ObservationIgnored private var lastPRWatchPoll: Int64 = 0
     @ObservationIgnored private var prWatchPollInFlight = false
+    @ObservationIgnored private var prWatchSearchFailures = 0
     /// Millis of the last pull request merge check; 0 means none yet, so the first tick after
     /// launch checks.
     @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
@@ -183,6 +184,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     static let archiveSweepIntervalMillis: Int64 = 5 * 60 * 1000
     static let pullRequestCheckIntervalMillis: Int64 = 10 * 60 * 1000
     static let prWatchPollIntervalMillis: Int64 = 60 * 1000
+    static let prWatchFailuresBeforeAttention = 10
     /// Sessions that ended this recently still get one more transcript read so final spend lands.
     static let finalSpendWindowMillis: Int64 = 15_000
 
@@ -1340,8 +1342,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// SPEC §13.1, phase 1: watches the user's open, non-draft pull requests in every project with
     /// PR follow-through on, mapping each repository to the project whose `origin` names it. Writes
     /// each poll through `PRWatchStore` and moves only watching, readyToVerify and verified; a watch
-    /// whose PR left the open list settles to merged or closed by `gh pr view`. No project enabled
-    /// means no `gh` call at all.
+    /// whose PR left the open list settles to merged or closed by `gh pr view`, and one whose PR went
+    /// back to draft is deleted. No project enabled means no `gh` call at all.
     func pollPRWatches() async {
         guard !prWatchPollInFlight else { return }
         let enabled = ((try? projects.list()) ?? []).filter { $0.settings.prFollowThrough.enabled }
@@ -1368,16 +1370,27 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         do {
             let cwd = URL(fileURLWithPath: anyProject.repoPath)
             authored = try await offMain { try reader.authored(cwd: cwd) }
+            prWatchSearchFailures = 0
             try? prWatches.clearPollProblems()
         } catch let failure as PullRequestWatchFailure where failure.ghUnavailable {
             try? prWatches.setPollProblem(failure.description, projectIds: Set(enabled.map(\.id)))
             return
         } catch {
+            prWatchSearchFailures += 1
+            NSLog("PR watch poll failed (%d in a row): %@", prWatchSearchFailures, describe(error))
+            if prWatchSearchFailures >= Self.prWatchFailuresBeforeAttention {
+                try? prWatches.setPollProblem(
+                    "`gh search prs` has failed \(prWatchSearchFailures) times in a row: \(describe(error))",
+                    projectIds: Set(enabled.map(\.id))
+                )
+            }
             return
         }
 
+        func key(_ repository: String, _ number: Int) -> String { "\(repository.lowercased())#\(number)" }
+        let drafts = Set(authored.filter(\.isDraft).map { key($0.repository, $0.number) })
         let open = authored.filter { !$0.isDraft && projectByRepo[$0.repository.lowercased()] != nil }
-        let stillOpen = Set(open.map { "\($0.repository.lowercased())#\($0.number)" })
+        let stillOpen = Set(open.map { key($0.repository, $0.number) })
         for (slug, prs) in Dictionary(grouping: open, by: { $0.repository.lowercased() }) {
             guard let project = projectByRepo[slug] else { continue }
             let parts = prs[0].repository.split(separator: "/").map(String.init)
@@ -1394,8 +1407,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
         let states = pullRequestStates
         for project in enabled {
-            for watch in (try? prWatches.live(projectId: project.id)) ?? []
-            where !stillOpen.contains("\(watch.repoOwner.lowercased())/\(watch.repoName.lowercased())#\(watch.number)") {
+            for watch in (try? prWatches.live(projectId: project.id)) ?? [] {
+                let watchKey = key("\(watch.repoOwner)/\(watch.repoName)", watch.number)
+                if stillOpen.contains(watchKey) { continue }
+                if drafts.contains(watchKey) {
+                    try? prWatches.delete(watchId: watch.id)
+                    continue
+                }
                 let cwd = URL(fileURLWithPath: project.repoPath)
                 let url = watch.url
                 switch try? await offMain({ try states.state(of: url, cwd: cwd) }) {
