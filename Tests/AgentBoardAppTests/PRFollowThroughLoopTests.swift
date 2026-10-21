@@ -157,7 +157,10 @@ final class PRFollowThroughLoopTests: XCTestCase {
                 ]),
                 .object([
                     "item_id": .number(items["T_choice"]!), "verdict": .string("decision"), "approach": .string("Direction."),
-                    "decision_question": .string("Make it async?"), "decision_options": .array([.string("Yes"), .string("No")]),
+                    "decision_question": .string("Make it async?"), "decision_options": .array([
+                        .object(["label": .string("Yes"), "verdict": .string("fix")]),
+                        .object(["label": .string("No"), "verdict": .string("answer"), "reply_body": .string("It stays sync.")]),
+                    ]),
                 ]),
             ])]),
             identity: try await fixture.identity(token: grant.token)

@@ -187,9 +187,43 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
 
     public var isOpenDecision: Bool { state == .open && verdict == .decision }
 
-    public var decisionOptions: [String] {
+    public var decisionOptions: [PRDecisionOption] {
         guard let json = decisionOptionsJSON else { return [] }
-        return (try? JSONDecoder().decode([String].self, from: Data(json.utf8))) ?? []
+        return (try? JSONDecoder().decode([PRDecisionOption].self, from: Data(json.utf8))) ?? []
+    }
+}
+
+/// One choice on a decision (SPEC §13.4): choosing it answers the item as `verdict`, `fix` or
+/// `answer`, and an `answer` posts `replyBody`. A bare string, the form stored before options carried
+/// a verdict, decodes as a `fix`.
+public struct PRDecisionOption: Codable, Sendable, Equatable, Hashable {
+    public var label: String
+    public var verdict: PRItemVerdict
+    public var replyBody: String?
+
+    public init(label: String, verdict: PRItemVerdict, replyBody: String? = nil) {
+        self.label = label
+        self.verdict = verdict
+        self.replyBody = replyBody
+    }
+
+    public enum CodingKeys: String, CodingKey {
+        case label
+        case verdict
+        case replyBody = "reply_body"
+    }
+
+    public init(from decoder: Decoder) throws {
+        if let label = try? decoder.singleValueContainer().decode(String.self) {
+            self.init(label: label, verdict: .fix)
+            return
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            label: try container.decode(String.self, forKey: .label),
+            verdict: try container.decode(PRItemVerdict.self, forKey: .verdict),
+            replyBody: try container.decodeIfPresent(String.self, forKey: .replyBody)
+        )
     }
 }
 

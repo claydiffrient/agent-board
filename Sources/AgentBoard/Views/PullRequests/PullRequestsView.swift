@@ -122,16 +122,16 @@ struct PullRequestsView: View {
                 togglePause: { togglePause(listing.watch) }
             )
             ForEach(listing.decisions) { decision in
-                PRDecisionRow(decision: decision) { answer, verdict in
-                    self.answer(decision, with: answer, verdict: verdict, project: project)
+                PRDecisionRow(decision: decision) { choice in
+                    answer(decision, choice: choice, project: project)
                 }
             }
         }
     }
 
-    private func answer(_ decision: PRItem, with answer: String, verdict: PRItemVerdict, project: Project?) {
+    private func answer(_ decision: PRItem, choice: PRDecisionChoice, project: Project?) {
         do {
-            try actions.answer(decision, with: answer, verdict: verdict, project: project)
+            try actions.answer(decision, choice: choice, project: project)
         } catch {
             errorMessage = errorText(error)
         }
@@ -182,20 +182,21 @@ struct PullRequestActions {
         try PRWatchStore(db).setPaused(paused, watchId: watch.id)
     }
 
-    func answer(_ decision: PRItem, with answer: String, verdict: PRItemVerdict, project: Project?) throws {
+    func answer(_ decision: PRItem, choice: PRDecisionChoice, project: Project?) throws {
         guard let id = decision.id else { return }
         let fixer = project?.settings.prFollowThrough.roles.fixer
         try Board(db).answerDecision(
-            itemId: id, answer: answer, verdict: verdict, fixerModel: fixer?.model ?? project?.settings.defaultModel
+            itemId: id, choice: choice, fixerModel: fixer?.model ?? project?.settings.defaultModel
         )
     }
 }
 
 /// One open decision under its pull request's row (SPEC §13.4): the comment, triage's question, an
-/// option button for each choice, which answers it as a fix, and a reply that answers it in words.
+/// option button for each choice, which answers it as that option's fix or reply, and a reply that
+/// answers it in words.
 struct PRDecisionRow: View {
     let decision: PRItem
-    let answer: (String, PRItemVerdict) -> Void
+    let answer: (PRDecisionChoice) -> Void
 
     @State private var reply = ""
 
@@ -228,8 +229,8 @@ struct PRDecisionRow: View {
 
     private var options: some View {
         ForEach(decision.decisionOptions, id: \.self) { option in
-            Button(option) { answer(option, .fix) }
-                .help("Fix the comment this way")
+            Button(option.label) { answer(.option(option.label)) }
+                .help(option.verdict == .answer ? "Reply: \(option.replyBody ?? "")" : "Fix the comment this way")
         }
     }
 
@@ -240,7 +241,7 @@ struct PRDecisionRow: View {
 
     private func sendReply() {
         guard !trimmedReply.isEmpty else { return }
-        answer(trimmedReply, .answer)
+        answer(.reply(trimmedReply))
         reply = ""
     }
 }

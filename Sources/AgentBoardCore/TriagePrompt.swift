@@ -64,7 +64,10 @@ public enum TriagePrompt {
     - `follow_up`: real, but out of scope for this pull request, such as a refactor that belongs in its own. \
     It becomes a separate task. `reply_body` says it is tracked separately.
     - `decision`: a trade-off, a disagreement with the reviewer, or anything that sets direction. The author \
-    decides. Give `decision_question` and two to four `decision_options`.
+    decides. Give `decision_question` and two to four `decision_options`, each `{label, verdict}` with \
+    verdict `fix` or `answer`. A `fix` option changes code; an `answer` option changes none and carries \
+    `reply_body`, the reply that explains the choice to the reviewer. For example, "Change the helper" is \
+    `fix`, and "Keep it local" is `answer` with a short reason as its reply.
     Reserve `decision` for a choice a reasonable engineer could make either way. A change that is clearly \
     right and in scope is `fix`, however large; do not pass a judgment up because it is hard.
     """

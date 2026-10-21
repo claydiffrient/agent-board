@@ -119,7 +119,7 @@ final class PRWatchPollTests: XCTestCase {
         try watches.setVerdicts(try watches.openItems(watchId: watch.id).map { item in
             PRVerdictInput(
                 itemId: item.id!, verdict: .decision, approach: "Direction.",
-                decisionQuestion: "Keep \(item.githubNodeId)?", decisionOptions: ["Yes", "No"]
+                decisionQuestion: "Keep \(item.githubNodeId)?", decisionOptions: [.init(label: "Yes", verdict: .fix), .init(label: "No", verdict: .fix)]
             )
         }, watchId: watch.id)
     }

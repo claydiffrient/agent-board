@@ -64,7 +64,7 @@ final class PullRequestsPageTests: XCTestCase {
 
     @discardableResult
     private func decision(
-        _ db: AppDatabase, _ project: Project, number: Int, question: String, options: [String]
+        _ db: AppDatabase, _ project: Project, number: Int, question: String, options: [PRDecisionOption]
     ) throws -> PRItem {
         let store = PRWatchStore(db)
         let created = try store.upsert(projectId: project.id, snapshot: PRSnapshot(
@@ -87,7 +87,10 @@ final class PullRequestsPageTests: XCTestCase {
     func testANeedsYouRowShowsTheCommentTheQuestionAnOptionButtonEachAndAReplyField() throws {
         let db = try AppDatabase.inMemory()
         let project = try project(db, label: label)
-        try decision(db, project, number: 7, question: "Which concurrency model?", options: ["Asynchronous", "Blocking"])
+        try decision(db, project, number: 7, question: "Which concurrency model?", options: [
+            PRDecisionOption(label: "Asynchronous", verdict: .fix),
+            PRDecisionOption(label: "Blocking", verdict: .answer, replyBody: "The caller needs the result."),
+        ])
 
         let mount = OffscreenMount(
             PullRequestsView(projects: [project]).environment(renderEnvironment(db: db)),
@@ -109,37 +112,59 @@ final class PullRequestsPageTests: XCTestCase {
         XCTAssertEqual(fields.map(\.placeholderString), ["Reply instead"])
     }
 
-    /// An option answers a decision as a fix with the option as its approach; a typed reply answers
-    /// it in words. Either way it leaves the badge and the attention signal and moves to the next round.
+    /// An option answers a decision with its own verdict: a fix gets a code task, an answer is handled
+    /// with the option's reply and no task, and a typed reply answers it in words. Each leaves the badge
+    /// and the attention signal and moves to the next round. `chosen` keeps the old string-only options,
+    /// which read as fix.
     func testAnsweringADecisionClearsItsSignalsAndMovesItToTheNextRound() throws {
         let db = try AppDatabase.inMemory()
         var project = try project(db, label: label)
         project.settings.prFollowThrough.roles.fixer = PRFollowThroughRole(model: "fixer-model")
         try ProjectStore(db).updateSettings(project.id, project.settings)
-        let chosen = try decision(db, project, number: 7, question: "Which model?", options: ["Asynchronous", "Blocking"])
-        let replied = try decision(db, project, number: 8, question: "Rename it?", options: ["Yes", "No"])
-        XCTAssertEqual(try PRWatchStore(db).badgeCounts()[project.id]?.openDecisions, 2)
+        let options = [
+            PRDecisionOption(label: "Change the helper", verdict: .fix),
+            PRDecisionOption(label: "Keep it local", verdict: .answer, replyBody: "Only one caller uses it."),
+        ]
+        let chosen = try decision(db, project, number: 7, question: "Which model?", options: options)
+        let kept = try decision(db, project, number: 8, question: "Share the helper?", options: options)
+        let replied = try decision(db, project, number: 9, question: "Rename it?", options: options)
+        try db.writer.write { db in
+            try db.execute(
+                sql: #"UPDATE pr_item SET decision_options_json = '["Change the helper","Keep it local"]' WHERE id = ?"#,
+                arguments: [chosen.id]
+            )
+        }
+        XCTAssertEqual(try PRWatchStore(db).badgeCounts()[project.id]?.openDecisions, 3)
         let cause = try XCTUnwrap(try ProjectAttentionStore(db).attention(projectId: project.id)?
             .cause(.pullRequestDecision))
-        XCTAssertTrue(cause.text.contains("2 pull request decisions"), cause.text)
+        XCTAssertTrue(cause.text.contains("3 pull request decisions"), cause.text)
 
         let actions = PullRequestActions(db: db, gh: FakeGh())
-        try actions.answer(chosen, with: "Asynchronous", verdict: .fix, project: project)
-        try actions.answer(replied, with: "The old name is public API.", verdict: .answer, project: project)
+        try actions.answer(chosen, choice: .option("Change the helper"), project: project)
+        try actions.answer(kept, choice: .option("Keep it local"), project: project)
+        try actions.answer(replied, choice: .reply("The old name is public API."), project: project)
 
         XCTAssertNil(try PRWatchStore(db).badgeCounts()[project.id])
         XCTAssertNil(try ProjectAttentionStore(db).attention(projectId: project.id)?.cause(.pullRequestDecision))
         let fix = try XCTUnwrap(try PRWatchStore(db).items(watchId: chosen.watchId).first)
         XCTAssertEqual(fix.state, .open)
         XCTAssertEqual(fix.verdict, .fix)
-        XCTAssertEqual(fix.decisionAnswer, "Asynchronous")
-        XCTAssertEqual(fix.approach, "Asynchronous")
+        XCTAssertEqual(fix.decisionAnswer, "Change the helper")
+        XCTAssertEqual(fix.approach, "Change the helper")
         XCTAssertEqual(fix.round, chosen.round + 1)
         let task = try XCTUnwrap(try TaskStore(db).get(try XCTUnwrap(fix.fixTaskId)))
         XCTAssertEqual(task.column, .backlog)
         XCTAssertEqual(task.type, .code)
         XCTAssertEqual(task.model, "fixer-model")
         XCTAssertTrue(task.body?.contains("Which model?") == true, task.body ?? "")
+
+        let local = try XCTUnwrap(try PRWatchStore(db).items(watchId: kept.watchId).first)
+        XCTAssertEqual(local.state, .handled)
+        XCTAssertEqual(local.verdict, .answer)
+        XCTAssertEqual(local.decisionAnswer, "Keep it local")
+        XCTAssertEqual(local.replyBody, "Only one caller uses it.")
+        XCTAssertNil(local.fixTaskId)
+        XCTAssertEqual(try TaskStore(db).list(projectId: project.id).filter { $0.origin == .followThrough }.map(\.id), [task.id])
 
         let answer = try XCTUnwrap(try PRWatchStore(db).items(watchId: replied.watchId).first)
         XCTAssertEqual(answer.state, .handled)
