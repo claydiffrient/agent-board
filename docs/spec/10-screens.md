@@ -413,16 +413,25 @@ three sections:
 - **Sessions** — **New Session**, the active session, and the history; clicking
   a history entry resumes it. Each shows its start and its spend.
 
-**Pull Requests** — a pinned sidebar row directly below Coordinator
-(`SidebarSelection`), opening a cross-project page rather than a project tab,
-for the pull requests a project with PR follow-through turned on is watching
-(§13). The page groups them as **Ready to verify**, **Needs you**, **In
-progress**, **Waiting on reviewers**, **Verified**, and **Parked**, with a
-project filter. Row actions: **Mark verified**, **Walk me through it** (only
-once the project sets a `verifyCommand`), **Open PR**, **Pause**. The row's
-badge counts Ready to verify plus open decisions; a decision also raises the
-owning project's attention dot. See §13 for the state machine, verdicts, and
-settings behind all of it.
+**Pull Requests** — the fourth pinned sidebar row, directly below Coordinator
+(`SidebarSelection.pullRequests`), opening a cross-project page rather than a
+project tab, for the pull requests a project with PR follow-through turned on is
+watching (§13). The row's count badge is PRs in Ready to verify plus open
+decision items across every project (`PRWatchStore.observeBadgeCounts`);
+decisions are zero until phase 2. The page observes `PRWatchStore.observePage`
+and groups the watches as **Ready to verify**, **Needs you**, **In progress**,
+**Waiting on reviewers**, **Verified**, and **Parked**, newest change first in
+each. Needs you and Parked are absent while empty; the other four always show,
+with a one-line placeholder when empty. A **Project** menu above the list
+narrows it to one project with follow-through on; while it shows every project,
+each row names its project. A row shows the title (a link that opens the PR in
+the browser), `owner/repo #n`, the state, the round once one has run, the open
+item count, and when the watch last changed — `pr_watch` records no push time,
+so a new head shows as a change like any other. Row actions: **Mark verified**
+(hidden once verified, disabled when the project sets no verification label),
+**Walk me through it** (only once the project sets a `verifyCommand`), and
+**Pause**, which sets `paused` and becomes **Resume**. See §13 for the state
+machine, verdicts, and settings behind all of it.
 
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
@@ -712,7 +721,7 @@ guaranteed to agree with this table across macOS versions.
 | Window height | 600pt | The tallest fixed stack a screen needs is the sidebar's: the project list's reserve plus Add Project, the notifications-off notice and the usage footer. Measured at the 180pt sidebar: 44 + 86 + 143 = 273pt, plus 224 for the list, is 497pt of the 548 a 600pt window leaves under a 52pt toolbar (the unified toolbar's usual height, assumed: an offscreen test window has no toolbar). The remainder goes to the Ports panel's header and rows. 600 also holds the settings sheet's 480pt minimum under the toolbar. |
 
 **The sidebar list always keeps seven rows' worth of height** (224pt, at the
-sidebar's 32pt row pitch: the three pinned rows, a section header and three
+sidebar's 32pt row pitch: the four pinned rows, a section header and two
 projects), and scrolls within it. The bottom stack — Ports panel, Add Project…,
 the notifications-off notice and the usage footer — sits *below* the list, not
 in a `safeAreaInset` over it: an inset lets the list scroll beneath it, so any

@@ -9,7 +9,7 @@ enum MainWindowLayout {
     static let minimumDetailWidth: CGFloat = 761
     static let sidebarMinimumWidth: CGFloat = 180
     static let sidebarIdealWidth: CGFloat = 220
-    /// Seven 32pt sidebar rows: the three pinned rows, a section header and three projects.
+    /// Seven 32pt sidebar rows: the four pinned rows, a section header and two projects.
     static let sidebarListReserve: CGFloat = 224
     static let minimumSize = CGSize(width: sidebarIdealWidth + minimumDetailWidth, height: 600)
 }
@@ -21,6 +21,7 @@ struct MainWindow: View {
     @State private var workspaces = Observed<[Workspace]>([])
     @State private var attention = Observed<[ProjectAttention]>([])
     @State private var coordinatorQueue = Observed<[Report]>([])
+    @State private var pullRequestCounts = Observed<[String: PRBadgeCount]>([:])
     @State private var showCoordinatorSettings = false
     @State private var selection: SidebarSelection = .atAGlance
     @State private var settingsProject: Project?
@@ -64,6 +65,9 @@ struct MainWindow: View {
         .task {
             await coordinatorQueue.run(ReportStore(env.db).observeUnconsumedForCoordinator(), in: env.db.reader)
         }
+        .task {
+            await pullRequestCounts.run(PRWatchStore(env.db).observeBadgeCounts(), in: env.db.reader)
+        }
         .task { await announceReleaseNotes() }
         .sheet(item: $settingsProject) { project in
             ProjectSettingsSheet(project: project, workspaces: workspaces.value) {
@@ -98,6 +102,8 @@ struct MainWindow: View {
             RosterView(activity: LiveRosterActivity(db: env.db))
         case .coordinator:
             CoordinatorView()
+        case .pullRequests:
+            PullRequestsView(projects: projects.value)
         case .atAGlance, .project:
             if let project = projects.value.first(where: { $0.id == selection.projectId }) {
                 ProjectDetailView(project: project)
@@ -208,6 +214,8 @@ struct MainWindow: View {
                 unreadReplies: CoordinatorRow.unreadReplies(coordinatorQueue.value),
                 openSettings: { showCoordinatorSettings = true }
             )
+        case .pullRequests:
+            PullRequestsRow(count: PullRequestsRow.count(pullRequestCounts.value))
         case .project: EmptyView()
         }
     }

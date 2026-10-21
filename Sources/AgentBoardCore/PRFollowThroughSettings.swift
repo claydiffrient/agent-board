@@ -70,6 +70,24 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         self.privateTerms = privateTerms
     }
 
+    /// The label Mark verified adds, or nil when none is set and the merge is the verification.
+    public var markVerifiedLabel: String? {
+        let label = verificationLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return label.isEmpty ? nil : label
+    }
+
+    /// `verifyCommand` with `{url}` replaced, for Walk me through it. Nil without a template, and for
+    /// a URL holding anything a shell would read as syntax: the template is run by a shell as written.
+    public func verifyCommand(for url: String) -> String? {
+        let template = verifyCommand?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !template.isEmpty, !url.isEmpty, url.allSatisfy(Self.isShellInert) else { return nil }
+        return template.replacingOccurrences(of: "{url}", with: url)
+    }
+
+    private static func isShellInert(_ c: Character) -> Bool {
+        c.isASCII && (c.isLetter || c.isNumber || ":/._-".contains(c))
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = PRFollowThroughSettings()
