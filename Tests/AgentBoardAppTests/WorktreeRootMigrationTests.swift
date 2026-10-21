@@ -156,6 +156,7 @@ final class DefaultWorktreeRootTests: XCTestCase {
         )
 
         try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
 
         let session = try XCTUnwrap(try SessionStore(fixture.db).forTask(task.id).first)
         let worktree = try XCTUnwrap(session.worktreePath)

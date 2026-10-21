@@ -133,7 +133,11 @@ nobody reviewed.
   `decision` report of their own. With no hook, the removal runs inside the
   accept, as it always has. Discarding a task removes its worktrees the same
   way before the task is deleted; the task's progress goes with it, so its
-  findings are kept only in the discard's `decision` report.
+  findings are kept only in the discard's `decision` report. A discard that
+  lands while a spawn of the task is still setting up (§3.1) cancels that setup
+  and waits for it to end before looking for worktrees: a setup cancelled before
+  `git worktree add` creates nothing, and one already running its hook finishes,
+  so the removal finds its worktree. That setup's end queues no report.
 
   The merge takes the task's branch into the branch meant to carry it:
   `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling
@@ -347,14 +351,29 @@ project: a reconcile waits for a tick reap in progress, and the tick skips a
 project whose reconcile is running. The tick starts each project's reap and
 does not wait for it, so metering, cap and stall checks are never held up by
 git removals. A spawn's new worktree is clean and at its base until its
-worker commits, and it exists for a moment before `Board.assign` writes its
-`setup` session row. The spawn marks the worktree's path as being placed
-before it creates it and clears the mark once the row is written or the spawn
-fails, and a reap keeps every marked path. Because a reap's list of active
-sessions predates its git scan, it rereads the active rows after the scan and
-before it removes anything. Anything dirty or unmerged is left alone and reported. A task branch
+worker commits. The spawn marks the worktree's path before it touches git and
+clears the mark when its setup ends (§3.1), and a reap keeps every marked path
+as well as every path an active row names, the `setup` row included. Because a
+reap's list of active sessions predates its git scan, it rereads the active
+rows and the marks after the scan and claims its orphans in the same step, with
+no suspension point between, so a spawn or resume either marked its path first
+or waits on the claim. Resuming a stopped session marks its worktree the same
+way until the session is active again, and is refused when a reap or teardown
+has already claimed that worktree: the removal is already running, and a
+session resumed there would lose its checkout. The other direction holds as well: a respawn
+reuses the task's worktree when it is still on disk, but not one a reap or
+teardown has already claimed for removal (§3.1). The spawn waits for that
+removal to finish and then creates a fresh worktree at the same path. It waits
+only on a claim for its own path, so it is never held up by removals of other
+worktrees. Anything dirty or unmerged is left alone and reported. A task branch
 cut moments ago sits exactly at its base, so it reads as merged until its
-worker's first commit, and the worktree check alone protects it. That check
+worker's first commit. Once its worktree exists the worktree check protects it;
+before that, the branch sweep skips `agentboard/<task-id>` while the spawn's
+mark is on `<root>/<task-id>`, and claims that path, as a teardown would, for
+every other task branch with no worktree there until its delete is done, so a
+spawn that marks the path afterwards waits on the claim before `git worktree
+add`. Without the claim, a worktree added between the sweep's check and its
+delete would lose its new branch. The worktree check
 reads each worktree's `HEAD` (and an in-progress rebase's `head-name` or
 bisect's `BISECT_START`) from git's own admin files and keeps the branch when
 any of them cannot be read: `git worktree list` exits 0 in that case while
