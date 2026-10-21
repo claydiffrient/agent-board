@@ -1,0 +1,191 @@
+import Foundation
+import GRDB
+
+public struct PRWatchStore: Sendable {
+    let db: AppDatabase
+
+    public init(_ db: AppDatabase) {
+        self.db = db
+    }
+
+    /// Records one poll (SPEC §4). Idempotent by node id: an unchanged snapshot moves only
+    /// `last_polled_at`. An open item that resolved or left the snapshot becomes handled, and a
+    /// non-open item whose body changed (a new reply) reopens.
+    @discardableResult
+    public func upsert(projectId: String, snapshot: PRSnapshot, now: Int64 = .nowMillis) throws -> PRWatch {
+        try db.writer.write { db in
+            let existing = try PRWatch.fetchOne(
+                db,
+                sql: "SELECT * FROM pr_watch WHERE project_id = ? AND repo_owner = ? AND repo_name = ? AND number = ?",
+                arguments: [projectId, snapshot.repoOwner, snapshot.repoName, snapshot.number]
+            )
+            var watch = existing ?? PRWatch(
+                id: PRWatch.newId(), projectId: projectId, repoOwner: snapshot.repoOwner,
+                repoName: snapshot.repoName, number: snapshot.number, url: snapshot.url, title: snapshot.title,
+                isDraft: snapshot.isDraft, headRef: snapshot.headRef, headOid: snapshot.headOid,
+                baseRef: snapshot.baseRef, state: .watching, round: 0, reviewDecision: snapshot.reviewDecision,
+                checksState: snapshot.checksState, mergeable: snapshot.mergeable,
+                labelsJSON: PRWatch.encodeLabels(snapshot.labels), paused: false, lastPolledAt: now,
+                lastFeedbackAt: nil, verifiedAt: nil, estCostUSD: 0, createdAt: now, updatedAt: now
+            )
+            if let existing {
+                watch.url = snapshot.url
+                watch.title = snapshot.title
+                watch.isDraft = snapshot.isDraft
+                watch.headRef = snapshot.headRef
+                watch.headOid = snapshot.headOid
+                watch.baseRef = snapshot.baseRef
+                watch.reviewDecision = snapshot.reviewDecision
+                watch.checksState = snapshot.checksState
+                watch.mergeable = snapshot.mergeable
+                watch.labels = snapshot.labels
+                if watch != existing { watch.updatedAt = now }
+                watch.lastPolledAt = now
+                try watch.update(db)
+            } else {
+                try watch.insert(db)
+            }
+
+            var feedbackArrived = false
+            var stored = Dictionary(
+                uniqueKeysWithValues: try PRItem.filter(Column("watch_id") == watch.id).fetchAll(db)
+                    .map { ($0.githubNodeId, $0) }
+            )
+            for incoming in snapshot.items {
+                guard var item = stored.removeValue(forKey: incoming.githubNodeId) else {
+                    if incoming.isResolved { continue }
+                    var item = PRItem(
+                        id: nil, watchId: watch.id, githubNodeId: incoming.githubNodeId, kind: incoming.kind,
+                        author: incoming.author, body: incoming.body, path: incoming.path, line: incoming.line,
+                        url: incoming.url, state: .open, round: watch.round, createdAt: now, updatedAt: now
+                    )
+                    try item.insert(db)
+                    feedbackArrived = true
+                    continue
+                }
+                let before = item
+                let bodyChanged = item.body != incoming.body
+                item.kind = incoming.kind
+                item.author = incoming.author
+                item.body = incoming.body
+                item.path = incoming.path
+                item.line = incoming.line
+                item.url = incoming.url
+                if incoming.isResolved {
+                    if item.state == .open { item.state = .handled }
+                } else if bodyChanged {
+                    if item.state != .open {
+                        item.state = .open
+                        item.verdict = nil
+                        item.followupGrade = nil
+                        item.round = watch.round
+                    }
+                    feedbackArrived = true
+                }
+                if item != before {
+                    item.updatedAt = now
+                    try item.update(db)
+                }
+            }
+            for var gone in stored.values where gone.state == .open {
+                gone.state = .handled
+                gone.updatedAt = now
+                try gone.update(db)
+            }
+
+            if feedbackArrived {
+                watch.lastFeedbackAt = now
+                watch.updatedAt = now
+                try watch.update(db)
+            }
+            return watch
+        }
+    }
+
+    public func get(_ id: String) throws -> PRWatch? {
+        try db.reader.read { try PRWatch.fetchOne($0, key: id) }
+    }
+
+    public func items(watchId: String) throws -> [PRItem] {
+        try db.reader.read { db in
+            try PRItem.filter(Column("watch_id") == watchId).order(Column("created_at"), Column("id")).fetchAll(db)
+        }
+    }
+
+    public func setState(_ state: PRWatchState, watchId: String, now: Int64 = .nowMillis) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE pr_watch SET state = ?, updated_at = ? WHERE id = ?",
+                arguments: [state, now, watchId]
+            )
+        }
+    }
+
+    public func setPaused(_ paused: Bool, watchId: String, now: Int64 = .nowMillis) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE pr_watch SET paused = ?, updated_at = ? WHERE id = ?",
+                arguments: [paused, now, watchId]
+            )
+        }
+    }
+
+    /// The Pull Requests page: every non-empty group in display order, newest change first within
+    /// each. Nil `projectId` lists every project.
+    public func page(projectId: String? = nil) throws -> [PRWatchGroup] {
+        let listings = try db.reader.read { db in
+            var sql = """
+            SELECT w.*,
+              (SELECT COUNT(*) FROM pr_item i WHERE i.watch_id = w.id AND i.state = 'open') AS open_items,
+              (SELECT COUNT(*) FROM pr_item i
+                 WHERE i.watch_id = w.id AND i.state = 'open' AND i.verdict = 'decision') AS open_decisions
+            FROM pr_watch w
+            WHERE w.state NOT IN ('merged', 'closed')
+            """
+            var arguments: StatementArguments = []
+            if let projectId {
+                sql += " AND w.project_id = ?"
+                arguments += [projectId]
+            }
+            sql += " ORDER BY w.updated_at DESC, w.number DESC"
+            return try Row.fetchAll(db, sql: sql, arguments: arguments).map { row in
+                PRWatchListing(
+                    watch: try PRWatch(row: row), openItems: row["open_items"], openDecisions: row["open_decisions"]
+                )
+            }
+        }
+        let grouped = Dictionary(grouping: listings) {
+            PRPageGroup.of($0.watch.state, openDecisions: $0.openDecisions)
+        }
+        return PRPageGroup.allCases.compactMap { group in
+            grouped[group].map { PRWatchGroup(group: group, listings: $0) }
+        }
+    }
+
+    /// Per project, for the sidebar badge and attention dot. A project with nothing to count is absent.
+    public func badgeCounts() throws -> [String: PRBadgeCount] {
+        try db.reader.read { db in
+            var counts: [String: PRBadgeCount] = [:]
+            let ready = try Row.fetchAll(
+                db,
+                sql: "SELECT project_id, COUNT(*) AS n FROM pr_watch WHERE state = 'ready_to_verify' GROUP BY project_id"
+            )
+            for row in ready {
+                counts[row["project_id"], default: PRBadgeCount()].readyToVerify = row["n"]
+            }
+            let decisions = try Row.fetchAll(
+                db,
+                sql: """
+                SELECT w.project_id, COUNT(*) AS n
+                FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id
+                WHERE i.state = 'open' AND i.verdict = 'decision' AND w.state NOT IN ('merged', 'closed')
+                GROUP BY w.project_id
+                """
+            )
+            for row in decisions {
+                counts[row["project_id"], default: PRBadgeCount()].openDecisions = row["n"]
+            }
+            return counts
+        }
+    }
+}
