@@ -152,28 +152,24 @@ public struct PRWatchStore: Sendable {
         }
     }
 
-    /// Makes `projectIds` exactly the projects whose poll cannot run `gh`, each with `detail`. A
-    /// project already recorded keeps its row untouched, so a failure repeated every poll writes
-    /// nothing and raises the attention signal once.
-    public func setPollProblem(_ detail: String, projectIds: Set<String>, now: Int64 = .nowMillis) throws {
+    /// Makes the keys of `problems` exactly the projects whose poll cannot run, each with its
+    /// detail. A project already recorded keeps its row untouched, so a failure repeated every poll
+    /// writes nothing and raises the attention signal once.
+    public func setPollProblems(_ problems: [String: String], now: Int64 = .nowMillis) throws {
+        let recorded = Set(try db.reader.read { try String.fetchAll($0, sql: "SELECT project_id FROM pr_poll_problem") })
+        let wanted = Set(problems.keys)
+        guard recorded != wanted else { return }
         try db.writer.write { db in
-            let recorded = Set(try String.fetchAll(db, sql: "SELECT project_id FROM pr_poll_problem"))
-            for gone in recorded.subtracting(projectIds) {
+            for gone in recorded.subtracting(wanted) {
                 try db.execute(sql: "DELETE FROM pr_poll_problem WHERE project_id = ?", arguments: [gone])
             }
-            for added in projectIds.subtracting(recorded) {
+            for added in wanted.subtracting(recorded) {
                 try db.execute(
                     sql: "INSERT INTO pr_poll_problem (project_id, detail, since) VALUES (?, ?, ?)",
-                    arguments: [added, detail, now]
+                    arguments: [added, problems[added], now]
                 )
             }
         }
-    }
-
-    public func clearPollProblems() throws {
-        let recorded = try db.reader.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM pr_poll_problem") ?? 0 }
-        guard recorded > 0 else { return }
-        try db.writer.write { try $0.execute(sql: "DELETE FROM pr_poll_problem") }
     }
 
     public func setPaused(_ paused: Bool, watchId: String, now: Int64 = .nowMillis) throws {

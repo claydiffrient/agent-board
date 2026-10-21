@@ -10,13 +10,15 @@ public struct PRTriage: Codable, FetchableRecord, PersistableRecord, Sendable, E
     public var watchId: String
     public var baseOid: String
     public var headOid: String
+    public var round: Int
     public var createdAt: Int64
 
-    public init(taskId: String, watchId: String, baseOid: String, headOid: String, createdAt: Int64) {
+    public init(taskId: String, watchId: String, baseOid: String, headOid: String, round: Int = 0, createdAt: Int64) {
         self.taskId = taskId
         self.watchId = watchId
         self.baseOid = baseOid
         self.headOid = headOid
+        self.round = round
         self.createdAt = createdAt
     }
 
@@ -25,6 +27,7 @@ public struct PRTriage: Codable, FetchableRecord, PersistableRecord, Sendable, E
         case watchId = "watch_id"
         case baseOid = "base_oid"
         case headOid = "head_oid"
+        case round
         case createdAt = "created_at"
     }
 }
@@ -146,7 +149,8 @@ extension Board {
                 acceptance: nil, priority: nil, column: .ready, origin: .triage, epicId: nil
             )
             try PRTriage(
-                taskId: task.id, watchId: watchId, baseOid: baseOid, headOid: headOid, createdAt: .nowMillis
+                taskId: task.id, watchId: watchId, baseOid: baseOid, headOid: headOid, round: watch.round,
+                createdAt: .nowMillis
             ).insert(db)
             return task
         }

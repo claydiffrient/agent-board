@@ -872,7 +872,8 @@ public struct Board: Sendable {
 
     /// Ends a worker session that will not report for itself and queues a `failed` report, so the
     /// orchestrator stops believing the worker is running. A task stranded in `running` leaves it:
-    /// for `review` when `salvage` shows commits on its branch, otherwise back to `ready`.
+    /// for `review` when `salvage` shows commits on its branch, otherwise back to `ready`. A triage
+    /// task is closed instead, with no report (SPEC §13.2).
     ///
     /// An already-inactive session row is not a reason to stop. The worker's `SessionEnd` hook races
     /// this call and writes `stopped` first often enough that bailing there strands the task in
