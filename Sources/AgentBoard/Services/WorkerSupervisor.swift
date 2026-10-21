@@ -616,7 +616,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var manager: WorktreeManager
         var name: String
         var branch: String
-        var base: String
+        /// Nil checks out `branch` as it stands, as the epic integrator's worktree does.
+        var base: String?
     }
 
     /// Carries out the placement. A `shared` one that git will not accept — a dirty checkout, or a
@@ -660,7 +661,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         await awaitTeardown(of: pending.manager.worktreeRoot.appendingPathComponent(pending.name).path)
         try await offMain {
             guard try Self.existingWorktree(pending.manager, name: pending.name) == nil else { return }
-            _ = try pending.manager.create(name: pending.name, branch: pending.branch, base: pending.base)
+            if let base = pending.base {
+                _ = try pending.manager.create(name: pending.name, branch: pending.branch, base: base)
+            } else {
+                _ = try pending.manager.createForBranch(name: pending.name, branch: pending.branch)
+            }
         }
     }
 
@@ -884,15 +889,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
         let manager = worktreeManager(for: project)
         let worktreeName = HeldWorktree.epicWorktreeName(epicId: epicId)
-        _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(worktreeName))
+        let worktree = manager.worktreeRoot.appendingPathComponent(worktreeName)
+        _ = preflightWorktreePath(worktree)
         let epicBranch = epic.branch
-        let worktree = try await offMain {
-            try Self.existingWorktree(manager, name: worktreeName)
-                ?? manager.createForBranch(name: worktreeName, branch: epicBranch)
+        // SPEC §3.1: the epic worktree is created in setup, after this answers, like any task's.
+        guard !placing.contains(worktree.path) else {
+            throw SupervisorError.setupStillRunning(title: existing?.title ?? epic.title, path: worktree.path)
         }
         if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
             throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
         }
+        placing.insert(worktree.path)
+        var setupHoldsMark = false
+        defer { if !setupHoldsMark { placing.remove(worktree.path) } }
 
         let members = try tasks.list(projectId: project.id, epicId: epicId, includeArchived: true)
             .filter { $0.origin != .integration && $0.column != .closed }
@@ -909,7 +918,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         let projectBase = project.baseBranch
         let facts = try await offMain { () -> [String: TaskBranchFacts] in
-            let merged = try manager.mergeStatus(worktree: worktree, branches: branchNames)
+            guard try manager.branchExists(epicBranch) else {
+                throw AgentRuntimeError("epic branch \(epicBranch) does not exist in \(manager.repoPath.path)")
+            }
+            let merged = try manager.mergeStatus(into: "refs/heads/\(epicBranch)", branches: branchNames)
             return try Self.branchFacts(
                 manager, taskIds: taskIds, epicBranch: epicBranch, baseBranch: projectBase,
                 sharedBranches: shared, merged: merged, dispatched: dispatched
@@ -959,8 +971,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     attempt: placeholder.attempt
                 ),
                 placeholder: placeholder,
-                port: port
+                port: port,
+                checkout: PendingCheckout(manager: manager, name: worktreeName, branch: epicBranch, base: nil),
+                placingMark: worktree.path
             )
+            setupHoldsMark = true
             return placeholder
         } catch {
             // A task with a session row on it cannot be deleted; the failure path below owns it.
@@ -1130,10 +1145,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func accept(taskId: String) async throws {
-        try await accept(taskId: taskId, acceptedBy: .human)
+        try await accept(taskId: taskId, acceptedBy: .human, landsAfterReturning: false)
     }
 
+    /// The accept a tool call makes. Landing a shared branch runs the repository's `post-checkout`
+    /// hook and teardown runs `WorktreeRemove` hooks, so both finish after the caller has its answer (SPEC §6).
     func accept(taskId: String, acceptedBy: TaskAcceptance) async throws {
+        try await accept(taskId: taskId, acceptedBy: acceptedBy, landsAfterReturning: true)
+    }
+
+    private func accept(taskId: String, acceptedBy: TaskAcceptance, landsAfterReturning: Bool) async throws {
         try await recording {
             guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
             guard let project = try projects.get(task.projectId) else {
@@ -1147,26 +1168,33 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try grants.revokeAll(sessionId: session.sessionId)
                 try fileLocks.releaseAll(sessionId: session.sessionId)
             }
-            // SPEC §5: a task branch lands before its worktree is removed, which can take a minute
-            // on a large repository while a dependent cut from the target lacks this work. A shared
-            // branch has no worktree to wait on and lands only once every member is accepted.
-            if sharedBranch(of: task) != nil {
-                await startTeardown(
-                    claimTeardown(of: taskSessions), task: task, project: project, report: acceptanceReport,
-                    landingNotice: nil
-                )
-                await landAcceptedBranch(task: task, project: project)
-            } else {
-                let before = lastError
-                await landAcceptedBranch(task: task, project: project)
-                let landingNotice = lastError == before ? nil : lastError
-                await startTeardown(
-                    claimTeardown(of: taskSessions), task: task, project: project, report: acceptanceReport,
-                    landingNotice: landingNotice
-                )
+            // Claimed now, so no reap takes the worktree for an orphan while the landing runs (SPEC §5).
+            let claim = claimTeardown(of: taskSessions)
+            let settle: @MainActor (WorkerSupervisor) async -> Void = { supervisor in
+                await supervisor.landAndTearDown(task: task, project: project, claim: claim, report: acceptanceReport)
             }
-            announceReports(projectId: task.projectId)
+            if landsAfterReturning {
+                inBackground(settle)
+            } else {
+                await settle(self)
+            }
         }
+    }
+
+    private func landAndTearDown(task: BoardTask, project: Project, claim: TeardownClaim, report: Int64?) async {
+        // SPEC §5: a task branch lands before its worktree is removed, which can take a minute
+        // on a large repository while a dependent cut from the target lacks this work. A shared
+        // branch has no worktree to wait on and lands only once every member is accepted.
+        if sharedBranch(of: task) != nil {
+            await startTeardown(claim, task: task, project: project, report: report, landingNotice: nil)
+            await landAcceptedBranch(task: task, project: project)
+        } else {
+            let before = lastError
+            await landAcceptedBranch(task: task, project: project)
+            let landingNotice = lastError == before ? nil : lastError
+            await startTeardown(claim, task: task, project: project, report: report, landingNotice: landingNotice)
+        }
+        announceReports(projectId: task.projectId)
     }
 
     /// A teardown hook may run for minutes, and an accept may be answering an MCP call, so behind a
@@ -1228,7 +1256,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return (try? board.recordWorktreeCleanup(taskId: task.id, reportId: reportId, findings: findings)) ?? false
     }
 
-    /// Waits for teardowns still running behind a teardown hook.
+    /// Waits for teardowns still running behind a teardown hook, and for the landing of an accept
+    /// a tool call made.
     func waitForTeardowns() async {
         while let task = teardownTasks.values.first {
             await task.value
