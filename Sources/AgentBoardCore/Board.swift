@@ -540,6 +540,7 @@ public struct Board: Sendable {
             try TaskStore.move(db, taskId, to: .ready, before: nil)
             try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
             try SessionStore.setStopReason(db, sessionId, suggested.map { "handed off to \($0)" } ?? "handed off")
+            try FileLockStore.releaseAll(db, sessionId: sessionId)
             return report
         }
     }
@@ -898,9 +899,6 @@ public struct Board: Sendable {
                 try SessionStore.setState(db, sessionId, cause.sessionState, endedAt: .nowMillis)
             }
             try SessionStore.setStopReason(db, sessionId, reason)
-            // Every route out of a session lands here or in `complete`: a cap kill, a human stop,
-            // a vanished process, a failed setup, an acknowledged wind-down. A lock that outlived
-            // one of them would block the checkout with nobody behind it.
             try FileLockStore.releaseAll(db, sessionId: sessionId)
             guard let task else { return nil }
             let taskId = task.id
