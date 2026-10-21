@@ -137,6 +137,9 @@ hook matcher names them as well as Bash), any `gh`, and any git subcommand
 outside a read-only allow-list (`diff`, `log`, `show`, `status`, `blame`,
 `grep`, `rev-parse`, `rev-list`, `merge-base`, `ls-files`, `cat-file` and
 their kind), so a write subcommand git adds later is denied by default.
+Other Bash file writes (`sed -i`, a `>` redirect, `tee`) are not denied, so the
+scope withholds the file-write tools, `gh` and git writes rather than every
+change to its disposable checkout.
 
 ### Orchestrator scope
 

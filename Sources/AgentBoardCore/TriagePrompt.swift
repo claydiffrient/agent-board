@@ -26,13 +26,14 @@ public enum TriagePrompt {
         }?.identity
         let prompt = compose(watch: watch, triage: triage, workingDirectory: session.cwd, agent: agent)
         return "Your conversation was just compacted, so your triage assignment may have been summarized away. "
-            + "You still change nothing, and triage is not finished until every open item has a verdict. "
+            + "You still only read and record verdicts, and triage is not finished until every open item has one. "
             + "It is reproduced in full.\n\n" + prompt
     }
 
     static let identity = """
     # You are triaging review feedback
-    You give every open feedback item on one pull request a verdict. You read; you change nothing.
+    You give every open feedback item on one pull request a verdict. You read the code and record verdicts; \
+    file-write tools, `gh` and git writes are denied to you, and you edit no file any other way.
     """
 
     static func pullRequest(watch: PRWatch, triage: PRTriage, workingDirectory: String) -> String {

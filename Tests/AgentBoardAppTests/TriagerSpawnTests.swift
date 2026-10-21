@@ -8,7 +8,7 @@ import XCTest
 
 /// SPEC §13.2: the supervisor spawns a triager in a detached checkout of the PR head it fetched from
 /// origin, under the triager scope and its deny list; nothing else may spawn onto its task, and the
-/// checkout goes once every item has a verdict.
+/// checkout goes once every item has a verdict or its session ends.
 @MainActor
 final class TriagerSpawnTests: XCTestCase {
     private var fixture: SupervisorFixture!
@@ -44,13 +44,17 @@ final class TriagerSpawnTests: XCTestCase {
         return try SupervisorFixture.git(["rev-parse", "HEAD"], cwd: clone).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    func testATriagerRunsReadOnlyInADetachedCheckoutOfTheFetchedHeadThatGoesWhenTriageEnds() async throws {
-        let head = try pushPullRequestHead()
-        let watch = try PRWatchStore(fixture.db).upsert(projectId: fixture.project.id, snapshot: PRSnapshot(
+    private func watchPullRequest(head: String) throws -> PRWatch {
+        try PRWatchStore(fixture.db).upsert(projectId: fixture.project.id, snapshot: PRSnapshot(
             repoOwner: "example-org", repoName: "app", number: 7, url: "https://github.com/example-org/app/pull/7",
             title: "Feature", headRef: "feature", headOid: head, baseRef: "main",
             items: [PRSnapshotItem(githubNodeId: "thread-1", kind: .thread, author: "reviewer", body: "Rename this.")]
         ))
+    }
+
+    func testATriagerRunsReadOnlyInADetachedCheckoutOfTheFetchedHeadThatGoesWhenTriageEnds() async throws {
+        let head = try pushPullRequestHead()
+        let watch = try watchPullRequest(head: head)
 
         let session = try await fixture.supervisor.spawnTriager(watchId: watch.id)
         await fixture.supervisor.waitForSetup()
@@ -93,5 +97,31 @@ final class TriagerSpawnTests: XCTestCase {
         await fixture.supervisor.waitForTeardowns()
         XCTAssertEqual(try fixture.tasks.get(taskId)?.column, .done)
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree), "the triage checkout outlived the triage")
+    }
+
+    func testAStoppedTriageIsClosedWithoutAReportLosesItsCheckoutAndIsNeverResumedAsAWorker() async throws {
+        let watch = try watchPullRequest(head: try pushPullRequestHead())
+        let placeholder = try await fixture.supervisor.spawnTriager(watchId: watch.id)
+        await fixture.supervisor.waitForSetup()
+        let taskId = try XCTUnwrap(placeholder.taskId)
+        let worktree = try XCTUnwrap(placeholder.worktreePath)
+        let session = try XCTUnwrap(fixture.sessions.forTask(taskId).first)
+
+        try await fixture.supervisor.stop(sessionId: session.sessionId)
+        await fixture.supervisor.waitForTeardowns()
+
+        XCTAssertEqual(try fixture.tasks.get(taskId)?.column, .closed)
+        XCTAssertTrue(try fixture.reports.unconsumed(projectId: fixture.project.id).filter { $0.taskId == taskId }.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree), "a stopped triage kept its checkout")
+
+        do {
+            try await fixture.supervisor.resume(sessionId: session.sessionId)
+            XCTFail("a stopped triager was resumed")
+        } catch {
+            XCTAssertTrue("\(error)".contains("triage"), "\(error)")
+        }
+        XCTAssertFalse(try fixture.grants.forSession(session.sessionId).contains { $0.scope == .worker })
+        let resumed = await fixture.runtime.resumed
+        XCTAssertTrue(resumed.isEmpty)
     }
 }

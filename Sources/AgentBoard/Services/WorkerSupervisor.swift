@@ -31,6 +31,7 @@ enum SupervisorError: LocalizedError {
     case dependencyNotOnBranch(dependencyId: String, title: String, commit: String, branch: String, landing: TaskLanding?)
     case watchNotFound(String)
     case triageTaskNotAssignable(title: String)
+    case triageNotResumable(title: String)
     case pullRequestNotFetched(String)
 
     var errorDescription: String? {
@@ -39,6 +40,8 @@ enum SupervisorError: LocalizedError {
         case .watchNotFound(let id): return "watched pull request \(id) not found"
         case .triageTaskNotAssignable(let title):
             return "\"\(title)\" is a pull request triage; only Agent Board's follow-through starts one"
+        case .triageNotResumable(let title):
+            return "\"\(title)\" is a pull request triage, which is not resumed; follow-through starts a fresh one"
         case .pullRequestNotFetched(let reason): return "the pull request could not be fetched: \(reason)"
         case .rosterAgentNotUsable(let id, let projectName):
             return "roster agent \(id) is not in \(projectName)'s usable set; enable it for this project first"
@@ -660,7 +663,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func failSetup(sessionId: String, projectId: String, error: Error) {
         let detail = describe(error)
-        let queued = (try? board.terminate(sessionId: sessionId, cause: .setupFailed(detail))) ?? nil
+        let queued = (try? terminateSession(sessionId, cause: .setupFailed(detail))) ?? nil
         guard queued != nil else { return }
         announceReports(projectId: projectId)
         // `sessionId` always names a real row (`assign` writes it before setup runs), so this could
@@ -690,7 +693,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func stopOrphanedCoordinatorSessions() {
         guard coordinatorConsoleInstance?.isProcessRunning != true else { return }
         for session in (try? coordinator.sessions()) ?? [] where session.state.isActive {
-            _ = try? board.terminate(sessionId: session.sessionId, cause: .vanished)
+            _ = try? terminateSession(session.sessionId, cause: .vanished)
         }
     }
 
@@ -992,7 +995,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.sessionHasNoShortId(sessionId)
         }
         let salvage = await branchSalvage(taskId: session.taskId)
-        try board.terminate(sessionId: sessionId, cause: .stopped(by: actor), salvage: salvage)
+        try terminateSession(sessionId, cause: .stopped(by: actor), salvage: salvage)
         try grants.revokeAll(sessionId: sessionId)
         announceReports(projectId: session.projectId)
         refreshSleepAssertion()
@@ -1069,6 +1072,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(session.projectId) else {
                 throw SupervisorError.projectNotFound(session.projectId)
             }
+            // SPEC §13.2: the grant and config below are a worker's, and a triage is cheap to start over.
+            if let task = try tasks.get(taskId), task.origin == .triage {
+                throw SupervisorError.triageNotResumable(title: task.title)
+            }
             let token: String
             if let grant = try grants.forSession(sessionId).first(where: { !$0.isRevoked }) {
                 token = grant.token
@@ -1116,7 +1123,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     } else {
                         throw SupervisorError.sessionHasNoShortId(session.sessionId)
                     }
-                    try board.terminate(sessionId: session.sessionId, cause: .stopped(by: .human))
+                    try terminateSession(session.sessionId, cause: .stopped(by: .human))
                 } catch {
                     firstFailure = firstFailure ?? error
                 }
@@ -1201,7 +1208,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
                 guard let info = Self.liveListing(of: session, in: listing ?? []) else {
                     let salvage = await branchSalvage(taskId: session.taskId)
-                    try board.terminate(sessionId: session.sessionId, cause: .vanished, salvage: salvage)
+                    try terminateSession(session.sessionId, cause: .vanished, salvage: salvage)
                     await reapProcesses(of: session, listing: listing)
                     try grants.revokeAll(sessionId: session.sessionId)
                     announceReports(projectId: session.projectId)
@@ -1978,8 +1985,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         continue
                     }
                     let salvage = await branchSalvage(taskId: session.taskId)
-                    let report = (try? board.terminate(
-                        sessionId: session.sessionId, cause: .vanished, salvage: salvage
+                    let report = (try? terminateSession(
+                        session.sessionId, cause: .vanished, salvage: salvage
                     )) ?? nil
                     queuedReport = queuedReport || report != nil
                     await reapProcesses(of: session, listing: listed)
@@ -1994,8 +2001,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if state == "stopped" || status == "stopped" {
                 if session.state.isActive {
                     let salvage = await branchSalvage(taskId: session.taskId)
-                    let report = (try? board.terminate(
-                        sessionId: session.sessionId, cause: .vanished, salvage: salvage
+                    let report = (try? terminateSession(
+                        session.sessionId, cause: .vanished, salvage: salvage
                     )) ?? nil
                     queuedReport = queuedReport || report != nil
                     await reapProcesses(of: session, listing: listed)
@@ -2028,7 +2035,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
               (try? await stopAgent(session, shortId: shortId, listing: listing)) != nil,
               session.state.isActive
         else { return false }
-        let report = (try? board.terminate(sessionId: session.sessionId, cause: .taskSettled)) ?? nil
+        let report = (try? terminateSession(session.sessionId, cause: .taskSettled)) ?? nil
         try? grants.revokeAll(sessionId: session.sessionId)
         return report != nil
     }
@@ -3028,7 +3035,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if let shortId = session.shortId {
             try? await stopAgent(session, shortId: shortId)
         }
-        _ = try? board.terminate(sessionId: sessionId, cause: .shutdownAcknowledged(note: note ?? nil))
+        _ = try? terminateSession(sessionId, cause: .shutdownAcknowledged(note: note ?? nil))
         try? grants.revokeAll(sessionId: sessionId)
         announceReports(projectId: projectId)
         if let order = try? shutdowns.outstanding(projectId: projectId) {
@@ -3047,11 +3054,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         await tearDownFinishedTriage(session)
     }
 
+    /// Every way a session ends goes through here, so a triage's checkout goes however it ended.
+    @discardableResult
+    private func terminateSession(
+        _ sessionId: String, cause: SessionTermination, salvage: BranchSalvage? = nil
+    ) throws -> Report? {
+        let report = try board.terminate(sessionId: sessionId, cause: cause, salvage: salvage)
+        if let session = try? sessions.get(sessionId), let taskId = session.taskId,
+           (try? tasks.get(taskId))?.origin == .triage {
+            inBackground { await $0.tearDownFinishedTriage(session) }
+        }
+        return report
+    }
+
     /// SPEC §13.2: a triage lands nothing, and its detached checkout of the PR head always has commits
     /// outside the project's bases, so the orphan sweep would keep it forever.
     private func tearDownFinishedTriage(_ session: AgentSession) async {
         guard let taskId = session.taskId, let task = try? tasks.get(taskId), task.origin == .triage,
-              task.column == .done, let project = try? projects.get(task.projectId),
+              task.column == .done || task.column == .closed, let project = try? projects.get(task.projectId),
               let taskSessions = try? sessions.forTask(taskId), !taskSessions.contains(where: \.state.isActive)
         else { return }
         await startTeardown(
@@ -3372,7 +3392,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             try? await stopAgent(session, shortId: shortId)
         }
         let salvage = await branchSalvage(taskId: session.taskId)
-        _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description), salvage: salvage)
+        _ = try? terminateSession(session.sessionId, cause: .capBreach(description), salvage: salvage)
         announceReports(projectId: session.projectId)
         post(
             "Worker stopped at cap", body: description, projectId: session.projectId,

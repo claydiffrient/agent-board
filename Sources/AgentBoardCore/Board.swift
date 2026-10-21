@@ -905,6 +905,20 @@ public struct Board: Sendable {
             guard let task else { return nil }
             let taskId = task.id
 
+            // SPEC §13.2: the orchestrator never asked for a triage and nothing can reassign one, so an
+            // unfinished triage is closed with no report and the follow-through loop starts a fresh one.
+            if task.origin == .triage {
+                if task.column != .done, task.column != .closed {
+                    try TaskStore.setBlocked(db, taskId, false, reason: nil)
+                    try TaskStore.close(db, taskId, reason: reason, by: "Agent Board", at: .nowMillis)
+                    _ = try ProgressStore.append(
+                        db, taskId: taskId, sessionId: sessionId, kind: .note,
+                        text: "Triage ended before every item had a verdict: \(reason)"
+                    )
+                }
+                return nil
+            }
+
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             if let settledLine = try Self.settledLine(db, task: task) {
                 let lines = [

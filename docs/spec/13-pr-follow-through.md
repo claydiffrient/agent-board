@@ -136,9 +136,11 @@ it creates a synthetic task of origin `triage`, titled for the PR, and its
 `pr_triage` row (§4) holding the watch and both oids, and checks out a
 detached worktree at the head under the project's worktree root, named for
 that task. The session runs in it with a `triager` grant (§6), so it reads the
-change with `git diff <base_oid>...<head_oid>` and writes nothing: Edit, Write
-and NotebookEdit, `gh`, and every git write are denied both by
-`--disallowedTools` and by the PreToolUse guard. `roles.triage` picks the
+change with `git diff <base_oid>...<head_oid>`. It is denied the file-write
+tools (Edit, Write and NotebookEdit), `gh`, and every git write, both by
+`--disallowedTools` and by the PreToolUse guard. A shell redirect or
+`sed -i` in Bash is not blocked, so the checkout is not guaranteed untouched;
+it is disposable, and nothing in it is ever landed. `roles.triage` picks the
 roster agent and model; with no agent the built-in prompt's identity is used.
 
 The built-in prompt, `TriagePrompt`, says what each verdict above means; that
@@ -155,7 +157,15 @@ leaves no open item without a verdict, the task goes straight to `done` with
 no report to the orchestrator, which did not ask for it, and once the
 session has stopped its detached worktree is removed the way an accepted
 task's is. The orphan sweep (§5) would never take it: a PR head's commits are
-outside the project's bases, so it keeps that checkout. Nothing in this
+outside the project's bases, so it keeps that checkout.
+
+A triage session that ends any other way (stopped, killed at a cap, a failed
+setup, vanished, or wound down) closes its task instead, with a progress note
+and still no report, since nothing on the board can reassign it, and its
+checkout is removed the same way. A stopped triager is never resumed: the
+supervisor refuses, and Status and the inspector offer no Resume button for
+it, because resuming would rewrite its session config as a worker's. The
+follow-through loop starts a fresh triage from settling instead. Nothing in this
 phase starts the triager on its own yet: the settling-to-triaging move (§13.1)
 is its caller once it is wired.
 
