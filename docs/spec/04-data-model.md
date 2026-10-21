@@ -378,6 +378,13 @@ CREATE TABLE pr_round (
   ended_at        INTEGER,
   UNIQUE (watch_id, number)
 );
+
+-- An enabled project whose last PR poll could not run `gh` (§13.1); it raises the attention signal.
+CREATE TABLE pr_poll_problem (
+  project_id TEXT PRIMARY KEY REFERENCES project(id) ON DELETE CASCADE,
+  detail     TEXT NOT NULL,
+  since      INTEGER NOT NULL
+);
 ```
 
 Every `epic.state` value is written by exactly one place, and nothing writes one

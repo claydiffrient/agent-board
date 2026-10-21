@@ -106,8 +106,8 @@ actor FakeRuntime: AgentRuntime {
     }
 }
 
-/// `gh` with a canned answer per pull request URL. A URL with no answer fails, so no test reaches
-/// GitHub by accident.
+/// `gh` with a canned answer per pull request URL, for `gh search prs`, and per repository for
+/// `gh api graphql`. Anything with no answer fails, so no test reaches GitHub by accident.
 final class FakeGh: GhRunning, @unchecked Sendable {
     private let lock = NSLock()
     private var answers: [String: CommandResult] = [:]
@@ -126,11 +126,50 @@ final class FakeGh: GhRunning, @unchecked Sendable {
         lock.withLock { answers[url] = CommandResult(status: 4, stdout: "", stderr: stderr) }
     }
 
+    /// What `gh search prs` prints: the user's open pull requests.
+    func answerSearch(_ prs: [AuthoredPullRequest]) {
+        let rows = prs.map { pr -> [String: Any] in
+            ["repository": ["nameWithOwner": pr.repository, "name": pr.repository.split(separator: "/").last.map(String.init) ?? ""],
+             "number": pr.number, "url": pr.url, "title": pr.title, "isDraft": pr.isDraft]
+        }
+        let json = String(decoding: try! JSONSerialization.data(withJSONObject: rows), as: UTF8.self)
+        lock.withLock { answers[Self.searchKey] = CommandResult(status: 0, stdout: json, stderr: "") }
+    }
+
+    func failSearch(status: Int32, stderr: String) {
+        lock.withLock { answers[Self.searchKey] = CommandResult(status: status, stdout: "", stderr: stderr) }
+    }
+
+    /// What `gh api graphql` prints for `owner/name`: a `data` object holding `viewer` and the
+    /// repository's pull requests under their `pr<number>` aliases.
+    func answerGraphQL(repository: String, viewer: String, pullRequests: [[String: Any]]) {
+        var repo: [String: Any] = [:]
+        for pr in pullRequests { repo["pr\(pr["number"] as! Int)"] = pr }
+        let payload: [String: Any] = ["data": ["viewer": ["login": viewer], "repository": repo]]
+        let json = String(decoding: try! JSONSerialization.data(withJSONObject: payload), as: UTF8.self)
+        lock.withLock { answers[Self.graphQLKey(repository)] = CommandResult(status: 0, stdout: json, stderr: "") }
+    }
+
+    private static let searchKey = "search prs"
+
+    private static func graphQLKey(_ repository: String) -> String { "graphql \(repository)" }
+
+    private static func key(for arguments: [String]) -> String {
+        if arguments.starts(with: ["search", "prs"]) { return searchKey }
+        if arguments.starts(with: ["api", "graphql"]) {
+            func value(_ name: String) -> String {
+                arguments.first { $0.hasPrefix("\(name)=") }.map { String($0.dropFirst(name.count + 1)) } ?? ""
+            }
+            return graphQLKey("\(value("owner"))/\(value("name"))")
+        }
+        return arguments.count > 2 ? arguments[2] : ""
+    }
+
     func run(_ arguments: [String], cwd: URL) throws -> CommandResult {
         try lock.withLock {
             recorded.append(arguments)
-            let url = arguments.count > 2 ? arguments[2] : ""
-            guard let answer = answers[url] else { throw PullRequestCheckFailure("FakeGh has no answer for \(url)") }
+            let key = Self.key(for: arguments)
+            guard let answer = answers[key] else { throw PullRequestCheckFailure("FakeGh has no answer for \(key)") }
             return answer
         }
     }

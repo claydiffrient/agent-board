@@ -121,6 +121,41 @@ public struct PRWatchStore: Sendable {
         }
     }
 
+    /// Every watch of `projectId` that is not merged or closed.
+    public func live(projectId: String) throws -> [PRWatch] {
+        try db.reader.read { db in
+            try PRWatch.fetchAll(
+                db,
+                sql: "SELECT * FROM pr_watch WHERE project_id = ? AND state NOT IN ('merged', 'closed') ORDER BY number",
+                arguments: [projectId]
+            )
+        }
+    }
+
+    /// Makes `projectIds` exactly the projects whose poll cannot run `gh`, each with `detail`. A
+    /// project already recorded keeps its row untouched, so a failure repeated every poll writes
+    /// nothing and raises the attention signal once.
+    public func setPollProblem(_ detail: String, projectIds: Set<String>, now: Int64 = .nowMillis) throws {
+        try db.writer.write { db in
+            let recorded = Set(try String.fetchAll(db, sql: "SELECT project_id FROM pr_poll_problem"))
+            for gone in recorded.subtracting(projectIds) {
+                try db.execute(sql: "DELETE FROM pr_poll_problem WHERE project_id = ?", arguments: [gone])
+            }
+            for added in projectIds.subtracting(recorded) {
+                try db.execute(
+                    sql: "INSERT INTO pr_poll_problem (project_id, detail, since) VALUES (?, ?, ?)",
+                    arguments: [added, detail, now]
+                )
+            }
+        }
+    }
+
+    public func clearPollProblems() throws {
+        let recorded = try db.reader.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM pr_poll_problem") ?? 0 }
+        guard recorded > 0 else { return }
+        try db.writer.write { try $0.execute(sql: "DELETE FROM pr_poll_problem") }
+    }
+
     public func setPaused(_ paused: Bool, watchId: String, now: Int64 = .nowMillis) throws {
         try db.writer.write { db in
             try db.execute(

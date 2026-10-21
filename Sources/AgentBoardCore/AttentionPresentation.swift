@@ -18,6 +18,8 @@ extension AttentionCause {
             return count == 1
                 ? "1 agent has not acknowledged shutdown"
                 : "\(count) agents have not acknowledged shutdown"
+        case .prPollUnavailable:
+            return detail.map { "1 PR watch stopped: \($0)" } ?? "1 PR watch stopped"
         }
     }
 }

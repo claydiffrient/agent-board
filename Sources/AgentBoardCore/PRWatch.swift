@@ -319,3 +319,21 @@ public struct PRBadgeCount: Sendable, Equatable {
 
     public var total: Int { readyToVerify + openDecisions }
 }
+
+/// The phase-1 moves of SPEC §13.1, decided from one poll. Every other state belongs to a later
+/// phase's driver and is left where it is.
+public enum PRWatchTransition {
+    public static func next(
+        from state: PRWatchState, snapshot: PRSnapshot, openItems: Int, settings: PRFollowThroughSettings
+    ) -> PRWatchState? {
+        guard [.watching, .readyToVerify, .verified].contains(state) else { return nil }
+        let label = settings.verificationLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let labeled = !label.isEmpty
+            && snapshot.labels.contains { $0.caseInsensitiveCompare(label) == .orderedSame }
+        let ready = (!settings.requireApproval || snapshot.reviewDecision == "APPROVED")
+            && snapshot.checksState == "SUCCESS"
+            && openItems == 0
+        let target: PRWatchState = labeled ? .verified : ready ? .readyToVerify : .watching
+        return target == state ? nil : target
+    }
+}
