@@ -202,7 +202,12 @@ what it created. A second spawn for the task while the mark is held is refused
 with "still setting up", even when the first attempt's session was stopped
 mid-setup: its hook keeps running, and a retry that adopted that worktree would
 have it deleted by the first attempt's rollback, or share a build output base
-keyed on the same path with a hook still writing it. A retry after a reap or
+keyed on the same path with a hook still writing it. Stopping an attempt
+mid-setup cancels whatever of its setup has not started, so a stop before
+`git worktree add` creates nothing, but a hook already running finishes. A
+cancelled setup queues no `failed` report, since the stop has ended the
+session, so when a stopped attempt's setup ends a `decision` report says so;
+that report is the refusal's cue to spawn again. A retry after a reap or
 teardown has claimed the path waits for that removal instead (§5). A session in `setup`
 holds a concurrency slot but does no work, is exempt from the idle cap (the
 clock is measuring setup, not the agent), and is skipped by `reconcile`, whose

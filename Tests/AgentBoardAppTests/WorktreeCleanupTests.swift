@@ -129,6 +129,27 @@ final class WorktreeCleanupTests: XCTestCase {
         XCTAssertEqual(try worktreePaths(), [])
     }
 
+    func testADiscardBeforeSetupCreatesTheWorktreeLeavesNoWorktreeOrBranch() async throws {
+        await fixture.supervisor.start()
+        try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
+        let task = try makeTask()
+        let (reached, signalReached) = AsyncStream<Void>.makeStream()
+        let (resume, signalResume) = AsyncStream<Void>.makeStream()
+        fixture.supervisor.beforeCheckoutCreated = {
+            signalReached.yield()
+            for await _ in resume { break }
+        }
+        _ = try await fixture.supervisor.spawnWorker(taskId: task.id)
+        for await _ in reached { break }
+
+        try await fixture.supervisor.discard(taskId: task.id)
+        signalResume.yield()
+        await fixture.supervisor.waitForSetup()
+
+        XCTAssertEqual(try worktreePaths(), [], "setup created a worktree for a discarded task")
+        XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(task.id)"))
+    }
+
     // MARK: - Reaper
 
     func testReconcileReapsACleanOrphanedWorktree() async throws {
@@ -235,6 +256,30 @@ final class WorktreeCleanupTests: XCTestCase {
         XCTAssertTrue(try fixture.manager.branchExists("agentboard/stale-task"))
         let notice = try XCTUnwrap(fixture.supervisor.lastError, "the sweep stopped reaping without saying why")
         XCTAssertTrue(notice.contains(admin.path), notice)
+    }
+
+    func testTheBranchSweepKeepsTheBranchOfATaskBeingPlaced() async throws {
+        await fixture.supervisor.start()
+        try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
+        let task = try makeTask()
+        try fixture.manager.ensureBranch("agentboard/\(task.id)", from: "main")
+        let (reached, signalReached) = AsyncStream<Void>.makeStream()
+        let (resume, signalResume) = AsyncStream<Void>.makeStream()
+        fixture.supervisor.beforeCheckoutCreated = {
+            signalReached.yield()
+            for await _ in resume { break }
+        }
+        _ = try await fixture.supervisor.spawnWorker(taskId: task.id)
+        for await _ in reached { break }
+
+        await fixture.supervisor.reconcile(projectId: fixture.project.id)
+
+        XCTAssertTrue(
+            try fixture.manager.branchExists("agentboard/\(task.id)"),
+            "the sweep deleted the branch of a task whose worktree was about to be created"
+        )
+        signalResume.yield()
+        await fixture.supervisor.waitForSetup()
     }
 
     func testReconcileKeepsATaskBranchThatIsStillCheckedOut() async throws {
