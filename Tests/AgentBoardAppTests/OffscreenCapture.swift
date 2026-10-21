@@ -102,6 +102,40 @@ struct Capture {
         return lower..<upper
     }
 
+    /// The lowest contiguous run of rows that are not one flat colour across `columns` — a label or
+    /// glyph, as opposed to a bezel's straight edge or a card's rounded corner.
+    ///
+    /// Reads `bytes` the same way `diff` and `isBlank` do, rather than `NSBitmapImageRep.colorAt`,
+    /// for the same 200x reason.
+    func lowestInkedRows(columns: Range<Int>) -> ClosedRange<Int>? {
+        let stride = samplesPerPixel
+        let from = max(0, columns.lowerBound)
+        let to = min(columns.upperBound, width)
+        guard from < to else { return nil }
+        func inked(_ y: Int) -> Bool {
+            var result = false
+            bytes.withUnsafeBufferPointer { px in
+                let row = y * rowBytes
+                let first = row + from * stride
+                guard first + 2 < px.count else { return }
+                let r = Int(px[first]), g = Int(px[first + 1]), b = Int(px[first + 2])
+                for x in from..<to {
+                    let i = row + x * stride
+                    guard i + 2 < px.count else { continue }
+                    if abs(Int(px[i]) - r) + abs(Int(px[i + 1]) - g) + abs(Int(px[i + 2]) - b) > 5 {
+                        result = true
+                        return
+                    }
+                }
+            }
+            return result
+        }
+        guard let bottom = (0..<height).reversed().first(where: inked) else { return nil }
+        var top = bottom
+        while top > 0, inked(top - 1) { top -= 1 }
+        return top...bottom
+    }
+
     /// True when every pixel is the same colour.
     ///
     /// The window server hands back a flat surface for a window it has not composited yet, and a
