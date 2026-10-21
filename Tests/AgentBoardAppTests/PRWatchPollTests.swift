@@ -12,10 +12,13 @@ final class PRWatchPollTests: XCTestCase {
     private let label = "verified-example"
     private var url: String { "https://github.com/\(repository)/pull/12" }
     private var watches: PRWatchStore { PRWatchStore(fixture.db) }
+    private var banners: [(title: String, route: NotificationRoute?)] = []
 
     override func setUp() async throws {
         fixture = try SupervisorFixture.make(gitRepo: true)
         try fixture.git(["remote", "add", "origin", "git@github.com:\(repository).git"])
+        banners = []
+        fixture.supervisor.postBanner = { [weak self] title, _, route in self?.banners.append((title, route)) }
     }
 
     override func tearDown() async throws {
@@ -30,13 +33,13 @@ final class PRWatchPollTests: XCTestCase {
     }
 
     private func pullRequest(
-        _ number: Int = 12, labels: [String] = [], checks: String? = "SUCCESS", threads: [[String: Any]] = [],
-        reviews: [[String: Any]] = []
+        _ number: Int = 12, head: String = "c0ffee", labels: [String] = [], checks: String? = "SUCCESS",
+        threads: [[String: Any]] = [], reviews: [[String: Any]] = []
     ) -> [String: Any] {
         let rollup: Any = checks.map { ["state": $0] } ?? NSNull()
         return [
             "number": number, "url": "https://github.com/\(repository)/pull/\(number)", "title": "Add widgets",
-            "isDraft": false, "headRefName": "add-widgets", "headRefOid": "c0ffee", "baseRefName": "main",
+            "isDraft": false, "headRefName": "add-widgets", "headRefOid": head, "baseRefName": "main",
             "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
             "labels": ["nodes": labels.map { ["name": $0] }],
             "commits": ["nodes": [["commit": ["statusCheckRollup": rollup]]]],
@@ -75,6 +78,41 @@ final class PRWatchPollTests: XCTestCase {
         answer(pullRequest(labels: [label]))
         await fixture.supervisor.pollPRWatches()
         XCTAssertEqual(try onlyWatch().state, .verified)
+    }
+
+    /// SPEC §13.4: once per head oid. A PR that stays ready, or drops out and comes back on the same
+    /// head, says nothing more; a push it is ready on again announces it again.
+    func testReadyToVerifyBannersOncePerHeadOidAndRoutesToItsRow() async throws {
+        try enable()
+        answer(pullRequest())
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+        XCTAssertEqual(banners.map(\.title), ["Pull request ready to verify — \(fixture.project.name)"])
+        XCTAssertEqual(banners.first?.route, NotificationRoute(projectId: fixture.project.id, subject: .pullRequest(watch.id)))
+
+        await fixture.supervisor.pollPRWatches()
+        answer(pullRequest(checks: "PENDING"))
+        await fixture.supervisor.pollPRWatches()
+        answer(pullRequest())
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+        XCTAssertEqual(banners.count, 1, "the same head stayed or came back ready")
+
+        answer(pullRequest(head: "decaf0"))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(banners.count, 2, "a new head that is ready announces itself again")
+    }
+
+    func testReadyToVerifyBannerHonorsTheProjectsNotificationSettings() async throws {
+        try enable()
+        var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
+        settings.notifications.setEnabled(.prReadyToVerify, false)
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+        answer(pullRequest())
+        await fixture.supervisor.pollPRWatches()
+
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+        XCTAssertTrue(banners.isEmpty)
     }
 
     func testNoConfiguredChecksCountAsGreenButPendingChecksDoNot() async throws {

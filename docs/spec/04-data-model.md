@@ -320,6 +320,7 @@ CREATE TABLE pr_watch (
   is_draft         INTEGER NOT NULL DEFAULT 0,
   head_ref         TEXT NOT NULL,
   head_oid         TEXT NOT NULL,
+  head_changed_at  INTEGER,           -- the poll that first saw head_oid; null for the head watching began on
   base_ref         TEXT NOT NULL,
   state            TEXT NOT NULL,     -- watching | settling | triaging | fixing | checking | publishing |
                                       -- awaiting_ci | ready_to_verify | verified | stale | parked | merged | closed
@@ -333,6 +334,7 @@ CREATE TABLE pr_watch (
   last_feedback_at INTEGER,           -- the last poll that brought a new, changed or reopened item
   verified_at      INTEGER,
   est_cost_usd     REAL NOT NULL DEFAULT 0,
+  ready_notified_oid TEXT,            -- the head whose Ready to verify banner fired (§13.4)
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,  -- moves only when something other than last_polled_at changes
   UNIQUE (project_id, repo_owner, repo_name, number)

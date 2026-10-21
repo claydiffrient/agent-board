@@ -7,13 +7,20 @@ import SwiftUI
 /// where it is in follow-through.
 struct PullRequestsView: View {
     let projects: [Project]
+    /// Owned by `MainWindow`, so At a Glance and a banner click can open the page already filtered.
+    @Binding var projectFilter: String?
 
     @Environment(AppEnvironment.self) private var env
     @Environment(\.openWindow) private var openWindow
     @State private var page = Observed<[PRWatchGroup]>([])
-    @State private var projectFilter: String?
     @State private var marking: Set<String> = []
     @State private var errorMessage: String?
+    @State private var routedWatchId: String?
+
+    init(projects: [Project], projectFilter: Binding<String?> = .constant(nil)) {
+        self.projects = projects
+        _projectFilter = projectFilter
+    }
 
     static func sections(_ groups: [PRWatchGroup]) -> [PRWatchGroup] {
         PRPageGroup.allCases.compactMap { group in
@@ -49,6 +56,12 @@ struct PullRequestsView: View {
         .task(id: projectFilter) {
             await page.run(PRWatchStore(env.db).observePage(projectId: projectFilter), in: env.db.reader)
         }
+        .task(id: env.router.sequence) {
+            guard let route = env.router.route, case .pullRequest(let watchId) = route.subject,
+                  env.router.take(.pullRequestRow, projectId: route.projectId) != nil
+            else { return }
+            routedWatchId = watchId
+        }
         .errorAlert($errorMessage)
     }
 
@@ -65,20 +78,33 @@ struct PullRequestsView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             Divider()
-            List {
-                ForEach(Self.sections(page.value), id: \.group) { section in
-                    Section(section.group.title) {
-                        if section.listings.isEmpty {
-                            Text(section.group.emptyText)
-                                .foregroundStyle(.secondary)
-                        }
-                        ForEach(section.listings) { listing in
-                            row(listing)
+            ScrollViewReader { proxy in
+                List {
+                    ForEach(Self.sections(page.value), id: \.group) { section in
+                        Section(section.group.title) {
+                            if section.listings.isEmpty {
+                                Text(section.group.emptyText)
+                                    .foregroundStyle(.secondary)
+                            }
+                            ForEach(section.listings) { listing in
+                                row(listing)
+                            }
                         }
                     }
                 }
+                .onChange(of: routedWatchId) { scrollToRoutedRow(proxy) }
+                .onChange(of: page.value) { scrollToRoutedRow(proxy) }
             }
         }
+    }
+
+    /// The routed row may arrive after the route does, once the filtered page has loaded.
+    private func scrollToRoutedRow(_ proxy: ScrollViewProxy) {
+        guard let id = routedWatchId,
+              page.value.contains(where: { $0.listings.contains { $0.id == id } })
+        else { return }
+        proxy.scrollTo(id, anchor: .center)
+        routedWatchId = nil
     }
 
     private func row(_ listing: PRWatchListing) -> some View {
@@ -187,7 +213,11 @@ struct PullRequestRow: View {
         var parts = ["\(watch.repoOwner)/\(watch.repoName) #\(watch.number)", watch.state.title]
         if watch.round > 0 { parts.append("round \(watch.round)") }
         parts.append(listing.openItems == 1 ? "1 open item" : "\(listing.openItems) open items")
-        parts.append("updated \(Format.relative(Date(timeIntervalSince1970: TimeInterval(watch.updatedAt) / 1000)))")
+        if let pushed = watch.headChangedAt {
+            parts.append("pushed \(Format.relative(Date(timeIntervalSince1970: TimeInterval(pushed) / 1000)))")
+        } else {
+            parts.append("updated \(Format.relative(Date(timeIntervalSince1970: TimeInterval(watch.updatedAt) / 1000)))")
+        }
         if watch.paused { parts.append("paused") }
         if let projectName { parts.append(projectName) }
         return parts.joined(separator: " · ")

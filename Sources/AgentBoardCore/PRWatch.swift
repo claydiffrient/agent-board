@@ -63,6 +63,8 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
     public var isDraft: Bool
     public var headRef: String
     public var headOid: String
+    /// When a poll first saw `headOid`; nil for a head that was already there when watching began.
+    public var headChangedAt: Int64? = nil
     public var baseRef: String
     public var state: PRWatchState
     public var round: Int
@@ -75,6 +77,8 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
     public var lastFeedbackAt: Int64?
     public var verifiedAt: Int64?
     public var estCostUSD: Double
+    /// The head whose Ready to verify banner has fired, so a PR announces itself once per head.
+    public var readyNotifiedOid: String? = nil
     public var createdAt: Int64
     public var updatedAt: Int64
 
@@ -89,6 +93,7 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
         case isDraft = "is_draft"
         case headRef = "head_ref"
         case headOid = "head_oid"
+        case headChangedAt = "head_changed_at"
         case baseRef = "base_ref"
         case state
         case round
@@ -101,6 +106,7 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
         case lastFeedbackAt = "last_feedback_at"
         case verifiedAt = "verified_at"
         case estCostUSD = "est_cost_usd"
+        case readyNotifiedOid = "ready_notified_oid"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -341,9 +347,9 @@ public enum PRWatchTransition {
         from state: PRWatchState, snapshot: PRSnapshot, openItems: Int, settings: PRFollowThroughSettings
     ) -> PRWatchState? {
         guard [.watching, .readyToVerify, .verified].contains(state) else { return nil }
-        let label = settings.verificationLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let labeled = !label.isEmpty
-            && snapshot.labels.contains { $0.caseInsensitiveCompare(label) == .orderedSame }
+        let labeled = settings.markVerifiedLabel.map { label in
+            snapshot.labels.contains { $0.caseInsensitiveCompare(label) == .orderedSame }
+        } ?? false
         let ready = (!settings.requireApproval || snapshot.reviewDecision == "APPROVED")
             && checksGreen(snapshot.checksState)
             && openItems == 0

@@ -41,6 +41,25 @@ final class PullRequestsPageTests: XCTestCase {
         return try XCTUnwrap(store.get(created.id))
     }
 
+    /// SPEC §10: At a Glance counts ready PRs only where follow-through is on, and its headline
+    /// clause filters to the one project it counts but lists every project when it counts several.
+    func testAtAGlanceCountsEnabledProjectsAndTheHeadlineFiltersOnlyToASoleProject() throws {
+        let db = try AppDatabase.inMemory()
+        let alpha = try project(db, name: "Alpha", label: nil)
+        let beta = try project(db, name: "Beta", label: nil)
+        var off = try project(db, name: "Off", label: nil)
+        off.settings.prFollowThrough.enabled = false
+        let counts = [
+            alpha.id: PRBadgeCount(readyToVerify: 2), beta.id: PRBadgeCount(openDecisions: 1),
+            off.id: PRBadgeCount(readyToVerify: 4),
+        ]
+
+        let ready = AtAGlanceView.readyToVerify(projects: [alpha, beta, off], counts: counts)
+        XCTAssertEqual(ready, [alpha.id: 2])
+        XCTAssertEqual(AtAGlanceView.headlineFilter(ready), alpha.id)
+        XCTAssertNil(AtAGlanceView.headlineFilter([alpha.id: 2, beta.id: 1]))
+    }
+
     func testEveryGroupShowsItsRowInPageOrder() throws {
         let db = try AppDatabase.inMemory()
         let project = try project(db, label: label)

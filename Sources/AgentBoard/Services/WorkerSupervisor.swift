@@ -1341,7 +1341,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §13.1, phase 1: watches the user's open, non-draft pull requests in every project with
     /// PR follow-through on, mapping each repository to the project whose `origin` names it. Writes
-    /// each poll through `PRWatchStore` and moves only watching, readyToVerify and verified; a watch
+    /// each poll through `PRWatchStore` and moves only watching, readyToVerify and verified, bannering
+    /// a PR's arrival in readyToVerify once per head oid (§13.4); a watch
     /// whose PR left the open list settles to merged or closed by `gh pr view`, and one whose PR went
     /// back to draft is deleted. No project enabled means no `gh` call at all.
     func pollPRWatches() async {
@@ -1434,6 +1435,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 settings: project.settings.prFollowThrough
             ) {
                 try prWatches.setState(next, watchId: watch.id)
+            }
+            if let ready = try prWatches.claimReadyNotification(watchId: watch.id) {
+                post(
+                    "Pull request ready to verify", body: "#\(ready.number) \(ready.title)",
+                    projectId: project.id, category: .prReadyToVerify, subject: .pullRequest(ready.id)
+                )
             }
         } catch {
             report(["could not record \(snapshot.url): \(describe(error))"])

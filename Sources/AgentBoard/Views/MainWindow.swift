@@ -24,6 +24,7 @@ struct MainWindow: View {
     @State private var pullRequestCounts = Observed<[String: PRBadgeCount]>([:])
     @State private var showCoordinatorSettings = false
     @State private var selection: SidebarSelection = .atAGlance
+    @State private var pullRequestFilter: String?
     @State private var settingsProject: Project?
     @State private var workspaceEdit: WorkspaceEdit?
     @State private var workspaceToDelete: Workspace?
@@ -103,7 +104,7 @@ struct MainWindow: View {
         case .coordinator:
             CoordinatorView()
         case .pullRequests:
-            PullRequestsView(projects: projects.value)
+            PullRequestsView(projects: projects.value, projectFilter: $pullRequestFilter)
         case .atAGlance, .project:
             if let project = projects.value.first(where: { $0.id == selection.projectId }) {
                 ProjectDetailView(project: project)
@@ -112,7 +113,8 @@ struct MainWindow: View {
                 AtAGlanceView(
                     projects: projects.value, workspaces: workspaces.value,
                     attention: attention.value, unreadReplies: CoordinatorRow.unreadReplies(coordinatorQueue.value),
-                    select: select
+                    pullRequestCounts: pullRequestCounts.value,
+                    select: select, showPullRequests: showPullRequests
                 )
             }
         }
@@ -130,11 +132,22 @@ struct MainWindow: View {
 
     /// A banner click selects its project through `select`, the same funnel the sidebar uses, so
     /// the orchestrator starts exactly as it does on a click. The screen is `ProjectDetailView`'s.
+    /// A pull request's banner opens the Pull Requests page filtered to its project instead.
     private func openRoutedProject() {
         guard let route = env.router.route,
               projects.value.contains(where: { $0.id == route.projectId })
         else { return }
-        select(.project(route.projectId))
+        if case .pullRequest = route.subject {
+            showPullRequests(projectId: route.projectId)
+        } else {
+            select(.project(route.projectId))
+        }
+    }
+
+    /// Nil lists every project.
+    private func showPullRequests(projectId: String?) {
+        pullRequestFilter = projectId
+        select(.pullRequests)
     }
 
     private var sections: [ProjectSection] {
@@ -411,7 +424,7 @@ struct ProjectDetailView: View {
         }
         .navigationTitle(project.name)
         .task(id: env.router.sequence) {
-            if let route = env.router.take(.screen, projectId: project.id) { screen = route.screen }
+            if let routed = env.router.take(.screen, projectId: project.id)?.screen { screen = routed }
         }
         .toolbar {
             ToolbarItem(placement: .principal) {

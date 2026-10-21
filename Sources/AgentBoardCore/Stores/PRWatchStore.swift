@@ -9,7 +9,7 @@ public struct PRWatchStore: Sendable {
     }
 
     /// Records one poll (SPEC §4). Idempotent by node id: an unchanged snapshot moves only
-    /// `last_polled_at`. An open item that resolved or left the snapshot becomes handled, and a
+    /// `last_polled_at`, and a new head oid stamps `head_changed_at`. An open item that resolved or left the snapshot becomes handled, and a
     /// non-open item whose body changed (a new reply) reopens.
     @discardableResult
     public func upsert(projectId: String, snapshot: PRSnapshot, now: Int64 = .nowMillis) throws -> PRWatch {
@@ -33,6 +33,7 @@ public struct PRWatchStore: Sendable {
                 watch.title = snapshot.title
                 watch.isDraft = snapshot.isDraft
                 watch.headRef = snapshot.headRef
+                if watch.headOid != snapshot.headOid { watch.headChangedAt = now }
                 watch.headOid = snapshot.headOid
                 watch.baseRef = snapshot.baseRef
                 watch.reviewDecision = snapshot.reviewDecision
@@ -118,6 +119,21 @@ public struct PRWatchStore: Sendable {
                 sql: "UPDATE pr_watch SET state = ?, updated_at = ? WHERE id = ?",
                 arguments: [state, now, watchId]
             )
+        }
+    }
+
+    /// Records that `watchId`'s Ready to verify banner fires for its current head, and returns the
+    /// watch when this call is the one that recorded it (SPEC §13.4). Nil when the watch is not ready
+    /// to verify or this head was already announced, so a PR that stays ready across polls, or
+    /// leaves and re-enters without a push, announces itself once.
+    public func claimReadyNotification(watchId: String) throws -> PRWatch? {
+        try db.writer.write { db in
+            guard var watch = try PRWatch.fetchOne(db, key: watchId),
+                  watch.state == .readyToVerify, watch.readyNotifiedOid != watch.headOid
+            else { return nil }
+            watch.readyNotifiedOid = watch.headOid
+            try watch.update(db)
+            return watch
         }
     }
 

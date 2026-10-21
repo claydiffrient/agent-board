@@ -185,9 +185,19 @@ on at all.
   pending approval raises.
 - At a Glance's headline (§10) gains "N PRs ready to verify" beside the
   review count, each project's card gains its own count, and clicking either
-  opens the Pull Requests page filtered to that project.
+  opens the Pull Requests page filtered to that project (§10 has the
+  headline's rule when several projects hold ready PRs).
 - A notification banner fires when a PR enters readyToVerify (once per head
-  oid) and when a decision item arrives.
+  oid) and when a decision item arrives. The Ready to verify banner (phase 1)
+  is decided after each poll's transition: `PRWatchStore.claimReadyNotification`
+  records the watch's head in `ready_notified_oid` and fires only when that head
+  is not already recorded, so a PR that stays ready across polls, or drops out
+  and comes back without a push, announces itself once, and a push it is ready
+  on again announces it again. It reads "Pull request ready to verify — <project>",
+  with `#n title` as its body, and its click opens the Pull Requests page filtered
+  to the project, scrolled to the row. It is the **Pull requests ready to
+  verify** notification category, on by default; turning it off or muting the
+  project still records the head, so unmuting does not replay old banners.
 - A seventh project-settings tab, **PR Follow-Through**, placed after
   Advanced (§10), holds every setting in §13.3 except `roles`, whose agent
   pickers arrive in phase 2. Its sections are **Watch** (`enabled`, settle

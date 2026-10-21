@@ -545,6 +545,12 @@ enum Schema {
     );
     """
 
+    /// When a watched PR's head last moved, and the head whose Ready to verify banner already fired.
+    static let prWatchHead = """
+    ALTER TABLE pr_watch ADD COLUMN head_changed_at INTEGER;
+    ALTER TABLE pr_watch ADD COLUMN ready_notified_oid TEXT;
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",

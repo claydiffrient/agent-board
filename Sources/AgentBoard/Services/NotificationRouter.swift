@@ -9,6 +9,7 @@ final class NotificationRouter {
     enum Consumer {
         case screen
         case epicLane
+        case pullRequestRow
     }
 
     private(set) var route: NotificationRoute?

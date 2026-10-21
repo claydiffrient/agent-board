@@ -11,10 +11,17 @@ absent things. When any project needs a human the headline leads with how many
 do — "2 projects need you." — *beside* the review count rather than in place of
 it: the review clause counts tasks in one board column, while attention counts
 projects that cannot proceed, and a pending approval raises the second without
-ever touching the first. In a project with PR follow-through on (§13), the
-headline also carries "N PRs ready to verify" beside the review count, and
-each project's card shows its own count; clicking either opens the Pull
-Requests page filtered to that project. Below it, one card per project — every project,
+ever touching the first. In projects with PR follow-through on (§13), the
+headline also carries "N PRs ready to verify" after the review count — "Nothing
+running, nothing awaiting your review, 1 PR ready to verify." — and at zero the
+clause is absent rather than reassuring, so the resting sentence is unchanged.
+Each project's card shows its own count as a link under its name, and a card
+with one is not **Idle**. Clicking the card's count opens the Pull Requests page
+filtered to that project; clicking the headline's clause does the same when one
+project holds every ready PR, and opens it unfiltered when several do. The counts
+come from the `PRWatchStore.observeBadgeCounts` observation `MainWindow` already
+runs for the sidebar badge, limited to projects with follow-through on, since a
+project that turned it off stops polling. Below it, one card per project — every project,
 including idle ones — grouped into the same workspace sections in the same order
 as the sidebar, so a project sits in the same relative place in both. A card
 carries the project name and its running, in-review and ready counts, or reads
@@ -426,12 +433,16 @@ with a one-line placeholder when empty. A **Project** menu above the list
 narrows it to one project with follow-through on; while it shows every project,
 each row names its project. A row shows the title (a link that opens the PR in
 the browser), `owner/repo #n`, the state, the round once one has run, the open
-item count, and when the watch last changed — `pr_watch` records no push time,
-so a new head shows as a change like any other. Row actions: **Mark verified**
+item count, and "pushed …" from `head_changed_at` — or, for a PR whose head has
+not moved since watching began, "updated …" from `updated_at`. Row actions: **Mark verified**
 (hidden once verified, disabled when the project sets no verification label),
 **Walk me through it** (only once the project sets a `verifyCommand`), and
-**Pause**, which sets `paused` and becomes **Resume**. See §13 for the state
-machine, verdicts, and settings behind all of it.
+**Pause**, which sets `paused` and becomes **Resume**. The page's project filter
+belongs to `MainWindow`, so At a Glance and a Ready to verify banner (§13.4) can
+open it already filtered; the banner's route
+(`NotificationRoute.Subject.pullRequest`) also scrolls to its row once the
+filtered page has loaded. See §13 for the state machine, verdicts, and settings
+behind all of it.
 
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
@@ -551,7 +562,7 @@ vanished entirely would leave nobody to ask about a port that appeared since.
 **Project settings** — a sheet from the sidebar row's gear, in seven tabs:
 **General** (Repository, Workspace, Archive), **Agents** (Models, Review,
 Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Worktree
-teardown, Isolation, Publishing), **Notifications**, **Advanced** (the `autoMode` classifier JSON,
+teardown, Isolation, Publishing), **Notifications** (one switch per banner category — approvals, blocked workers, caps and stalls, worker failures, pull requests ready to verify — and the project mute), **Advanced** (the `autoMode` classifier JSON,
 Extra MCP servers), and **PR Follow-Through** (Watch, Verification, Replies, Publish guard; §13.3), after Advanced. Tabs group by what a setting governs, not by how often it is
 touched. Every section is in exactly one tab; a section in none would be a stored
 setting with no UI. **Delete Project…** sits outside the tabs, at the left of the

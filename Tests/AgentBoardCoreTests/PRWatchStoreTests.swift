@@ -4,11 +4,11 @@ import XCTest
 @testable import AgentBoardCore
 
 final class PRWatchStoreTests: XCTestCase {
-    private func snapshot(number: Int = 7, items: [PRSnapshotItem]) -> PRSnapshot {
+    private func snapshot(number: Int = 7, head: String = "abc123", items: [PRSnapshotItem]) -> PRSnapshot {
         PRSnapshot(
             repoOwner: "example-org", repoName: "app", number: number,
             url: "https://github.com/example-org/app/pull/\(number)", title: "Add a widget",
-            headRef: "feature/widget", headOid: "abc123", baseRef: "main", reviewDecision: "REVIEW_REQUIRED",
+            headRef: "feature/widget", headOid: head, baseRef: "main", reviewDecision: "REVIEW_REQUIRED",
             checksState: "SUCCESS", mergeable: "MERGEABLE", labels: ["needs-review"], items: items
         )
     }
@@ -50,6 +50,20 @@ final class PRWatchStoreTests: XCTestCase {
         let reopened = try XCTUnwrap(store.items(watchId: created.id).first { $0.githubNodeId == "T1" })
         XCTAssertEqual(reopened.state, .open)
         XCTAssertEqual(try store.get(created.id)?.lastFeedbackAt, 4_000)
+    }
+
+    func testANewHeadOidStampsHeadChangedAtAndAnUnchangedSnapshotLeavesItAlone() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let created = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: []), now: 1_000)
+        XCTAssertNil(created.headChangedAt, "the head was already there when watching began")
+
+        let pushed = try store.upsert(projectId: f.project.id, snapshot: snapshot(head: "def456", items: []), now: 2_000)
+        XCTAssertEqual(pushed.headChangedAt, 2_000)
+
+        let polled = try store.upsert(projectId: f.project.id, snapshot: snapshot(head: "def456", items: []), now: 3_000)
+        XCTAssertEqual(polled.headChangedAt, 2_000)
+        XCTAssertEqual(try store.get(created.id)?.headChangedAt, 2_000)
     }
 
     func testPageGroupsWatchesAndBadgeCountsReadyAndDecisions() throws {
