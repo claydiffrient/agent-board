@@ -3184,6 +3184,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func sweepArchives(_ all: [Project], now: Int64 = .nowMillis) -> [String] {
         _ = try? messages.deleteExpired(now: now)
         _ = try? requests.deleteExpired(now: now)
+        _ = try? hookEvents.prune(now: now)
         return all.flatMap { (try? archives.run(projectId: $0.id, now: now)) ?? [] }
     }
 
