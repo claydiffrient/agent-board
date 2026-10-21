@@ -287,6 +287,44 @@ final class OffscreenMount {
     }
 }
 
+/// Pumps `window`'s run loop until `condition` is true, or fails by name after `ceiling`.
+///
+/// Replaces a fixed `settle(turns: N)` pump — a guess at how long a GRDB `ValueObservation` and
+/// SwiftUI take to reach the view tree — with a wait for the state the caller is about to assert,
+/// so the poll costs only as many turns as the day's machine actually needs. `ceiling` is on
+/// `SuspendingClock`, for the reason `OffscreenMount.capture` is: a system sleep mid-poll must not
+/// blow a wall-clock deadline the instant the machine wakes.
+@MainActor
+func pump(
+    _ window: NSWindow, ceiling: Duration = .seconds(10),
+    file: StaticString = #filePath, line: UInt = #line,
+    until condition: () -> Bool
+) {
+    let clock = SuspendingClock()
+    let deadline = clock.now.advanced(by: ceiling)
+    while true {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        window.layoutIfNeeded()
+        window.displayIfNeeded()
+        if condition() { return }
+        guard clock.now < deadline else {
+            XCTFail("the window never satisfied its condition inside \(ceiling)", file: file, line: line)
+            return
+        }
+    }
+}
+
+/// A short, fixed dwell for a negative assertion, where there is no condition to poll for because
+/// the test's point is that some state never appears.
+@MainActor
+func pumpBriefly(_ window: NSWindow, turns: Int = 5) {
+    for _ in 0..<turns {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        window.layoutIfNeeded()
+        window.displayIfNeeded()
+    }
+}
+
 /// An environment whose sidebar footer never draws, so nothing in a captured `MainWindow` changes
 /// except what the test writes.
 ///

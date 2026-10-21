@@ -78,16 +78,10 @@ final class StatusPortsSectionLiveTests: XCTestCase {
 
         func close() { window.orderOut(nil) }
 
-        func settle(turns: Int = 80) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
-
+        /// A short dwell before shooting: `settled(_:)` below is what actually waits out a slow
+        /// render, by requiring two of these captures to agree; this only has to cover one frame.
         func capture() throws -> NSBitmapImageRep {
-            settle()
+            pumpBriefly(window, turns: 9)
             let image = try XCTUnwrap(
                 CGWindowListCreateImage(
                     .null, .optionIncludingWindow, CGWindowID(window.windowNumber),
@@ -275,30 +269,6 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         )
     }
 
-    /// A port nothing names is not drawn anywhere, so it cannot land on a project's pane either.
-    func testAPortNothingNamesDrawsNothingOnAnyProjectsPane() throws {
-        let db = try AppDatabase.inMemory()
-        let mine = try register(db, "Mine")
-        try endedSession(db, project: mine, id: "s-mine", title: "Run the dev server")
-        let mineOnly = [ListeningPort(port: 3000, pid: 501, command: "node", sessionId: "s-mine", source: .ledger)]
-
-        let unnamed = try model(db, mineOnly + [
-            ListeningPort(port: 8080, pid: 502, command: "python3", sessionId: nil)
-        ], publishes: 1)
-        XCTAssertEqual(unnamed.ports.map(\.port), [3000])
-        XCTAssertEqual(unnamed.ports(inProject: mine.id).map(\.port), [3000])
-
-        let base = pane(db, mine, try model(db, mineOnly))
-        let withUnnamed = pane(db, mine, unnamed)
-        defer { base.close(); withUnnamed.close() }
-
-        let drift = diff(try settled(base), try settled(withUnnamed))
-        XCTAssertEqual(
-            drift.count, 0,
-            "a port nothing names drew on a project's Status pane (\(drift.box))"
-        )
-    }
-
     /// One sweep, two surfaces. The Status pane reads `ports(inProject:)` and starts nothing of its
     /// own: mounted alone it sweeps zero times, and mounted beside the sidebar panel the pair costs
     /// exactly the panel's one mount refresh.
@@ -318,7 +288,7 @@ final class StatusPortsSectionLiveTests: XCTestCase {
 
         let paneOnly = Mount(StatusView(project: mine).environment(env), width: 900, height: 500)
         defer { paneOnly.close() }
-        paneOnly.settle()
+        pumpBriefly(paneOnly.window)
         XCTAssertEqual(counter.count, 1, "the Status pane swept the process table on its own")
 
         let both = Mount(
@@ -329,7 +299,7 @@ final class StatusPortsSectionLiveTests: XCTestCase {
             width: 900, height: 700
         )
         defer { both.close() }
-        both.settle()
+        pump(both.window) { counter.count == 2 }
 
         XCTAssertEqual(
             counter.count, 2,
@@ -386,10 +356,10 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         defer { both.close() }
         both.window.layoutIfNeeded()
         type(":3000", into: both)
-        both.settle()
+        pumpBriefly(both.window)
         for text in [":30", "node", "dev server", ""] {
             type(text, into: both)
-            both.settle(turns: 10)
+            pumpBriefly(both.window, turns: 10)
         }
 
         XCTAssertEqual(

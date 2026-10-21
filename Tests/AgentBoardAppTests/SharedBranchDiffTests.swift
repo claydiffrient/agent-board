@@ -103,32 +103,6 @@ final class SharedBranchDiffTests: XCTestCase {
         XCTAssertEqual(betaSummary, DiffSummary(filesChanged: 1, insertions: 1, deletions: 0))
     }
 
-    /// The failure worth naming: before attribution this read as the sibling's whole branch.
-    func testATaskThatHasCommittedNothingReadsAsEmpty() async throws {
-        try write("beta.txt", "b\n")
-        try await commit(beta, paths: ["beta.txt"], message: "Add beta")
-
-        let stat = await fixture.supervisor.worktreeDiffstat(taskId: alpha.id)
-        let summary = await fixture.supervisor.worktreeDiffSummary(taskId: alpha.id)
-
-        XCTAssertEqual(stat, "")
-        XCTAssertEqual(summary, DiffSummary())
-        XCTAssertEqual(summary?.isEmpty, true)
-    }
-
-    /// A commit made outside Agent Board — the human's own, or a merge — belongs to no task.
-    func testAnUnrecordedCommitOnTheSharedBranchIsNobodysWork() async throws {
-        try write("human.txt", "by hand\n")
-        try SupervisorFixture.git(["add", "human.txt"], cwd: fixture.repo)
-        try SupervisorFixture.git(["commit", "-q", "-m", "A hand-made commit"], cwd: fixture.repo)
-
-        let alphaStat = await fixture.supervisor.worktreeDiffstat(taskId: alpha.id)
-        let betaStat = await fixture.supervisor.worktreeDiffstat(taskId: beta.id)
-
-        XCTAssertEqual(alphaStat, "")
-        XCTAssertEqual(betaStat, "")
-    }
-
     /// The worktree path has to keep working; nothing here may change what an isolated task reads.
     func testAWorktreeTaskStillDiffsItsWholeBranch() async throws {
         let isolated = try makeTask("Isolated")

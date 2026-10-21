@@ -35,14 +35,6 @@ final class AtAGlanceLaunchCostTests: XCTestCase {
         let window: NSWindow
         let host: NSView
         let supervisor: ConsoleRecordingSupervisor
-
-        func settle(turns: Int = 60) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
     }
 
     private func projects(_ db: AppDatabase, _ names: [String]) throws -> [Project] {
@@ -65,6 +57,7 @@ final class AtAGlanceLaunchCostTests: XCTestCase {
         )
         window.contentView = host
         window.orderBack(nil)
+        addTeardownBlock { window.orderOut(nil) }
         return Mounted(window: window, host: host, supervisor: supervisor)
     }
 
@@ -74,7 +67,9 @@ final class AtAGlanceLaunchCostTests: XCTestCase {
         let mounted = mount(
             MainWindow(collapseState: collapse.state), db: db, supervisor: ConsoleRecordingSupervisor()
         )
-        mounted.settle()
+        // Nothing to poll for: the assertion is that the recorder never fires, so a fixed dwell —
+        // not a condition — is the right wait.
+        pumpBriefly(mounted.window)
 
         XCTAssertEqual(
             mounted.supervisor.consoleRequests, [],
@@ -88,7 +83,7 @@ final class AtAGlanceLaunchCostTests: XCTestCase {
         let db = try AppDatabase.inMemory()
         let project = try XCTUnwrap(try projects(db, ["Alpha"]).first)
         let mounted = mount(ProjectDetailView(project: project), db: db, supervisor: ConsoleRecordingSupervisor())
-        mounted.settle()
+        pump(mounted.window) { mounted.supervisor.consoleRequests == [project.id] }
 
         XCTAssertEqual(mounted.supervisor.consoleRequests, [project.id])
     }
@@ -103,7 +98,7 @@ final class AtAGlanceLaunchCostTests: XCTestCase {
         var selected: [SidebarSelection] = []
         let page = AtAGlanceView(projects: all, workspaces: [], attention: [], select: { selected.append($0) })
         let mounted = mount(page, db: db, supervisor: ConsoleRecordingSupervisor())
-        mounted.settle()
+        pump(mounted.window) { mounted.host.subviews.count > 0 }
 
         XCTAssertEqual(mounted.supervisor.consoleRequests, [], "the page must not open any project's console")
         XCTAssertTrue(selected.isEmpty, "nothing was clicked, so nothing may have been selected")

@@ -50,14 +50,6 @@ final class ReleaseNotesLaunchMountTests: XCTestCase {
             window.orderBack(nil)
         }
 
-        func settle(turns: Int = 80) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
-
         func close() { window.orderOut(nil) }
     }
 
@@ -84,40 +76,17 @@ final class ReleaseNotesLaunchMountTests: XCTestCase {
         )
         let mount = Mount(db: db, announcer: ReleaseNotesAnnouncer(state: state, defaults: defaults))
         defer { mount.close() }
-        mount.settle()
+        pump(mount.window) { self.recorded != nil }
     }
 
     private var recorded: String? { defaults.string(forKey: ReleaseNotesAnnouncer.key) }
 
-    /// The control. Mounting the board on a build with no notes must leave the store exactly as it
-    /// was — otherwise a write in any later test says only that something ran, not that the
-    /// decision reached it.
-    func testMountingABoardWithNoNotesWritesNothing() throws {
-        try mountAndSettle(.unavailable)
-        XCTAssertNil(recorded, "an unbundled build wrote a record from a mount")
-    }
-
     /// The first ever launch, end to end through the view: silent, and the current version recorded
-    /// so the next launch is not mistaken for an upgrade.
+    /// so the next launch is not mistaken for an upgrade. `ReleaseNotesAnnouncerTests` holds every
+    /// other branch of the decision as a value test; this is the one wiring check that the launch
+    /// task actually runs when the board mounts.
     func testAFirstLaunchRecordsTheVersionFromTheMount() throws {
         try mountAndSettle(try state(running: "0.1.0", versions: ["0.1.0"]))
         XCTAssertEqual(recorded, "0.1.0", "the launch task did not run when the board mounted")
-    }
-
-    /// The upgrade path through the view. `openWindow(id:)` is reached here and has no scene to
-    /// open under `xctest`; what this asserts is that the branch is taken and survives, not that a
-    /// window appeared.
-    func testAnUpgradeTakesTheOpeningBranchAndMovesTheRecord() throws {
-        defaults.set("0.1.0", forKey: ReleaseNotesAnnouncer.key)
-        try mountAndSettle(try state(running: "0.2.0", versions: ["0.2.0", "0.1.0"]))
-        XCTAssertEqual(recorded, "0.2.0")
-    }
-
-    /// A second launch at the same version. The record is what makes it quiet, and mounting again
-    /// must not disturb it.
-    func testASecondLaunchAtTheSameVersionLeavesTheRecordWhereItIs() throws {
-        defaults.set("0.2.0", forKey: ReleaseNotesAnnouncer.key)
-        try mountAndSettle(try state(running: "0.2.0", versions: ["0.2.0", "0.1.0"]))
-        XCTAssertEqual(recorded, "0.2.0")
     }
 }

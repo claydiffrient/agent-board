@@ -21,14 +21,8 @@ final class SharedBranchAttributionTests: XCTestCase {
             .appendingPathComponent("agent-board-shared-\(UUID().uuidString)")
             .resolvingSymlinksInPath()
         repo = sandbox.appendingPathComponent("repo")
-        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        try git(["init", "-q", "-b", "main"])
-        try git(["config", "user.email", "test@example.com"])
-        try git(["config", "user.name", "Test"])
-        try git(["config", "commit.gpgsign", "false"])
-        try write("README.md", "hello\n")
-        try git(["add", "."])
-        try git(["commit", "-q", "-m", "Initial commit"])
+        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: Self.repoTemplate, to: repo)
         try git(["checkout", "-q", "-b", branch])
 
         ledger = TaskCommitStore(try AppDatabase.inMemory())
@@ -42,6 +36,28 @@ final class SharedBranchAttributionTests: XCTestCase {
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: sandbox)
     }
+
+    /// Built once per `swift test` process and copied into place for every test, rather than paying
+    /// `git init`, three `config` calls, `add` and `commit` per test.
+    private static let repoTemplate: URL = {
+        let template = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agent-board-shared-template-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: template, withIntermediateDirectories: true)
+        func run(_ args: [String]) throws {
+            let result = try ProcessRunner.run(
+                executable: URL(fileURLWithPath: "/usr/bin/git"), arguments: args, cwd: template
+            )
+            guard result.status == 0 else { throw AgentRuntimeError("git \(args) failed: \(result.stderr)") }
+        }
+        try! run(["init", "-q", "-b", "main"])
+        try! run(["config", "user.email", "test@example.com"])
+        try! run(["config", "user.name", "Test"])
+        try! run(["config", "commit.gpgsign", "false"])
+        try! "hello\n".write(to: template.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try! run(["add", "."])
+        try! run(["commit", "-q", "-m", "Initial commit"])
+        return template
+    }()
 
     @discardableResult
     private func git(_ args: [String]) throws -> String {
