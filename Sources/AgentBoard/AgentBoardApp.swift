@@ -66,6 +66,16 @@ struct AgentBoardApp: App {
         }
         .defaultSize(width: 1000, height: 700)
 
+        WindowGroup("Verify Pull Request", id: PRVerifyScene.id, for: String.self) { $watchId in
+            if let watchId {
+                PRVerifyWindow(watchId: watchId)
+                    .environment(appEnvironment)
+            } else {
+                ContentUnavailableView("No pull request", systemImage: "apple.terminal")
+            }
+        }
+        .defaultSize(width: 1000, height: 700)
+
         Settings {
             SettingsView(terminalAppearance: .shared)
         }

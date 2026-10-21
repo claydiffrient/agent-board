@@ -134,4 +134,14 @@ final class PRWatchStoreTests: XCTestCase {
         )
         XCTAssertEqual(ProjectSettings.decode(settings.encoded()), settings)
     }
+
+    func testVerifyCommandFillsInTheURLAndRefusesOneAShellWouldParse() {
+        var settings = PRFollowThroughSettings()
+        let url = "https://github.com/example-org/app/pull/7"
+        XCTAssertNil(settings.verifyCommand(for: url), "no template, no command")
+
+        settings.verifyCommand = "verify-example --pr {url}"
+        XCTAssertEqual(settings.verifyCommand(for: url), "verify-example --pr \(url)")
+        XCTAssertNil(settings.verifyCommand(for: url + ";touch x"))
+    }
 }

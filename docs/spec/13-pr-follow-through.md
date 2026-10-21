@@ -163,7 +163,23 @@ on at all.
   phase 2; the other groups read directly off `pr_watch.state` from phase 1.
 - Row actions: **Mark verified** (`gh pr edit --add-label <label>`), **Walk
   me through it** (shown only when `verifyCommand` is set), **Open PR**,
-  **Pause**.
+  **Pause**. Opening the PR is the row's title, a link to its URL.
+- **Mark verified** runs `gh pr edit <url> --add-label <verificationLabel>`
+  through `PullRequestLabeler` in the project's checkout, then records the
+  watch as verified with the label added, so the row moves without waiting for
+  the next poll; that poll reads the label back and keeps it there. With no
+  `verificationLabel` the button is disabled and nothing runs, since the
+  human's merge is the verification. A `gh` failure shows its stderr and
+  changes nothing.
+- **Walk me through it** opens a new **Verify Pull Request** window, one per
+  watch, running `verifyCommand` with `{url}` replaced by the PR's URL. The
+  user's login shell runs it with `-c`, in the project's checkout, with the
+  human-shell environment the Worktree Shell window uses: no board token and no
+  agent-session variables. It does not type into the project's Terminal
+  screen, whose shell may be mid-command, and nothing in the app writes into a
+  human's PTY on its behalf. The URL is substituted as written, so one holding
+  anything but letters, digits and `:/._-` is refused and the button is
+  hidden; a GitHub PR URL never does.
 - The row's badge counts Ready to verify plus open decision items. A decision
   also raises the owning project's attention dot (§9), the same signal a
   pending approval raises.

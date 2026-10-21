@@ -169,29 +169,50 @@ public struct PRWatchStore: Sendable {
         }
     }
 
+    /// Records Mark verified once `gh` has added `label`, so the page moves the row without waiting
+    /// for the next poll to read the label back.
+    public func markVerified(watchId: String, label: String, now: Int64 = .nowMillis) throws {
+        try db.writer.write { db in
+            guard var watch = try PRWatch.fetchOne(db, key: watchId) else { return }
+            if !watch.labels.contains(where: { $0.caseInsensitiveCompare(label) == .orderedSame }) {
+                watch.labels.append(label)
+            }
+            watch.state = .verified
+            watch.verifiedAt = now
+            watch.updatedAt = now
+            try watch.update(db)
+        }
+    }
+
     /// The Pull Requests page: every non-empty group in display order, newest change first within
     /// each. Nil `projectId` lists every project.
     public func page(projectId: String? = nil) throws -> [PRWatchGroup] {
-        let listings = try db.reader.read { db in
-            var sql = """
-            SELECT w.*,
-              (SELECT COUNT(*) FROM pr_item i WHERE i.watch_id = w.id AND i.state = 'open') AS open_items,
-              (SELECT COUNT(*) FROM pr_item i
-                 WHERE i.watch_id = w.id AND i.state = 'open' AND i.verdict = 'decision') AS open_decisions
-            FROM pr_watch w
-            WHERE w.state NOT IN ('merged', 'closed')
-            """
-            var arguments: StatementArguments = []
-            if let projectId {
-                sql += " AND w.project_id = ?"
-                arguments += [projectId]
-            }
-            sql += " ORDER BY w.updated_at DESC, w.number DESC"
-            return try Row.fetchAll(db, sql: sql, arguments: arguments).map { row in
-                PRWatchListing(
-                    watch: try PRWatch(row: row), openItems: row["open_items"], openDecisions: row["open_decisions"]
-                )
-            }
+        try db.reader.read { try Self.page($0, projectId: projectId) }
+    }
+
+    public func observePage(projectId: String? = nil) -> ValueObservation<ValueReducers.Fetch<[PRWatchGroup]>> {
+        ValueObservation.tracking { try Self.page($0, projectId: projectId) }
+    }
+
+    static func page(_ db: Database, projectId: String?) throws -> [PRWatchGroup] {
+        var sql = """
+        SELECT w.*,
+          (SELECT COUNT(*) FROM pr_item i WHERE i.watch_id = w.id AND i.state = 'open') AS open_items,
+          (SELECT COUNT(*) FROM pr_item i
+             WHERE i.watch_id = w.id AND i.state = 'open' AND i.verdict = 'decision') AS open_decisions
+        FROM pr_watch w
+        WHERE w.state NOT IN ('merged', 'closed')
+        """
+        var arguments: StatementArguments = []
+        if let projectId {
+            sql += " AND w.project_id = ?"
+            arguments += [projectId]
+        }
+        sql += " ORDER BY w.updated_at DESC, w.number DESC"
+        let listings = try Row.fetchAll(db, sql: sql, arguments: arguments).map { row in
+            PRWatchListing(
+                watch: try PRWatch(row: row), openItems: row["open_items"], openDecisions: row["open_decisions"]
+            )
         }
         let grouped = Dictionary(grouping: listings) {
             PRPageGroup.of($0.watch.state, openDecisions: $0.openDecisions)
@@ -203,28 +224,34 @@ public struct PRWatchStore: Sendable {
 
     /// Per project, for the sidebar badge and attention dot. A project with nothing to count is absent.
     public func badgeCounts() throws -> [String: PRBadgeCount] {
-        try db.reader.read { db in
-            var counts: [String: PRBadgeCount] = [:]
-            let ready = try Row.fetchAll(
-                db,
-                sql: "SELECT project_id, COUNT(*) AS n FROM pr_watch WHERE state = 'ready_to_verify' GROUP BY project_id"
-            )
-            for row in ready {
-                counts[row["project_id"], default: PRBadgeCount()].readyToVerify = row["n"]
-            }
-            let decisions = try Row.fetchAll(
-                db,
-                sql: """
-                SELECT w.project_id, COUNT(*) AS n
-                FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id
-                WHERE i.state = 'open' AND i.verdict = 'decision' AND w.state NOT IN ('merged', 'closed')
-                GROUP BY w.project_id
-                """
-            )
-            for row in decisions {
-                counts[row["project_id"], default: PRBadgeCount()].openDecisions = row["n"]
-            }
-            return counts
+        try db.reader.read(Self.badgeCounts)
+    }
+
+    public func observeBadgeCounts() -> ValueObservation<ValueReducers.Fetch<[String: PRBadgeCount]>> {
+        ValueObservation.tracking(Self.badgeCounts)
+    }
+
+    static func badgeCounts(_ db: Database) throws -> [String: PRBadgeCount] {
+        var counts: [String: PRBadgeCount] = [:]
+        let ready = try Row.fetchAll(
+            db,
+            sql: "SELECT project_id, COUNT(*) AS n FROM pr_watch WHERE state = 'ready_to_verify' GROUP BY project_id"
+        )
+        for row in ready {
+            counts[row["project_id"], default: PRBadgeCount()].readyToVerify = row["n"]
         }
+        let decisions = try Row.fetchAll(
+            db,
+            sql: """
+            SELECT w.project_id, COUNT(*) AS n
+            FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id
+            WHERE i.state = 'open' AND i.verdict = 'decision' AND w.state NOT IN ('merged', 'closed')
+            GROUP BY w.project_id
+            """
+        )
+        for row in decisions {
+            counts[row["project_id"], default: PRBadgeCount()].openDecisions = row["n"]
+        }
+        return counts
     }
 }

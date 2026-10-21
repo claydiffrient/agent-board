@@ -280,6 +280,9 @@ public enum PRPageGroup: String, Sendable, CaseIterable, Equatable {
     case verified
     case parked
 
+    /// Needs you and Parked are absent from the page while empty; every other group always shows.
+    public var hidesWhenEmpty: Bool { self == .needsYou || self == .parked }
+
     public static func of(_ state: PRWatchState, openDecisions: Int) -> PRPageGroup? {
         if state.isTerminal { return nil }
         if openDecisions > 0 { return .needsYou }
@@ -299,12 +302,23 @@ public struct PRWatchListing: Sendable, Equatable, Identifiable {
     public var openItems: Int
     public var openDecisions: Int
 
+    public init(watch: PRWatch, openItems: Int, openDecisions: Int) {
+        self.watch = watch
+        self.openItems = openItems
+        self.openDecisions = openDecisions
+    }
+
     public var id: String { watch.id }
 }
 
 public struct PRWatchGroup: Sendable, Equatable {
     public var group: PRPageGroup
     public var listings: [PRWatchListing]
+
+    public init(group: PRPageGroup, listings: [PRWatchListing]) {
+        self.group = group
+        self.listings = listings
+    }
 }
 
 /// What a project's Pull Requests badge counts: PRs ready to verify plus open decisions.
