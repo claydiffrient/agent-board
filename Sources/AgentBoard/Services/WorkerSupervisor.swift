@@ -15,6 +15,7 @@ enum SupervisorError: LocalizedError {
     case sessionHasNoShortId(String)
     case taskNotAssignable(title: String, column: TaskColumn)
     case noReviewToRerun(title: String)
+    case integrationNotRosterable(title: String)
     case capRefused(String)
     case taskAlreadyHeld(title: String, sessionId: String)
     case worktreeAlreadyHeld(path: String, sessionId: String)
@@ -47,6 +48,9 @@ enum SupervisorError: LocalizedError {
         case .taskNotAssignable(let title, let column): return "\"\(title)\" is in \(column.rawValue) and cannot be assigned"
         case .noReviewToRerun(let title):
             return "\"\(title)\" is not in review with a rostered reviewer, so there is no review to re-run"
+        case .integrationNotRosterable(let title):
+            return "\"\(title)\" is an integration task, which a roster agent cannot run; call spawn_worker "
+                + "to respawn its integrator on the epic checkout, or request_integration to start a new one"
         case .capRefused(let reason): return "spawn refused: \(reason)"
         case .taskAlreadyHeld(let title, let sessionId):
             return "\"\(title)\" is still held by session \(sessionId); a second agent would share its worktree"
@@ -339,6 +343,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
         guard task.column != .running, task.column != .done, task.column != .closed else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
+        }
+        // SPEC §5.2 step 3: a respawned integrator runs where the first one did, on the epic branch.
+        if task.origin == .integration, scope == .worker, rosterAgentId != nil {
+            throw SupervisorError.integrationNotRosterable(title: task.title)
+        }
+        if task.origin == .integration, let epicId = task.epicId, scope == .worker {
+            let placeholder = try await spawnIntegrator(epicId: epicId, retrying: task)
+            return WorkerSpawn(
+                setupSessionId: placeholder.sessionId, worktreePath: placeholder.cwd,
+                branch: placeholder.branch ?? ""
+            )
         }
         guard let project = try projects.get(task.projectId) else {
             throw SupervisorError.projectNotFound(task.projectId)
@@ -785,8 +800,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// §5.2 step 3. The integrator is an ordinary worker on a worktree checked out on the epic
     /// branch, bound to a synthetic task so its token scope, report channel and board card are real.
+    /// `retrying` is an earlier integration task of this epic, respawned instead of creating another.
     @discardableResult
-    private func spawnIntegrator(epicId: String) async throws -> AgentSession {
+    private func spawnIntegrator(epicId: String, retrying existing: BoardTask? = nil) async throws -> AgentSession {
         guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
         guard let project = try projects.get(epic.projectId) else {
             throw SupervisorError.projectNotFound(epic.projectId)
@@ -833,7 +849,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         let branches = IntegrationPlan.classify(ordered, facts: facts)
 
-        let task = try board.createIntegrationTask(epicId: epicId)
+        if let existing, let holder = try sessions.activeHolder(taskId: existing.id) {
+            throw SupervisorError.taskAlreadyHeld(title: existing.title, sessionId: holder.sessionId)
+        }
+        let task = try existing ?? board.createIntegrationTask(epicId: epicId)
+        let attempt = try sessions.forTask(task.id).count + 1
         var assigned: AgentSession?
         do {
             let placeholder = try board.assign(
@@ -845,7 +865,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         placement: .worktree, cwd: worktree, worktreePath: worktree.path,
                         branch: epicBranch, warnings: []
                     ),
-                    attempt: 1
+                    attempt: attempt
                 )
             )
             assigned = placeholder
@@ -876,7 +896,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             return placeholder
         } catch {
             // A task with a session row on it cannot be deleted; the failure path below owns it.
-            if assigned == nil { try? tasks.delete(task.id) }
+            if assigned == nil, existing == nil { try? tasks.delete(task.id) }
             throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
         }
     }

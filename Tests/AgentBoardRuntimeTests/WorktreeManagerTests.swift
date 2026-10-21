@@ -204,6 +204,19 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(try git(["branch", "--format=%(refname:short)"], cwd: repo), before)
     }
 
+    func testCreateForBranchRecreatesACheckoutWhoseDirectoryIsGoneButStillRegistered() throws {
+        try manager.ensureBranch("agentboard/epic-7", from: "main")
+        let path = try manager.createForBranch(name: "epic-7", branch: "agentboard/epic-7")
+        try FileManager.default.removeItem(at: path)
+
+        let again = try manager.createForBranch(name: "epic-7", branch: "agentboard/epic-7")
+
+        XCTAssertEqual(
+            try git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: again).trimmingCharacters(in: .whitespacesAndNewlines),
+            "agentboard/epic-7"
+        )
+    }
+
     func testCreateForBranchFailsForMissingBranch() {
         XCTAssertThrowsError(try manager.createForBranch(name: "epic-none", branch: "agentboard/epic-none")) { error in
             XCTAssertTrue("\(error)".contains("agentboard/epic-none"), "\(error)")
@@ -381,6 +394,21 @@ final class WorktreeManagerTests: XCTestCase {
         }
         XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore)
         XCTAssertTrue(FileManager.default.fileExists(atPath: admin.appendingPathComponent("HEAD").path), "a live registration was pruned")
+    }
+
+    func testMergeFailsClosedWhenTheWorktreesDirectoryCanBeListedButNotSearched() throws {
+        let integration = try epicWithMergeableTask()
+        let linkedRoot = try adminDirectory(of: integration).deletingLastPathComponent()
+        let epicBefore = try revParse("agentboard/epic-1")
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: linkedRoot.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: linkedRoot.path) }
+
+        XCTAssertThrowsError(try manager.merge(
+            taskBranch: "agentboard/task", into: "agentboard/epic-1", taskTitle: "Add the widget", targetTitle: "Widgets"
+        )) { error in
+            XCTAssertTrue(error is UnreadableWorktreeRecord, "\(error)")
+        }
+        XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore)
     }
 
     func testMergeTreatsATargetBeingBisectedAsCheckedOut() throws {
