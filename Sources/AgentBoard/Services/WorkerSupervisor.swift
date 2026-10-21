@@ -155,6 +155,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Millis of the last archive sweep; 0 means none yet, so the first tick after launch sweeps
     /// and picks up whatever came due while the app was closed.
     @ObservationIgnored private var lastArchiveSweep: Int64 = 0
+    /// Millis of the last orphan reap on the tick. `start()` sets it, so the first one waits an interval.
+    @ObservationIgnored private var lastOrphanReap: Int64 = 0
+    /// One `reconcile` or tick reap per project at a time, so two passes never choose orphans at once (SPEC §5).
+    @ObservationIgnored private var worktreeSweeps: [String: _Concurrency.Task<Void, Never>] = [:]
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
     @ObservationIgnored private var stallNotified: Set<String> = []
     /// `<project-id>\u{01}<branch>` for each shared branch whose pre-ledger `Agent-Board-Task`
@@ -175,6 +179,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Resolved paths of worktrees some teardown is removing now. No other removal touches them, so
     /// a teardown hook never runs twice in one worktree (SPEC §3.1).
     @ObservationIgnored private var tearingDown: Set<String> = []
+    @ObservationIgnored private var teardownWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    /// Worktree paths a spawn is creating, counted per spawn, until its session row is written. Until
+    /// then the worktree is clean and at its base, so a reap would take it for an orphan (SPEC §5).
+    @ObservationIgnored private var placing: [String: Int] = [:]
+    /// Runs in `spawn` once the worktree exists and before its session row does, so a test can reap in that gap.
+    @ObservationIgnored var afterCheckoutCreated: @MainActor () async -> Void = {}
     /// A resume starts the process before it moves the task back to `running`, so until then its
     /// session looks like a stray one on a settled task to `reconcile`.
     @ObservationIgnored private var resuming: Set<String> = []
@@ -188,6 +198,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// The archive policies are day-granular, so they ride the metering tick at a far coarser
     /// cadence rather than paying for a scan every 5 seconds — or a second timer.
     static let archiveSweepIntervalMillis: Int64 = 5 * 60 * 1000
+    static let orphanReapIntervalMillis: Int64 = 3 * 60 * 1000
     static let pullRequestCheckIntervalMillis: Int64 = 10 * 60 * 1000
     static let prWatchPollIntervalMillis: Int64 = 60 * 1000
     static let prWatchFailuresBeforeAttention = 10
@@ -261,6 +272,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         await sweepLeakedAgents()
         await migrateWorktreeRoots()
         refreshSleepAssertion()
+        lastOrphanReap = sleepLedger.reading().nowMillis
         startMetering()
     }
 
@@ -413,10 +425,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } else {
             base = project.baseBranch
         }
+        let pendingWorktree = manager.worktreeRoot.appendingPathComponent(taskId).path
+        placing[pendingWorktree, default: 0] += 1
+        defer {
+            placing[pendingWorktree, default: 1] -= 1
+            if placing[pendingWorktree] == 0 { placing[pendingWorktree] = nil }
+        }
         var site = try await checkoutSite(
             project: project, taskId: taskId, placement: placement, base: base,
             cutsFromProjectBase: epic == nil, manager: manager, warnings: warnings
         )
+        await afterCheckoutCreated()
         report(baseWarnings)
         site.warnings += baseWarnings
         let branch = site.branch
@@ -591,6 +610,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let fallbackWarnings = placement == .worktree
             ? warnings
             : preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
+        // SPEC §5: a worktree a reap or teardown has claimed is about to be deleted, so it is not reused.
+        await awaitTeardown(of: manager.worktreeRoot.appendingPathComponent(taskId).path)
         let (worktree, baseWarning) = try await offMain { () -> (URL, String?) in
             if let existing = try Self.existingWorktree(manager, name: taskId) { return (existing, nil) }
             // SPEC §3.1 step 1: a reused task branch keeps whatever it was cut from.
@@ -1876,6 +1897,23 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func reconcile(projectId: String) async {
+        while let running = worktreeSweeps[projectId] { await running.value }
+        await startWorktreeSweep(projectId: projectId) { await $0.reconcileNow(projectId: projectId) }.value
+    }
+
+    private func startWorktreeSweep(
+        projectId: String, _ body: @escaping @MainActor (WorkerSupervisor) async -> Void
+    ) -> _Concurrency.Task<Void, Never> {
+        let sweep = _Concurrency.Task { [weak self] in
+            guard let self else { return }
+            await body(self)
+            worktreeSweeps[projectId] = nil
+        }
+        worktreeSweeps[projectId] = sweep
+        return sweep
+    }
+
+    private func reconcileNow(projectId: String) async {
         let listed: [AgentInfo]
         do {
             listed = try await runtime.listSessions()
@@ -2197,6 +2235,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func releaseTeardown(_ claim: TeardownClaim) {
         tearingDown.subtract(claim.resolvedPaths)
+        for path in claim.resolvedPaths {
+            teardownWaiters.removeValue(forKey: path)?.forEach { $0.resume() }
+        }
+    }
+
+    private func awaitTeardown(of path: String) async {
+        let resolvedPath = Self.resolved(path)
+        while tearingDown.contains(resolvedPath) {
+            await withCheckedContinuation { teardownWaiters[resolvedPath, default: []].append($0) }
+        }
     }
 
     private func tearDownWorktrees(_ claim: TeardownClaim, task: BoardTask, project: Project) async -> WorktreeCleanup {
@@ -2210,6 +2258,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    /// The metering tick's reap, so orphans go without the Status view open. It starts each project's
+    /// sweep without waiting on it, and skips a project whose `reconcile` is running (SPEC §5).
+    private func reapOrphanedWorktreesOnTick(_ all: [Project]) {
+        for project in all where worktreeSweeps[project.id] == nil {
+            _ = startWorktreeSweep(projectId: project.id) { supervisor in
+                guard let ours = try? supervisor.sessions.all(projectId: project.id) else { return }
+                let live = Set(ours.filter { $0.state.isActive }.compactMap(\.worktreePath))
+                await supervisor.reapOrphanedWorktrees(projectId: project.id, keeping: live)
+            }
+        }
+    }
+
+    func waitForWorktreeSweeps() async {
+        while let sweep = worktreeSweeps.values.first {
+            await sweep.value
+        }
+    }
+
     /// Sessions that failed or were stopped on a task nobody accepted or discarded leave their
     /// worktree behind, as do sessions whose task record is already gone.
     /// Behind a teardown hook the removals run in the background, so `reconcile` returns promptly.
@@ -2217,12 +2283,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard let project = try? projects.get(projectId) else { return }
         let manager = worktreeManager(for: project)
         let bases = [project.baseBranch] + ((try? epics.list(projectId: projectId)) ?? []).map(\.branch)
-        let keeping = live.union(tearingDown)
+        let keeping = live.union(tearingDown).union(placing.keys)
         let scan = await offMainResult {
             Self.orphans(manager: manager, keeping: keeping, bases: bases)
         }
         report(scan.notices)
-        let claim = claimTeardown(of: scan.orphans.map(\.url.path))
+        // `live` predates the scan, so a spawn that created its worktree and wrote its row meanwhile is in neither.
+        guard let current = try? sessions.all(projectId: projectId) else { return }
+        let held = Set(current.filter { $0.state.isActive }.compactMap(\.worktreePath).map(Self.resolved))
+            .union(placing.keys.map(Self.resolved))
+        let claim = claimTeardown(of: scan.orphans.filter { !held.contains($0.path) }.map(\.url.path))
         let orphans = scan.orphans.filter { claim.paths.contains($0.url.path) }
         let removal: @MainActor (WorkerSupervisor) async -> Void = { supervisor in
             defer { supervisor.releaseTeardown(claim) }
@@ -3099,6 +3169,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if now - lastPRWatchPoll >= Self.prWatchPollIntervalMillis {
             lastPRWatchPoll = now
             _Concurrency.Task { await self.pollPRWatches() }
+        }
+        if now - lastOrphanReap >= Self.orphanReapIntervalMillis {
+            lastOrphanReap = now
+            reapOrphanedWorktreesOnTick(all)
         }
         for project in all {
             refreshShutdownProgressIfOrdered(projectId: project.id)

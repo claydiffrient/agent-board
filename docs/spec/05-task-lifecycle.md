@@ -339,7 +339,25 @@ nobody reviewed.
 
 Reconcile also reaps worktrees under the project's worktree root that no active
 session owns, and deletes merged `agentboard/*` branches that no longer have a
-worktree. Anything dirty or unmerged is left alone and reported. A task branch
+worktree. Reconcile runs only while a project's Status view is open, so the
+supervisor's metering tick runs the same reap on every project every three
+minutes as well, the first one three minutes after launch, keeping the
+worktrees of the sessions whose rows are active. The two are serialized per
+project: a reconcile waits for a tick reap in progress, and the tick skips a
+project whose reconcile is running. The tick starts each project's reap and
+does not wait for it, so metering, cap and stall checks are never held up by
+git removals. A spawn's new worktree is clean and at its base until its
+worker commits, and it exists for a moment before `Board.assign` writes its
+`setup` session row. The spawn marks the worktree's path as being placed
+before it creates it and clears the mark once the row is written or the spawn
+fails, and a reap keeps every marked path. Because a reap's list of active
+sessions predates its git scan, it rereads the active rows after the scan and
+before it removes anything. The other direction holds as well: a respawn
+reuses the task's worktree when it is still on disk, but not one a reap or
+teardown has already claimed for removal (§3.1). The spawn waits for that
+removal to finish and then creates a fresh worktree at the same path. It waits
+only on a claim for its own path, so it is never held up by removals of other
+worktrees. Anything dirty or unmerged is left alone and reported. A task branch
 cut moments ago sits exactly at its base, so it reads as merged until its
 worker's first commit, and the worktree check alone protects it. That check
 reads each worktree's `HEAD` (and an in-progress rebase's `head-name` or
