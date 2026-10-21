@@ -196,7 +196,7 @@ happens to a setup still running when Agent Board quits.
 
 **Removing a worktree.** Every path that removes a task or epic worktree goes
 through `WorktreeManager.remove`: accepting a task, discarding one, the
-orphan reaper `reconcile` runs, and **Remove worktrees** on a done or
+orphan reaper `reconcile` and the metering tick run (§5), and **Remove worktrees** on a done or
 abandoned epic's lane (§5.2). Archiving removes nothing, and closing an epic
 removes nothing, so neither runs anything. Before git deletes the directory,
 `remove` runs the project's **teardown hook** (`worktreeTeardownCommand`, §4)
