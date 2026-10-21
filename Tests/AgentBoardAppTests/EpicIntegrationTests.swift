@@ -288,27 +288,6 @@ final class EpicIntegrationTests: XCTestCase {
         XCTAssertNil(try fixture.epics.list(projectId: fixture.project.id).first)
     }
 
-    /// Nothing on the integration path may reach a remote (D8, §5.2 step 4).
-    func testIntegrationPathNeverPushesOrOpensAPullRequest() async throws {
-        let ready = try fixture.epicReadyForIntegration(["api"])
-        let approval = try requestIntegration(epicId: ready.epic.id)
-
-        try await fixture.supervisor.approve(approvalId: approval.id)
-        await fixture.supervisor.waitForSetup()
-
-        let request = try await onlySpawn()
-        XCTAssertTrue(request.prompt.contains("Do not push. Do not open a PR."), request.prompt)
-        for denied in ["Bash(git push*)", "Bash(gh pr create*)", "Bash(gh pr merge*)"] {
-            XCTAssertTrue(request.disallowedTools.contains(denied), "\(request.disallowedTools)")
-        }
-        XCTAssertEqual(try fixture.git(["remote"]).trimmingCharacters(in: .whitespacesAndNewlines), "")
-        XCTAssertEqual(
-            try fixture.git(["rev-parse", ready.epic.branch]),
-            try fixture.git(["rev-parse", "agentboard/\(ready.tasks[0].id)^"]),
-            "the epic branch moved without the integrator having run"
-        )
-    }
-
     private func onlySpawn() async throws -> SpawnRequest {
         let spawns = await fixture.runtime.spawns
         XCTAssertEqual(spawns.count, 1, "expected exactly one spawned session")

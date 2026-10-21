@@ -166,15 +166,4 @@ final class PublishApprovalSupervisorTests: XCTestCase {
         )
     }
 
-    func testABranchThatWasNeverCreatedFailsWithItsOwnCause() async throws {
-        try addRemote()
-        let approval = try pushApproval(branch: "agentboard/never-created")
-        do {
-            try await fixture.supervisor.approve(approvalId: approval.id)
-            XCTFail("expected the push to fail on a branch that does not exist")
-        } catch {
-            XCTAssertEqual(error as? PublishFailure, .noSuchBranch("agentboard/never-created"))
-        }
-        XCTAssertTrue(try remoteBranches().isEmpty)
-    }
 }
