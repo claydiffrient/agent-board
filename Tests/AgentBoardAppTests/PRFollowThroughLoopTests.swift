@@ -504,21 +504,22 @@ final class PRFollowThroughLoopTests: XCTestCase {
         try fixture.git(["rev-parse", ref], cwd: directory).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// A round that has passed its check, its watch now publishing, with GitHub reporting the PR open at
-    /// `head` carrying `labels`. Returns the round branch's tip and the round's worktree.
+    /// A round that has passed its check, with GitHub reporting the PR open at `head` carrying `labels`
+    /// and accepting replies. Everything is staged before the check passes, since the metering tick may
+    /// poll on its own and publish. Returns the round branch's tip and the round's worktree.
     private func passedRound(
         label: String? = nil, replies: Bool = false, question: Bool = false, labels: [String] = []
     ) async throws -> (tip: String, worktree: String) {
         try enableChecking(label: label, replies: replies)
+        fixture.gh.answer(url, state: "OPEN", head: head, labels: labels)
+        fixture.gh.answerReplies(url: "\(url)#discussion_r1")
         let fixer = try await runningFixer(question: question)
         let worktree = try XCTUnwrap(try activeSession(on: fixer.id).worktreePath)
         try await completeFixer(fixer, file: "fix.txt")
         await poll()
         try await review(fixer, accept: true)
         try await grade("fixed", evidence: "App.swift:3 now says count.")
-        fixture.gh.answer(url, state: "OPEN", head: head, labels: labels)
         await poll()
-        XCTAssertEqual(try onlyWatch().state, .publishing)
         return (try rev("HEAD", in: URL(fileURLWithPath: worktree)), worktree)
     }
 
@@ -542,7 +543,6 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
     func testWithRepliesOnEachHandledThreadGetsItsFactualReplyAndNoThreadIsResolved() async throws {
         let (tip, _) = try await passedRound(replies: true, question: true)
-        fixture.gh.answerReplies(url: "\(url)#discussion_r1")
         await poll()
 
         let replies = fixture.gh.calls.filter { $0.contains { $0.hasPrefix("query=mutation") } }
@@ -554,12 +554,12 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
     /// GitHub still reports the round's base, so the push is tried and git refuses it as a non-fast-forward.
     func testAHeadRefThatMovedUnderTheRoundGoesStaleAndIsNotPushedOver() async throws {
-        let (_, worktree) = try await passedRound()
         _ = try fixture.git(["checkout", "-q", "--detach", head])
         _ = try fixture.git(["commit", "-q", "--allow-empty", "-m", "Push from elsewhere"])
         let moved = try rev("HEAD")
         _ = try fixture.git(["checkout", "-q", "main"])
         _ = try fixture.git(["push", "-q", remote.path, "\(moved):refs/heads/add-widgets"])
+        let (_, worktree) = try await passedRound()
         await poll()
 
         XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), moved)
@@ -572,7 +572,6 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
     func testAVerificationLabelOnThePRBlocksThePushAndFreezesTheRoundsItemsAsDecisions() async throws {
         _ = try await passedRound(label: "verified-example", replies: true, labels: ["verified-example"])
-        fixture.gh.answerReplies(url: "\(url)#discussion_r1")
         await poll()
 
         XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), head)
