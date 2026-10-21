@@ -135,6 +135,17 @@ nobody reviewed.
   way before the task is deleted; the task's progress goes with it, so its
   findings are kept only in the discard's `decision` report.
 
+  A task leased a worktree slot (§3.1 step 2) has it *released* instead of
+  removed, by accept and discard alike: `git switch --detach` at its last
+  commit, so its branch is no longer checked out and can be merged or deleted
+  like any other, then `git clean -fd` — never `-x`, which would delete the
+  ignored build output the slot is kept for. No teardown hook runs, and the
+  repository's `post-checkout` hook is skipped for the detach, which changes
+  no file. A slot with uncommitted changes stays leased, out of the pool,
+  reported under **Worktree cleanup:** like a kept worktree, until a person
+  resolves it; `reconcile` then releases it, as it does any lease an accept
+  or discard did not get to.
+
   The merge takes the task's branch into the branch meant to carry it:
   `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling
   spawned into the epic branches from work that is already in, and the project's

@@ -130,6 +130,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let messages: MessageStore
     @ObservationIgnored private let requests: RequestStore
     @ObservationIgnored private let fileLocks: FileLockStore
+    @ObservationIgnored private let slots: WorktreeSlotStore
     @ObservationIgnored private let attention: ProjectAttentionStore
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
     @ObservationIgnored private let pullRequestWatch: PullRequestWatchReader
@@ -236,6 +237,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         messages = MessageStore(db)
         requests = RequestStore(db)
         fileLocks = FileLockStore(db)
+        slots = WorktreeSlotStore(db)
         attention = ProjectAttentionStore(db)
         pullRequestStates = PullRequestStateReader(gh: gh)
         pullRequestWatch = PullRequestWatchReader(gh: gh)
@@ -415,7 +417,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         var site = try await checkoutSite(
             project: project, taskId: taskId, placement: placement, base: base,
-            cutsFromProjectBase: epic == nil, manager: manager, warnings: warnings
+            cutsFromProjectBase: epic == nil, occupiesSlot: scope != .reviewer, manager: manager, warnings: warnings
         )
         report(baseWarnings)
         site.warnings += baseWarnings
@@ -446,15 +448,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let reviewHead = scope == .reviewer
                 ? try await offMain { try ReviewCheckout.baseline(in: site.cwd) }
                 : nil
-            let row = Self.setupRow(
-                projectId: project.id, taskId: taskId, site: site, attempt: attempt,
-                rosterAgentId: agent?.id, reviewHead: reviewHead, reviewBase: scope == .reviewer ? reviewBase : nil
-            )
+            let row = { (site: CheckoutSite) in
+                Self.setupRow(
+                    projectId: project.id, taskId: taskId, site: site, attempt: attempt,
+                    rosterAgentId: agent?.id, reviewHead: reviewHead, reviewBase: scope == .reviewer ? reviewBase : nil
+                )
+            }
             // A reviewer holds a task that is already in `review`; `assign` would move it to
             // `running` and take it out of the queue its own accept_task reads.
-            let placeholder = scope == .reviewer
-                ? try board.assignReviewer(taskId: taskId, session: row)
-                : try board.assign(taskId: taskId, session: row)
+            let placeholder: AgentSession
+            if scope == .reviewer {
+                placeholder = try board.assignReviewer(taskId: taskId, session: row(site))
+            } else {
+                let assigned = try await assignWorker(taskId: taskId, site: site, row: row, manager: manager)
+                placeholder = assigned.session
+                site = assigned.site
+            }
             if let epic, epic.state == .planning {
                 try epics.setState(epic.id, .active)
             }
@@ -465,6 +474,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     cwd: site.cwd,
                     worktreePath: site.worktreePath,
                     branch: branch,
+                    slotStart: site.slotStart,
                     configId: Self.configId(taskId: taskId, attempt: placeholder.attempt),
                     name: Self.sessionName(for: task),
                     prompt: scope == .reviewer
@@ -567,14 +577,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var worktreePath: String?
         var branch: String
         var warnings: [String]
+        /// Set until `Board.assign` leases this worker a slot from it; `cwd` is the worktree root until then.
+        var slotPool: WorktreeSlotPool? = nil
+        /// Where the task branch is cut if it does not exist yet, for a worker whose slot setup puts
+        /// on its branch (SPEC §3.1 step 2).
+        var slotStart: String? = nil
     }
 
     /// Carries out the placement. A `shared` one that git will not accept — a dirty checkout, or a
     /// branch another worktree holds — degrades to a worktree with a notice rather than failing the
-    /// spawn.
+    /// spawn. A task keeps the slot or worktree an earlier attempt left it; otherwise a worker is
+    /// offered the project's slot pool, and a reviewer, which never leases one, gets a worktree.
     private func checkoutSite(
         project: Project, taskId: String, placement: WorkerPlacement, base: String,
-        cutsFromProjectBase: Bool, manager: WorktreeManager, warnings: [String]
+        cutsFromProjectBase: Bool, occupiesSlot: Bool, manager: WorktreeManager, warnings: [String]
     ) async throws -> CheckoutSite {
         if let sharedBranch = placement.sharedBranch {
             let repo = URL(fileURLWithPath: project.repoPath)
@@ -591,20 +607,91 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let fallbackWarnings = placement == .worktree
             ? warnings
             : preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
-        let (worktree, baseWarning) = try await offMain { () -> (URL, String?) in
-            if let existing = try Self.existingWorktree(manager, name: taskId) { return (existing, nil) }
-            // SPEC §3.1 step 1: a reused task branch keeps whatever it was cut from.
-            guard cutsFromProjectBase, try !manager.branchExists(branch) else {
-                return (try manager.create(name: taskId, branch: branch, base: base), nil)
+        let slotCount = occupiesSlot ? project.settings.worktreeSlots : 0
+        let leased = try slots.lease(taskId: taskId)
+        let leasedSlots = Set(try slots.slots(projectId: project.id).compactMap { $0.taskId == nil ? nil : $0.slot })
+        let (found, cut, unusable) = try await offMain { () -> (URL?, BaseStartPoint, Set<Int>) in
+            if let leased {
+                return (manager.worktreeRoot.appendingPathComponent(WorktreeSlot.name(leased.slot)), BaseStartPoint(ref: base), [])
             }
-            let start = manager.freshestBase(base)
-            return (try manager.create(name: taskId, branch: branch, base: start.ref), start.warning)
+            if let existing = try Self.existingWorktree(manager, name: taskId) { return (existing, BaseStartPoint(ref: base), []) }
+            // SPEC §3.1 step 1: a reused task branch keeps whatever it was cut from.
+            let fresh = try cutsFromProjectBase && !manager.branchExists(branch)
+            return (
+                nil,
+                fresh ? manager.freshestBase(base) : BaseStartPoint(ref: base),
+                slotCount > 0 ? Self.unusableSlots(manager, count: slotCount, leased: leasedSlots) : []
+            )
         }
-        if let baseWarning { report([baseWarning]) }
-        return CheckoutSite(
-            placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch,
-            warnings: fallbackWarnings + [baseWarning].compactMap { $0 }
-        )
+        if let found {
+            let inSlot = leased != nil && occupiesSlot
+            return CheckoutSite(
+                placement: .worktree, cwd: found, worktreePath: found.path, branch: branch, warnings: fallbackWarnings,
+                slotStart: inSlot ? try await slotStart(branch: branch, base: base, cutsFromProjectBase: cutsFromProjectBase, manager: manager) : nil
+            )
+        }
+        if let warning = cut.warning { report([warning]) }
+        let startWarnings = fallbackWarnings + [cut.warning].compactMap { $0 }
+        if slotCount > 0 {
+            return CheckoutSite(
+                placement: .worktree, cwd: manager.worktreeRoot, worktreePath: nil, branch: branch,
+                warnings: startWarnings,
+                slotPool: WorktreeSlotPool(root: manager.worktreeRoot.path, count: slotCount, unusable: unusable),
+                slotStart: cut.ref
+            )
+        }
+        return try await ownWorktree(taskId: taskId, branch: branch, start: cut.ref, manager: manager, warnings: startWarnings)
+    }
+
+    private func ownWorktree(
+        taskId: String, branch: String, start: String, manager: WorktreeManager, warnings: [String]
+    ) async throws -> CheckoutSite {
+        let worktree = try await offMain { try manager.create(name: taskId, branch: branch, base: start) }
+        return CheckoutSite(placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch, warnings: warnings)
+    }
+
+    /// A leased slot whose setup failed before its branch was cut needs a start point again.
+    private func slotStart(branch: String, base: String, cutsFromProjectBase: Bool, manager: WorktreeManager) async throws -> String {
+        try await offMain {
+            guard cutsFromProjectBase, try !manager.branchExists(branch) else { return base }
+            return manager.freshestBase(base).ref
+        }
+    }
+
+    /// A free slot whose directory is not a worktree of this repository, or holds uncommitted
+    /// changes, cannot be switched to a new task.
+    private nonisolated static func unusableSlots(_ manager: WorktreeManager, count: Int, leased: Set<Int>) -> Set<Int> {
+        let registered = Set(((try? manager.registeredWorktreePaths()) ?? []).map { resolved($0.path) })
+        return Set((1...count).filter { slot in
+            guard !leased.contains(slot) else { return false }
+            let path = manager.worktreeRoot.appendingPathComponent(WorktreeSlot.name(slot))
+            guard FileManager.default.fileExists(atPath: path.path) else { return false }
+            guard registered.contains(resolved(path.path)) else { return true }
+            return (try? manager.hasUncommittedChanges(worktree: path)) != false
+        })
+    }
+
+    /// SPEC §3.1 step 2: the slot is chosen inside `Board.assign`'s transaction. With every slot
+    /// leased or unusable, the worker gets a worktree of its own rather than waiting for one.
+    private func assignWorker(
+        taskId: String, site: CheckoutSite, row: (CheckoutSite) -> AgentSession, manager: WorktreeManager
+    ) async throws -> (session: AgentSession, site: CheckoutSite) {
+        guard let pool = site.slotPool, let start = site.slotStart else {
+            return (try board.assign(taskId: taskId, session: row(site)), site)
+        }
+        do {
+            let placeholder = try board.assign(taskId: taskId, session: row(site), leasingSlotFrom: pool)
+            var leased = site
+            leased.slotPool = nil
+            leased.cwd = URL(fileURLWithPath: placeholder.cwd)
+            leased.worktreePath = placeholder.worktreePath
+            return (placeholder, leased)
+        } catch BoardError.noFreeWorktreeSlot {
+            let own = try await ownWorktree(
+                taskId: taskId, branch: site.branch, start: start, manager: manager, warnings: site.warnings
+            )
+            return (try board.assign(taskId: taskId, session: row(own)), own)
+        }
     }
 
     /// A shared placement creates no path, so a warning left over from an earlier spawn would be
@@ -722,6 +809,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         /// Nil when the worker runs in the project's own checkout.
         var worktreePath: String?
         var branch: String
+        /// Set when `launch` must first put the slot at `worktreePath` on `branch`, cutting it here if new.
+        var slotStart: String? = nil
         var configId: String
         var name: String
         var prompt: String
@@ -744,6 +833,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// itself, and the setup row resolved into the session Claude issued.
     private func launch(_ plan: LaunchPlan, port: Int, placeholder: AgentSession) async throws -> AgentSession {
         let project = plan.project
+        if let start = plan.slotStart, let path = plan.worktreePath {
+            let manager = worktreeManager(for: project)
+            if let slot = WorktreeSlot.index(ofPath: path, root: manager.worktreeRoot.path) {
+                let branch = plan.branch
+                _ = try await offMain { try manager.occupySlot(slot, branch: branch, start: start) }
+            }
+        }
         let memoryDir = URL(fileURLWithPath: project.memoryDir
             ?? ClaudeProjectPaths.memoryDir(forPath: project.repoPath, projectsRoot: projectsRoot).path)
         _ = try ClaudeProjectPaths.linkMemory(worktreePath: plan.cwd.path, to: memoryDir, projectsRoot: projectsRoot)
@@ -1074,8 +1170,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             // branch has no worktree to wait on and lands only once every member is accepted.
             if sharedBranch(of: task) != nil {
                 await startTeardown(
-                    claimTeardown(of: taskSessions), task: task, project: project, report: acceptanceReport,
-                    landingNotice: nil
+                    claimTeardown(of: ownWorktreePaths(task.id, sessions: taskSessions, project: project)),
+                    task: task, project: project, report: acceptanceReport, landingNotice: nil
                 )
                 await landAcceptedBranch(task: task, project: project)
             } else {
@@ -1083,8 +1179,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 await landAcceptedBranch(task: task, project: project)
                 let landingNotice = lastError == before ? nil : lastError
                 await startTeardown(
-                    claimTeardown(of: taskSessions), task: task, project: project, report: acceptanceReport,
-                    landingNotice: landingNotice
+                    claimTeardown(of: ownWorktreePaths(task.id, sessions: taskSessions, project: project)),
+                    task: task, project: project, report: acceptanceReport, landingNotice: landingNotice
                 )
             }
             announceReports(projectId: task.projectId)
@@ -1868,7 +1964,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             for session in taskSessions {
                 try grants.revokeAll(sessionId: session.sessionId)
             }
-            let cleanup = await tearDownWorktrees(claimTeardown(of: taskSessions), task: task, project: project)
+            let cleanup = await tearDownWorktrees(
+                claimTeardown(of: ownWorktreePaths(taskId, sessions: taskSessions, project: project)),
+                task: task, project: project
+            )
             report(cleanup.notices)
             try board.discard(taskId: taskId, cleanup: cleanup.findings.map(\.text))
             announceReports(projectId: project.id)
@@ -1942,6 +2041,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if queuedReport { announceReports(projectId: projectId) }
         await recoverStrandedTasks(projectId: projectId)
         await reapOrphanedWorktrees(projectId: projectId, keeping: liveWorktrees)
+        await reconcileSlots(projectId: projectId)
         refreshSleepAssertion()
     }
 
@@ -2035,7 +2135,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         guard let worktreePath = taskSessions
             .map({ $0.worktreePath ?? $0.cwd })
-            .first(where: { FileManager.default.fileExists(atPath: $0) })
+            .first(where: { FileManager.default.fileExists(atPath: $0) && isOwnWorktree($0, taskId: taskId, project: project) })
         else { return nil }
         return DiffContext(
             manager: manager, site: .worktree(URL(fileURLWithPath: worktreePath)), base: project.baseBranch,
@@ -2139,7 +2239,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let branch = Self.taskBranchPrefix + taskId
         let fallbackBase = mergeTargets(for: task, project: project).last ?? project.baseBranch
         let worktree = (try? sessions.forTask(taskId).compactMap(\.worktreePath))?
-            .first { FileManager.default.fileExists(atPath: $0) }
+            .first { FileManager.default.fileExists(atPath: $0) && isOwnWorktree($0, taskId: taskId, project: project) }
             .map { URL(fileURLWithPath: $0) }
         return try? await offMain {
             try Self.readSalvage(manager: manager, branch: branch, fallbackBase: fallbackBase, worktree: worktree)
@@ -2190,9 +2290,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return claim
     }
 
-    /// A retried task has one worktree per attempt, so every session is torn down, not just the newest.
-    private func claimTeardown(of taskSessions: [AgentSession]) -> TeardownClaim {
-        claimTeardown(of: taskSessions.compactMap(\.worktreePath))
+    /// A retried task has one worktree per attempt, so every session's is the task's own, not just
+    /// the newest's — except a pooled slot, which is the task's only while it holds the lease.
+    private func ownWorktreePaths(_ taskId: String, sessions taskSessions: [AgentSession], project: Project) -> [String] {
+        let recorded = taskSessions.compactMap(\.worktreePath).filter { isOwnWorktree($0, taskId: taskId, project: project) }
+        guard let lease = try? slots.lease(taskId: taskId) else { return recorded }
+        return recorded + [worktreeManager(for: project).worktreeRoot.appendingPathComponent(WorktreeSlot.name(lease.slot)).path]
+    }
+
+    /// A slot a task's session once ran in may be leased to another task by now.
+    private func isOwnWorktree(_ path: String, taskId: String, project: Project) -> Bool {
+        guard let slot = WorktreeSlot.index(ofPath: path, root: worktreeManager(for: project).worktreeRoot.path) else {
+            return true
+        }
+        return (try? slots.lease(taskId: taskId))?.slot == slot
     }
 
     private func releaseTeardown(_ claim: TeardownClaim) {
@@ -2205,9 +2316,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let branch = claim.leavesBranch ? nil : Self.taskBranchPrefix + task.id
         let bases = mergeTargets(for: task, project: project)
         let paths = claim.paths
-        return await offMainResult {
+        let cleanup = await offMainResult {
             Self.tearDown(manager: manager, paths: paths, branch: branch, bases: bases)
         }
+        for slot in cleanup.releasedSlots {
+            try? slots.release(projectId: project.id, slot: slot, taskId: task.id)
+        }
+        return cleanup
     }
 
     /// Sessions that failed or were stopped on a task nobody accepted or discarded leave their
@@ -2236,6 +2351,85 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } else {
             await removal(self)
         }
+    }
+
+    /// SPEC §3.1 step 2: a lease outlives its task only when accept or discard could not release it
+    /// — the app quit first, the slot had uncommitted changes, or the task was closed or deleted
+    /// another way — so a lease whose task is gone, done or closed is released here. A free slot
+    /// above the project's count is retired, which is the only time a slot runs the teardown hook.
+    private func reconcileSlots(projectId: String) async {
+        guard let project = try? projects.get(projectId),
+              let rows = try? slots.slots(projectId: projectId), !rows.isEmpty
+        else { return }
+        let manager = worktreeManager(for: project)
+        var releasing: [WorktreeSlot] = []
+        var retiring: [Int] = []
+        for row in rows {
+            guard let taskId = row.taskId else {
+                if row.slot > project.settings.worktreeSlots { retiring.append(row.slot) }
+                continue
+            }
+            let column = (try? tasks.get(taskId))?.column
+            guard column == nil || column == .done || column == .closed,
+                  (try? sessions.activeHolder(worktreePath: Self.slotPath(manager, row.slot))) == nil
+            else { continue }
+            releasing.append(row)
+        }
+        let claim = claimTeardown(of: (releasing.map(\.slot) + retiring).map { Self.slotPath(manager, $0) })
+        releasing = releasing.filter { claim.paths.contains(Self.slotPath(manager, $0.slot)) }
+        retiring = retiring.filter { claim.paths.contains(Self.slotPath(manager, $0)) }
+        let work: @MainActor (WorkerSupervisor) async -> Void = { [releasing, retiring] supervisor in
+            defer { supervisor.releaseTeardown(claim) }
+            let outcome = await supervisor.offMainResult {
+                Self.settleSlots(manager: manager, releasing: releasing.map(\.slot), retiring: retiring)
+            }
+            for row in releasing where outcome.released.contains(row.slot) {
+                guard let taskId = row.taskId else { continue }
+                try? supervisor.slots.release(projectId: projectId, slot: row.slot, taskId: taskId)
+            }
+            for slot in outcome.retired {
+                try? supervisor.slots.retire(projectId: projectId, slot: slot)
+            }
+            supervisor.report(outcome.notices)
+        }
+        if project.settings.worktreeTeardown != nil, !retiring.isEmpty {
+            inBackground(work)
+        } else {
+            await work(self)
+        }
+    }
+
+    private nonisolated static func slotPath(_ manager: WorktreeManager, _ slot: Int) -> String {
+        manager.worktreeRoot.appendingPathComponent(WorktreeSlot.name(slot)).path
+    }
+
+    private nonisolated static func settleSlots(
+        manager: WorktreeManager, releasing: [Int], retiring: [Int]
+    ) -> (released: [Int], retired: [Int], notices: [String]) {
+        var released: [Int] = []
+        var retired: [Int] = []
+        var notices: [String] = []
+        for slot in releasing {
+            switch releaseSlot(manager, at: URL(fileURLWithPath: slotPath(manager, slot))) {
+            case .released: released.append(slot)
+            case .kept(let reason): notices.append(reason)
+            }
+        }
+        for slot in retiring {
+            let path = URL(fileURLWithPath: slotPath(manager, slot))
+            guard FileManager.default.fileExists(atPath: path.path) else {
+                retired.append(slot)
+                continue
+            }
+            switch removeIfClean(manager, at: path) {
+            case .removed(let diagnostics, let teardownFailure):
+                retired.append(slot)
+                notices.append(contentsOf: diagnostics + [teardownFailure].compactMap { $0 })
+            case .kept(let reason):
+                notices.append(reason)
+            }
+        }
+        return (released, retired, notices)
     }
 
     private func recordReap(_ cleanup: WorktreeCleanup, projectId: String) {
@@ -2274,7 +2468,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     ) -> WorktreeCleanup {
         var cleanup = WorktreeCleanup()
         var removedEvery = true
-        for path in paths where FileManager.default.fileExists(atPath: path) {
+        for path in paths {
+            if let slot = WorktreeSlot.index(ofPath: path, root: manager.worktreeRoot.path) {
+                switch releaseSlot(manager, at: URL(fileURLWithPath: path)) {
+                case .released: cleanup.releasedSlots.append(slot)
+                case .kept(let reason):
+                    cleanup.add(reason, at: path)
+                    removedEvery = false
+                }
+                continue
+            }
+            guard FileManager.default.fileExists(atPath: path) else { continue }
             switch removeIfClean(manager, at: URL(fileURLWithPath: path)) {
             case .removed(let diagnostics, let teardownFailure):
                 cleanup.notices.append(contentsOf: diagnostics)
@@ -2307,6 +2511,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let path = resolved(info.path.path)
             guard path.hasPrefix(root + "/"), !liveRoots.contains(path) else { continue }
             if info.branch?.hasPrefix(EpicStore.branchPrefix) == true { continue }
+            // An idle slot is the pool's, not an orphan; reconcile releases and retires slots itself.
+            if WorktreeSlot.index(ofPath: path, root: root) != nil { continue }
             do {
                 if try manager.hasUnmergedCommits(worktree: info.path, bases: bases) {
                     notices.append("kept orphaned worktree \(path): it has commits that are not in \(bases.joined(separator: " or "))")
@@ -2388,6 +2594,27 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             return .removed(removal.hookDiagnostics, teardownFailure: removal.teardownFailure)
         } catch {
             return .kept("could not remove worktree \(path.path): \(error)")
+        }
+    }
+
+    private enum SlotTeardown {
+        case released
+        case kept(String)
+    }
+
+    /// SPEC §5: a slot goes back to the pool rather than being removed, and the teardown hook does
+    /// not run in it; with uncommitted changes it stays leased, like a kept worktree.
+    private nonisolated static func releaseSlot(_ manager: WorktreeManager, at path: URL) -> SlotTeardown {
+        do {
+            switch try manager.releaseSlot(at: path) {
+            case .released, .gone: return .released
+            case .dirty(let dirty):
+                let listed = dirty.prefix(dirtyPathsListed).joined(separator: ", ")
+                let more = dirty.count > dirtyPathsListed ? " and \(dirty.count - dirtyPathsListed) more" : ""
+                return .kept("kept worktree slot \(path.path) out of the pool: it has uncommitted changes in \(listed)\(more)")
+            }
+        } catch {
+            return .kept("could not return worktree slot \(path.path) to the pool: \(error)")
         }
     }
 

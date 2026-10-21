@@ -231,6 +231,9 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// How many agents may be co-resident in the project's own checkout at once. Matches
     /// `caps.maxConcurrentWorkers` so shared mode adds no second, tighter ceiling to discover.
     public var sharedCheckoutMaxAgents: Int = 3
+    /// How many reusable worktrees at `<worktree root>/slot-<n>` a worker is leased before it gets
+    /// a worktree of its own (SPEC §3.1 step 2). 0 gives every task its own worktree.
+    public var worktreeSlots: Int = 0
     /// What this project may interrupt the human for. Banners only — the sidebar badge and the
     /// rest of the attention signal are unaffected by it.
     public var notifications: NotificationPreferences = NotificationPreferences()
@@ -259,6 +262,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         archivePolicy: ArchivePolicy = .afterEpicMerge,
         worktreeStrategy: WorktreeStrategy = .worktree,
         sharedCheckoutMaxAgents: Int = 3,
+        worktreeSlots: Int = 0,
         notifications: NotificationPreferences = NotificationPreferences(),
         remoteBranchTemplate: String? = nil,
         standaloneIntegration: StandaloneIntegration? = nil,
@@ -279,6 +283,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.archivePolicy = archivePolicy
         self.worktreeStrategy = worktreeStrategy
         self.sharedCheckoutMaxAgents = sharedCheckoutMaxAgents
+        self.worktreeSlots = worktreeSlots
         self.notifications = notifications
         self.remoteBranchTemplate = remoteBranchTemplate
         self.standaloneIntegration = standaloneIntegration
@@ -310,6 +315,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         worktreeStrategy = try c.decodeIfPresent(WorktreeStrategy.self, forKey: .worktreeStrategy) ?? .worktree
         sharedCheckoutMaxAgents = try c.decodeIfPresent(Int.self, forKey: .sharedCheckoutMaxAgents)
             ?? ProjectSettings().sharedCheckoutMaxAgents
+        worktreeSlots = try c.decodeIfPresent(Int.self, forKey: .worktreeSlots) ?? 0
         notifications = try c.decodeIfPresent(NotificationPreferences.self, forKey: .notifications)
             ?? NotificationPreferences()
         remoteBranchTemplate = try c.decodeIfPresent(String.self, forKey: .remoteBranchTemplate)

@@ -92,6 +92,28 @@ For a task `T` in project `P`:
      path; so a failed `git worktree add` removes the worktree it created
      (keeping the branch), and the retry runs the hook afresh instead of
      starting a worker in a checkout whose setup never finished.
+   - **Worktree slots.** With `worktreeSlots` above 0 (§4), a worker is
+     leased a pooled worktree at `<worktrees>/slot-<n>` instead, and only
+     falls back to `<worktrees>/<task-id>` above when every slot is leased or
+     unusable — it never waits for one. A slot outlives its tasks so a build
+     directory inside it stays warm: SwiftPM, measured, recompiles every
+     object when the same sources build at a new path, and 14 of 1631 after a
+     one-PR switch in place. `Board.assign` picks the lowest free slot
+     (`worktree_slot`, §4) in the same transaction that writes the session
+     row, so two spawns cannot lease one slot; a free slot whose directory is
+     not a worktree of this repository, has uncommitted changes, or still has
+     a live session in it is skipped. The lease belongs to the *task*, not
+     the session, from spawn until accept or discard (§5): a reviewer lands in
+     the worker's slot, and a handed-off or retried task keeps it for its next
+     agent. The task keeps a per-task worktree an earlier attempt left it, too.
+     Putting the slot on `agentboard/<task-id>` — `git worktree add` the first
+     time, then `git switch <branch>`, or `git switch -c <branch> <base>` for
+     a new branch — runs first in step 3, not here, and fires the
+     repository's `post-checkout` hook once per lease, as `git worktree add`
+     does. A slot with uncommitted changes is refused rather than switched.
+     Every task in slot `n` shares `~/.claude/projects/<slot-slug>/`, which
+     is safe: a transcript is found by session id within it, and step 3's
+     memory link is already in place for the next lease.
    - **`shared`** places in the project's own checkout — `P`'s repository root,
      not a path under `<worktrees>` — checking the wanted branch out there
      (`git checkout <branch>`, or `git checkout -b <branch> <base>` the first
@@ -108,7 +130,8 @@ For a task `T` in project `P`:
    - Whichever is chosen, a git failure adopting the shared branch — the
      checkout is dirty, the branch is held by another worktree — degrades to
      `worktree` rather than failing the spawn, and queues a notice naming why.
-3. Symlink `~/.claude/projects/<worktree-slug>/memory` → the canonical project
+3. For a worker in a slot, put the slot on its branch (step 2). Then symlink
+   `~/.claude/projects/<worktree-slug>/memory` → the canonical project
    memory dir. **Skipping this makes every worker amnesiac.** For a shared
    placement the "worktree" is the project's own checkout, so every co-resident
    worker resolves to the same slug and re-links the same already-correct
@@ -196,9 +219,15 @@ happens to a setup still running when Agent Board quits.
 
 **Removing a worktree.** Every path that removes a task or epic worktree goes
 through `WorktreeManager.remove`: accepting a task, discarding one, the
-orphan reaper `reconcile` runs, and **Remove worktrees** on a done or
-abandoned epic's lane (§5.2). Archiving removes nothing, and closing an epic
-removes nothing, so neither runs anything. Before git deletes the directory,
+orphan reaper `reconcile` runs, **Remove worktrees** on a done or
+abandoned epic's lane (§5.2), and retiring a worktree slot. Archiving removes
+nothing, and closing an epic removes nothing, so neither runs anything. A
+slot is not removed when its task is accepted or discarded: it is *released*
+(§5), and neither the orphan reaper nor **Remove worktrees** touches one. It
+is removed only when `reconcile` retires it — a free slot numbered above the
+project's `worktreeSlots` — so the teardown hook runs in a slot then and at no
+other time: a `bazel clean --expunge` on release would delete exactly the warm
+output base the slot exists to keep. Before git deletes the directory,
 `remove` runs the project's **teardown hook** (`worktreeTeardownCommand`, §4)
 when one is set: `/bin/zsh -c <command>` with the worktree as its working
 directory and `PWD`, under `ChildEnvironment.sanitized()`, off the main
