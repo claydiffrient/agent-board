@@ -9,8 +9,8 @@ public struct PRWatchStore: Sendable {
     }
 
     /// Records one poll (SPEC §4). Idempotent by node id: an unchanged snapshot moves only
-    /// `last_polled_at`, and a new head oid stamps `head_changed_at`. An open item that resolved or left the snapshot becomes handled, and a
-    /// non-open item whose body changed (a new reply) reopens.
+    /// `last_polled_at`, and a new head oid stamps `head_changed_at`. An open item that resolved or left the snapshot becomes handled.
+    /// An item whose body changed (a new reply) is open and untriaged again; one that reopens also drops its task.
     @discardableResult
     public func upsert(projectId: String, snapshot: PRSnapshot, now: Int64 = .nowMillis) throws -> PRWatch {
         try db.writer.write { db in
@@ -77,10 +77,16 @@ public struct PRWatchStore: Sendable {
                 } else if bodyChanged {
                     if item.state != .open {
                         item.state = .open
-                        item.verdict = nil
-                        item.followupGrade = nil
+                        item.fixTaskId = nil
                         item.round = watch.round
                     }
+                    item.verdict = nil
+                    item.approach = nil
+                    item.decisionQuestion = nil
+                    item.decisionOptionsJSON = nil
+                    item.decisionAnswer = nil
+                    item.replyBody = nil
+                    item.followupGrade = nil
                     feedbackArrived = true
                 }
                 if item != before {
@@ -152,28 +158,24 @@ public struct PRWatchStore: Sendable {
         }
     }
 
-    /// Makes `projectIds` exactly the projects whose poll cannot run `gh`, each with `detail`. A
-    /// project already recorded keeps its row untouched, so a failure repeated every poll writes
-    /// nothing and raises the attention signal once.
-    public func setPollProblem(_ detail: String, projectIds: Set<String>, now: Int64 = .nowMillis) throws {
+    /// Makes the keys of `problems` exactly the projects whose poll cannot run, each with its
+    /// detail. A project already recorded keeps its row untouched, so a failure repeated every poll
+    /// writes nothing and raises the attention signal once.
+    public func setPollProblems(_ problems: [String: String], now: Int64 = .nowMillis) throws {
+        let recorded = Set(try db.reader.read { try String.fetchAll($0, sql: "SELECT project_id FROM pr_poll_problem") })
+        let wanted = Set(problems.keys)
+        guard recorded != wanted else { return }
         try db.writer.write { db in
-            let recorded = Set(try String.fetchAll(db, sql: "SELECT project_id FROM pr_poll_problem"))
-            for gone in recorded.subtracting(projectIds) {
+            for gone in recorded.subtracting(wanted) {
                 try db.execute(sql: "DELETE FROM pr_poll_problem WHERE project_id = ?", arguments: [gone])
             }
-            for added in projectIds.subtracting(recorded) {
+            for added in wanted.subtracting(recorded) {
                 try db.execute(
                     sql: "INSERT INTO pr_poll_problem (project_id, detail, since) VALUES (?, ?, ?)",
-                    arguments: [added, detail, now]
+                    arguments: [added, problems[added], now]
                 )
             }
         }
-    }
-
-    public func clearPollProblems() throws {
-        let recorded = try db.reader.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM pr_poll_problem") ?? 0 }
-        guard recorded > 0 else { return }
-        try db.writer.write { try $0.execute(sql: "DELETE FROM pr_poll_problem") }
     }
 
     public func setPaused(_ paused: Bool, watchId: String, now: Int64 = .nowMillis) throws {

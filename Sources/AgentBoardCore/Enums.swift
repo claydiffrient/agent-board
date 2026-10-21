@@ -104,6 +104,8 @@ public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, Data
     case integration
     /// The synthetic task a PR's triager is bound to (SPEC §13.2). Only the supervisor spawns onto it.
     case triage
+    /// A backlog task follow-through created from a triaged PR item (SPEC §13.2).
+    case followThrough = "follow_through"
 }
 
 /// What kind of work a task is. Under `agent` review it picks the task's row in the project's

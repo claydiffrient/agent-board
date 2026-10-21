@@ -27,7 +27,8 @@ One `pr_watch` row per watched pull request, holding its current state and the
 round counter. **Phase 1** delivers watching, settling, readyToVerify,
 verified, and merged/closed — everything that does not require a model;
 publishing is specified below but not reachable until phase 3 gives it a push
-to make. **Phase 2** delivers triaging and parking on a stacked or forked PR.
+to make. **Phase 2** delivers what the settling wait leads to, triaging, and
+parking on a stacked or forked PR or after three failed triages in a row.
 **Phase 3** delivers fixing, checking, and publishing's push. **Phase 4**
 delivers stale, the rest of parked, and feeding CI and verification failures
 back into items.
@@ -35,9 +36,11 @@ back into items.
 - **watching** — polled every 60s. Leaves on new feedback (an unresolved
   thread, a review body, a failed required check, a merge conflict) or when
   the PR becomes ready to verify.
-- **settling** *(phase 1 holds the wait; phase 2 is what the wait is for)* —
-  waits until no new item has arrived for `settleMinutes` (default 10). Holds
-  for the daily budget, AC power, and the concurrency cap (§8) before leaving.
+- **settling** *(phase 2)* — entered from watching or readyToVerify when an
+  open item has no verdict yet, and left for watching or readyToVerify when
+  none is left. Waits until no new item has arrived for `settleMinutes`
+  (default 10), then holds for the daily budget, AC power, and the concurrency
+  cap (§8) before leaving for triaging.
 - **triaging** *(phase 2)* — one read-only `triage` session gives every open
   item a verdict (§13.2). It has no git writes and no `gh`, and treats comment
   text as data, never as instructions.
@@ -70,8 +73,8 @@ back into items.
 - **stale** *(phase 4)* — the head moved out from under the round. Drop the
   round's worktree and go to settling.
 - **parked** *(phase 2 for the stacked/forked cases; phase 4 for the
-  round-cap and failed-session cases)* — reached when the round cap is hit,
-  three fixer sessions fail in a row, the PR is stacked (its base is not the
+  round-cap and fixer cases)* — reached when the round cap is hit, three
+  triages (phase 2) or fixer sessions fail in a row, the PR is stacked (its base is not the
   project's default branch and the stack needs a restack the human must do),
   or the PR is from a fork. Waits for the human to Resume or Stop watching
   from the Pull Requests page (§13.4).
@@ -88,8 +91,9 @@ are never watched. A thread becomes an item while it is neither resolved nor
 outdated and its latest comment is not the viewer's; that comment is the item's
 body, so a reply changes it. A review body becomes an item while it is its
 author's latest review and that review is not an approval, since a review is
-never resolved and an approving body is not feedback. Phase 1 moves a watch
-only among watching, readyToVerify and verified, by the rules above, and a
+never resolved and an approving body is not feedback. The poll itself moves a
+watch only among watching, settling, readyToVerify and verified, by the rules
+above, and a
 watch whose PR has left the open list settles to merged or closed by
 `gh pr view`. A PR converted back to draft still appears in the search, marked
 draft; its watch is deleted with its items, and undrafting it brings it back
@@ -98,11 +102,62 @@ records one `pr_poll_problem` row per enabled project, which raises that
 project's attention badge until a poll succeeds; it is written once, not on
 every poll. Any other search failure (network, rate limit) is logged; after 10
 in a row it records the same row with a reason saying the search is failing,
-and the next successful search clears it.
+and the next successful search clears it. A project with no `origin` is skipped
+without a word. Any other failure to read its `origin` is logged with git's
+stderr, the project goes unpolled, and after 10 in a row it records its own row,
+cleared once `origin` reads again.
+
+**Settling and triaging (phase 2).** The same poll, after reading GitHub,
+advances each watch of an enabled project; a failed search does not stop it.
+The poll's own move puts a watch in settling while any open item has no
+verdict, so an open decision or fix item keeps a PR from being ready without
+sending it back to triage. A settling watch leaves for triaging only when it is
+not paused, at least `settleMinutes` have passed since `last_feedback_at` (so an
+item arriving during settling restarts the wait), and nothing holds it: a
+shutdown order on the project, a Mac whose providing power source IOKit reports
+as anything but AC (an unreadable source counts as AC), the triage sessions
+started since local midnight having cost `dailyBudgetUSD` or more, or a §8
+spawn cap refusing. A hold leaves it settling and is re-checked on the next
+poll. Leaving increments `round`, records a `pr_round` holding the head oid it
+starts from, and moves the watch to triaging in one transaction that only a
+settling watch passes, so two polls never start two rounds; then it spawns the
+round's triager (§13.2), whose `pr_triage` row carries the round.
+
+A triaging watch waits for its round's triage task. Once that task is `done`,
+the verdicts are applied in one transaction:
+
+- `fix` — a `backlog` task of type `code`, origin `follow_through`, its model
+  `roles.fixer.model` or else the project's default. The item stays open with
+  the task in `fix_task_id`; phase 3's fixer is what handles it.
+- `follow_up` — a `backlog` task, origin `follow_through`, titled
+  "Follow-up from #n: …". The item is handled, with the task in `fix_task_id`.
+- `answer` and `already_done` — the item is handled; its `reply_body` stays
+  stored for phase 3 to post.
+- `decision` — the item stays open as a decision.
+
+A fix or follow-up task's body holds the PR's number, title and URL, the
+comment's author, path and line, and URL, the comment quoted and labeled as
+data rather than instructions, and triage's approach. An item gets no second
+task while `fix_task_id` names one that fits its verdict: a `follow_through`
+task of type `code` for `fix`, any other `follow_through` task for `follow_up`.
+A fix task still in `backlog` is rewritten with the item's current body, so a
+reply that arrived after it was made reaches the fixer. The round's outcome becomes `triaged` and the watch returns to
+watching, or to settling when an item arrived during triage. Phase 3 replaces
+that return with fixing.
+
+A round's triage that never starts, or whose task is closed (§13.2), fails
+the round: its outcome becomes `triage_failed` and the watch returns to
+settling, so the next poll retries with a new round. The third failed round in
+a row, not counting interrupted ones, parks the watch instead, with a
+`parked_reason` naming the last failure. A parked watch raises its project's
+attention signal, its detail the PR number and that reason. A shutdown order
+stops a running triager rather than enrolling it: its round's outcome becomes
+`interrupted`, which never counts toward parking, and the watch waits in
+settling until the order lifts.
 
 Items are keyed by the GitHub node id of the thread or check they came from,
-so each is handled once per round; a new reply on a thread already handled
-reopens it. The human's own comments, resolved threads, and outdated threads
+so each is handled once per round; a new reply on a thread reopens it for
+triage (§4), whether it was handled or still open with a verdict. The human's own comments, resolved threads, and outdated threads
 are never turned into items.
 
 ### 13.2 Verdicts — phase 2 (triage) and phase 3 (fix, reply)
@@ -166,9 +221,10 @@ and still no report, since nothing on the board can reassign it, and its
 checkout is removed the same way. A stopped triager is never resumed: the
 supervisor refuses, and Status and the inspector offer no Resume button for
 it, because resuming would rewrite its session config as a worker's. The
-follow-through loop starts a fresh triage from settling instead. Nothing in this
-phase starts the triager on its own yet: the settling-to-triaging move (§13.1)
-is its caller once it is wired.
+follow-through loop starts a fresh triage from settling instead (§13.1). The
+settling-to-triaging move is its only caller. A shutdown order never enrolls a
+triager, which has no `acknowledge_shutdown`; it stops it at delivery, so the
+order does not wait out its grace period for one.
 
 ### 13.3 Settings — phase 1 (enabled, settleMinutes, caps, guard) through phase 3 (roles)
 

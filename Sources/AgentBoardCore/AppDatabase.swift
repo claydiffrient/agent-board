@@ -190,6 +190,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("pr_triage") { db in
             try db.execute(sql: Schema.prTriage)
         }
+        migrator.registerMigration("pr_triage_round") { db in
+            try db.execute(sql: Schema.prTriageRound)
+        }
         return migrator
     }
 }

@@ -79,6 +79,7 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
     public var estCostUSD: Double
     /// The head whose Ready to verify banner has fired, so a PR announces itself once per head.
     public var readyNotifiedOid: String? = nil
+    public var parkedReason: String? = nil
     public var createdAt: Int64
     public var updatedAt: Int64
 
@@ -107,6 +108,7 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
         case verifiedAt = "verified_at"
         case estCostUSD = "est_cost_usd"
         case readyNotifiedOid = "ready_notified_oid"
+        case parkedReason = "parked_reason"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -340,20 +342,25 @@ public struct PRBadgeCount: Sendable, Equatable {
     public var total: Int { readyToVerify + openDecisions }
 }
 
-/// The phase-1 moves of SPEC §13.1, decided from one poll. Every other state belongs to a later
-/// phase's driver and is left where it is.
+/// The moves of SPEC §13.1 decided from one poll: among watching, settling, readyToVerify and
+/// verified. Leaving settling for triaging, and every later state, belongs to the follow-through driver.
 public enum PRWatchTransition {
+    /// `untriagedItems` counts open items with no verdict yet; an open decision or fix still counts in
+    /// `openItems`, so it keeps a PR from being ready without sending it back to triage.
     public static func next(
-        from state: PRWatchState, snapshot: PRSnapshot, openItems: Int, settings: PRFollowThroughSettings
+        from state: PRWatchState, snapshot: PRSnapshot, openItems: Int, untriagedItems: Int,
+        settings: PRFollowThroughSettings
     ) -> PRWatchState? {
-        guard [.watching, .readyToVerify, .verified].contains(state) else { return nil }
+        guard [.watching, .settling, .readyToVerify, .verified].contains(state) else { return nil }
         let labeled = settings.markVerifiedLabel.map { label in
             snapshot.labels.contains { $0.caseInsensitiveCompare(label) == .orderedSame }
         } ?? false
         let ready = (!settings.requireApproval || snapshot.reviewDecision == "APPROVED")
             && checksGreen(snapshot.checksState)
             && openItems == 0
-        let target: PRWatchState = labeled ? .verified : ready ? .readyToVerify : .watching
+        let target: PRWatchState = labeled ? .verified
+            : untriagedItems > 0 ? .settling
+            : ready ? .readyToVerify : .watching
         return target == state ? nil : target
     }
 

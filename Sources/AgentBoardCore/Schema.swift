@@ -563,6 +563,12 @@ enum Schema {
     CREATE INDEX pr_triage_watch ON pr_triage(watch_id);
     """
 
+    /// The round each triage was spawned for, and why a watch is parked.
+    static let prTriageRound = """
+    ALTER TABLE pr_triage ADD COLUMN round INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE pr_watch ADD COLUMN parked_reason TEXT;
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",

@@ -126,7 +126,7 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertEqual(try onlyWatch().state, .watching)
     }
 
-    func testAnUnresolvedThreadKeepsItWatchingWithOneOpenItem() async throws {
+    func testAnUnresolvedThreadSettlesItWithOneOpenItem() async throws {
         try enable()
         answer(pullRequest(threads: [
             thread("T_open", by: "reviewer"),
@@ -137,7 +137,7 @@ final class PRWatchPollTests: XCTestCase {
         await fixture.supervisor.pollPRWatches()
 
         let watch = try onlyWatch()
-        XCTAssertEqual(watch.state, .watching)
+        XCTAssertEqual(watch.state, .settling)
         let open = try watches.items(watchId: watch.id).filter { $0.state == .open }
         XCTAssertEqual(open.map(\.githubNodeId), ["T_open"])
     }
@@ -216,5 +216,21 @@ final class PRWatchPollTests: XCTestCase {
         answer(pullRequest())
         await fixture.supervisor.pollPRWatches()
         XCTAssertEqual(try attention.attention(projectId: fixture.project.id)?.has(.prPollUnavailable), false)
+    }
+
+    /// Only a missing `origin` skips a project quietly; one git cannot read counts as a failing poll.
+    func testAnOriginGitCannotReadRaisesAttentionAfterRepeatedPolls() async throws {
+        try enable()
+        try fixture.breakOriginConfig()
+        answer(pullRequest())
+        let attention = ProjectAttentionStore(fixture.db)
+        for _ in 1..<WorkerSupervisor.prWatchFailuresBeforeAttention {
+            await fixture.supervisor.pollPRWatches()
+        }
+        XCTAssertEqual(try attention.attention(projectId: fixture.project.id)?.has(.prPollUnavailable), false)
+
+        await fixture.supervisor.pollPRWatches()
+        let cause = try XCTUnwrap(try attention.attention(projectId: fixture.project.id)?.cause(.prPollUnavailable))
+        XCTAssertTrue(cause.text.contains("origin"), cause.text)
     }
 }
