@@ -1,6 +1,7 @@
 import AgentBoardCore
 import AgentBoardRuntime
 import Foundation
+import GRDB
 import XCTest
 @testable import AgentBoard
 
@@ -34,18 +35,34 @@ final class PRWatchPollTests: XCTestCase {
 
     private func pullRequest(
         _ number: Int = 12, head: String = "c0ffee", labels: [String] = [], checks: String? = "SUCCESS",
-        threads: [[String: Any]] = [], reviews: [[String: Any]] = []
+        required: [String] = [], reported: [[String: Any]] = [], threads: [[String: Any]] = [],
+        reviews: [[String: Any]] = []
     ) -> [String: Any] {
-        let rollup: Any = checks.map { ["state": $0] } ?? NSNull()
+        let rollup: Any = checks.map { ["state": $0, "contexts": ["nodes": reported]] } ?? NSNull()
+        let protection: Any = required.isEmpty ? NSNull() : ["requiredStatusCheckContexts": required]
         return [
             "number": number, "url": "https://github.com/\(repository)/pull/\(number)", "title": "Add widgets",
             "isDraft": false, "headRefName": "add-widgets", "headRefOid": head, "baseRefName": "main",
+            "baseRef": ["refUpdateRule": protection, "rules": ["nodes": []]],
             "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
             "labels": ["nodes": labels.map { ["name": $0] }],
             "commits": ["nodes": [["commit": ["statusCheckRollup": rollup]]]],
             "reviewThreads": ["nodes": threads],
             "reviews": ["nodes": reviews],
         ]
+    }
+
+    private func checkRun(_ name: String, status: String = "COMPLETED", conclusion: String?) -> [String: Any] {
+        ["name": name, "status": status, "conclusion": conclusion ?? NSNull()]
+    }
+
+    private func backdateHeadPastTheChecksGracePeriod() throws {
+        try fixture.db.writer.write {
+            try $0.execute(
+                sql: "UPDATE pr_watch SET head_changed_at = ?",
+                arguments: [Int64.nowMillis - PRWatchTransition.checksGraceMillis]
+            )
+        }
     }
 
     private func thread(_ id: String, by author: String, resolved: Bool = false, outdated: Bool = false) -> [String: Any] {
@@ -115,15 +132,52 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertTrue(banners.isEmpty)
     }
 
-    func testNoConfiguredChecksCountAsGreenButPendingChecksDoNot() async throws {
+    func testNoChecksAtAllCountAsGreenOnlyOnceTheGracePeriodHasPassed() async throws {
         try enable()
         answer(pullRequest(checks: nil))
         await fixture.supervisor.pollPRWatches()
-        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+        XCTAssertEqual(try onlyWatch().state, .watching, "CI may not have registered its checks yet")
 
-        answer(pullRequest(checks: "PENDING"))
+        try backdateHeadPastTheChecksGracePeriod()
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+    }
+
+    func testAnApprovedPullRequestRightAfterAPushIsNotReadyWhileItsRequiredChecksHaveNotReported() async throws {
+        try enable()
+        answer(pullRequest(checks: nil, required: ["build"]))
         await fixture.supervisor.pollPRWatches()
         XCTAssertEqual(try onlyWatch().state, .watching)
+        XCTAssertTrue(banners.isEmpty)
+
+        try backdateHeadPastTheChecksGracePeriod()
+        answer(pullRequest(checks: "SUCCESS", required: ["build"], reported: [checkRun("lint", conclusion: "SUCCESS")]))
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .watching)
+        XCTAssertEqual(watch.checksState, "PENDING")
+    }
+
+    func testOnlyTheBaseBranchesRequiredChecksGateReadiness() async throws {
+        try enable()
+        answer(pullRequest(checks: "FAILURE", required: ["build"], reported: [
+            checkRun("build", conclusion: "SUCCESS"),
+            checkRun("lint", conclusion: "FAILURE"),
+        ]))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+    }
+
+    func testANeutralCheckIsAFailureThatOutweighsAPendingOne() async throws {
+        try enable()
+        answer(pullRequest(checks: "PENDING", reported: [
+            checkRun("build", status: "IN_PROGRESS", conclusion: nil),
+            checkRun("lint", conclusion: "NEUTRAL"),
+        ]))
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .watching)
+        XCTAssertEqual(watch.checksState, "FAILURE")
     }
 
     func testAnUnresolvedThreadKeepsItWatchingWithOneOpenItem() async throws {
