@@ -4,10 +4,21 @@ import Foundation
 import XCTest
 @testable import AgentBoard
 
+private final class SteppedClock: SystemClock, @unchecked Sendable {
+    var wallMillis: Int64 = .nowMillis
+    var uptimeSeconds: TimeInterval = 10_000
+
+    func advance(seconds: TimeInterval) {
+        wallMillis += Int64(seconds * 1000)
+        uptimeSeconds += seconds
+    }
+}
+
 /// SPEC §13.1 phase 1: the PR follow-through poll, driven through `FakeGh`.
 @MainActor
 final class PRWatchPollTests: XCTestCase {
     private var fixture: SupervisorFixture!
+    private var clock: SteppedClock!
     private let repository = "example-org/app"
     private let label = "verified-example"
     private var url: String { "https://github.com/\(repository)/pull/12" }
@@ -15,7 +26,8 @@ final class PRWatchPollTests: XCTestCase {
     private var banners: [(title: String, route: NotificationRoute?)] = []
 
     override func setUp() async throws {
-        fixture = try SupervisorFixture.make(gitRepo: true)
+        clock = SteppedClock()
+        fixture = try SupervisorFixture.make(gitRepo: true, sleepLedger: SleepLedger(clock: clock))
         try fixture.git(["remote", "add", "origin", "git@github.com:\(repository).git"])
         banners = []
         fixture.supervisor.postBanner = { [weak self] title, _, route in self?.banners.append((title, route)) }
@@ -278,5 +290,28 @@ final class PRWatchPollTests: XCTestCase {
         await fixture.supervisor.pollPRWatches()
         let cause = try XCTUnwrap(try attention.attention(projectId: fixture.project.id)?.cause(.prPollUnavailable))
         XCTAssertTrue(cause.text.contains("origin"), cause.text)
+    }
+
+    private var searches: Int {
+        fixture.gh.calls.filter { $0 == PullRequestWatchReader.searchArguments }.count
+    }
+
+    func testMeteringTicksDuringASlowPollQueueNoPollBehindIt() async throws {
+        try enable()
+        answer(pullRequest())
+        fixture.gh.holdSearch()
+        await fixture.supervisor.meterTick()
+        for _ in 0..<500 where searches == 0 { try await _Concurrency.Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(searches, 1)
+
+        for _ in 0..<2 {
+            clock.advance(seconds: TimeInterval(WorkerSupervisor.prWatchPollIntervalMillis / 1000) + 1)
+            await fixture.supervisor.meterTick()
+        }
+        fixture.gh.releaseSearch()
+        await fixture.supervisor.pollPRWatches()
+        try await _Concurrency.Task.sleep(for: .milliseconds(300))
+
+        XCTAssertEqual(searches, 2, "only the direct call polled after the slow one")
     }
 }

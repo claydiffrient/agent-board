@@ -3341,7 +3341,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         if now - lastPRWatchPoll >= Self.prWatchPollIntervalMillis {
             lastPRWatchPoll = now
-            _Concurrency.Task { await self.pollPRWatches() }
+            // A slow `gh` must not queue a poll per tick behind the one still running.
+            if prWatchPoll == nil { _Concurrency.Task { await self.pollPRWatches() } }
         }
         for project in all {
             refreshShutdownProgressIfOrdered(projectId: project.id)
