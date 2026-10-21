@@ -79,12 +79,12 @@ final class PRFollowThroughLoopTests: XCTestCase {
         ]
     }
 
-    private func answer(threads: [[String: Any]]) {
+    private func answer(threads: [[String: Any]], checks: String = "SUCCESS") {
         fixture.gh.answerSearch([AuthoredPullRequest(repository: repository, number: 12, url: url, title: "Add widgets")])
         fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: [[
             "number": 12, "url": url, "title": "Add widgets", "isDraft": false, "headRefName": "add-widgets",
             "headRefOid": head, "baseRefName": "main", "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
-            "labels": ["nodes": []], "commits": ["nodes": [["commit": ["statusCheckRollup": ["state": "SUCCESS"]]]]],
+            "labels": ["nodes": []], "commits": ["nodes": [["commit": ["statusCheckRollup": ["state": checks]]]]],
             "reviewThreads": ["nodes": threads], "reviews": ["nodes": []],
         ]])
     }
@@ -542,14 +542,16 @@ final class PRFollowThroughLoopTests: XCTestCase {
         try fixture.git(["rev-parse", ref], cwd: directory).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// A round that has passed its check, with GitHub reporting the PR open at `head` carrying `labels`
-    /// and accepting replies. Everything is staged before the check passes, since the metering tick may
-    /// poll on its own and publish. Returns the round branch's tip and the round's worktree.
+    /// A round that has passed its check, with GitHub reporting the PR open at `remoteHead` (default
+    /// `head`) carrying `labels` and accepting replies. Everything is staged before the check passes,
+    /// since the metering tick may poll on its own and publish. Returns the round branch's tip and the
+    /// round's worktree.
     private func passedRound(
-        label: String? = nil, replies: Bool = false, question: Bool = false, labels: [String] = []
+        label: String? = nil, replies: Bool = false, question: Bool = false, labels: [String] = [],
+        remoteHead: String? = nil
     ) async throws -> (tip: String, worktree: String) {
         try enableChecking(label: label, replies: replies)
-        fixture.gh.answer(url, state: "OPEN", head: head, labels: labels)
+        fixture.gh.answer(url, state: "OPEN", head: remoteHead ?? head, labels: labels)
         fixture.gh.answerReplies(url: "\(url)#discussion_r1")
         let fixer = try await runningFixer(question: question)
         let worktree = try XCTUnwrap(try activeSession(on: fixer.id).worktreePath)
@@ -579,6 +581,23 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try onlyWatch().state, .readyToVerify, "green checks on the pushed head end the wait")
     }
 
+    func testRedChecksOnThePushedHeadKeepTheirChecksItemOpenAcrossPollsWhileTheyStayRed() async throws {
+        let (tip, _) = try await passedRound()
+        await poll()
+        XCTAssertEqual(try onlyWatch().state, .awaitingCI)
+
+        head = tip
+        answer(threads: [], checks: "FAILURE")
+        await poll()
+        await poll()
+
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .watching)
+        let checks = try watches.items(watchId: watch.id).filter { $0.kind == .check }
+        XCTAssertEqual(checks.map(\.githubNodeId), [PRItem.checksNodeId(head: tip)])
+        XCTAssertEqual(checks.first?.isOpenDecision, true, "a head that stays red keeps its checks item")
+    }
+
     func testWithRepliesOnEachHandledThreadGetsItsFactualReplyAndNoThreadIsResolved() async throws {
         let (tip, _) = try await passedRound(replies: true, question: true)
         await poll()
@@ -606,6 +625,41 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["stale"])
         XCTAssertNil(try watches.items(watchId: watch.id).first?.verdict, "the item goes back to triage")
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+    }
+
+    /// `gh pr view` already reports a head that is neither the round's base nor its tip, so no push is tried.
+    /// The round's answer is still replied to, once, and its fix, never pushed, claims nothing.
+    func testAStaleRoundStillPostsItsAnswerReplyExactlyOnce() async throws {
+        _ = try fixture.git(["checkout", "-q", "--detach", head])
+        _ = try fixture.git(["commit", "-q", "--allow-empty", "-m", "Push from elsewhere"])
+        let moved = try rev("HEAD")
+        _ = try fixture.git(["checkout", "-q", "main"])
+        _ = try await passedRound(replies: true, question: true, remoteHead: moved)
+        await poll()
+
+        XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), head, "nothing is pushed")
+        let watch = try onlyWatch()
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["stale"])
+        var replies: [[String]] { fixture.gh.calls.filter { $0.contains { $0.hasPrefix("query=mutation") } } }
+        XCTAssertEqual(replies.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question"])
+        XCTAssertEqual(replies.map(\.last), ["body=Three retries."])
+
+        await poll()
+        let fix = try XCTUnwrap(try watches.items(watchId: watch.id).first { $0.githubNodeId == "T_fix" })
+        let result = try await TriagerToolHandler(db: fixture.db, events: sink).call(
+            "set_verdicts",
+            arguments: .object(["verdicts": .array([.object([
+                "item_id": .number(Double(fix.id ?? 0)), "verdict": .string("answer"),
+                "approach": .string("Factual."), "reply_body": .string("It was renamed upstream."),
+            ])])]),
+            identity: try await identity(of: try runningTriager())
+        )
+        await result.afterResponse?()
+        await poll()
+
+        XCTAssertEqual(try onlyWatch().state, .watching)
+        XCTAssertEqual(replies.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question", "thread=T_fix"])
+        XCTAssertEqual(replies.map(\.last), ["body=Three retries.", "body=It was renamed upstream."])
     }
 
     func testAVerificationLabelOnThePRBlocksThePushAndFreezesTheRoundsItemsAsDecisions() async throws {

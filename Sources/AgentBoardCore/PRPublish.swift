@@ -105,13 +105,27 @@ extension PRWatchStore {
         }
     }
 
-    /// A round's handled thread and review items with a factual reply not yet posted.
-    public func pendingReplies(watchId: String, round: Int) throws -> [PRItem] {
+    /// Every handled thread and review item, from any round, with a factual reply not yet posted (SPEC
+    /// §13.2). A `fix` item qualifies only once its own round pushed it, so a stale or parked round's
+    /// fixes never claim "Fixed in".
+    public func pendingReplies(watchId: String) throws -> [PRItem] {
         try db.reader.read { db in
-            try PRItem.filter(
-                Column("watch_id") == watchId && Column("round") == round && Column("state") == PRItemState.handled
-                    && Column("reply_url") == nil && [PRItemKind.thread, PRItemKind.review].contains(Column("kind"))
-            ).order(Column("id")).fetchAll(db)
+            try PRItem.fetchAll(
+                db,
+                sql: """
+                SELECT i.* FROM pr_item i
+                WHERE i.watch_id = ? AND i.state = 'handled' AND i.reply_url IS NULL AND i.kind IN ('thread', 'review')
+                AND (
+                  (i.verdict IN ('answer', 'already_done', 'follow_up') AND i.reply_body IS NOT NULL)
+                  OR (i.verdict = 'fix' AND EXISTS (
+                    SELECT 1 FROM pr_round r WHERE r.watch_id = i.watch_id AND r.number = i.round
+                    AND r.pushed_head_oid IS NOT NULL AND r.fix_task_id = i.fix_task_id
+                  ))
+                )
+                ORDER BY i.id
+                """,
+                arguments: [watchId]
+            )
         }
     }
 

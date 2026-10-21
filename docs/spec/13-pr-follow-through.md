@@ -263,7 +263,8 @@ fails or the PR is not open. Then, in order:
 - **Stale.** A head that is neither the round's `base_head_oid` nor the round
   branch's tip ends the round with outcome `stale`: its fix items go back to
   triage with no verdict, its worktree is removed, and the watch goes to
-  settling, which triages them against the new head.
+  settling, which triages them against the new head. Replies still owed are
+  then posted (§13.2).
 - **The push.** A round branch whose tip is not the `checked_head_oid` its
   follow-up check judged parks the watch unpushed. Otherwise
   `BranchPublisher.fastForward` pushes `refs/heads/<round branch>` to
@@ -272,7 +273,8 @@ fails or the PR is not open. Then, in order:
   publish guard (§13.5) reads the commits `origin/<head ref>` lacks first.
   A `[rejected]` ref is a moved head, and goes stale as above; any other
   refusal, the guard's included, ends the round `publish_failed` and parks the
-  watch with the error. A head already at the round branch's tip, from a
+  watch with the error. Every park here, like stale, then posts the replies
+  still owed (§13.2). A head already at the round branch's tip, from a
   push whose recording was interrupted, is not pushed again.
 
 A push ends the round `published` with the tip in `pushed_head_oid`, marks its
@@ -336,12 +338,17 @@ setting is on, and only for a factual verdict — fix, answer, already_done, or
 follow_up. A decision is never auto-replied, since it is, by definition,
 something argued rather than settled.
 
-**Posting replies (phase 3).** Replies go out after a round's push, or, for a
-round with no fix item, once its verdicts are applied. Each item the round
-handled whose `reply_url` is empty gets one: a fix item "Fixed in `<sha>`."
-with the pushed head's first seven characters, and any other factual item its
-triage `reply_body`; an item with no `reply_body` gets none. A thread item is
-answered on its thread with `gh api graphql`'s
+**Posting replies (phase 3).** Replies go out after a round's push, when a
+publishing round goes stale or parks, or, for a round with no fix item, once its
+verdicts are applied. Each time, every handled thread or review item whose
+`reply_url` is empty gets one, whatever round handled it, so an answer from a
+round that never pushed is still replied to at the next of those points. A fix
+item gets "Fixed in `<sha>`." with the first seven characters of the head its
+own round pushed, and only once that round pushed it under its fix task; a fix
+whose round went stale, froze or parked claims nothing. Any other factual item
+gets its triage `reply_body`; an item with no `reply_body` gets none. A frozen
+round posts nothing itself; its owed replies wait for the next point. A thread
+item is answered on its thread with `gh api graphql`'s
 `addPullRequestReviewThreadReply`; a review body, which has no thread, gets one
 pull-request comment through `gh api repos/<owner>/<name>/issues/<n>/comments`,
 led by a link to the review. The reply's URL is stored in `reply_url`, so

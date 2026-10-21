@@ -1980,7 +1980,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         case .done:
             do {
                 if let next = try board.applyVerdicts(watchId: watch.id), next != .fixing {
-                    await postFactualReplies(watchId: watch.id, round: watch.round, project: project)
+                    await postFactualReplies(watchId: watch.id, project: project)
                 }
             } catch {
                 report(["could not apply the triage of \(watch.url): \(describe(error))"])
@@ -2107,12 +2107,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let manager = worktreeManager(for: project)
             guard let tip = try await offMain({ try manager.refCommit("refs/heads/\(branch)") }) else {
                 try board.parkPublishing(watchId: watch.id, reason: "Round \(round.number)'s branch `\(branch)` is gone.")
+                await postFactualReplies(watchId: watch.id, project: project)
                 return
             }
             if remote.oid != tip {
                 guard remote.oid == round.baseHeadOid else {
                     try board.markRoundStale(watchId: watch.id)
                     await dropRoundWorktree(task, project: project)
+                    await postFactualReplies(watchId: watch.id, project: project)
                     return
                 }
                 if let checked = round.checkedHeadOid, checked != tip {
@@ -2120,6 +2122,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         watchId: watch.id,
                         reason: "Round \(round.number)'s branch moved from \(checked) to \(tip) after its check, so it was not pushed."
                     )
+                    await postFactualReplies(watchId: watch.id, project: project)
                     return
                 }
                 let publisher = BranchPublisher(repoPath: repo, privateTerms: settings.privateTerms)
@@ -2129,11 +2132,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 } catch PublishFailure.notFastForward {
                     try board.markRoundStale(watchId: watch.id)
                     await dropRoundWorktree(task, project: project)
+                    await postFactualReplies(watchId: watch.id, project: project)
                     return
                 } catch {
                     try board.parkPublishing(
                         watchId: watch.id, reason: "Round \(round.number) was not pushed: \(describe(error))"
                     )
+                    await postFactualReplies(watchId: watch.id, project: project)
                     return
                 }
             }
@@ -2143,7 +2148,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             return
         }
         await dropRoundWorktree(task, project: project)
-        await postFactualReplies(watchId: watch.id, round: round.number, project: project)
+        await postFactualReplies(watchId: watch.id, project: project)
     }
 
     private func dropRoundWorktree(_ task: BoardTask, project: Project) async {
@@ -2151,18 +2156,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         await startTeardown(claimTeardown(of: taskSessions), task: task, project: project, report: nil, landingNotice: nil)
     }
 
-    /// SPEC §13.2: with `postFactualReplies` on, each of the round's handled thread items gets a reply and
+    /// SPEC §13.2: with `postFactualReplies` on, each handled thread item still owed a reply gets one and
     /// each review body a PR comment, its URL recorded. Nothing is resolved. A failed post is logged and
     /// left without a URL.
-    private func postFactualReplies(watchId: String, round number: Int, project: Project) async {
+    private func postFactualReplies(watchId: String, project: Project) async {
         guard project.settings.prFollowThrough.postFactualReplies, let watch = try? prWatches.get(watchId),
-              let items = try? prWatches.pendingReplies(watchId: watchId, round: number), !items.isEmpty
+              let items = try? prWatches.pendingReplies(watchId: watchId), !items.isEmpty
         else { return }
-        let pushed = (try? prWatches.rounds(watchId: watchId))?.first { $0.number == number }?.pushedHeadOid
+        let pushed = Dictionary(
+            ((try? prWatches.rounds(watchId: watchId)) ?? []).map { ($0.number, $0.pushedHeadOid) },
+            uniquingKeysWith: { first, _ in first }
+        )
         let replier = pullRequestReplies
         let cwd = URL(fileURLWithPath: project.repoPath)
         for item in items {
-            guard let id = item.id, let text = item.factualReply(pushedHeadOid: pushed) else { continue }
+            guard let id = item.id, let text = item.factualReply(pushedHeadOid: pushed[item.round] ?? nil) else { continue }
             let body = item.kind == .review ? item.url.map { "In reply to \($0):\n\n\(text)" } ?? text : text
             do {
                 let url: String
