@@ -327,7 +327,7 @@ CREATE TABLE pr_watch (
                                       -- awaiting_ci | ready_to_verify | verified | stale | parked | merged | closed
   round            INTEGER NOT NULL DEFAULT 0,
   review_decision  TEXT,              -- GitHub's reviewDecision, as read
-  checks_state     TEXT,
+  checks_state     TEXT,              -- SUCCESS | PENDING | FAILURE by §13.1's checks rule; null when nothing is required or reported
   mergeable        TEXT,
   labels_json      TEXT NOT NULL DEFAULT '[]',
   paused           INTEGER NOT NULL DEFAULT 0,
