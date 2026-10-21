@@ -164,7 +164,8 @@ public struct Board: Sendable {
             guard let project = try Project.fetchOne(db, key: task.projectId) else {
                 throw BoardError.projectNotFound(task.projectId)
             }
-            if project.settings.autonomyEnabled {
+            // SPEC §13.5's §8 amendment: a fix round skips approval where follow-through is on.
+            if project.settings.autonomyEnabled || (task.origin == .fixRound && project.settings.prFollowThrough.enabled) {
                 return .proceed
             }
             if let existing = try ApprovalStore.pendingSpawn(db, taskId: taskId) {

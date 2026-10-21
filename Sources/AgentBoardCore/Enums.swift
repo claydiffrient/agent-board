@@ -106,6 +106,8 @@ public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, Data
     case triage
     /// A backlog task follow-through created from a triaged PR item (SPEC §13.2).
     case followThrough = "follow_through"
+    /// The task a PR round's fixer is bound to (SPEC §13.1), worked on the round's branch.
+    case fixRound = "fix_round"
 }
 
 /// What kind of work a task is. Under `agent` review it picks the task's row in the project's

@@ -5,9 +5,9 @@ import Foundation
 import XCTest
 @testable import AgentBoard
 
-/// SPEC §13.1 phase 2: settling waits out `settleMinutes` and its holds, then starts one triager per
-/// round, whose verdicts become backlog tasks once and only once; a triage that ends without them is
-/// retried, and the third in a row parks the watch. Driven through `FakeGh`.
+/// SPEC §13.1 phases 2 and 3: settling waits out `settleMinutes` and its holds, then starts one
+/// triager per round, whose fix verdicts start one fixer on the round's branch; a triage that ends
+/// without verdicts is retried, and the third in a row parks the watch. Driven through `FakeGh`.
 @MainActor
 final class PRFollowThroughLoopTests: XCTestCase {
     private var fixture: SupervisorFixture!
@@ -18,7 +18,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
     private var watches: PRWatchStore { PRWatchStore(fixture.db) }
 
     /// `origin` names GitHub, so the poll maps it, while a fake ssh serves a local bare clone, so the
-    /// triager's base fetch works. The PR head is a commit the repository already has.
+    /// triager's and fixer's fetches work. The PR head is a commit the repository already has.
     override func setUp() async throws {
         fixture = try SupervisorFixture.make(gitRepo: true)
         let remote = fixture.supportDir.appendingPathComponent("remote.git")
@@ -32,6 +32,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         _ = try fixture.git(["commit", "-q", "--allow-empty", "-m", "Add widgets"])
         head = try fixture.git(["rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
         _ = try fixture.git(["checkout", "-q", "main"])
+        _ = try fixture.git(["push", "-q", remote.path, "add-widgets"])
         onAC = true
         fixture.supervisor.isOnACPower = { [unowned self] in self.onAC }
         await fixture.supervisor.start()
@@ -132,7 +133,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try watches.rounds(watchId: watch.id).first?.baseHeadOid, head)
     }
 
-    func testVerdictsBecomeBacklogTasksOnceAndTheWatchGoesBackToWatching() async throws {
+    func testFixVerdictsStartOneFixerOnTheRoundBranchAtTheFetchedHeadWithNoApproval() async throws {
         try enable()
         answer(threads: [
             thread("T_fix", body: "Rename this."), thread("T_later", body: "Extract a helper someday."),
@@ -168,29 +169,35 @@ final class PRFollowThroughLoopTests: XCTestCase {
         await poll()
 
         let watch = try onlyWatch()
-        XCTAssertEqual(watch.state, .watching)
-        let made = try fixture.tasks.list(projectId: fixture.project.id).filter { $0.origin == .followThrough }
-        XCTAssertEqual(made.count, 2, made.map(\.title).description)
-        let fix = try XCTUnwrap(made.first { $0.type == .code })
-        XCTAssertEqual(fix.column, .backlog)
-        XCTAssertEqual(fix.model, "fixer-model")
-        for part in ["Rename this.", "Sources/App.swift:3", "\(url)#T_fix", "Rename it to count.", url] {
-            XCTAssertTrue(fix.body?.contains(part) == true, "\(part) is missing from:\n\(fix.body ?? "")")
-        }
-        let followUp = try XCTUnwrap(made.first { $0.id != fix.id })
-        XCTAssertEqual(followUp.column, .backlog)
+        XCTAssertEqual(watch.state, .fixing)
+        let followUp = try XCTUnwrap(try fixture.tasks.list(projectId: fixture.project.id).first { $0.origin == .followThrough })
         XCTAssertTrue(followUp.title.hasPrefix("Follow-up from #12"), followUp.title)
+        let fixer = try XCTUnwrap(try fixture.tasks.list(projectId: fixture.project.id).first { $0.origin == .fixRound })
+        XCTAssertEqual(fixer.model, "fixer-model")
+        XCTAssertEqual(try ApprovalStore(fixture.db).pending(projectId: fixture.project.id), [])
+
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(
+            try fixture.sessions.forTask(fixer.id).first { $0.state.isActive }?.worktreePath
+        ))
+        XCTAssertEqual(try fixture.git(["rev-parse", "refs/remotes/origin/add-widgets"]).trimmingCharacters(in: .whitespacesAndNewlines), head)
+        XCTAssertEqual(try fixture.git(["rev-parse", "HEAD"], cwd: worktree).trimmingCharacters(in: .whitespacesAndNewlines), head)
+        XCTAssertEqual(
+            try fixture.git(["symbolic-ref", "--short", "HEAD"], cwd: worktree).trimmingCharacters(in: .whitespacesAndNewlines),
+            "agentboard/pr-12-r1"
+        )
+        let spawns = await fixture.runtime.spawns
+        XCTAssertEqual(spawns.count, 2)
+        XCTAssertEqual(spawns.last?.cwd.resolvingSymlinksInPath().path, worktree.resolvingSymlinksInPath().path)
+        XCTAssertTrue(spawns.last?.disallowedTools.contains("Bash(git commit*--amend*)") == true)
 
         let byNode = Dictionary(uniqueKeysWithValues: try watches.items(watchId: watch.id).map { ($0.githubNodeId, $0) })
         XCTAssertEqual(byNode["T_fix"]?.state, .open)
-        XCTAssertEqual(byNode["T_fix"]?.fixTaskId, fix.id)
+        XCTAssertEqual(byNode["T_fix"]?.fixTaskId, fixer.id)
         XCTAssertEqual(byNode["T_later"]?.state, .handled)
+        XCTAssertEqual(byNode["T_later"]?.fixTaskId, followUp.id)
         XCTAssertEqual(byNode["T_question"]?.state, .handled)
         XCTAssertEqual(byNode["T_question"]?.replyBody, "Three retries.")
         XCTAssertEqual(byNode["T_choice"]?.isOpenDecision, true)
-        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["triaged"])
-        let spawned = await spawnCount
-        XCTAssertEqual(spawned, 1)
     }
 
     /// The third failure in a row parks the watch and raises the project's attention, naming it.

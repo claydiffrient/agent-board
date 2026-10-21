@@ -53,7 +53,7 @@ CREATE TABLE task (
   failed         INTEGER NOT NULL DEFAULT 0,
   failure_reason TEXT,
   ordering       REAL NOT NULL,
-  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration | triage | follow_through
+  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration | triage | follow_through | fix_round
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
@@ -380,6 +380,7 @@ CREATE TABLE pr_round (
   outcome         TEXT,              -- triaged | triage_failed | interrupted; null while the round runs
   started_at      INTEGER NOT NULL,
   ended_at        INTEGER,
+  fix_task_id     TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the round's `fix_round` task (§13.1)
   UNIQUE (watch_id, number)
 );
 

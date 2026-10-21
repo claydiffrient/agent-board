@@ -569,6 +569,11 @@ enum Schema {
     ALTER TABLE pr_watch ADD COLUMN parked_reason TEXT;
     """
 
+    /// The fixer task a round's fix items went to.
+    static let prRoundFixTask = """
+    ALTER TABLE pr_round ADD COLUMN fix_task_id TEXT REFERENCES task(id) ON DELETE SET NULL;
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",

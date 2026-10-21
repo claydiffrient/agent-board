@@ -197,6 +197,7 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
     public var outcome: String?
     public var startedAt: Int64
     public var endedAt: Int64?
+    public var fixTaskId: String? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -207,6 +208,12 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
         case outcome
         case startedAt = "started_at"
         case endedAt = "ended_at"
+        case fixTaskId = "fix_task_id"
+    }
+
+    /// The branch a round's fixer commits on (SPEC §13.1).
+    public static func branch(pullRequest number: Int, round: Int) -> String {
+        "\(TaskStore.branchPrefix)pr-\(number)-r\(round)"
     }
 
     public mutating func didInsert(_ inserted: InsertionSuccess) {
