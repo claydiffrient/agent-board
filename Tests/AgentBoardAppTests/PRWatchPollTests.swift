@@ -52,8 +52,10 @@ final class PRWatchPollTests: XCTestCase {
         ]
     }
 
-    private func checkRun(_ name: String, status: String = "COMPLETED", conclusion: String?) -> [String: Any] {
-        ["name": name, "status": status, "conclusion": conclusion ?? NSNull()]
+    private func checkRun(
+        _ name: String, status: String = "COMPLETED", conclusion: String?, startedAt: String? = nil
+    ) -> [String: Any] {
+        ["name": name, "status": status, "conclusion": conclusion ?? NSNull(), "startedAt": startedAt ?? NSNull()]
     }
 
     private func backdateHeadPastTheChecksGracePeriod() throws {
@@ -166,6 +168,18 @@ final class PRWatchPollTests: XCTestCase {
         ]))
         await fixture.supervisor.pollPRWatches()
         XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+    }
+
+    func testAPassingRerunClearsTheFailedRunOfTheSameRequiredCheck() async throws {
+        try enable()
+        answer(pullRequest(checks: "FAILURE", required: ["build"], reported: [
+            checkRun("build", conclusion: "SUCCESS", startedAt: "2026-10-21T12:30:00Z"),
+            checkRun("build", conclusion: "FAILURE", startedAt: "2026-10-21T12:00:00Z"),
+        ]))
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.checksState, "SUCCESS")
+        XCTAssertEqual(watch.state, .readyToVerify)
     }
 
     func testANeutralCheckIsAFailureThatOutweighsAPendingOne() async throws {
