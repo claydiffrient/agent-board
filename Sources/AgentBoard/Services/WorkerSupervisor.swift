@@ -15,6 +15,7 @@ enum SupervisorError: LocalizedError {
     case sessionHasNoShortId(String)
     case taskNotAssignable(title: String, column: TaskColumn)
     case noReviewToRerun(title: String)
+    case integrationNotRosterable(title: String)
     case capRefused(String)
     case taskAlreadyHeld(title: String, sessionId: String)
     case worktreeAlreadyHeld(path: String, sessionId: String)
@@ -47,6 +48,9 @@ enum SupervisorError: LocalizedError {
         case .taskNotAssignable(let title, let column): return "\"\(title)\" is in \(column.rawValue) and cannot be assigned"
         case .noReviewToRerun(let title):
             return "\"\(title)\" is not in review with a rostered reviewer, so there is no review to re-run"
+        case .integrationNotRosterable(let title):
+            return "\"\(title)\" is an integration task, which a roster agent cannot run; call spawn_worker "
+                + "to respawn its integrator on the epic checkout, or request_integration to start a new one"
         case .capRefused(let reason): return "spawn refused: \(reason)"
         case .taskAlreadyHeld(let title, let sessionId):
             return "\"\(title)\" is still held by session \(sessionId); a second agent would share its worktree"
@@ -341,7 +345,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
         }
         // SPEC §5.2 step 3: a respawned integrator runs where the first one did, on the epic branch.
-        if task.origin == .integration, let epicId = task.epicId, rosterAgentId == nil, scope == .worker {
+        if task.origin == .integration, scope == .worker, rosterAgentId != nil {
+            throw SupervisorError.integrationNotRosterable(title: task.title)
+        }
+        if task.origin == .integration, let epicId = task.epicId, scope == .worker {
             let placeholder = try await spawnIntegrator(epicId: epicId, retrying: task)
             return WorkerSpawn(
                 setupSessionId: placeholder.sessionId, worktreePath: placeholder.cwd,

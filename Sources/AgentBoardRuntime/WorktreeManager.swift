@@ -511,12 +511,14 @@ public struct WorktreeManager: Sendable {
         let linked: [URL]
         do {
             linked = try FileManager.default
-                .contentsOfDirectory(at: linkedRoot, includingPropertiesForKeys: [.isDirectoryKey])
-                .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+                .contentsOfDirectory(at: linkedRoot, includingPropertiesForKeys: nil)
         } catch {
             throw UnreadableWorktreeRecord(directory: linkedRoot.path, detail: error.localizedDescription)
         }
-        return (common, linked)
+        return (common, try linked.filter { entry in
+            guard let mode = try Self.mode(entry, admin: linkedRoot) else { return false }
+            return mode & S_IFMT == S_IFDIR
+        })
     }
 
     /// SPEC §5: an unlocked entry whose `gitdir` is missing or names a `.git` file that is gone —
@@ -531,10 +533,15 @@ public struct WorktreeManager: Sendable {
     /// False only when `lstat` says the path is not there. `FileManager.fileExists` also returns
     /// false when a parent cannot be searched, which would read a live worktree as dead.
     private static func exists(_ file: URL, admin: URL) throws -> Bool {
+        try mode(file, admin: admin) != nil
+    }
+
+    /// `lstat`'s mode, nil only for ENOENT or ENOTDIR; any other failure throws.
+    private static func mode(_ file: URL, admin: URL) throws -> mode_t? {
         var info = stat()
-        if lstat(file.path, &info) == 0 { return true }
+        if lstat(file.path, &info) == 0 { return info.st_mode }
         let code = errno
-        if code == ENOENT || code == ENOTDIR { return false }
+        if code == ENOENT || code == ENOTDIR { return nil }
         throw UnreadableWorktreeRecord(directory: admin.path, detail: "\(file.path): \(String(cString: strerror(code)))")
     }
 

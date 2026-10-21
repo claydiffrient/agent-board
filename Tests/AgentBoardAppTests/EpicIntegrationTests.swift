@@ -87,6 +87,10 @@ final class EpicIntegrationTests: XCTestCase {
         let integration = try XCTUnwrap(first.taskId)
         try await fixture.supervisor.stop(sessionId: first.sessionId)
 
+        do {
+            _ = try await fixture.supervisor.assignAgent(taskId: integration, rosterAgentId: "any", scope: .worker)
+            XCTFail("a roster agent was spawned on an integration task")
+        } catch SupervisorError.integrationNotRosterable {}
         _ = try await fixture.supervisor.spawnWorker(taskId: integration)
         await fixture.supervisor.waitForSetup()
 

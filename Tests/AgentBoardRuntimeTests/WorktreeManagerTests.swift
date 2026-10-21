@@ -396,6 +396,21 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: admin.appendingPathComponent("HEAD").path), "a live registration was pruned")
     }
 
+    func testMergeFailsClosedWhenTheWorktreesDirectoryCanBeListedButNotSearched() throws {
+        let integration = try epicWithMergeableTask()
+        let linkedRoot = try adminDirectory(of: integration).deletingLastPathComponent()
+        let epicBefore = try revParse("agentboard/epic-1")
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: linkedRoot.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: linkedRoot.path) }
+
+        XCTAssertThrowsError(try manager.merge(
+            taskBranch: "agentboard/task", into: "agentboard/epic-1", taskTitle: "Add the widget", targetTitle: "Widgets"
+        )) { error in
+            XCTAssertTrue(error is UnreadableWorktreeRecord, "\(error)")
+        }
+        XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore)
+    }
+
     func testMergeTreatsATargetBeingBisectedAsCheckedOut() throws {
         let integration = try epicWithMergeableTask()
         try git(["bisect", "start"], cwd: integration)
