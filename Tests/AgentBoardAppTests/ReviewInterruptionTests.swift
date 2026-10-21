@@ -116,6 +116,52 @@ final class ReviewInterruptionTests: XCTestCase {
         XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .review)
     }
 
+    func testAResumedReviewerStaysInReviewWithReviewerTools() async throws {
+        let (task, _, reviewer) = try await taskUnderReview()
+        try await fixture.supervisor.stop(sessionId: reviewer.sessionId)
+
+        try await fixture.supervisor.resume(sessionId: reviewer.sessionId)
+
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .review)
+        let live = try fixture.grants.forSession(reviewer.sessionId).filter { !$0.isRevoked }
+        XCTAssertEqual(live.map(\.scope), [.reviewer])
+    }
+
+    func testResumingTheWorkerIsRefusedWhileTheReviewerHoldsTheTask() async throws {
+        let (task, worker, reviewer) = try await taskUnderReview()
+
+        do {
+            try await fixture.supervisor.resume(sessionId: worker.sessionId)
+            XCTFail("the worker was resumed into a task its reviewer holds")
+        } catch SupervisorError.taskAlreadyHeld(_, let holder) {
+            XCTAssertEqual(holder, reviewer.sessionId)
+        }
+
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .review)
+        let resumed = await fixture.runtime.resumed
+        XCTAssertEqual(resumed, [])
+    }
+
+    func testResumingTheWorkerIsRefusedWhileAnotherSessionHoldsItsWorktree() async throws {
+        let (_, worker, reviewer) = try await taskUnderReview()
+        try await fixture.supervisor.stop(sessionId: reviewer.sessionId)
+        let other = try fixture.tasks.create(
+            projectId: fixture.project.id, title: "Other", body: nil, acceptance: nil,
+            priority: nil, column: .running, origin: .human, epicId: nil
+        )
+        try fixture.sessions.insert(AgentSession(
+            sessionId: "squatter", shortId: "squatter", projectId: fixture.project.id, taskId: other.id,
+            role: .worker, worktreePath: worker.worktreePath, cwd: worker.cwd, state: .running
+        ))
+
+        do {
+            try await fixture.supervisor.resume(sessionId: worker.sessionId)
+            XCTFail("the worker was resumed into a worktree another session holds")
+        } catch SupervisorError.worktreeAlreadyHeld(_, let holder) {
+            XCTAssertEqual(holder, "squatter")
+        }
+    }
+
     func testAReviewersOwnAcceptTaskDoesNotStopTheReviewer() async throws {
         let (task, _, reviewer) = try await taskUnderReview()
         let handler = ReviewerToolHandler(

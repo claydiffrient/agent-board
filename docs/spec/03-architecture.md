@@ -117,6 +117,9 @@ For a task `T` in project `P`:
    `/hooks?token=…` (a `command` + `curl` hook for `SessionStart`, see §2), plus
    the project's `autoMode` block. On resume, rewrite this file and the MCP
    config in place with the current port; `--bg --resume` reuses the paths.
+   The rewrite keeps the spawn's hooks, so a shared-checkout worker resumed by a
+   human or by a wind-down order (§8) still gets its file-lock `PreToolUse`
+   entry (§8.4).
 5. Generate `mcp-<session>.json`: one HTTP server entry for `/mcp` with
    `Authorization: Bearer <token>`, where the token carries scope `worker` and
    is bound to `(session, task)`.
