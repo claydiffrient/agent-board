@@ -8,6 +8,8 @@ public enum PRRoundOutcome: String, Sendable, CaseIterable, Equatable, DatabaseV
     case triageFailed = "triage_failed"
     /// A shutdown order stopped the triage. Retried, never counted as a failure.
     case interrupted
+    /// The round's check failed `failedChecksBeforePark` times, or could not run, and the watch parked.
+    case checkFailed = "check_failed"
 }
 
 extension PRWatchStore {
@@ -96,16 +98,16 @@ extension PRWatchStore {
         )
     }
 
-    /// What the project's triage and fixer sessions started since `since` have cost, for `dailyBudgetUSD`.
+    /// What the project's triage, fixer, reviewer and follow-up check sessions started since `since` have cost, for `dailyBudgetUSD`.
     public func followThroughSpend(projectId: String, since: Int64) throws -> Double {
         try db.reader.read { db in
             try Double.fetchOne(
                 db,
                 sql: """
                 SELECT COALESCE(SUM(s.est_cost_usd), 0) FROM agent_session s JOIN task t ON t.id = s.task_id
-                WHERE s.project_id = ? AND t.origin IN (?, ?) AND s.started_at >= ?
+                WHERE s.project_id = ? AND t.origin IN (?, ?, ?) AND s.started_at >= ?
                 """,
-                arguments: [projectId, TaskOrigin.triage, TaskOrigin.fixRound, since]
+                arguments: [projectId, TaskOrigin.triage, TaskOrigin.fixRound, TaskOrigin.followupCheck, since]
             ) ?? 0
         }
     }

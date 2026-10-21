@@ -34,17 +34,22 @@ enum SupervisorError: LocalizedError {
     case triageNotResumable(title: String)
     case pullRequestNotFetched(String)
     case fixRoundNotFound(title: String)
+    case fixRoundNotAcceptable(title: String)
 
     var errorDescription: String? {
         switch self {
         case .approvalNotFound(let id): return "approval \(id) not found"
         case .watchNotFound(let id): return "watched pull request \(id) not found"
         case .triageTaskNotAssignable(let title):
-            return "\"\(title)\" is a pull request triage; only Agent Board's follow-through starts one"
+            return "\"\(title)\" is a pull request triage or follow-up check; only Agent Board's follow-through starts one"
         case .triageNotResumable(let title):
-            return "\"\(title)\" is a pull request triage, which is not resumed; follow-through starts a fresh one"
+            return "\"\(title)\" is a pull request triage or follow-up check, which is not resumed; follow-through "
+                + "starts a fresh one"
         case .pullRequestNotFetched(let reason): return "the pull request could not be fetched: \(reason)"
         case .fixRoundNotFound(let title): return "\"\(title)\" is not a pull request round's fix task"
+        case .fixRoundNotAcceptable(let title):
+            return "\"\(title)\" is a pull request fix round; its check accepts it, and Agent Board pushes it to the "
+                + "pull request rather than merging it"
         case .rosterAgentNotUsable(let id, let projectName):
             return "roster agent \(id) is not in \(projectName)'s usable set; enable it for this project first"
         case .epicCloseRefused(let reason): return reason
@@ -351,9 +356,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         taskId: String, rosterAgentId: String? = nil, scope: AgentBoardCore.TokenScope = .worker
     ) async throws -> WorkerSpawn {
         guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
-        // A worker or reviewer grant on a triage task would hold authority over the PR's checkout that
-        // the triager scope exists to withhold.
-        guard task.origin != .triage else { throw SupervisorError.triageTaskNotAssignable(title: task.title) }
+        // A worker or reviewer grant on a triage or follow-up check task would hold authority over the PR's
+        // checkout that the triager scope exists to withhold.
+        guard !task.origin.isPullRequestReader else { throw SupervisorError.triageTaskNotAssignable(title: task.title) }
         guard task.column != .running, task.column != .done, task.column != .closed else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
         }
@@ -367,6 +372,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         if task.origin == .fixRound, scope == .worker {
             return try await spawnFixer(task: task, rosterAgentId: rosterAgentId, project: project, port: port)
+        }
+        if task.origin == .fixRound, scope == .reviewer, let rosterAgentId {
+            return try await spawnRoundReviewer(task: task, rosterAgentId: rosterAgentId, project: project, port: port)
         }
         let agent = try rosterAgentId.map { id -> RosterAgent in
             guard let agent = try roster.usableAgent(id, forProject: project.id) else {
@@ -997,6 +1005,145 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    /// SPEC §13.1 checking: a round's reviewer reads `base_head_oid...HEAD` on the round branch, in the
+    /// fixer's own worktree, never a task branch against the project's base. A branch with nothing on it
+    /// beyond the pull request's head is a round that fixed nothing.
+    private func spawnRoundReviewer(
+        task: BoardTask, rosterAgentId: String, project: Project, port: Int
+    ) async throws -> WorkerSpawn {
+        guard let round = try prWatches.round(fixTaskId: task.id), let watch = try prWatches.get(round.watchId) else {
+            throw SupervisorError.fixRoundNotFound(title: task.title)
+        }
+        guard let agent = try roster.usableAgent(rosterAgentId, forProject: project.id) else {
+            throw SupervisorError.rosterAgentNotUsable(id: rosterAgentId, projectName: project.name)
+        }
+        if let holder = try sessions.activeHolder(taskId: task.id) {
+            throw SupervisorError.taskAlreadyHeld(title: task.title, sessionId: holder.sessionId)
+        }
+        let manager = worktreeManager(for: project)
+        let name = task.id
+        guard let worktree = try await offMain({ try Self.existingWorktree(manager, name: name) }) else {
+            throw SupervisorError.spawnFailed(
+                worktree: manager.worktreeRoot.appendingPathComponent(name).path,
+                underlying: "the round's worktree is gone, so there is nothing to review"
+            )
+        }
+        if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
+            throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
+        }
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let base = round.baseHeadOid
+        guard try await offMain({ try ReviewCheckout.hasDiff(against: base, in: worktree) }) else {
+            throw NothingToReview(reason: "Branch `\(branch)` has no change beyond the pull request's head `\(base)`, "
+                + "so the round fixed nothing.")
+        }
+
+        do {
+            let reviewHead = try await offMain { try ReviewCheckout.baseline(in: worktree) }
+            let site = CheckoutSite(placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch, warnings: [])
+            let placeholder = try board.assignReviewer(
+                taskId: task.id,
+                session: Self.setupRow(
+                    projectId: project.id, taskId: task.id, site: site, attempt: try sessions.forTask(task.id).count + 1,
+                    rosterAgentId: agent.id, reviewHead: reviewHead, reviewBase: base
+                )
+            )
+            let role = project.settings.prFollowThrough.roles.reviewer
+            beginSetup(
+                LaunchPlan(
+                    project: project,
+                    taskId: task.id,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
+                    branch: branch,
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: ReviewPrompt.compose(
+                        task: task, branch: branch, base: base, verification: project.settings.verification,
+                        workingDirectory: worktree.path, agent: agent.identity,
+                        comments: try CommentStore(db).list(taskId: task.id)
+                    ),
+                    model: role?.model ?? agent.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    scope: .reviewer
+                ),
+                placeholder: placeholder,
+                port: port
+            )
+            return WorkerSpawn(
+                setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch,
+                sharesCheckout: false, warnings: []
+            )
+        } catch {
+            throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
+        }
+    }
+
+    /// SPEC §13.1 checking: the follow-up checker holds a triager grant, so it reads and grades and
+    /// changes nothing, in a detached checkout of the round branch's tip, bound to a synthetic
+    /// `followup_check` task. `roles.followupCheck` picks the roster agent, whose plugin dirs it runs with.
+    private func spawnFollowupCheck(_ watch: PRWatch, round: PRRound, project: Project) async throws {
+        guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        try requireNoShutdown(projectId: project.id)
+        if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
+            throw SupervisorError.capRefused(reason)
+        }
+        let role = project.settings.prFollowThrough.roles.followupCheck
+        let agent = try role?.rosterAgentId.map { id -> RosterAgent in
+            guard let agent = try roster.usableAgent(id, forProject: project.id) else {
+                throw SupervisorError.rosterAgentNotUsable(id: id, projectName: project.name)
+            }
+            return agent
+        }
+        let manager = worktreeManager(for: project)
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        guard let headOid = try await offMain({ try manager.refCommit("refs/heads/\(branch)") }) else {
+            throw AgentRuntimeError("the round branch `\(branch)` does not exist")
+        }
+        guard let task = try board.createFollowupCheckTask(watchId: watch.id, headOid: headOid) else { return }
+        _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(task.id))
+        var assigned: AgentSession?
+        do {
+            let worktree = try await offMain { try manager.createDetached(name: task.id, commit: headOid) }
+            let placeholder = try board.assign(
+                taskId: task.id,
+                session: AgentSession(
+                    sessionId: "setup-\(UUID().uuidString)", projectId: project.id, taskId: task.id, role: .worker,
+                    worktreePath: worktree.path, cwd: worktree.path, state: .setup, attempt: 1,
+                    rosterAgentId: agent?.id
+                )
+            )
+            assigned = placeholder
+            beginSetup(
+                LaunchPlan(
+                    project: project,
+                    taskId: task.id,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
+                    branch: headOid,
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: FollowupCheckPrompt.compose(
+                        watch: watch, round: round, headOid: headOid, workingDirectory: worktree.path,
+                        agent: agent?.identity
+                    ),
+                    model: role?.model ?? agent?.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    scope: .triager
+                ),
+                placeholder: placeholder,
+                port: port
+            )
+        } catch {
+            if assigned == nil { try? tasks.delete(task.id) }
+            throw SupervisorError.spawnFailed(
+                worktree: manager.worktreeRoot.appendingPathComponent(task.id).path, underlying: describe(error)
+            )
+        }
+    }
+
     /// §5.2 step 3. The integrator is an ordinary worker on a worktree checked out on the epic
     /// branch, bound to a synthetic task so its token scope, report channel and board card are real.
     @discardableResult
@@ -1188,7 +1335,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 throw SupervisorError.projectNotFound(session.projectId)
             }
             // SPEC §13.2: the grant and config below are a worker's, and a triage is cheap to start over.
-            if let task = try tasks.get(taskId), task.origin == .triage {
+            if let task = try tasks.get(taskId), task.origin.isPullRequestReader {
                 throw SupervisorError.triageNotResumable(title: task.title)
             }
             let token: String
@@ -1259,6 +1406,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(task.projectId) else {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
+            // SPEC §13.1: a round's branch is pushed onto its pull request, never merged as a task branch.
+            if task.origin == .fixRound { throw SupervisorError.fixRoundNotAcceptable(title: task.title) }
             try await stopLiveSessions(onTask: taskId, sparing: acceptedBy.acceptingSessionId, by: acceptedBy.actor)
             try board.accept(taskId: taskId, acceptedBy: acceptedBy)
             let acceptanceReport = try? ReportStore(db).latest(taskId: taskId)?.id
@@ -1724,8 +1873,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// SPEC §13.1 and §13.2: a settling watch starts one triager per round once no item has arrived
-    /// for `settleMinutes` and nothing holds it, a triaging one moves on once that triage ends, and a
-    /// fixing one starts its round's fixer.
+    /// for `settleMinutes` and nothing holds it, a triaging one moves on once that triage ends, a
+    /// fixing one starts its round's fixer, and a checking one its reviewer and follow-up check.
     private func advancePRWatches(_ enabled: [Project]) async {
         for project in enabled {
             for watch in (try? prWatches.live(projectId: project.id)) ?? [] {
@@ -1733,6 +1882,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 case .settling: await startTriageIfSettled(watch, project: project)
                 case .triaging: settleTriageRound(watch, project: project)
                 case .fixing: await startFixRound(watch, project: project)
+                case .checking: await advanceCheck(watch, project: project)
                 default: break
                 }
             }
@@ -1790,22 +1940,84 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// SPEC §13.1 fixing and §13.5's §8 amendment: the round's one fixer task, spawned with no
-    /// approval while follow-through is on, under the settling holds and every §8 cap. Only a task
-    /// that has never had a session is spawned from here, so a failed fixer is not retried in a loop.
+    /// approval while follow-through is on, under the settling holds and every §8 cap. A fixer starts
+    /// here once per check, only while the task's fixer sessions do not outnumber its failed checks, so
+    /// a failed fixer is not retried in a loop. A round left with nothing to fix ends.
     private func startFixRound(_ watch: PRWatch, project: Project) async {
         do {
-            guard let round = try prWatches.rounds(watchId: watch.id).last(where: { $0.number == watch.round }) else {
+            guard let round = try prWatches.currentRound(watchId: watch.id) else { return }
+            let model = project.settings.prFollowThrough.roles.fixer?.model
+            guard let taskId = try round.fixTaskId ?? board.createFixRoundTask(watchId: watch.id, model: model)?.id else {
+                try board.endFixRoundWithoutFixes(watchId: watch.id)
                 return
             }
-            let model = project.settings.prFollowThrough.roles.fixer?.model
-            guard let taskId = try round.fixTaskId ?? board.createFixRoundTask(watchId: watch.id, model: model)?.id,
-                  try tasks.get(taskId)?.column == .ready, try sessions.forTask(taskId).isEmpty,
+            guard try tasks.get(taskId)?.column == .ready,
+                  try sessions.forTask(taskId).filter({ $0.reviewHead == nil }).count <= round.checkFailures,
                   !isFollowThroughHeld(project: project),
                   case .proceed = try board.requestSpawn(taskId: taskId, requestedBy: "follow-through")
             else { return }
             try await spawn(taskId: taskId)
         } catch {
             NSLog("PR follow-through: the fix round of %@ did not start: %@", watch.url, describe(error))
+        }
+    }
+
+    /// SPEC §13.1 checking: starts the round's reviewer and follow-up check under the settling holds,
+    /// then settles the round once both are in. A round that cannot be checked parks its watch.
+    private func advanceCheck(_ watch: PRWatch, project: Project) async {
+        guard let round = try? prWatches.currentRound(watchId: watch.id), let taskId = round.fixTaskId,
+              let task = try? tasks.get(taskId), task.column == .review
+        else { return }
+        let held = isFollowThroughHeld(project: project)
+        do {
+            if round.reviewVerdict == nil, try sessions.activeHolder(taskId: taskId) == nil {
+                let reviewers = try sessions.forTask(taskId).filter { $0.reviewHead != nil }.count
+                if reviewers > round.checkFailures {
+                    try board.parkCheck(
+                        watchId: watch.id, reason: "Round \(round.number)'s reviewer ended without a verdict."
+                    )
+                    return
+                }
+                if !held { try await startRoundReview(task, watch: watch) }
+            }
+            guard try prWatches.get(watch.id)?.state == .checking else { return }
+            if let checkId = round.followupTaskId {
+                if let check = try tasks.get(checkId), check.column == .closed {
+                    try board.parkCheck(
+                        watchId: watch.id,
+                        reason: "Round \(round.number)'s follow-up check ended before grading every item: "
+                            + (check.closedReason ?? "no reason recorded")
+                    )
+                    return
+                }
+            } else if !held, !(try prWatches.checkItems(round: round)).isEmpty {
+                try await spawnFollowupCheck(watch, round: round, project: project)
+            }
+            try board.settleCheck(watchId: watch.id)
+        } catch {
+            NSLog("PR follow-through: the check of %@ could not run: %@", watch.url, describe(error))
+            try? board.parkCheck(
+                watchId: watch.id, reason: "Round \(round.number)'s check could not run: \(describe(error))"
+            )
+        }
+    }
+
+    /// An agent reviewer, or a park when the project's routing names none. A round with nothing on its
+    /// branch is reopened on the spot rather than handed to a reviewer.
+    private func startRoundReview(_ task: BoardTask, watch: PRWatch) async throws {
+        switch try board.assignRoundReviewer(taskId: task.id) {
+        case .agentReview(let agentId, _):
+            do {
+                _ = try await spawn(taskId: task.id, rosterAgentId: agentId, scope: .reviewer)
+            } catch let empty as NothingToReview {
+                try board.recordRoundReview(
+                    taskId: task.id, sessionId: nil, reviewerName: "Agent Board", accepted: false, text: empty.reason
+                )
+            }
+        case .humanReview(let reason):
+            try board.parkCheck(watchId: watch.id, reason: reason ?? "This round has no agent reviewer.")
+        case .autoAccept:
+            try board.parkCheck(watchId: watch.id, reason: "This round has no agent reviewer.")
         }
     }
 
@@ -3057,12 +3269,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             // SPEC §13.2: a triager has no acknowledge_shutdown and is never resumed, so it is stopped
             // outright, and its round is retried once the order lifts rather than counted as failed.
             let triagers = Set(active.filter { session in
-                session.taskId.flatMap { try? tasks.get($0) }?.origin == .triage
+                session.taskId.flatMap { try? tasks.get($0) }?.origin.isPullRequestReader == true
             }.map(\.sessionId))
             for triager in active where triagers.contains(triager.sessionId) {
                 if let triage = triager.taskId.flatMap({ try? prWatches.triage(taskId: $0) }) {
                     _ = try? prWatches.abandonTriageRound(watchId: triage.watchId, failure: nil)
                 }
+                if let taskId = triager.taskId { try? prWatches.interruptFollowupCheck(taskId: taskId) }
                 try? await stopSession(triager.sessionId, by: .human)
             }
             let workers = active.filter { $0.state != .setup && !triagers.contains($0.sessionId) }
@@ -3320,16 +3533,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     ) throws -> Report? {
         let report = try board.terminate(sessionId: sessionId, cause: cause, salvage: salvage)
         if let session = try? sessions.get(sessionId), let taskId = session.taskId,
-           (try? tasks.get(taskId))?.origin == .triage {
+           (try? tasks.get(taskId))?.origin.isPullRequestReader == true {
             inBackground { await $0.tearDownFinishedTriage(session) }
         }
         return report
     }
 
-    /// SPEC §13.2: a triage lands nothing, and its detached checkout of the PR head always has commits
-    /// outside the project's bases, so the orphan sweep would keep it forever.
+    /// SPEC §13.1, §13.2: a triage or follow-up check lands nothing, and its detached checkout of the PR
+    /// head always has commits outside the project's bases, so the orphan sweep would keep it forever.
     private func tearDownFinishedTriage(_ session: AgentSession) async {
-        guard let taskId = session.taskId, let task = try? tasks.get(taskId), task.origin == .triage,
+        guard let taskId = session.taskId, let task = try? tasks.get(taskId), task.origin.isPullRequestReader,
               task.column == .done || task.column == .closed, let project = try? projects.get(task.projectId),
               let taskSessions = try? sessions.forTask(taskId), !taskSessions.contains(where: \.state.isActive)
         else { return }

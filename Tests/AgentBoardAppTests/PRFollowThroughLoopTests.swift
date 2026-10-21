@@ -1,13 +1,15 @@
 import AgentBoardBridge
 import AgentBoardCore
 import AgentBoardRuntime
+import AgentBoardServer
 import Foundation
 import XCTest
 @testable import AgentBoard
 
 /// SPEC §13.1 phases 2 and 3: settling waits out `settleMinutes` and its holds, then starts one
-/// triager per round, whose fix verdicts start one fixer on the round's branch; a triage that ends
-/// without verdicts is retried, and the third in a row parks the watch. Driven through `FakeGh`.
+/// triager per round, whose fix verdicts start one fixer on the round's branch, which the reviewer and
+/// follow-up check roles then check; a triage that ends without verdicts is retried, and the third in a
+/// row parks the watch. Driven through `FakeGh`.
 @MainActor
 final class PRFollowThroughLoopTests: XCTestCase {
     private var fixture: SupervisorFixture!
@@ -46,11 +48,13 @@ final class PRFollowThroughLoopTests: XCTestCase {
         fixture = nil
     }
 
-    private func enable(settleMinutes: Int = 0, budget: Double? = nil) throws {
+    private func enable(
+        settleMinutes: Int = 0, budget: Double? = nil,
+        roles: PRFollowThroughRoles = PRFollowThroughRoles(fixer: PRFollowThroughRole(model: "fixer-model"))
+    ) throws {
         var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
         settings.prFollowThrough = PRFollowThroughSettings(
-            enabled: true, settleMinutes: settleMinutes, dailyBudgetUSD: budget,
-            roles: PRFollowThroughRoles(fixer: PRFollowThroughRole(model: "fixer-model"))
+            enabled: true, settleMinutes: settleMinutes, dailyBudgetUSD: budget, roles: roles
         )
         try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
     }
@@ -288,5 +292,191 @@ final class PRFollowThroughLoopTests: XCTestCase {
         await poll()
         let retried = await spawnCount
         XCTAssertEqual(retried, 2)
+    }
+
+    // MARK: - Checking
+
+    private let gradingPlugin = "/plugins/grading"
+
+    /// A reviewer role and a follow-up check role, each a board-local roster agent.
+    private func enableChecking() throws {
+        let store = RosterStore(fixture.db)
+        let rita = try store.create(name: "Rita", role: "reviewer", systemPrompt: "You review for correctness.")
+        let gail = try store.create(
+            name: "Gail", role: "follow-up checker", systemPrompt: "Grade with the house lens.", pluginDirs: [gradingPlugin]
+        )
+        try store.enable(agentId: rita.id, forProject: fixture.project.id)
+        try store.enable(agentId: gail.id, forProject: fixture.project.id)
+        try enable(roles: PRFollowThroughRoles(
+            fixer: PRFollowThroughRole(model: "fixer-model"), reviewer: PRFollowThroughRole(rosterAgentId: rita.id),
+            followupCheck: PRFollowThroughRole(rosterAgentId: gail.id)
+        ))
+    }
+
+    private var sink: LateBoundSink {
+        let sink = LateBoundSink()
+        sink.target = fixture.supervisor
+        return sink
+    }
+
+    private func activeSession(on taskId: String) throws -> AgentSession {
+        try XCTUnwrap(try fixture.sessions.forTask(taskId).first { $0.state.isActive })
+    }
+
+    private func identity(of session: AgentSession) async throws -> TokenIdentity {
+        try await fixture.identity(token: try XCTUnwrap(fixture.grants.forSession(session.sessionId).first).token)
+    }
+
+    /// One `fix` thread, triaged, with its round's fixer running.
+    private func runningFixer() async throws -> BoardTask {
+        answer(threads: [thread("T_fix")])
+        await poll()
+        let item = try XCTUnwrap(try watches.items(watchId: try onlyWatch().id).first)
+        let result = try await TriagerToolHandler(db: fixture.db, events: sink).call(
+            "set_verdicts",
+            arguments: .object(["verdicts": .array([.object([
+                "item_id": .number(Double(item.id ?? 0)), "verdict": .string("fix"),
+                "approach": .string("Rename n to count."),
+            ])])]),
+            identity: try await identity(of: try runningTriager())
+        )
+        await result.afterResponse?()
+        await poll()
+        await poll()
+        return try XCTUnwrap(try fixture.tasks.list(projectId: fixture.project.id).first { $0.origin == .fixRound })
+    }
+
+    private func completeFixer(_ fixer: BoardTask, file: String) async throws {
+        let session = try activeSession(on: fixer.id)
+        try fixture.commitInto(try XCTUnwrap(session.worktreePath), file: file)
+        let result = try await WorkerToolHandler(db: fixture.db, control: sink, events: sink).call(
+            "report_complete",
+            arguments: .object([
+                "summary": .string("Renamed it."), "files_changed": .array([.string(file)]),
+                "tests_run": .string("none"), "caveats": .string(""),
+            ]),
+            identity: try await identity(of: session)
+        )
+        await result.afterResponse?()
+    }
+
+    private func review(_ fixer: BoardTask, accept: Bool, text: String = "Ran the tests; they pass.") async throws {
+        let reviewer = try activeSession(on: fixer.id)
+        XCTAssertNotNil(reviewer.reviewHead)
+        let result = try await ReviewerToolHandler(db: fixture.db, control: sink, events: sink).call(
+            accept ? "accept_task" : "reopen_task",
+            arguments: .object([accept ? "verdict" : "findings": .string(text)]),
+            identity: try await identity(of: reviewer)
+        )
+        await result.afterResponse?()
+    }
+
+    private func grade(_ grade: String, evidence: String) async throws {
+        let round = try XCTUnwrap(try watches.currentRound(watchId: try onlyWatch().id))
+        let checker = try activeSession(on: try XCTUnwrap(round.followupTaskId))
+        let item = try XCTUnwrap(try watches.checkItems(round: round).first)
+        let result = try await TriagerToolHandler(db: fixture.db, events: sink).call(
+            "set_followup_grades",
+            arguments: .object(["grades": .array([.object([
+                "item_id": .number(Double(item.id ?? 0)), "grade": .string(grade), "evidence": .string(evidence),
+            ])])]),
+            identity: try await identity(of: checker)
+        )
+        await result.afterResponse?()
+    }
+
+    private func resolved(_ url: URL) -> String { url.resolvingSymlinksInPath().path }
+
+    func testACompletedFixerIsCheckedOnTheRoundBranchAndPassesToPublishingWithNoMerge() async throws {
+        try enableChecking()
+        let fixer = try await runningFixer()
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(try activeSession(on: fixer.id).worktreePath))
+        let mainBefore = try fixture.git(["rev-parse", "main"])
+
+        try await completeFixer(fixer, file: "fix.txt")
+        XCTAssertEqual(try onlyWatch().state, .checking)
+        XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .review)
+        do {
+            try await fixture.supervisor.accept(taskId: fixer.id)
+            XCTFail("a fix round must never take the ordinary accept path")
+        } catch SupervisorError.fixRoundNotAcceptable {}
+
+        await poll()
+        let spawns = await fixture.runtime.spawns
+        let reviewer = spawns[spawns.count - 2]
+        let checker = try XCTUnwrap(spawns.last)
+        let tip = try fixture.git(["rev-parse", "HEAD"], cwd: worktree).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(resolved(reviewer.cwd), resolved(worktree), "the reviewer reads the fixer's own worktree")
+        XCTAssertTrue(reviewer.prompt.contains("on branch `agentboard/pr-12-r1`"), reviewer.prompt)
+        XCTAssertTrue(reviewer.prompt.contains("`git diff \(head)...HEAD`"), reviewer.prompt)
+        XCTAssertEqual(checker.pluginDirs, [gradingPlugin])
+        XCTAssertTrue(checker.prompt.contains("`git diff \(head)..\(tip)`"), checker.prompt)
+        XCTAssertTrue(checker.disallowedTools.contains { $0.hasPrefix("Bash(gh") }, "the follow-up check is read-only")
+
+        try await review(fixer, accept: true)
+        await poll()
+        XCTAssertEqual(try onlyWatch().state, .checking, "an acceptance waits for the follow-up check")
+        try await grade("fixed", evidence: "App.swift:3 now says count.")
+        await poll()
+
+        XCTAssertEqual(try onlyWatch().state, .publishing)
+        XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .done)
+        XCTAssertEqual(try fixture.git(["rev-parse", "main"]), mainBefore)
+        XCTAssertEqual(try fixture.git(["branch", "--list", "agentboard/\(fixer.id)"]), "")
+        XCTAssertEqual(try watches.currentRound(watchId: try onlyWatch().id)?.checkedHeadOid, tip)
+    }
+
+    func testANotFixedGradeReopensTheFixerWithTheFindingAndTheThirdFailedCheckParks() async throws {
+        try enableChecking()
+        let fixer = try await runningFixer()
+        for failure in 1...PRWatchStore.failedChecksBeforePark {
+            try await completeFixer(fixer, file: "fix-\(failure).txt")
+            await poll()
+            try await review(fixer, accept: true)
+            try await grade("not_fixed", evidence: "n is still named n at App.swift:\(failure).")
+            await poll()
+            guard failure < PRWatchStore.failedChecksBeforePark else { break }
+            XCTAssertEqual(try onlyWatch().state, .fixing)
+            XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .ready)
+            await poll()
+            let spawns = await fixture.runtime.spawns
+            let respawn = try XCTUnwrap(spawns.last)
+            XCTAssertTrue(respawn.prompt.contains("n is still named n at App.swift:\(failure)."), respawn.prompt)
+            XCTAssertTrue(respawn.disallowedTools.contains("Bash(git commit*--amend*)"), "the respawn must be a fixer")
+        }
+
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .parked)
+        XCTAssertTrue(watch.parkedReason?.contains("3 times") == true, watch.parkedReason ?? "")
+        XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .closed)
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["check_failed"])
+        let parked = await spawnCount
+        await poll()
+        let after = await spawnCount
+        XCTAssertEqual(after, parked)
+    }
+
+    func testAFixingRoundWhoseFixItemIsResolvedBeforeItsFixerStartsEndsAndReturnsToWatching() async throws {
+        try enable()
+        answer(threads: [thread("T_fix")])
+        await poll()
+        let item = try XCTUnwrap(try watches.items(watchId: try onlyWatch().id).first)
+        let result = try await TriagerToolHandler(db: fixture.db, events: sink).call(
+            "set_verdicts",
+            arguments: .object(["verdicts": .array([.object([
+                "item_id": .number(Double(item.id ?? 0)), "verdict": .string("fix"), "approach": .string("Rename it."),
+            ])])]),
+            identity: try await identity(of: try runningTriager())
+        )
+        await result.afterResponse?()
+        await poll()
+        XCTAssertEqual(try onlyWatch().state, .fixing)
+
+        answer(threads: [])
+        await poll()
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .watching)
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["triaged"])
+        XCTAssertFalse(try fixture.tasks.list(projectId: fixture.project.id).contains { $0.origin == .fixRound })
     }
 }

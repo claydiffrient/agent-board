@@ -49,8 +49,8 @@ back into items.
   amend, no rebase. A stacked PR parks instead (below).
 - **checking** *(phase 3)* — the `reviewer` role reviews the round's diff, and
   the `followupCheck` role grades each item `fixed`, `partly`, `not_fixed`, or
-  `moot`. Anything other than fixed or moot reopens fixing, at most
-  `roundCap` times (default 3); the round past the cap parks the PR instead.
+  `moot`. A reopen or anything other than fixed or moot reopens fixing, at
+  most twice a round; the third failed check parks the PR instead.
 - **publishing** *(phase 3)* — re-reads the remote head and goes to **stale**
   if it moved. Otherwise fast-forward pushes the round branch to the PR's head
   ref, then posts factual replies when `postFactualReplies` is on. It never
@@ -73,7 +73,8 @@ back into items.
 - **stale** *(phase 4)* — the head moved out from under the round. Drop the
   round's worktree and go to settling.
 - **parked** *(phase 2 for the forked case and failed triages; phase 3 for a
-  stacked PR; phase 4 for the round-cap and fixer cases)* — reached when the round cap is hit, three
+  stacked PR and a round's third failed check; phase 4 for the round-cap and fixer cases)* — reached
+  when the round cap is hit, a round fails its check three times, three
   triages (phase 2) or fixer sessions fail in a row, the PR is stacked (its base is not the
   project's default branch and the stack needs a restack the human must do),
   or the PR is from a fork. Waits for the human to Resume or Stop watching
@@ -156,8 +157,12 @@ task goes in the round's `fix_task_id` and in each of those items'
 item of the watch names — a fix task phase 2 made — is closed with a reason
 naming the round.
 
-The fixer is spawned only while its task is `ready` and has never had a
-session, so a fixer that failed is not respawned in a loop. It holds under the
+The fixer is spawned only while its task is `ready` and its fixer sessions
+(those with no `review_head`) do not outnumber the round's `check_failures`:
+once per check, so a fixer that failed is not respawned in a loop. A fixing
+round with no task and no open `fix` item — every one answered on GitHub or
+reopened for triage before its task was made — ends with outcome `triaged`,
+and the watch goes to settling when an item awaits triage, else to watching. It holds under the
 same settling holds, and its spawn approval is skipped while follow-through is
 on (§13.5). Spawning fetches the PR's head ref from `origin` into
 `refs/remotes/origin/<head>`, and the round's `base_head_oid` if the repository
@@ -171,6 +176,61 @@ Besides the worker deny list it is denied `git commit --amend` and
 onto the PR's head; every worker is already denied pushing. Spawning the task
 any other way — `spawn_worker`, or approving its spawn — takes the same path,
 and a roster agent named there replaces the role's.
+
+**Checking (phase 3).** The fixer's `report_complete` never takes the review
+queue or the accept path. Its task goes to `review`, its report is recorded
+already consumed (the orchestrator never asked for the round), and the watch
+moves from fixing to checking, clearing the round's `review_verdict`,
+`review_findings`, `followup_task_id` and `checked_head_oid` and its items'
+grades. A human or orchestrator accept of a `fix_round` task is refused: the
+round's branch is pushed onto its PR by publishing, never merged as a task
+branch. The next poll starts both halves of the check, under the settling
+holds:
+
+- **The review.** The reviewer is `roles.reviewer`'s roster agent, else the
+  review routing table's Code row (§4). A round is pushed with no person in
+  the loop, so anything but an agent — a person, accept without review, or a
+  named agent the project cannot use — parks the watch with the reason. The
+  agent is recorded as the task's reviewer and spawned with reviewer scope in
+  the fixer's own worktree on the round branch, its review base
+  `base_head_oid`, so it reads `git diff <base_head_oid>...HEAD`; its model is
+  `roles.reviewer.model`, else the agent's, else the project's default. Its
+  prompt adds that accepting lets Agent Board push the round with no person in
+  between, so it runs the project's tests on the suites the diff touches and
+  accepts only when they pass. `accept_task` and `reopen_task` record its
+  verdict on the round (`review_verdict`, and a reopen's findings in
+  `review_findings`) and end its session; neither moves the task. A round
+  branch with no change beyond `base_head_oid` is reopened on the spot with
+  that reason, with no reviewer spawned. A reviewer session that ends without
+  a verdict parks the watch; one left idle without one is raised as §5.1 says.
+- **The follow-up check.** When the round has items to grade, a synthetic task
+  of origin `followup_check` is created and recorded in `followup_task_id`
+  with the round branch's tip as `checked_head_oid`, and a session holding a
+  triager grant (§6) runs in a detached checkout of that tip under the
+  project's worktree root, named for the task. `roles.followupCheck` picks the
+  roster agent, whose plugin directories it is launched with, and the model the
+  same way as the reviewer's; with no agent, the built-in `FollowupCheckPrompt`
+  identity is used. It reads `git diff <base_head_oid>..<checked_head_oid>` and
+  grades each item with `set_followup_grades`, giving evidence for each. Once
+  every item has a grade its task goes to `done` and its checkout is removed,
+  as a finished triage's is. It is never assigned by hand or resumed, and one
+  that ends any other way closes its task and parks the watch; a shutdown order
+  stops it at delivery and clears `followup_task_id`, so a fresh one starts
+  once the order lifts.
+
+Once the review is in and, when the round has items, its follow-up check is
+`done`, the round is decided in one transaction. An acceptance with every
+item graded `fixed` or `moot` passes: the task goes to `done` with an "Agent
+review passed." note and the watch to publishing. Anything else is a failed
+check, counted in `check_failures`. Its findings — the reviewer's, and each
+item short of fixed with its grade and evidence, numbered as in the task body
+— go on the task as an "Agent review failed." note, which the next fixer's
+opening prompt carries (§5.1). The first two failures send the task back to
+`ready` and the watch to fixing, which spawns that fixer in the same worktree
+on the same branch. The third ends the round with outcome `check_failed`,
+closes its fix task, and parks the watch with a `parked_reason` holding the
+last findings. A check that cannot start — a spawn that fails, a worktree
+that is gone — parks the watch the same way, with the error.
 
 A round's triage that never starts, or whose task is closed (§13.2), fails
 the round: its outcome becomes `triage_failed` and the watch returns to

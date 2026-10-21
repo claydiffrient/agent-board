@@ -108,6 +108,11 @@ public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, Data
     case followThrough = "follow_through"
     /// The task a PR round's fixer is bound to (SPEC §13.1), worked on the round's branch.
     case fixRound = "fix_round"
+    /// The synthetic task a round's follow-up check is bound to (SPEC §13.1). Only the supervisor spawns onto it.
+    case followupCheck = "followup_check"
+
+    /// A read-only session over a pull request under a triager grant: never assigned, resumed or landed.
+    public var isPullRequestReader: Bool { self == .triage || self == .followupCheck }
 }
 
 /// What kind of work a task is. Under `agent` review it picks the task's row in the project's

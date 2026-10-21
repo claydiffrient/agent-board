@@ -50,6 +50,11 @@ public enum PRFollowupGrade: String, Codable, Sendable, CaseIterable, Equatable,
     case moot
 }
 
+public enum PRRoundReview: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case accepted
+    case reopened
+}
+
 public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
     public static let databaseTableName = "pr_watch"
 
@@ -148,6 +153,7 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
     public var decisionAnswer: String?
     public var fixTaskId: String?
     public var followupGrade: PRFollowupGrade?
+    public var followupNote: String? = nil
     public var replyBody: String?
     public var replyURL: String?
     public var round: Int
@@ -172,6 +178,7 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
         case decisionAnswer = "decision_answer"
         case fixTaskId = "fix_task_id"
         case followupGrade = "followup_grade"
+        case followupNote = "followup_note"
         case replyBody = "reply_body"
         case replyURL = "reply_url"
         case round
@@ -198,6 +205,12 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
     public var startedAt: Int64
     public var endedAt: Int64?
     public var fixTaskId: String? = nil
+    public var checkFailures: Int = 0
+    public var reviewVerdict: PRRoundReview? = nil
+    public var reviewFindings: String? = nil
+    public var followupTaskId: String? = nil
+    /// The round branch's tip when its follow-up check started: the head the check judged.
+    public var checkedHeadOid: String? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -209,6 +222,11 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
         case startedAt = "started_at"
         case endedAt = "ended_at"
         case fixTaskId = "fix_task_id"
+        case checkFailures = "check_failures"
+        case reviewVerdict = "review_verdict"
+        case reviewFindings = "review_findings"
+        case followupTaskId = "followup_task_id"
+        case checkedHeadOid = "checked_head_oid"
     }
 
     /// The branch a round's fixer commits on (SPEC §13.1).

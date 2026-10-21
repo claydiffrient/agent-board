@@ -53,7 +53,7 @@ CREATE TABLE task (
   failed         INTEGER NOT NULL DEFAULT 0,
   failure_reason TEXT,
   ordering       REAL NOT NULL,
-  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration | triage | follow_through | fix_round
+  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration | triage | follow_through | fix_round | followup_check
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
@@ -361,7 +361,8 @@ CREATE TABLE pr_item (
   decision_options_json TEXT,
   decision_answer       TEXT,
   fix_task_id           TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the fix or follow-up task triage made of it (§13.1)
-  followup_grade        TEXT,            -- fixed | partly | not_fixed | moot
+  followup_grade        TEXT,            -- fixed | partly | not_fixed | moot; the round's follow-up check (§13.1)
+  followup_note         TEXT,            -- that grade's evidence, which a failed check hands the fixer
   reply_body            TEXT,
   reply_url             TEXT,
   round                 INTEGER NOT NULL DEFAULT 0,
@@ -377,10 +378,15 @@ CREATE TABLE pr_round (
   number          INTEGER NOT NULL,
   base_head_oid   TEXT NOT NULL,     -- the PR head the round's branch was cut from
   pushed_head_oid TEXT,
-  outcome         TEXT,              -- triaged | triage_failed | interrupted; null while the round runs
+  outcome         TEXT,              -- triaged | triage_failed | interrupted | check_failed; null while the round runs
   started_at      INTEGER NOT NULL,
   ended_at        INTEGER,
   fix_task_id     TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the round's `fix_round` task (§13.1)
+  check_failures  INTEGER NOT NULL DEFAULT 0,  -- failed checks this round; the third parks the watch
+  review_verdict  TEXT,              -- accepted | reopened; the reviewer's verdict on the current check
+  review_findings TEXT,              -- a reopening reviewer's findings, for the fixer
+  followup_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the current check's `followup_check` task
+  checked_head_oid TEXT,             -- the round branch's tip the follow-up check judged
   UNIQUE (watch_id, number)
 );
 

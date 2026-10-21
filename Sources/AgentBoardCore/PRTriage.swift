@@ -156,12 +156,13 @@ extension Board {
         }
     }
 
-    /// Ends a triage once every open item has a verdict: the session completes, its grant is
-    /// revoked, and the task goes to `done` with no report, since nothing on the board asked for it.
+    /// Ends a triage once every open item has a verdict, or a follow-up check once every item has a grade:
+    /// the session completes, its grant is revoked, and the task goes to `done` with no report, since
+    /// nothing on the board asked for it.
     public func finishTriage(taskId: String, sessionId: String?, summary: String) throws {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
-            guard task.origin == .triage else {
+            guard task.origin.isPullRequestReader else {
                 throw BoardError.invalidTransition(taskId: taskId, from: task.column, to: .done)
             }
             if let sessionId, let session = try AgentSession.fetchOne(db, key: sessionId), session.state.isActive {

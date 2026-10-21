@@ -469,6 +469,12 @@ public final class WorkerToolHandler: ToolHandler {
     /// would put a second agent on a task the first reviewer already holds.
     private func routeCompletion(_ task: BoardTask, outcome: Board.CompletionOutcome) async -> ToolResult {
         let recorded = Self.recordedLine(outcome)
+        if task.origin == .fixRound {
+            return ToolResult(
+                text: "\(recorded) The round is now being checked: a reviewer reviews it and a follow-up check grades "
+                    + "each item, and Agent Board pushes it only if both pass. Stop here; do not start further work."
+            )
+        }
         guard outcome.autoAccept else {
             if case .agentReview(let agentId, let agentName) = outcome.routing {
                 return await spawnReviewer(task, recorded: recorded, agentId: agentId, agentName: agentName)

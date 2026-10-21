@@ -199,6 +199,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("pr_round_fix_task") { db in
             try db.execute(sql: Schema.prRoundFixTask)
         }
+        migrator.registerMigration("pr_round_check") { db in
+            try db.execute(sql: Schema.prRoundCheck)
+        }
         return migrator
     }
 }

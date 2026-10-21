@@ -100,6 +100,14 @@ public final class ReviewerToolHandler: ToolHandler {
             try requireUnderReview(task)
             try await requireUntouchedCheckout(task, identity: identity, then: "Stop here; do not start further work.")
             let name = try reviewerName(task, identity: identity)
+            // SPEC §13.1: a round's acceptance is half of its check, never the ordinary accept path.
+            if task.origin == .fixRound {
+                try recordRoundReview(task, identity: identity, name: name, accepted: true, text: verdict)
+                return stoppingAfterwards(ToolResult(
+                    text: "Recorded your acceptance of this round. Agent Board pushes it once its follow-up check "
+                        + "passes. Stop here; do not start further work."
+                ), identity: identity)
+            }
             try board.recordReviewVerdict(
                 taskId: task.id, sessionId: identity.sessionId, reviewerName: name, verdict: verdict
             )
@@ -118,6 +126,15 @@ public final class ReviewerToolHandler: ToolHandler {
                 task, identity: identity,
                 then: "Record your findings with log_progress so the person sees them, then stop."
             )
+            if task.origin == .fixRound {
+                try recordRoundReview(
+                    task, identity: identity, name: try reviewerName(task, identity: identity), accepted: false,
+                    text: findings
+                )
+                return stoppingAfterwards(ToolResult(
+                    text: "Recorded. Your findings go back to the round's fixer. Stop here; do not start further work."
+                ), identity: identity)
+            }
             try board.reviewReopen(
                 taskId: task.id, sessionId: identity.sessionId,
                 reviewerName: try reviewerName(task, identity: identity), findings: findings
@@ -140,6 +157,18 @@ public final class ReviewerToolHandler: ToolHandler {
             await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
         }
         return result
+    }
+
+    private func recordRoundReview(
+        _ task: BoardTask, identity: TokenIdentity, name: String, accepted: Bool, text: String
+    ) throws {
+        do {
+            try board.recordRoundReview(
+                taskId: task.id, sessionId: identity.sessionId, reviewerName: name, accepted: accepted, text: text
+            )
+        } catch let rejection as PRVerdictRejection {
+            throw ToolError("\(rejection.reason) Your verdict was not recorded. Stop here.")
+        }
     }
 
     private func assignedTask(_ identity: TokenIdentity) throws -> BoardTask {
