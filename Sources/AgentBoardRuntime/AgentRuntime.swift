@@ -154,6 +154,8 @@ public struct BackgroundSessionRuntime: AgentRuntime {
     public func resume(sessionId: String, cwd: URL, prompt: String) async throws -> SpawnedAgent {
         let timeout = registrationTimeout
         return try await offMain {
+            // Claude Code re-applies every spawn flag from the job's saved respawnFlags, so none is re-passed
+            // here (note "`claude --bg --resume` re-applies every spawn flag", 09ee63e4).
             let result = try ClaudeCLI.run([prompt, "--bg", "--resume", sessionId], cwd: cwd)
             return try Self.registered(from: result, timeout: timeout) { agents in
                 agents.first { $0.sessionId == sessionId && $0.id != nil }
