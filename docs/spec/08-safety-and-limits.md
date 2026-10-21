@@ -4,7 +4,7 @@ Per project, overridable:
 
 | Cap | Default | On breach |
 |---|---|---|
-| Concurrent workers | 3 (lower for large repos — Derivita) | Spawn refused; orchestrator told why |
+| Concurrent workers | 3 (lower for large repos, e.g. a monorepo work project) | Spawn refused; orchestrator told why |
 | Tokens per agent (uncached input + output) | off until set | Agent stopped, task flagged, Resume offered |
 | Elapsed per agent, sleep excluded | 30 min | Agent stopped, task flagged, Resume offered |
 | Idle (no tool use, no output), sleep excluded | 5 min (6× while a tool call is running) | Agent stopped, task flagged |

@@ -112,8 +112,21 @@ final class FakeGh: GhRunning, @unchecked Sendable {
     private let lock = NSLock()
     private var answers: [String: CommandResult] = [:]
     private var recorded: [[String]] = []
+    private var searchGate: DispatchSemaphore?
 
     var calls: [[String]] { lock.withLock { recorded } }
+
+    /// Blocks every `gh search prs` until `releaseSearch()`, standing in for a slow `gh`.
+    func holdSearch() {
+        lock.withLock { searchGate = DispatchSemaphore(value: 0) }
+    }
+
+    func releaseSearch() {
+        lock.withLock { () -> DispatchSemaphore? in
+            defer { searchGate = nil }
+            return searchGate
+        }?.signal()
+    }
 
     func answer(_ url: String, state: String, mergeCommit: String? = nil, head: String? = nil, labels: [String] = []) {
         let commit = mergeCommit.map { #"{"oid":"\#($0)"}"# } ?? "null"
@@ -182,9 +195,13 @@ final class FakeGh: GhRunning, @unchecked Sendable {
     }
 
     func run(_ arguments: [String], cwd: URL) throws -> CommandResult {
-        try lock.withLock {
+        let key = Self.key(for: arguments)
+        let gate = lock.withLock { () -> DispatchSemaphore? in
             recorded.append(arguments)
-            let key = Self.key(for: arguments)
+            return key == Self.searchKey ? searchGate : nil
+        }
+        gate?.wait()
+        return try lock.withLock {
             guard let answer = answers[key] else { throw PullRequestCheckFailure("FakeGh has no answer for \(key)") }
             return answer
         }

@@ -86,6 +86,7 @@ public struct PRWatchStore: Sendable {
                     item.decisionQuestion = nil
                     item.decisionOptionsJSON = nil
                     item.decisionAnswer = nil
+                    item.decisionNotifiedAt = nil
                     item.replyBody = nil
                     item.followupGrade = nil
                     feedbackArrived = true
@@ -218,9 +219,7 @@ public struct PRWatchStore: Sendable {
     static func page(_ db: Database, projectId: String?) throws -> [PRWatchGroup] {
         var sql = """
         SELECT w.*,
-          (SELECT COUNT(*) FROM pr_item i WHERE i.watch_id = w.id AND i.state = 'open') AS open_items,
-          (SELECT COUNT(*) FROM pr_item i
-             WHERE i.watch_id = w.id AND i.state = 'open' AND i.verdict = 'decision') AS open_decisions
+          (SELECT COUNT(*) FROM pr_item i WHERE i.watch_id = w.id AND i.state = 'open') AS open_items
         FROM pr_watch w
         WHERE w.state NOT IN ('merged', 'closed')
         """
@@ -230,10 +229,21 @@ public struct PRWatchStore: Sendable {
             arguments += [projectId]
         }
         sql += " ORDER BY w.updated_at DESC, w.number DESC"
-        let listings = try Row.fetchAll(db, sql: sql, arguments: arguments).map { row in
-            PRWatchListing(
-                watch: try PRWatch(row: row), openItems: row["open_items"], openDecisions: row["open_decisions"]
-            )
+        let rows = try Row.fetchAll(db, sql: sql, arguments: arguments)
+        let decisions = Dictionary(
+            grouping: try PRItem.fetchAll(
+                db,
+                sql: """
+                SELECT i.* FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id
+                WHERE i.state = 'open' AND i.verdict = 'decision' AND w.state NOT IN ('merged', 'closed')
+                ORDER BY i.created_at, i.id
+                """
+            ),
+            by: \.watchId
+        )
+        let listings = try rows.map { row in
+            let watch = try PRWatch(row: row)
+            return PRWatchListing(watch: watch, openItems: row["open_items"], decisions: decisions[watch.id] ?? [])
         }
         let grouped = Dictionary(grouping: listings) {
             PRPageGroup.of($0.watch.state, openDecisions: $0.openDecisions)
@@ -243,7 +253,8 @@ public struct PRWatchStore: Sendable {
         }
     }
 
-    /// Per project, for the sidebar badge and attention dot. A project with nothing to count is absent.
+    /// Per project, for the sidebar badge and At a Glance. A project with nothing to count is absent,
+    /// and so is every project with follow-through off and every paused watch (SPEC §13.4).
     public func badgeCounts() throws -> [String: PRBadgeCount] {
         try db.reader.read(Self.badgeCounts)
     }
@@ -252,11 +263,21 @@ public struct PRWatchStore: Sendable {
         ValueObservation.tracking(Self.badgeCounts)
     }
 
+    /// The SQL condition, on a `pr_watch w` joined to its `project p`, that a watch counts toward
+    /// the badge, the attention signal and the banners.
+    static let countsTowardAttention = """
+        json_extract(p.settings_json, '$.prFollowThrough.enabled') = 1 AND w.paused = 0
+        """
+
     static func badgeCounts(_ db: Database) throws -> [String: PRBadgeCount] {
         var counts: [String: PRBadgeCount] = [:]
         let ready = try Row.fetchAll(
             db,
-            sql: "SELECT project_id, COUNT(*) AS n FROM pr_watch WHERE state = 'ready_to_verify' GROUP BY project_id"
+            sql: """
+            SELECT w.project_id, COUNT(*) AS n FROM pr_watch w JOIN project p ON p.id = w.project_id
+            WHERE w.state = 'ready_to_verify' AND \(countsTowardAttention)
+            GROUP BY w.project_id
+            """
         )
         for row in ready {
             counts[row["project_id"], default: PRBadgeCount()].readyToVerify = row["n"]
@@ -265,8 +286,9 @@ public struct PRWatchStore: Sendable {
             db,
             sql: """
             SELECT w.project_id, COUNT(*) AS n
-            FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id
+            FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id JOIN project p ON p.id = w.project_id
             WHERE i.state = 'open' AND i.verdict = 'decision' AND w.state NOT IN ('merged', 'closed')
+              AND \(countsTowardAttention)
             GROUP BY w.project_id
             """
         )
@@ -274,5 +296,27 @@ public struct PRWatchStore: Sendable {
             counts[row["project_id"], default: PRBadgeCount()].openDecisions = row["n"]
         }
         return counts
+    }
+
+    /// Records that each of `watchId`'s open decisions not yet announced has had its banner, and
+    /// returns those, so each decision announces itself once (SPEC §13.4). A new reply on its thread
+    /// clears the record along with the verdict.
+    public func claimDecisionNotifications(watchId: String, now: Int64 = .nowMillis) throws -> [PRItem] {
+        try db.writer.write { db in
+            let unannounced = try PRItem.fetchAll(
+                db,
+                sql: """
+                SELECT * FROM pr_item
+                WHERE watch_id = ? AND state = 'open' AND verdict = 'decision' AND decision_notified_at IS NULL
+                ORDER BY created_at, id
+                """,
+                arguments: [watchId]
+            )
+            for var item in unannounced {
+                item.decisionNotifiedAt = now
+                try item.update(db)
+            }
+            return unannounced
+        }
     }
 }

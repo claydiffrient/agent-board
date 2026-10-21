@@ -569,6 +569,10 @@ enum Schema {
     ALTER TABLE pr_watch ADD COLUMN parked_reason TEXT;
     """
 
+    static let prItemDecisionNotified = """
+    ALTER TABLE pr_item ADD COLUMN decision_notified_at INTEGER;
+    """
+
     /// The fixer task a round's fix items went to.
     static let prRoundFixTask = """
     ALTER TABLE pr_round ADD COLUMN fix_task_id TEXT REFERENCES task(id) ON DELETE SET NULL;

@@ -45,8 +45,17 @@ public final class TriagerToolHandler: ToolHandler {
                             ),
                             "reply_body": ToolSchema.string("The reply to the reviewer, for a factual verdict."),
                             "decision_question": ToolSchema.string("Required for decision: what the author decides."),
-                            "decision_options": ToolSchema.stringArray(
-                                "Required for decision: two to four options."
+                            "decision_options": ToolSchema.objectArray(
+                                properties: [
+                                    "label": ToolSchema.string("The choice, as the author's button reads."),
+                                    "verdict": ToolSchema.enumeration([PRItemVerdict.fix.rawValue, PRItemVerdict.answer.rawValue]),
+                                    "reply_body": ToolSchema.string(
+                                        "Required for answer: the reply to the reviewer explaining the choice."
+                                    ),
+                                ],
+                                required: ["label", "verdict"],
+                                description: "Required for decision: two to four options. Choosing a fix option "
+                                    + "makes the change; choosing an answer option posts its reply_body and changes no code."
                             ),
                         ],
                         required: ["item_id", "verdict", "approach"]
@@ -292,8 +301,28 @@ public final class TriagerToolHandler: ToolHandler {
                 approach: ToolArguments.optionalString("approach", in: entry) ?? "",
                 replyBody: ToolArguments.optionalString("reply_body", in: entry),
                 decisionQuestion: ToolArguments.optionalString("decision_question", in: entry),
-                decisionOptions: try ToolArguments.stringArray("decision_options", in: entry)
+                decisionOptions: try Self.decisionOptions(in: entry, itemId: itemId)
             )
+        }
+    }
+
+    static func decisionOptions(in entry: JSONValue, itemId: Int64) throws -> [PRDecisionOption]? {
+        guard let value = entry["decision_options"], value != .null else { return nil }
+        guard let options = value.arrayValue else {
+            throw ToolError("Item \(itemId): decision_options must be an array of {label, verdict} objects.")
+        }
+        return try options.map { option in
+            guard let label = option["label"]?.stringValue, let raw = option["verdict"]?.stringValue else {
+                throw ToolError("Item \(itemId): every decision option needs a label and a verdict.")
+            }
+            guard let verdict = PRItemVerdict(rawValue: raw), verdict == .fix || verdict == .answer else {
+                throw ToolError("Item \(itemId): option \"\(label)\" has verdict \(raw); an option is fix or answer.")
+            }
+            let replyBody = ToolArguments.optionalString("reply_body", in: option)
+            if verdict == .answer, replyBody?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                throw ToolError("Item \(itemId): the answer option \"\(label)\" needs a reply_body.")
+            }
+            return PRDecisionOption(label: label, verdict: verdict, replyBody: replyBody)
         }
     }
 

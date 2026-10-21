@@ -41,23 +41,130 @@ final class PullRequestsPageTests: XCTestCase {
         return try XCTUnwrap(store.get(created.id))
     }
 
-    /// SPEC §10: At a Glance counts ready PRs only where follow-through is on, and its headline
-    /// clause filters to the one project it counts but lists every project when it counts several.
-    func testAtAGlanceCountsEnabledProjectsAndTheHeadlineFiltersOnlyToASoleProject() throws {
+    /// SPEC §13.4: the sidebar badge and At a Glance read one count, and it leaves out a project that
+    /// turned follow-through off with ready watches still stored. The headline clause filters to the
+    /// one project it counts but lists every project when it counts several.
+    func testOnlyProjectsWithFollowThroughOnCountTowardTheBadgeAndAtAGlance() throws {
         let db = try AppDatabase.inMemory()
         let alpha = try project(db, name: "Alpha", label: nil)
-        let beta = try project(db, name: "Beta", label: nil)
         var off = try project(db, name: "Off", label: nil)
+        try watch(db, alpha, number: 1, title: "One", state: .readyToVerify)
+        try watch(db, off, number: 2, title: "Two", state: .readyToVerify)
+        try watch(db, off, number: 3, title: "Three", state: .watching, decision: true)
         off.settings.prFollowThrough.enabled = false
-        let counts = [
-            alpha.id: PRBadgeCount(readyToVerify: 2), beta.id: PRBadgeCount(openDecisions: 1),
-            off.id: PRBadgeCount(readyToVerify: 4),
-        ]
+        try ProjectStore(db).updateSettings(off.id, off.settings)
 
-        let ready = AtAGlanceView.readyToVerify(projects: [alpha, beta, off], counts: counts)
-        XCTAssertEqual(ready, [alpha.id: 2])
+        let counts = try PRWatchStore(db).badgeCounts()
+        XCTAssertEqual(PullRequestsRow.count(counts), 1)
+        let ready = AtAGlanceView.readyToVerify(counts)
+        XCTAssertEqual(ready, [alpha.id: 1])
         XCTAssertEqual(AtAGlanceView.headlineFilter(ready), alpha.id)
-        XCTAssertNil(AtAGlanceView.headlineFilter([alpha.id: 2, beta.id: 1]))
+        XCTAssertNil(AtAGlanceView.headlineFilter([alpha.id: 2, off.id: 1]))
+    }
+
+    @discardableResult
+    private func decision(
+        _ db: AppDatabase, _ project: Project, number: Int, question: String, options: [PRDecisionOption]
+    ) throws -> PRItem {
+        let store = PRWatchStore(db)
+        let created = try store.upsert(projectId: project.id, snapshot: PRSnapshot(
+            repoOwner: "example-org", repoName: "app", number: number,
+            url: "https://github.com/example-org/app/pull/\(number)", title: "Pull \(number)",
+            headRef: "branch-\(number)", headOid: "c0ffee", baseRef: "main",
+            items: [PRSnapshotItem(
+                githubNodeId: "D\(number)", kind: .thread, author: "reviewer", body: "Should this block the caller?"
+            )]
+        ))
+        let item = try XCTUnwrap(try store.openItems(watchId: created.id).first)
+        try store.setVerdicts([PRVerdictInput(
+            itemId: try XCTUnwrap(item.id), verdict: .decision, approach: "Direction.",
+            decisionQuestion: question, decisionOptions: options
+        )], watchId: created.id)
+        try store.setState(.watching, watchId: created.id)
+        return try XCTUnwrap(try store.openItems(watchId: created.id).first)
+    }
+
+    func testANeedsYouRowShowsTheCommentTheQuestionAnOptionButtonEachAndAReplyField() throws {
+        let db = try AppDatabase.inMemory()
+        let project = try project(db, label: label)
+        try decision(db, project, number: 7, question: "Which concurrency model?", options: [
+            PRDecisionOption(label: "Asynchronous", verdict: .fix),
+            PRDecisionOption(label: "Blocking", verdict: .answer, replyBody: "The caller needs the result."),
+        ])
+
+        let mount = OffscreenMount(
+            PullRequestsView(projects: [project]).environment(renderEnvironment(db: db)),
+            size: CGSize(width: 900, height: 800)
+        )
+        defer { mount.close() }
+        // The Needs you row plus the empty Ready to verify, In progress, Waiting and Verified placeholders.
+        _ = try mount.capture(showing: SidebarContent(rows: 5, headers: 5))
+        let shot = try XCTUnwrap(CGWindowListCreateImage(
+            .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+            [.boundsIgnoreFraming, .bestResolution]
+        ))
+        let words = ["concurrency", "Asynchronous", "Blocking", "caller"]
+        let text = try recognizedLines(in: shot, words: words).map(\.text).joined(separator: " | ")
+        for word in words {
+            XCTAssertTrue(text.localizedCaseInsensitiveContains(word), "\(word) not drawn: \(text)")
+        }
+        let fields = textFields(in: mount.host).filter(\.isEditable)
+        XCTAssertEqual(fields.map(\.placeholderString), ["Reply instead"])
+    }
+
+    /// An option answers a decision with its own verdict: a fix stays open for the next round with no
+    /// task, an answer is handled with the option's reply, and a typed reply answers it in words. Each leaves the badge
+    /// and the attention signal and moves to the next round. `chosen` keeps the old string-only options,
+    /// which read as fix.
+    func testAnsweringADecisionClearsItsSignalsAndMovesItToTheNextRound() throws {
+        let db = try AppDatabase.inMemory()
+        let project = try project(db, label: label)
+        let options = [
+            PRDecisionOption(label: "Change the helper", verdict: .fix),
+            PRDecisionOption(label: "Keep it local", verdict: .answer, replyBody: "Only one caller uses it."),
+        ]
+        let chosen = try decision(db, project, number: 7, question: "Which model?", options: options)
+        let kept = try decision(db, project, number: 8, question: "Share the helper?", options: options)
+        let replied = try decision(db, project, number: 9, question: "Rename it?", options: options)
+        try db.writer.write { db in
+            try db.execute(
+                sql: #"UPDATE pr_item SET decision_options_json = '["Change the helper","Keep it local"]' WHERE id = ?"#,
+                arguments: [chosen.id]
+            )
+        }
+        XCTAssertEqual(try PRWatchStore(db).badgeCounts()[project.id]?.openDecisions, 3)
+        let cause = try XCTUnwrap(try ProjectAttentionStore(db).attention(projectId: project.id)?
+            .cause(.pullRequestDecision))
+        XCTAssertTrue(cause.text.contains("3 pull request decisions"), cause.text)
+
+        let actions = PullRequestActions(db: db, gh: FakeGh())
+        try actions.answer(chosen, choice: .option("Change the helper"))
+        try actions.answer(kept, choice: .option("Keep it local"))
+        try actions.answer(replied, choice: .reply("The old name is public API."))
+
+        XCTAssertNil(try PRWatchStore(db).badgeCounts()[project.id])
+        XCTAssertNil(try ProjectAttentionStore(db).attention(projectId: project.id)?.cause(.pullRequestDecision))
+        let fix = try XCTUnwrap(try PRWatchStore(db).items(watchId: chosen.watchId).first)
+        XCTAssertEqual(fix.state, .open)
+        XCTAssertEqual(fix.verdict, .fix)
+        XCTAssertEqual(fix.decisionAnswer, "Change the helper")
+        XCTAssertEqual(fix.approach, "Change the helper")
+        XCTAssertEqual(fix.round, chosen.round + 1)
+        XCTAssertNil(fix.fixTaskId)
+
+        let local = try XCTUnwrap(try PRWatchStore(db).items(watchId: kept.watchId).first)
+        XCTAssertEqual(local.state, .handled)
+        XCTAssertEqual(local.verdict, .answer)
+        XCTAssertEqual(local.decisionAnswer, "Keep it local")
+        XCTAssertEqual(local.replyBody, "Only one caller uses it.")
+        XCTAssertNil(local.fixTaskId)
+        XCTAssertEqual(try TaskStore(db).list(projectId: project.id).filter { $0.origin == .followThrough }, [])
+
+        let answer = try XCTUnwrap(try PRWatchStore(db).items(watchId: replied.watchId).first)
+        XCTAssertEqual(answer.state, .handled)
+        XCTAssertEqual(answer.verdict, .answer)
+        XCTAssertEqual(answer.replyBody, "The old name is public API.")
+        XCTAssertNil(answer.fixTaskId)
     }
 
     func testEveryGroupShowsItsRowInPageOrder() throws {
@@ -141,6 +248,16 @@ final class PullRequestsPageTests: XCTestCase {
         try watch(db, second, number: 5, title: "Five", state: .settling)
 
         XCTAssertEqual(PullRequestsRow.count(try PRWatchStore(db).badgeCounts()), 2)
+    }
+
+    private func textFields(in root: NSView) -> [NSTextField] {
+        var found: [NSTextField] = []
+        var queue = [root]
+        while let view = queue.popLast() {
+            if let field = view as? NSTextField { found.append(field) }
+            queue.append(contentsOf: view.subviews)
+        }
+        return found
     }
 
     private struct Line {

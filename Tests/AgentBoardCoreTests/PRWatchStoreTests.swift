@@ -176,6 +176,9 @@ final class PRWatchStoreTests: XCTestCase {
         let f = try Fixture.make()
         let other = try f.otherProject()
         let store = PRWatchStore(f.db)
+        var settings = f.project.settings
+        settings.prFollowThrough.enabled = true
+        try ProjectStore(f.db).updateSettings(f.project.id, settings)
         let ready = try store.upsert(projectId: f.project.id, snapshot: snapshot(number: 1, items: []))
         let decided = try store.upsert(projectId: f.project.id, snapshot: snapshot(number: 2, items: [thread("D1")]))
         let waiting = try store.upsert(projectId: other.id, snapshot: snapshot(number: 3, items: []))

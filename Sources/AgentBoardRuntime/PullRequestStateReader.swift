@@ -37,7 +37,7 @@ public struct SystemGh: GhRunning {
     public init() {}
 
     public func run(_ arguments: [String], cwd: URL) throws -> CommandResult {
-        guard let gh = PullRequestOpener.ghExecutable() else {
+        guard let gh = try PullRequestOpener.ghExecutable() else {
             throw PullRequestCheckFailure("the GitHub CLI (`gh`) is not installed; install it with `brew install gh`.")
         }
         return try ProcessRunner.run(

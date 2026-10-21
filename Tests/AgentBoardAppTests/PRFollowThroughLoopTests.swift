@@ -172,7 +172,10 @@ final class PRFollowThroughLoopTests: XCTestCase {
                 ]),
                 .object([
                     "item_id": .number(items["T_choice"]!), "verdict": .string("decision"), "approach": .string("Direction."),
-                    "decision_question": .string("Make it async?"), "decision_options": .array([.string("Yes"), .string("No")]),
+                    "decision_question": .string("Make it async?"), "decision_options": .array([
+                        .object(["label": .string("Yes"), "verdict": .string("fix")]),
+                        .object(["label": .string("No"), "verdict": .string("answer"), "reply_body": .string("It stays sync.")]),
+                    ]),
                 ]),
             ])]),
             identity: try await fixture.identity(token: grant.token)
@@ -496,6 +499,41 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(watch.state, .watching)
         XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["triaged"])
         XCTAssertFalse(try fixture.tasks.list(projectId: fixture.project.id).contains { $0.origin == .fixRound })
+    }
+
+    /// A decision answered with a fix option starts the next round's fixer without a second triage.
+    func testADecisionAnsweredAsAFixStartsTheNextRoundsFixerWithNoTriage() async throws {
+        try enable()
+        answer(threads: [thread("T_choice", body: "Should this be async?")])
+        await poll()
+        let item = try XCTUnwrap(try watches.items(watchId: try onlyWatch().id).first)
+        let result = try await TriagerToolHandler(db: fixture.db, events: sink).call(
+            "set_verdicts",
+            arguments: .object(["verdicts": .array([.object([
+                "item_id": .number(Double(item.id ?? 0)), "verdict": .string("decision"), "approach": .string("Direction."),
+                "decision_question": .string("Make it async?"), "decision_options": .array([
+                    .object(["label": .string("Yes"), "verdict": .string("fix")]),
+                    .object(["label": .string("No"), "verdict": .string("answer"), "reply_body": .string("It stays sync.")]),
+                ]),
+            ])])]),
+            identity: try await identity(of: try runningTriager())
+        )
+        await result.afterResponse?()
+        await poll()
+        XCTAssertEqual(try onlyWatch().state, .watching)
+
+        try fixture.board.answerDecision(itemId: try XCTUnwrap(item.id), choice: .option("Yes"))
+        await poll()
+
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .fixing)
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.number), [1, 2])
+        XCTAssertEqual(try triageTasks().count, 1)
+        let fixer = try XCTUnwrap(try fixture.tasks.list(projectId: fixture.project.id).first { $0.origin == .fixRound })
+        XCTAssertTrue(fixer.body?.contains("Make it async?") == true, fixer.body ?? "")
+        XCTAssertEqual(try watches.items(watchId: watch.id).first?.fixTaskId, fixer.id)
+        XCTAssertFalse(try fixture.tasks.list(projectId: fixture.project.id).contains { $0.origin == .followThrough })
+        XCTAssertTrue(try fixture.sessions.forTask(fixer.id).contains { $0.state.isActive })
     }
 
     // MARK: - Publishing

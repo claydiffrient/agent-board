@@ -29,17 +29,22 @@ extension PRWatchStore {
     public func beginTriageRound(watchId: String, now: Int64 = .nowMillis) throws -> PRRound? {
         try db.writer.write { db in
             guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .settling else { return nil }
-            watch.round += 1
             watch.state = .triaging
-            watch.updatedAt = now
-            try watch.update(db)
-            var round = PRRound(
-                id: nil, watchId: watchId, number: watch.round, baseHeadOid: watch.headOid, pushedHeadOid: nil,
-                outcome: nil, startedAt: now, endedAt: nil
-            )
-            try round.insert(db)
-            return round
+            return try Self.beginRound(db, watch: &watch, now: now)
         }
+    }
+
+    /// Moves `watch` to its next round, writing the watch in whatever state the caller set.
+    static func beginRound(_ db: Database, watch: inout PRWatch, now: Int64) throws -> PRRound {
+        watch.round += 1
+        watch.updatedAt = now
+        try watch.update(db)
+        var round = PRRound(
+            id: nil, watchId: watch.id, number: watch.round, baseHeadOid: watch.headOid, pushedHeadOid: nil,
+            outcome: nil, startedAt: now, endedAt: nil
+        )
+        try round.insert(db)
+        return round
     }
 
     public func rounds(watchId: String) throws -> [PRRound] {
@@ -67,6 +72,19 @@ extension PRWatchStore {
         try Int.fetchOne(
             db,
             sql: "SELECT COUNT(*) FROM pr_item WHERE watch_id = ? AND state = 'open' AND verdict IS NULL",
+            arguments: [watchId]
+        ) ?? 0
+    }
+
+    /// Open `fix` items an answered decision moved past the watch's round (SPEC §13.4), which need a
+    /// fix round but no triage.
+    static func answeredFixCount(_ db: Database, watchId: String) throws -> Int {
+        try Int.fetchOne(
+            db,
+            sql: """
+            SELECT COUNT(*) FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id
+            WHERE i.watch_id = ? AND i.state = 'open' AND i.verdict = 'fix' AND i.round > w.round
+            """,
             arguments: [watchId]
         ) ?? 0
     }
@@ -136,23 +154,7 @@ extension Board {
                 .order(Column("id"))
                 .fetchAll(db)
             for var item in items {
-                switch item.verdict {
-                case .followUp?:
-                    let task = try item.fixTaskId.flatMap { try Task.fetchOne(db, key: $0) }
-                    if task?.origin != .followThrough || task?.type == .code {
-                        item.fixTaskId = try TaskStore.insert(
-                            db, projectId: watch.projectId,
-                            title: Self.itemTaskTitle("Follow-up", item: item, watch: watch),
-                            body: Self.itemTaskBody(item: item, watch: watch), acceptance: nil, priority: nil,
-                            column: .backlog, origin: .followThrough, epicId: nil
-                        ).id
-                    }
-                    item.state = .handled
-                case .answer?, .alreadyDone?:
-                    item.state = .handled
-                case .fix?, .decision?, nil:
-                    continue
-                }
+                guard try Self.applyVerdict(db, to: &item, watch: watch) else { continue }
                 item.round = watch.round
                 item.updatedAt = now
                 try item.update(db)
@@ -163,14 +165,7 @@ extension Board {
             if try PRWatchStore.untriagedItemCount(db, watchId: watchId) > 0 {
                 watch.state = .settling
             } else if fixes > 0 {
-                let base = try Project.fetchOne(db, key: watch.projectId)?.baseBranch
-                if let base, watch.baseRef != base {
-                    watch.state = .parked
-                    watch.parkedReason = "#\(watch.number) is stacked on `\(watch.baseRef)`, not `\(base)`, so a fix "
-                        + "round would leave the layers above it to restack, which is yours to do."
-                } else {
-                    watch.state = .fixing
-                }
+                try Self.fixUnlessStacked(db, watch: &watch)
             } else {
                 watch.state = .watching
             }
@@ -181,6 +176,62 @@ extension Board {
             try watch.update(db)
             return watch.state
         }
+    }
+
+    /// Settling → fixing with no triage, for a watch whose only waiting items are `fix` answers to
+    /// decisions (SPEC §13.4). Parked instead when the PR is stacked. Nil unless the watch is settling,
+    /// no item awaits triage, and an answered fix waits.
+    @discardableResult
+    public func beginAnsweredFixRound(watchId: String, now: Int64 = .nowMillis) throws -> PRWatchState? {
+        try db.writer.write { db in
+            guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .settling,
+                  try PRWatchStore.untriagedItemCount(db, watchId: watchId) == 0,
+                  try PRWatchStore.answeredFixCount(db, watchId: watchId) > 0
+            else { return nil }
+            try Self.fixUnlessStacked(db, watch: &watch)
+            let round = try PRWatchStore.beginRound(db, watch: &watch, now: now)
+            if watch.state != .fixing {
+                try PRWatchStore.endRound(db, watchId: watchId, number: round.number, outcome: .triaged, now: now)
+            }
+            return watch.state
+        }
+    }
+
+    /// Fixing, or parked when the PR is stacked: a fix on a lower layer leaves the layers above it
+    /// to restack (SPEC §13.1). Writes no watch; the caller does.
+    static func fixUnlessStacked(_ db: Database, watch: inout PRWatch) throws {
+        let base = try Project.fetchOne(db, key: watch.projectId)?.baseBranch
+        if let base, watch.baseRef != base {
+            watch.state = .parked
+            watch.parkedReason = "#\(watch.number) is stacked on `\(watch.baseRef)`, not `\(base)`, so a fix "
+                + "round would leave the layers above it to restack, which is yours to do."
+        } else {
+            watch.state = .fixing
+        }
+    }
+
+    /// Makes the task `item`'s verdict calls for and sets its state, and returns whether the item
+    /// itself changed (SPEC §13.1): a `follow_up` gets its backlog task and is handled, `answer` and
+    /// `already_done` are handled, and `fix` and `decision` stay open. Writes no item; the caller does.
+    static func applyVerdict(_ db: Database, to item: inout PRItem, watch: PRWatch) throws -> Bool {
+        switch item.verdict {
+        case .followUp?:
+            let task = try item.fixTaskId.flatMap { try Task.fetchOne(db, key: $0) }
+            if task?.origin != .followThrough || task?.type == .code {
+                item.fixTaskId = try TaskStore.insert(
+                    db, projectId: watch.projectId,
+                    title: Self.itemTaskTitle("Follow-up", item: item, watch: watch),
+                    body: Self.itemTaskBody(item: item, watch: watch), acceptance: nil, priority: nil,
+                    column: .backlog, origin: .followThrough, epicId: nil
+                ).id
+            }
+            item.state = .handled
+        case .answer?, .alreadyDone?:
+            item.state = .handled
+        case .fix?, .decision?, nil:
+            return false
+        }
+        return true
     }
 
     /// Fixing's one task per round (SPEC §13.1): a `ready` code task holding every open `fix` item,
@@ -270,7 +321,7 @@ extension Board {
 
         \(quoted)
 
-        Triage's approach:
+        \(item.decisionAnswer == nil ? "Triage's approach:" : "The pull request author's answer to \"\(item.decisionQuestion ?? "")\":")
         \(item.approach ?? "")
         """
     }

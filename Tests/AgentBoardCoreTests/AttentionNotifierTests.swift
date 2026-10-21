@@ -40,10 +40,10 @@ final class AttentionNotifierTests: XCTestCase {
 
         let raised = notifier.notices(for: [
             project([approval], id: "p1", name: "Agent Board"),
-            project([blocked], id: "p2", name: "Omaha"),
+            project([blocked], id: "p2", name: "Example"),
         ])
 
-        XCTAssertEqual(raised.map(\.title), ["Approval waiting — Agent Board", "Worker blocked — Omaha"])
+        XCTAssertEqual(raised.map(\.title), ["Approval waiting — Agent Board", "Worker blocked — Example"])
     }
 
     func testAPersistingConditionNotifiesOnceNotOnEveryObservation() {
@@ -122,7 +122,7 @@ final class AttentionNotifierTests: XCTestCase {
 
         let raised = notifier.notices(for: [
             project([approval], id: "p1", name: "Agent Board"),
-            project([blocked], id: "p2", name: "Omaha"),
+            project([blocked], id: "p2", name: "Example"),
         ], focused: "p1")
 
         XCTAssertEqual(raised.map(\.projectId), ["p2"])
@@ -150,7 +150,7 @@ final class AttentionNotifierTests: XCTestCase {
         XCTAssertEqual(NotificationText.title("Worker may be stuck", project: nil), "Worker may be stuck")
         XCTAssertEqual(NotificationText.title("Worker may be stuck", project: "  "), "Worker may be stuck")
         XCTAssertEqual(
-            NotificationText.title("Worker stopped at cap", project: "Omaha"), "Worker stopped at cap — Omaha"
+            NotificationText.title("Worker stopped at cap", project: "Example"), "Worker stopped at cap — Example"
         )
     }
 

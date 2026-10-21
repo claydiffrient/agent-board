@@ -20,8 +20,9 @@ with one is not **Idle**. Clicking the card's count opens the Pull Requests page
 filtered to that project; clicking the headline's clause does the same when one
 project holds every ready PR, and opens it unfiltered when several do. The counts
 come from the `PRWatchStore.observeBadgeCounts` observation `MainWindow` already
-runs for the sidebar badge, limited to projects with follow-through on, since a
-project that turned it off stops polling. Below it, one card per project — every project,
+runs for the sidebar badge, which counts only projects with follow-through on,
+since a project that turned it off stops polling, and only watches that are not
+paused (§13.1), so the badge and At a Glance never disagree. Below it, one card per project — every project,
 including idle ones — grouped into the same workspace sections in the same order
 as the sidebar, so a project sits in the same relative place in both. A card
 carries the project name and its running, in-review and ready counts, or reads
@@ -425,8 +426,8 @@ three sections:
 (`SidebarSelection.pullRequests`), opening a cross-project page rather than a
 project tab, for the pull requests a project with PR follow-through turned on is
 watching (§13). The row's count badge is PRs in Ready to verify plus open
-decision items across every project (`PRWatchStore.observeBadgeCounts`);
-decisions are zero until phase 2. The page observes `PRWatchStore.observePage`
+decision items across every project with follow-through on, leaving out paused
+watches (`PRWatchStore.observeBadgeCounts`). The page observes `PRWatchStore.observePage`
 and groups the watches as **Ready to verify**, **Needs you**, **In progress**,
 **Waiting on reviewers**, **Verified**, and **Parked**, newest change first in
 each. Needs you and Parked are absent while empty; the other four always show,
@@ -438,7 +439,12 @@ item count, and "pushed …" from `head_changed_at` — or, for a PR whose head 
 not moved since watching began, "updated …" from `updated_at`. Row actions: **Mark verified**
 (hidden once verified, disabled when the project sets no verification label),
 **Walk me through it** (only once the project sets a `verifyCommand`), and
-**Pause**, which sets `paused` and becomes **Resume**. The page's project filter
+**Pause**, which sets `paused` and becomes **Resume**. A row in Needs you lists
+each open decision under it (`PRDecisionRow`): the comment's author and text
+on one or two lines, triage's question, one button per option, and a **Reply
+instead** field with **Send reply**. An option answers the decision as a fix
+and the reply answers it in words (§13.4); either way the decision leaves the
+row, the badge and the project's attention dot at once. The page's project filter
 belongs to `MainWindow`, so At a Glance and a Ready to verify banner (§13.4) can
 open it already filtered; the banner's route
 (`NotificationRoute.Subject.pullRequest`) also scrolls to its row once the
@@ -563,7 +569,7 @@ vanished entirely would leave nobody to ask about a port that appeared since.
 **Project settings** — a sheet from the sidebar row's gear, in seven tabs:
 **General** (Repository, Workspace, Archive), **Agents** (Models, Review,
 Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Worktree
-teardown, Isolation, Publishing), **Notifications** (one switch per banner category — approvals, blocked workers, caps and stalls, worker failures, pull requests ready to verify — and the project mute), **Advanced** (the `autoMode` classifier JSON,
+teardown, Isolation, Publishing), **Notifications** (one switch per banner category — approvals, blocked workers, caps and stalls, worker failures, pull requests ready to verify, pull request decisions — and the project mute), **Advanced** (the `autoMode` classifier JSON,
 Extra MCP servers), and **PR Follow-Through** (Watch, Verification, Replies, Publish guard, Roles; §13.3), after Advanced. Tabs group by what a setting governs, not by how often it is
 touched. Every section is in exactly one tab; a section in none would be a stored
 setting with no UI. **Delete Project…** sits outside the tabs, at the left of the

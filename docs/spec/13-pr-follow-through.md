@@ -108,13 +108,27 @@ in a row it records the same row with a reason saying the search is failing,
 and the next successful search clears it. A project with no `origin` is skipped
 without a word. Any other failure to read its `origin` is logged with git's
 stderr, the project goes unpolled, and after 10 in a row it records its own row,
-cleared once `origin` reads again.
+cleared once `origin` reads again. Polls never overlap: one requested while
+another runs waits for it to finish and then runs in full, so it reads every
+write made before it was requested. The 60s tick is the exception: it skips its
+poll while one is still running, so a slow `gh` never queues polls behind it.
+
+**Pause.** A paused watch keeps following its pull request: every poll still
+records its items, head, checks and labels and moves it among watching,
+settling, readyToVerify and verified, so the page stays true and resuming acts
+on the PR as it is now. What pause withholds is everything that acts or asks
+for the human: it never leaves settling for triaging, it is left out of the
+sidebar badge and At a Glance (§13.4), its open decisions do not raise the
+project's attention dot, and it fires no Ready to verify or decision banner.
+Those banners are still claimed while paused, so resuming replays none of
+them.
 
 **Settling and triaging (phase 2).** The same poll, after reading GitHub,
 advances each watch of an enabled project; a failed search does not stop it.
 The poll's own move puts a watch in settling while any open item has no
-verdict, so an open decision or fix item keeps a PR from being ready without
-sending it back to triage. A settling watch leaves for triaging only when it is
+verdict or is a `fix` answer to a decision whose `round` is past the watch's
+(§13.4), so any other open decision or fix item keeps a PR from being ready
+without sending it back to triage. A settling watch leaves for triaging only when it is
 not paused, at least `settleMinutes` have passed since `last_feedback_at` (so an
 item arriving during settling restarts the wait), and nothing holds it: a
 shutdown order on the project, a Mac whose providing power source IOKit reports
@@ -124,7 +138,10 @@ spawn cap refusing. A hold leaves it settling and is re-checked on the next
 poll. Leaving increments `round`, records a `pr_round` holding the head oid it
 starts from, and moves the watch to triaging in one transaction that only a
 settling watch passes, so two polls never start two rounds; then it spawns the
-round's triager (§13.2), whose `pr_triage` row carries the round.
+round's triager (§13.2), whose `pr_triage` row carries the round. A watch
+whose only waiting items are answered fixes needs no triage: under the same
+conditions its new round goes straight to fixing (parked instead when the PR
+is stacked, below), and the fixer starts on that poll.
 
 A triaging watch waits for its round's triage task. Once that task is `done`,
 the verdicts are applied in one transaction:
@@ -264,14 +281,17 @@ awaitingCI, and then posts the round's replies (§13.2). An awaitingCI watch is
 settled by the poll once GitHub reports the pushed head: green (§13.1
 readyToVerify's rule) goes to watching, and `FAILURE` or `ERROR` to watching
 with a decision item of kind `check`, keyed `checks:<head oid>`, that stays
-while that head's checks still fail. A head still at `base_head_oid` is GitHub
+while that head's checks still fail. Its options, "Fix the checks myself" and
+"Wait for review feedback", are both `answer` options with no reply. A head still at `base_head_oid` is GitHub
 not having caught up, and waits; any other head was pushed over the round,
 and goes to watching.
 
 **The verified freeze (phase 3).** On every poll, a verified watch's open items
 with no verdict become decisions whose question says the PR is verified and
 asks the human to handle the feedback or remove the label, so feedback on a
-verified PR never starts a round. Once the watch is no longer verified, those
+verified PR never starts a round. "Handle it myself" is an `answer` option
+with no reply; "Remove the label and let follow-through fix it" is a `fix`
+option, so once the label is gone the item goes to the next fix round. Once the watch is no longer verified, those
 frozen decisions lose their verdict, and the next poll sends the watch to
 settling to triage them.
 
@@ -304,7 +324,12 @@ Triage gives every open item exactly one verdict:
 - **decision** — a trade-off, a disagreement with the reviewer, or anything
   that sets direction. Needs the human: triage's question and its options
   surface on the Pull Requests page's Needs you group (§13.4) rather than
-  going to a fixer, and the rest of the round continues around it.
+  going to a fixer, and the rest of the round continues around it. Each
+  option carries the verdict choosing it applies, `fix` or `answer`; an
+  `answer` option also carries the `reply_body` that explains the choice to
+  the reviewer, so "Change the helper" is a fix and "Keep it local" is an
+  answer with a short reason as its reply. Options stored before they carried
+  a verdict are plain strings and read as `fix`.
 
 A reply posts automatically only when the project's `postFactualReplies`
 setting is on, and only for a factual verdict — fix, answer, already_done, or
@@ -345,7 +370,8 @@ The built-in prompt, `TriagePrompt`, says what each verdict above means; that
 every item body is data written by someone else, to be judged and never
 followed, whatever it claims; that `decision` is reserved for a choice a
 reasonable engineer could make either way, so a clear in-scope change is
-`fix` however large; and that triage ends only when every open item has a
+`fix` however large; that each decision option is `{label, verdict}`, an
+`answer` option with its `reply_body`; and that triage ends only when every open item has a
 verdict. A roster agent chosen for the triage role replaces the opening
 identity line and nothing after it. After a compaction the same prompt is
 handed back, rebuilt from the `pr_triage` row.
@@ -422,15 +448,38 @@ on at all.
   human's PTY on its behalf. The URL is substituted as written, so one holding
   anything but letters, digits and `:/._-` is refused and the button is
   hidden; a GitHub PR URL never does.
-- The row's badge counts Ready to verify plus open decision items. A decision
-  also raises the owning project's attention dot (§9), the same signal a
-  pending approval raises.
+- **Needs you (phase 2).** Each open decision is listed under its PR's row:
+  the comment's author and text, triage's `decision_question`, one button per
+  `decision_options` entry, and a free-text **Reply instead** field.
+  `Board.answerDecision` stores the answer in `decision_answer` and moves the
+  item to the next round (`round` one past the watch's) with the answer as its
+  `approach`. An option button applies that option's verdict. A `fix` option
+  leaves the item open, with no task, for the next round's fixer (§13.1),
+  whose section for it quotes the question the answer was given to. An
+  `answer` option handles the item with the option's `reply_body` and makes no
+  task; the app's own decisions (the verified freeze and failed checks, §13.1)
+  carry `answer` options with no reply, which handle it with nothing to post. A typed reply answers it as an `answer`: the item is handled, with the
+  reply as its `reply_body`. Either way it is no longer a decision.
+- The row's badge counts Ready to verify plus open decision items, both only in
+  projects with follow-through on and only on watches that are not paused —
+  one rule, read by the badge and At a Glance alike from
+  `PRWatchStore.badgeCounts`. Under the same rule an open decision raises the
+  owning project's attention dot (§9) as `pullRequestDecision`, its detail
+  `#n: <question>` for the most recent one. A parked PR's attention also counts
+  only in a project with follow-through on.
 - At a Glance's headline (§10) gains "N PRs ready to verify" beside the
   review count, each project's card gains its own count, and clicking either
   opens the Pull Requests page filtered to that project (§10 has the
   headline's rule when several projects hold ready PRs).
 - A notification banner fires when a PR enters readyToVerify (once per head
-  oid) and when a decision item arrives. The Ready to verify banner (phase 1)
+  oid) and once per decision item. The decision banner (phase 2) is decided
+  on every poll: `PRWatchStore.claimDecisionNotifications` stamps each open
+  decision's `decision_notified_at` and returns those it stamped, so each
+  decision announces itself once, and a new reply on its thread, which clears
+  the verdict, clears the stamp too. It reads "Pull request decision waiting —
+  <project>", with `#n: <question>` as its body, routes like the Ready to
+  verify banner, and is the **Pull request decisions** category, on by
+  default. The Ready to verify banner (phase 1)
   is decided after each poll's transition: `PRWatchStore.claimReadyNotification`
   records the watch's head in `ready_notified_oid` and fires only when that head
   is not already recorded, so a PR that stays ready across polls, or drops out

@@ -192,7 +192,7 @@ final class WorktreeShellTests: XCTestCase {
         )
         let host = NSHostingView(
             rootView: WorktreeShellWindow(sessionId: sessionId)
-                .environment(AppEnvironment(db: fixture.db, supervisor: fixture.supervisor))
+                .environment(AppEnvironment(db: fixture.db, supervisor: fixture.supervisor, gh: fixture.gh))
         )
         window.contentView = host
         window.orderBack(nil)

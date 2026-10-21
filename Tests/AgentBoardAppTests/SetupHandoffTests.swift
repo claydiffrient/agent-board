@@ -154,7 +154,8 @@ final class SetupHandoffTests: XCTestCase {
             ),
             appSupportDir: fixture.supportDir,
             worktreeBase: fixture.worktreeBase,
-            projectsRoot: fixture.supportDir.appendingPathComponent("claude-projects")
+            projectsRoot: fixture.supportDir.appendingPathComponent("claude-projects"),
+            gh: fixture.gh
         )
         await restarted.start()
 

@@ -90,7 +90,13 @@ final class TriageScopeTests: XCTestCase {
             "set_verdicts",
             ["verdicts": .array([verdict(ids[1], "decision", extra: [
                 "decision_question": .string("How large should the cache be?"),
-                "decision_options": .array([.string("64 entries"), .string("Unbounded")]),
+                "decision_options": .array([
+                    .object(["label": .string("64 entries"), "verdict": .string("fix")]),
+                    .object([
+                        "label": .string("Unbounded"), "verdict": .string("answer"),
+                        "reply_body": .string("Callers bound it."),
+                    ]),
+                ]),
             ])])],
             as: identity
         )
@@ -98,7 +104,10 @@ final class TriageScopeTests: XCTestCase {
         XCTAssertEqual(items.map(\.verdict), [.fix, .decision])
         XCTAssertEqual(items.map(\.approach), ["because", "because"])
         XCTAssertEqual(items[1].decisionQuestion, "How large should the cache be?")
-        XCTAssertEqual(items[1].decisionOptionsJSON, #"["64 entries","Unbounded"]"#)
+        XCTAssertEqual(items[1].decisionOptions, [
+            PRDecisionOption(label: "64 entries", verdict: .fix),
+            PRDecisionOption(label: "Unbounded", verdict: .answer, replyBody: "Callers bound it."),
+        ])
         XCTAssertEqual(try f.tasks.get(try XCTUnwrap(identity.taskId))?.column, .done)
         XCTAssertEqual(try f.sessions.get("triager-1")?.state, .completed)
         let events = await f.events.events

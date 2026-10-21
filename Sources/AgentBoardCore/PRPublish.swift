@@ -23,7 +23,10 @@ extension PRWatchStore {
     public static let verifiedFreezeApproach = "Arrived after the pull request was verified, so follow-through will not change it."
     static let verifiedFreezeQuestion = "This pull request is verified, so Agent Board will not push to it. "
         + "Handle this feedback yourself, or remove the verification label to send it to triage."
-    static let verifiedFreezeOptions = ["Handle it myself", "Remove the label and let follow-through fix it"]
+    static let verifiedFreezeOptions = [
+        PRDecisionOption(label: "Handle it myself", verdict: .answer),
+        PRDecisionOption(label: "Remove the label and let follow-through fix it", verdict: .fix),
+    ]
 
     /// SPEC §13.1 verified: open feedback with no verdict on a verified watch becomes a decision rather than
     /// a round, and once the watch is no longer verified those decisions are untriaged again.
@@ -81,7 +84,10 @@ extension PRWatchStore {
                             approach: "Follow-through does not triage failed checks yet.",
                             decisionQuestion: "Checks failed after round \(round.number) was pushed. Fix them on the "
                                 + "pull request yourself, or push nothing and let new review feedback start the next round.",
-                            decisionOptionsJSON: Self.encodeOptions(["Fix the checks myself", "Wait for review feedback"]),
+                            decisionOptionsJSON: Self.encodeOptions([
+                                PRDecisionOption(label: "Fix the checks myself", verdict: .answer),
+                                PRDecisionOption(label: "Wait for review feedback", verdict: .answer),
+                            ]),
                             round: round.number, createdAt: now, updatedAt: now
                         )
                         try item.insert(db)

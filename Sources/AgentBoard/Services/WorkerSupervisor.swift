@@ -15,6 +15,7 @@ enum SupervisorError: LocalizedError {
     case sessionHasNoShortId(String)
     case taskNotAssignable(title: String, column: TaskColumn)
     case noReviewToRerun(title: String)
+    case integrationNotRosterable(title: String)
     case capRefused(String)
     case taskAlreadyHeld(title: String, sessionId: String)
     case worktreeAlreadyHeld(path: String, sessionId: String)
@@ -64,6 +65,9 @@ enum SupervisorError: LocalizedError {
         case .taskNotAssignable(let title, let column): return "\"\(title)\" is in \(column.rawValue) and cannot be assigned"
         case .noReviewToRerun(let title):
             return "\"\(title)\" is not in review with a rostered reviewer, so there is no review to re-run"
+        case .integrationNotRosterable(let title):
+            return "\"\(title)\" is an integration task, which a roster agent cannot run; call spawn_worker "
+                + "to respawn its integrator on the epic checkout, or request_integration to start a new one"
         case .capRefused(let reason): return "spawn refused: \(reason)"
         case .taskAlreadyHeld(let title, let sessionId):
             return "\"\(title)\" is still held by session \(sessionId); a second agent would share its worktree"
@@ -150,7 +154,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let prWatches: PRWatchStore
     /// Millis of the last PR follow-through poll; 0 means none yet.
     @ObservationIgnored private var lastPRWatchPoll: Int64 = 0
-    @ObservationIgnored private var prWatchPollInFlight = false
+    @ObservationIgnored private var prWatchPoll: _Concurrency.Task<Void, Never>?
     @ObservationIgnored private var prWatchSearchFailures = 0
     /// Consecutive polls on which git could not read a project's `origin`, by project id.
     @ObservationIgnored private var prWatchRemoteFailures: [String: Int] = [:]
@@ -363,6 +367,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard !task.origin.isPullRequestReader else { throw SupervisorError.triageTaskNotAssignable(title: task.title) }
         guard task.column != .running, task.column != .done, task.column != .closed else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
+        }
+        // SPEC §5.2 step 3: a respawned integrator runs where the first one did, on the epic branch.
+        if task.origin == .integration, scope == .worker, rosterAgentId != nil {
+            throw SupervisorError.integrationNotRosterable(title: task.title)
+        }
+        if task.origin == .integration, let epicId = task.epicId, scope == .worker {
+            let placeholder = try await spawnIntegrator(epicId: epicId, retrying: task)
+            return WorkerSpawn(
+                setupSessionId: placeholder.sessionId, worktreePath: placeholder.cwd,
+                branch: placeholder.branch ?? ""
+            )
         }
         guard let project = try projects.get(task.projectId) else {
             throw SupervisorError.projectNotFound(task.projectId)
@@ -1148,8 +1163,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// §5.2 step 3. The integrator is an ordinary worker on a worktree checked out on the epic
     /// branch, bound to a synthetic task so its token scope, report channel and board card are real.
+    /// `retrying` is an earlier integration task of this epic, respawned instead of creating another.
     @discardableResult
-    private func spawnIntegrator(epicId: String) async throws -> AgentSession {
+    private func spawnIntegrator(epicId: String, retrying existing: BoardTask? = nil) async throws -> AgentSession {
         guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
         guard let project = try projects.get(epic.projectId) else {
             throw SupervisorError.projectNotFound(epic.projectId)
@@ -1196,7 +1212,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         let branches = IntegrationPlan.classify(ordered, facts: facts)
 
-        let task = try board.createIntegrationTask(epicId: epicId)
+        if let existing, let holder = try sessions.activeHolder(taskId: existing.id) {
+            throw SupervisorError.taskAlreadyHeld(title: existing.title, sessionId: holder.sessionId)
+        }
+        let task = try existing ?? board.createIntegrationTask(epicId: epicId)
+        let attempt = try sessions.forTask(task.id).count + 1
         var assigned: AgentSession?
         do {
             let placeholder = try board.assign(
@@ -1208,7 +1228,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         placement: .worktree, cwd: worktree, worktreePath: worktree.path,
                         branch: epicBranch, warnings: []
                     ),
-                    attempt: 1
+                    attempt: attempt
                 )
             )
             assigned = placeholder
@@ -1239,7 +1259,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             return placeholder
         } catch {
             // A task with a session row on it cannot be deleted; the failure path below owns it.
-            if assigned == nil { try? tasks.delete(task.id) }
+            if assigned == nil, existing == nil { try? tasks.delete(task.id) }
             throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
         }
     }
@@ -1742,15 +1762,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// SPEC §13.1: watches the user's open, non-draft pull requests in every project with PR
     /// follow-through on, mapping each repository to the project whose `origin` names it, then
     /// advances each watch through settling and triaging. No project enabled means no `gh` call at all.
+    /// A call made while a poll runs waits for it and then polls again, so it always reads state
+    /// written before the call.
     func pollPRWatches() async {
-        guard !prWatchPollInFlight else { return }
+        while let inFlight = prWatchPoll { await inFlight.value }
+        let poll = _Concurrency.Task {
+            await runPRWatchPoll()
+            prWatchPoll = nil
+        }
+        prWatchPoll = poll
+        await poll.value
+    }
+
+    private func runPRWatchPoll() async {
         let enabled = ((try? projects.list()) ?? []).filter { $0.settings.prFollowThrough.enabled }
         guard !enabled.isEmpty else {
             try? prWatches.setPollProblems([:])
             return
         }
-        prWatchPollInFlight = true
-        defer { prWatchPollInFlight = false }
         await refreshPRWatches(enabled)
         await advancePRWatches(enabled)
     }
@@ -1859,13 +1888,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let open = try prWatches.openItems(watchId: watch.id)
             if let next = PRWatchTransition.next(
                 from: watch.state, snapshot: snapshot, openItems: open.count,
-                untriagedItems: open.filter { $0.verdict == nil }.count,
+                itemsAwaitingRound: open.filter { $0.verdict == nil || ($0.verdict == .fix && $0.round > watch.round) }.count,
                 settings: project.settings.prFollowThrough
             ) {
                 try prWatches.setState(next, watchId: watch.id)
             }
             try prWatches.applyVerifiedFreeze(watchId: watch.id)
-            if let ready = try prWatches.claimReadyNotification(watchId: watch.id) {
+            // SPEC §13.4: a paused watch claims its banner without showing it, so resuming replays nothing.
+            if let ready = try prWatches.claimReadyNotification(watchId: watch.id), !ready.paused {
                 post(
                     "Pull request ready to verify", body: "#\(ready.number) \(ready.title)",
                     projectId: project.id, category: .prReadyToVerify, subject: .pullRequest(ready.id)
@@ -1879,7 +1909,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// SPEC §13.1 and §13.2: a settling watch starts one triager per round once no item has arrived
     /// for `settleMinutes` and nothing holds it, a triaging one moves on once that triage ends, a
     /// fixing one starts its round's fixer, a checking one its reviewer and follow-up check, and a
-    /// publishing one pushes its round.
+    /// publishing one pushes its round. Then each open decision not yet announced banners once (§13.4).
     private func advancePRWatches(_ enabled: [Project]) async {
         for project in enabled {
             for watch in (try? prWatches.live(projectId: project.id)) ?? [] {
@@ -1891,17 +1921,35 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 case .publishing: await publishRound(watch, project: project)
                 default: break
                 }
+                announceDecisions(watchId: watch.id, project: project)
             }
+        }
+    }
+
+    private func announceDecisions(watchId: String, project: Project) {
+        guard let decisions = try? prWatches.claimDecisionNotifications(watchId: watchId), !decisions.isEmpty,
+              let watch = try? prWatches.get(watchId), !watch.paused
+        else { return }
+        for decision in decisions {
+            post(
+                "Pull request decision waiting", body: "#\(watch.number): \(decision.decisionQuestion ?? watch.title)",
+                projectId: project.id, category: .prDecisions, subject: .pullRequest(watch.id)
+            )
         }
     }
 
     private func startTriageIfSettled(_ watch: PRWatch, project: Project) async {
         let settleMillis = Int64(max(project.settings.prFollowThrough.settleMinutes, 0)) * 60_000
         guard !watch.paused, Int64.nowMillis - (watch.lastFeedbackAt ?? watch.updatedAt) >= settleMillis,
-              ((try? prWatches.untriagedItemCount(watchId: watch.id)) ?? 0) > 0,
-              !isFollowThroughHeld(project: project),
-              (try? prWatches.beginTriageRound(watchId: watch.id)) != nil
+              !isFollowThroughHeld(project: project)
         else { return }
+        guard ((try? prWatches.untriagedItemCount(watchId: watch.id)) ?? 0) > 0 else {
+            if (try? board.beginAnsweredFixRound(watchId: watch.id)) == .fixing {
+                await startFixRound(watch, project: project)
+            }
+            return
+        }
+        guard (try? prWatches.beginTriageRound(watchId: watch.id)) != nil else { return }
         do {
             try await spawnTriager(watchId: watch.id)
         } catch {
@@ -3782,7 +3830,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         if now - lastPRWatchPoll >= Self.prWatchPollIntervalMillis {
             lastPRWatchPoll = now
-            _Concurrency.Task { await self.pollPRWatches() }
+            // A slow `gh` must not queue a poll per tick behind the one still running.
+            if prWatchPoll == nil { _Concurrency.Task { await self.pollPRWatches() } }
         }
         for project in all {
             refreshShutdownProgressIfOrdered(projectId: project.id)

@@ -41,7 +41,7 @@ final class EpicAcceptMergeTests: XCTestCase {
         XCTAssertEqual(try mergeReports(), [])
     }
 
-    /// Derivita's `post-checkout` runs its setup script, which fails under launchd's PATH; a merge
+    /// A work project's `post-checkout` runs its setup script, which fails under launchd's PATH; a merge
     /// that checked the epic branch out anywhere failed with it and left that checkout behind.
     func testANonFastForwardAcceptMergesWithoutRunningTheRepositorysCheckoutHook() async throws {
         let epic = try makeEpic()
@@ -213,7 +213,7 @@ final class EpicAcceptMergeTests: XCTestCase {
         XCTAssertTrue(body.contains(integration.path), body)
     }
 
-    /// The Derivita incident: a dependent spawned while its accepted dependency's commit was not yet
+    /// An incident on a work project: a dependent spawned while its accepted dependency's commit was not yet
     /// on the epic branch, so its worker started without the work it builds on.
     func testADependentIsNotCutFromAnEpicBranchThatLacksItsDependencysCommit() async throws {
         await fixture.supervisor.start()

@@ -39,11 +39,11 @@ public struct PRVerdictInput: Sendable, Equatable {
     public var approach: String
     public var replyBody: String?
     public var decisionQuestion: String?
-    public var decisionOptions: [String]?
+    public var decisionOptions: [PRDecisionOption]?
 
     public init(
         itemId: Int64, verdict: PRItemVerdict, approach: String, replyBody: String? = nil,
-        decisionQuestion: String? = nil, decisionOptions: [String]? = nil
+        decisionQuestion: String? = nil, decisionOptions: [PRDecisionOption]? = nil
     ) {
         self.itemId = itemId
         self.verdict = verdict
@@ -117,9 +117,26 @@ extension PRWatchStore {
         guard nonBlank(input.decisionQuestion) != nil else {
             throw PRVerdictRejection("Item \(input.itemId) is a decision with no decision_question.")
         }
-        let options = (input.decisionOptions ?? []).compactMap(nonBlank)
-        guard options.count >= 2 else {
+        let options = input.decisionOptions ?? []
+        guard options.filter({ nonBlank($0.label) != nil }).count >= 2 else {
             throw PRVerdictRejection("Item \(input.itemId) is a decision with fewer than two decision_options.")
+        }
+        for option in options {
+            switch option.verdict {
+            case .fix:
+                break
+            case .answer:
+                guard nonBlank(option.replyBody) != nil else {
+                    throw PRVerdictRejection(
+                        "Item \(input.itemId): the answer option \"\(option.label)\" has no reply_body."
+                    )
+                }
+            default:
+                throw PRVerdictRejection(
+                    "Item \(input.itemId): option \"\(option.label)\" has verdict \(option.verdict.rawValue); "
+                        + "an option is fix or answer."
+                )
+            }
         }
     }
 
@@ -128,9 +145,16 @@ extension PRWatchStore {
         return text
     }
 
-    static func encodeOptions(_ options: [String]) -> String {
-        let kept = options.compactMap(nonBlank)
-        guard let data = try? JSONEncoder().encode(kept), let json = String(data: data, encoding: .utf8) else {
+    static func encodeOptions(_ options: [PRDecisionOption]) -> String {
+        let kept = options.filter { nonBlank($0.label) != nil }.map { option in
+            PRDecisionOption(
+                label: option.label, verdict: option.verdict,
+                replyBody: option.verdict == .answer ? nonBlank(option.replyBody) : nil
+            )
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(kept), let json = String(data: data, encoding: .utf8) else {
             return "[]"
         }
         return json
