@@ -248,12 +248,12 @@ on at all.
   caps), **Verification** (label — empty means the merge verifies — required
   approval, and the verify command with its `{url}` placeholder),
   **Replies** (`postFactualReplies`, captioned with which verdicts count as
-  factual), **Roles** (for each of Triage, Fixer, Reviewer and Follow-up
-  check, an agent picker of Default plus the project's enabled roster agents,
-  and a model picker; a stored agent the project can no longer spawn stays
-  listed as not available, and a role set back to Default with no model is
-  stored as absent), and **Publish guard** (the `privateTerms` list: each term a row
-  with a remove button, plus a field that adds one on Return). Save trims
+  factual), **Publish guard** (the `privateTerms` list: each term a row
+  with a remove button, plus a field that adds one on Return), and **Roles**
+  (for each of Triage, Fixer, Reviewer and Follow-up check, an agent picker of
+  Default plus the project's enabled roster agents, and a model picker; a
+  stored agent the project can no longer spawn stays listed as not available,
+  and a role set back to Default with no model is stored as absent). Save trims
   terms, drops blanks and case-insensitive repeats, and keeps a term typed
   into the add field but never added. Save also stores a settle window
   below 0 as 0, a round cap below 1 as 1, and a budget of 0 or less as

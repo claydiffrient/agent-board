@@ -30,7 +30,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
         case .workflow: [.verification, .teardown, .isolation, .publishing]
         case .notifications: [.notifications]
         case .advanced: [.autoMode, .extraMcpServers]
-        case .prFollowThrough: [.prWatch, .prVerification, .prReplies, .prRoles, .publishGuard]
+        case .prFollowThrough: [.prWatch, .prVerification, .prReplies, .publishGuard, .prRoles]
         }
     }
 }

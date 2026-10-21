@@ -579,27 +579,37 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
             $0.prFollowThrough = PRFollowThroughSettings(
                 enabled: true, verificationLabel: "verified-example", requireApproval: false,
                 settleMinutes: 15, roundCap: 2, verifyCommand: "example-verify {url}",
-                postFactualReplies: true, privateTerms: ["Globex"]
+                postFactualReplies: true,
+                roles: PRFollowThroughRoles(
+                    triage: .init(model: "example-triage"), fixer: .init(model: "example-fixer"),
+                    reviewer: .init(model: "example-reviewer"), followupCheck: .init(model: "example-check")
+                ),
+                privateTerms: ["Globex"]
             )
         }
         let mounted = try mount(tab: .prFollowThrough, configure: configure)
 
+        let roleModels = ["example-triage", "example-fixer", "example-reviewer", "example-check"]
         XCTAssertEqual(
             mounted.fields.map(\.stringValue),
-            ["15", "2", "", "verified-example", "example-verify {url}", ""]
+            ["15", "2", "", "verified-example", "example-verify {url}", ""] + roleModels
         )
         XCTAssertEqual(
             mounted.fields.map(\.placeholderString),
             [nil, nil, "Spawn caps", "e.g. verified", "e.g. open {url}", "Press Return to add"]
+                + Array(repeating: "Model id", count: roleModels.count)
         )
         XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off, .on])
+        if !mounted.collect(NSPopUpButton.self).isEmpty {
+            XCTAssertEqual(popUpButtons(titled: "Default", in: mounted.host).count, 4, "one agent picker per role")
+        }
 
         let (db, project) = try storedProject(configure)
         let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
             .environment(renderEnvironment(db: db))
-        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 1500))
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 900))
         defer { mount.close() }
-        let wanted = ["Watch", "Verification", "Replies", "Roles", "Publish guard", "Globex"]
+        let wanted = ["Watch", "Verification", "Replies", "Publish guard", "Globex"]
         var lines: [String] = []
         _ = try mount.capture(until: { _ in
             guard let image = CGWindowListCreateImage(

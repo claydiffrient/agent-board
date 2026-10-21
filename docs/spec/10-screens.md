@@ -563,7 +563,7 @@ vanished entirely would leave nobody to ask about a port that appeared since.
 **General** (Repository, Workspace, Archive), **Agents** (Models, Review,
 Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Worktree
 teardown, Isolation, Publishing), **Notifications** (one switch per banner category — approvals, blocked workers, caps and stalls, worker failures, pull requests ready to verify — and the project mute), **Advanced** (the `autoMode` classifier JSON,
-Extra MCP servers), and **PR Follow-Through** (Watch, Verification, Replies, Roles, Publish guard; §13.3), after Advanced. Tabs group by what a setting governs, not by how often it is
+Extra MCP servers), and **PR Follow-Through** (Watch, Verification, Replies, Publish guard, Roles; §13.3), after Advanced. Tabs group by what a setting governs, not by how often it is
 touched. Every section is in exactly one tab; a section in none would be a stored
 setting with no UI. **Delete Project…** sits outside the tabs, at the left of the
 Cancel/Save row, so it is reachable from every tab. The sheet is at least 780pt
