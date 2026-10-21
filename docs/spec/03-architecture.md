@@ -55,8 +55,8 @@ For a task `T` in project `P`:
    cut from local `<base>`, which holds the human's unpushed work. Local
    `<base>` itself is never moved: it is usually checked out in the human's
    own checkout. The fetch never fails a spawn. A project with no `origin`
-   (the remote `BranchPublisher` pushes to, §6.1) skips it; a fetch that
-   fails or outlives `WorktreeManager.baseFetchTimeout` falls back to local
+   (the remote `BranchPublisher` pushes to, §6.1) skips it silently; a remote
+   git cannot read, or a fetch that fails or outlives `WorktreeManager.baseFetchTimeout` falls back to local
    `<base>` and returns a spawn warning naming the problem. It runs off the
    main thread under `ChildEnvironment.sanitized()` with
    `GIT_TERMINAL_PROMPT=0`, like every other git call. Whatever start point
