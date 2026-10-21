@@ -235,7 +235,12 @@ final class StatusPortsSectionLiveTests: XCTestCase {
             size: CGSize(width: 900, height: 700)
         )
         defer { both.close() }
-        pump(both.window) { counter.count == 2 }
+        // `!ports.isSweeping` as well as the count: the counter increments inside the detached sweep
+        // task, off `MainActor`, before the `Task` that owns it resumes on `MainActor` to clear
+        // `inFlight` (in `finished()`). Waiting on the count alone can return in the gap between those
+        // two, and the `ports.refresh()` below would then silently join the still-finishing sweep
+        // instead of starting the third one this test is asserting on.
+        pump(both.window) { counter.count == 2 && !ports.isSweeping }
 
         XCTAssertEqual(
             counter.count, 2,
