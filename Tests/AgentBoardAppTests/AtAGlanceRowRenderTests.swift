@@ -65,6 +65,7 @@ final class AtAGlanceRowRenderTests: XCTestCase {
         )
         window.contentView = host
         window.orderBack(nil)
+        addTeardownBlock { window.orderOut(nil) }
         for _ in 0..<80 {
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
             window.layoutIfNeeded()

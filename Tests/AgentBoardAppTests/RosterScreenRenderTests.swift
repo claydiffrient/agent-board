@@ -37,6 +37,7 @@ final class RosterScreenRenderTests: XCTestCase {
         )
         window.contentView = host
         window.orderFront(nil)
+        addTeardownBlock { window.orderOut(nil) }
         return Mounted(window: window, host: host)
     }
 

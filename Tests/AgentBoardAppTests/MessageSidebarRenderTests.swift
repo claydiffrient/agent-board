@@ -39,6 +39,7 @@ final class MessageSidebarRenderTests: XCTestCase {
         )
         window.contentView = host
         window.orderBack(nil)
+        addTeardownBlock { window.orderOut(nil) }
         return Mounted(window: window, host: host)
     }
 

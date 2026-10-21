@@ -91,6 +91,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         )
         window.contentView = host
         window.orderBack(nil)
+        addTeardownBlock { window.orderOut(nil) }
         let mounted = Mounted(window: window, host: host)
         settle(mounted, until: condition)
         return mounted
