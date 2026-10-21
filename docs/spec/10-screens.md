@@ -11,7 +11,17 @@ absent things. When any project needs a human the headline leads with how many
 do — "2 projects need you." — *beside* the review count rather than in place of
 it: the review clause counts tasks in one board column, while attention counts
 projects that cannot proceed, and a pending approval raises the second without
-ever touching the first. Below it, one card per project — every project,
+ever touching the first. In projects with PR follow-through on (§13), the
+headline also carries "N PRs ready to verify" after the review count — "Nothing
+running, nothing awaiting your review, 1 PR ready to verify." — and at zero the
+clause is absent rather than reassuring, so the resting sentence is unchanged.
+Each project's card shows its own count as a link under its name, and a card
+with one is not **Idle**. Clicking the card's count opens the Pull Requests page
+filtered to that project; clicking the headline's clause does the same when one
+project holds every ready PR, and opens it unfiltered when several do. The counts
+come from the `PRWatchStore.observeBadgeCounts` observation `MainWindow` already
+runs for the sidebar badge, limited to projects with follow-through on, since a
+project that turned it off stops polling. Below it, one card per project — every project,
 including idle ones — grouped into the same workspace sections in the same order
 as the sidebar, so a project sits in the same relative place in both. A card
 carries the project name and its running, in-review and ready counts, or reads
@@ -369,7 +379,8 @@ above the workspace sections, so it does not join Task Board and Status inside a
 project. Per archetype: name, a source chip (`board-local`, `project`, `user`),
 model, an enabled switch, and the task it is mid-way through. A board-local one
 also shows its role and can be added, edited and deleted; the editor covers
-name, role, system prompt, model and enabled. A disk one is read-only: it shows
+name, role, system prompt, model, enabled, and plugin directories (one path
+per line, §4). A disk one is read-only: it shows
 its file path and description, and offers Open and Reveal in Finder instead of
 Edit and Delete. Every user definition is listed, plus every project's own, each
 project one noting the user file it replaces. A name clash is marked on both
@@ -409,6 +420,30 @@ three sections:
   sheet; the Coordinator writes them through its note tools.
 - **Sessions** — **New Session**, the active session, and the history; clicking
   a history entry resumes it. Each shows its start and its spend.
+
+**Pull Requests** — the fourth pinned sidebar row, directly below Coordinator
+(`SidebarSelection.pullRequests`), opening a cross-project page rather than a
+project tab, for the pull requests a project with PR follow-through turned on is
+watching (§13). The row's count badge is PRs in Ready to verify plus open
+decision items across every project (`PRWatchStore.observeBadgeCounts`);
+decisions are zero until phase 2. The page observes `PRWatchStore.observePage`
+and groups the watches as **Ready to verify**, **Needs you**, **In progress**,
+**Waiting on reviewers**, **Verified**, and **Parked**, newest change first in
+each. Needs you and Parked are absent while empty; the other four always show,
+with a one-line placeholder when empty. A **Project** menu above the list
+narrows it to one project with follow-through on; while it shows every project,
+each row names its project. A row shows the title (a link that opens the PR in
+the browser), `owner/repo #n`, the state, the round once one has run, the open
+item count, and "pushed …" from `head_changed_at` — or, for a PR whose head has
+not moved since watching began, "updated …" from `updated_at`. Row actions: **Mark verified**
+(hidden once verified, disabled when the project sets no verification label),
+**Walk me through it** (only once the project sets a `verifyCommand`), and
+**Pause**, which sets `paused` and becomes **Resume**. The page's project filter
+belongs to `MainWindow`, so At a Glance and a Ready to verify banner (§13.4) can
+open it already filtered; the banner's route
+(`NotificationRoute.Subject.pullRequest`) also scrolls to its row once the
+filtered page has loaded. See §13 for the state machine, verdicts, and settings
+behind all of it.
 
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
@@ -525,11 +560,11 @@ not free. The header still costs that one line rather than collapsing to zero,
 because it carries the refresh button — the sweep is hourly, and a panel that
 vanished entirely would leave nobody to ask about a port that appeared since.
 
-**Project settings** — a sheet from the sidebar row's gear, in six tabs:
+**Project settings** — a sheet from the sidebar row's gear, in seven tabs:
 **General** (Repository, Workspace, Archive), **Agents** (Models, Review,
 Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Worktree
-teardown, Isolation, Publishing), **Notifications**, and **Advanced** (the `autoMode` classifier JSON,
-Extra MCP servers). Tabs group by what a setting governs, not by how often it is
+teardown, Isolation, Publishing), **Notifications** (one switch per banner category — approvals, blocked workers, caps and stalls, worker failures, pull requests ready to verify — and the project mute), **Advanced** (the `autoMode` classifier JSON,
+Extra MCP servers), and **PR Follow-Through** (Watch, Verification, Replies, Publish guard; §13.3), after Advanced. Tabs group by what a setting governs, not by how often it is
 touched. Every section is in exactly one tab; a section in none would be a stored
 setting with no UI. **Delete Project…** sits outside the tabs, at the left of the
 Cancel/Save row, so it is reachable from every tab. The sheet is at least 780pt
@@ -698,7 +733,7 @@ guaranteed to agree with this table across macOS versions.
 | Window height | 600pt | The tallest fixed stack a screen needs is the sidebar's: the project list's reserve plus Add Project, the notifications-off notice and the usage footer. Measured at the 180pt sidebar: 44 + 86 + 143 = 273pt, plus 224 for the list, is 497pt of the 548 a 600pt window leaves under a 52pt toolbar (the unified toolbar's usual height, assumed: an offscreen test window has no toolbar). The remainder goes to the Ports panel's header and rows. 600 also holds the settings sheet's 480pt minimum under the toolbar. |
 
 **The sidebar list always keeps seven rows' worth of height** (224pt, at the
-sidebar's 32pt row pitch: the three pinned rows, a section header and three
+sidebar's 32pt row pitch: the four pinned rows, a section header and two
 projects), and scrolls within it. The bottom stack — Ports panel, Add Project…,
 the notifications-off notice and the usage footer — sits *below* the list, not
 in a `safeAreaInset` over it: an inset lets the list scroll beneath it, so any

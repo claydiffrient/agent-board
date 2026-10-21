@@ -12,6 +12,8 @@ public enum AttentionReason: String, Sendable, Codable, CaseIterable, Equatable 
     case strandedReports
     /// A shutdown order past its grace period whose deliveries are still unacknowledged.
     case overdueShutdown
+    /// PR follow-through is on but `gh` is missing or not logged in, so no PR is being watched (SPEC §13.1).
+    case prPollUnavailable
 
     var severity: Int { Self.allCases.firstIndex(of: self)! }
 }
@@ -108,6 +110,7 @@ public struct ProjectAttentionStore: Sendable {
         add(.blockedWorker, row["blocked_workers"], detail: row["blocked_title"])
         add(.strandedReports, row["stranded_reports"])
         add(.overdueShutdown, row["overdue_deliveries"])
+        add(.prPollUnavailable, row["pr_poll_problems"], detail: row["pr_poll_detail"])
         return ProjectAttention(
             id: row["id"],
             name: row["name"],
@@ -147,7 +150,9 @@ public struct ProjectAttentionStore: Sendable {
                COALESCE(b.n, 0) AS blocked_workers,
                b.title AS blocked_title,
                CASE WHEN COALESCE(o.n, 0) > 0 THEN 0 ELSE COALESCE(r.n, 0) END AS stranded_reports,
-               COALESCE(s.n, 0) AS overdue_deliveries
+               COALESCE(s.n, 0) AS overdue_deliveries,
+               CASE WHEN pp.project_id IS NULL THEN 0 ELSE 1 END AS pr_poll_problems,
+               pp.detail AS pr_poll_detail
         FROM project p
         LEFT JOIN (
             SELECT project_id, COUNT(*) AS n FROM approval
@@ -174,6 +179,7 @@ public struct ProjectAttentionStore: Sendable {
             WHERE so.resolved_at IS NULL AND sd.acknowledged_at IS NULL AND ? - sd.ordered_at >= ?
             GROUP BY so.project_id
         ) s ON s.project_id = p.id
+        LEFT JOIN pr_poll_problem pp ON pp.project_id = p.id
         ORDER BY p.name COLLATE NOCASE, p.created_at
         """
 }

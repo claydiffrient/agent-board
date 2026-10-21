@@ -25,11 +25,12 @@ final class RosteredSpawnTests: XCTestCase {
 
     @discardableResult
     private func rostered(
-        _ name: String, role: String = "frontend", model: String? = nil, disallowedTools: [String] = []
+        _ name: String, role: String = "frontend", model: String? = nil, disallowedTools: [String] = [],
+        pluginDirs: [String] = []
     ) throws -> RosterAgent {
         let agent = try roster.create(
             name: name, role: role, systemPrompt: "You own the front end.", model: model,
-            disallowedTools: disallowedTools
+            disallowedTools: disallowedTools, pluginDirs: pluginDirs
         )
         try roster.enable(agentId: agent.id, forProject: fixture.project.id)
         return agent
@@ -94,6 +95,16 @@ final class RosteredSpawnTests: XCTestCase {
 
         let rosteredRequest = try await lastRequest()
         XCTAssertEqual(rosteredRequest.disallowedTools, plain.disallowedTools + ["WebFetch"])
+    }
+
+    func testAnAgentsPluginDirsArePassedAsPluginDirArguments() async throws {
+        let ada = try rostered("Ada", pluginDirs: ["/opt/plugins/checks", "~/plugins/follow-up"])
+
+        try await assign(try makeTask(), as: ada)
+
+        let args = BackgroundSessionRuntime.arguments(for: try await lastRequest())
+        let pairs = args.indices.dropLast().filter { args[$0] == "--plugin-dir" }.map { args[$0 + 1] }
+        XCTAssertEqual(pairs, ["/opt/plugins/checks", fixture.fakeHome.path + "/plugins/follow-up"])
     }
 
     // MARK: identity, model and the recorded assignment

@@ -8,7 +8,7 @@ final class NotificationPreferencesTests: XCTestCase {
     func testEveryCategoryDefaultsToNotifying() {
         let prefs = NotificationPreferences()
 
-        XCTAssertEqual(NotificationCategory.allCases.count, 4)
+        XCTAssertEqual(NotificationCategory.allCases.count, 5)
         for category in NotificationCategory.allCases {
             XCTAssertTrue(prefs.allows(category, now: now), category.rawValue)
         }

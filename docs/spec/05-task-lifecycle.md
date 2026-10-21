@@ -224,8 +224,12 @@ nobody reviewed.
   "Integrate standalone tasks and epics by" is *Pull request* or *Local merge*. A project
   that never chose stores neither, and the accept resolves it by running
   `git remote get-url origin` off the main actor: a repository with an `origin`
-  integrates by pull request, and one without — or a missing repository or
-  git — by local merge. The picker's first entry is that default, labelled with
+  integrates by pull request, and one git reports has none (exit 2, "No such
+  remote") by local merge. Any other git failure — no repository, no git, an
+  unreadable config — never means local merge: the accept keeps the answer it
+  last resolved for that project in this run, and with none it merges nothing,
+  leaving the task `unlanded` with git's exit status and stderr in its detail;
+  an integrator spawn fails with the same error. The picker's first entry is that default, labelled with
   what it resolved to ("Pull request (default: has origin)"); a stored choice
   always wins. The same resolved choice decides whether an integrated epic
   waits on its pull request (§5.2 step 4), which is why the picker reads

@@ -5,18 +5,25 @@ import Foundation
 /// reaches the orchestrator as a generic failure it has to spend a round trip diagnosing.
 public enum PublishFailure: Error, CustomStringConvertible, Equatable, Sendable {
     case noRemote(name: String, repoPath: String)
+    /// Git itself failed, so whatever it was asked stays unknown; `stderr` is git's own words.
+    case gitFailed(command: String, repoPath: String, status: Int32, stderr: String)
     case ghMissing
     case ghNotAuthenticated(detail: String)
     case noSuchBranch(String)
     case pushFailed(branch: String, detail: String)
     case pullRequestFailed(detail: String)
     case noPullRequestURL(output: String)
+    case privateTerm(term: String, site: PrivateTermSite)
+    case privateTermCheckFailed(detail: String)
 
     public var description: String {
         switch self {
         case .noRemote(let name, let repoPath):
             return "This project has no git remote named \"\(name)\". \(repoPath) is local-only, "
                 + "so there is nowhere to push. Add a remote and try again."
+        case .gitFailed(let command, let repoPath, let status, let stderr):
+            return "`git \(command)` exited \(status) in \(repoPath): "
+                + (stderr.isEmpty ? "git wrote nothing to stderr." : stderr)
         case .ghMissing:
             return "The GitHub CLI (`gh`) is not installed, so Agent Board cannot open a pull request. "
                 + "Install it with `brew install gh`."
@@ -30,6 +37,12 @@ public enum PublishFailure: Error, CustomStringConvertible, Equatable, Sendable 
             return "Opening the pull request failed: \(detail)"
         case .noPullRequestURL(let output):
             return "The pull request command succeeded but printed no URL:\n\(output)"
+        case .privateTerm(let term, let site):
+            return "Refused to publish: the private term \"\(term)\" appears in \(site). Nothing was pushed. "
+                + "Remove it, or change the project's private terms in its PR Follow-Through settings."
+        case .privateTermCheckFailed(let detail):
+            return "Refused to publish: the private-term check could not read what would be sent, "
+                + "so nothing was pushed: \(detail)"
         }
     }
 }
@@ -90,6 +103,30 @@ public enum PublishCommand {
 
     public static let ghAuthStatus = ["auth", "status"]
 
+    public static func refExists(_ ref: String) -> [String] {
+        ["rev-parse", "--verify", "--quiet", "\(ref)^{commit}"]
+    }
+
+    /// Every message on `branch` that `exclude` lacks; a nil `exclude` means the branch's whole history.
+    public static func commitMessages(branch: String, exclude: String?) -> [String] {
+        ["log", "-z", "--format=%B", range(branch: branch, exclude: exclude)]
+    }
+
+    public static let commitMarker = "\u{1}"
+
+    /// The same commits as `commitMessages`, oldest first: each a `commitMarker` + subject line, then
+    /// its patch. `--text` puts binary files' contents in it, and a merge shows only what its author
+    /// changed beyond git's own merge result.
+    public static func commitPatches(branch: String, exclude: String?) -> [String] {
+        ["-c", "core.quotepath=false", "log", "-p", "--text", "--root", "--reverse", "--no-color", "--no-ext-diff",
+         "--no-textconv", "--no-renames", "--diff-filter=d", "--diff-merges=remerge",
+         "--src-prefix=a/", "--dst-prefix=b/", "--format=%x01%s", range(branch: branch, exclude: exclude), "--"]
+    }
+
+    private static func range(branch: String, exclude: String?) -> String {
+        exclude.map { "\($0)..refs/heads/\(branch)" } ?? "refs/heads/\(branch)"
+    }
+
     public static func pullRequestCreate(base: String, head: String, title: String, body: String) -> [String] {
         ["pr", "create", "--base", base, "--head", head, "--title", title, "--body", body]
     }
@@ -118,9 +155,12 @@ public enum PublishCommand {
 /// checked before anything leaves the machine, so a refusal names the cause rather than the symptom.
 public struct BranchPublisher: Sendable {
     public var repoPath: URL
+    /// The project's `prFollowThrough.privateTerms` (SPEC §13.5).
+    public var privateTerms: [String]
 
-    public init(repoPath: URL) {
+    public init(repoPath: URL, privateTerms: [String] = []) {
         self.repoPath = repoPath
+        self.privateTerms = privateTerms
     }
 
     private var gitURL: URL { URL(fileURLWithPath: WorktreeManager.gitPath) }
@@ -131,29 +171,33 @@ public struct BranchPublisher: Sendable {
 
     // MARK: Preconditions
 
+    /// `noRemote` only when git says the remote is not configured (exit 2, "No such remote") or
+    /// prints an empty URL; any other failure is `gitFailed`.
     @discardableResult
     public func requireRemote(_ remote: String = "origin") throws -> String {
-        let result = try git(PublishCommand.remoteURL(remote))
+        let arguments = PublishCommand.remoteURL(remote)
+        let result = try git(arguments)
         let url = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard result.status == 0, !url.isEmpty else {
-            throw PublishFailure.noRemote(name: remote, repoPath: repoPath.path)
+        if result.status == 0, !url.isEmpty { return url }
+        guard result.status == 0 || (result.status == 2 && result.stderr.contains("No such remote")) else {
+            throw gitFailure(arguments, result)
         }
-        return url
+        throw PublishFailure.noRemote(name: remote, repoPath: repoPath.path)
     }
 
-    /// SPEC §5: what a project with no stored choice integrates standalone tasks by. Anything that
-    /// stops `origin` being read — no remote, no repository, no git — means local merge.
-    public func defaultStandaloneIntegration() -> StandaloneIntegration {
-        (try? requireRemote()) == nil ? .localMerge : .pullRequest
-    }
-
-    public func standaloneIntegration(_ settings: ProjectSettings) -> StandaloneIntegration {
-        settings.standaloneIntegration ?? defaultStandaloneIntegration()
+    /// SPEC §5: what a project with no stored choice integrates standalone tasks by. Only an
+    /// `origin` git reports as absent means local merge; any other failure to read it throws.
+    public func defaultStandaloneIntegration() throws -> StandaloneIntegration {
+        do {
+            try requireRemote()
+            return .pullRequest
+        } catch PublishFailure.noRemote {
+            return .localMerge
+        }
     }
 
     public func requireBranch(_ branch: String) throws {
-        let result = try git(PublishCommand.branchExists(branch))
-        guard result.status == 0 else { throw PublishFailure.noSuchBranch(branch) }
+        guard try refExists(PublishCommand.branchExists(branch)) else { throw PublishFailure.noSuchBranch(branch) }
     }
 
     /// `gh` present on disk and logged in, as two separate answers.
@@ -169,12 +213,44 @@ public struct BranchPublisher: Sendable {
         return gh
     }
 
+    /// SPEC §13.5: throws `privateTerm` when anything this publish would send names one of
+    /// `privateTerms`. What is sent is every commit `<remote>/<base>` lacks; with no such ref, the
+    /// branch's whole history.
+    public func refusePrivateTerms(
+        branch: String, publishedAs: String? = nil, base: String?, remote: String = "origin",
+        title: String? = nil, body: String? = nil
+    ) throws {
+        guard privateTerms.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+            return
+        }
+        let remoteBase = base.map { "refs/remotes/\(remote)/\($0)" }
+        let exclude = try remoteBase.flatMap { try refExists(PublishCommand.refExists($0)) ? $0 : nil }
+        let outgoing = OutgoingPublish(
+            publishedBranch: publishedAs ?? branch,
+            title: title,
+            body: body,
+            commitMessages: try checked(PublishCommand.commitMessages(branch: branch, exclude: exclude)),
+            commitPatches: try checked(PublishCommand.commitPatches(branch: branch, exclude: exclude))
+        )
+        if let match = PrivateTermGuard.firstMatch(terms: privateTerms, in: outgoing) {
+            throw PublishFailure.privateTerm(term: match.term, site: match.site)
+        }
+    }
+
     // MARK: Actions
 
     /// `publishedAs` is the name the branch takes on the remote; the local branch is never renamed.
-    public func push(branch: String, publishedAs: String? = nil, remote: String = "origin") throws -> PushResult {
+    /// `base` bounds what the private-term guard reads.
+    public func push(
+        branch: String, publishedAs: String? = nil, base: String? = nil, remote: String = "origin"
+    ) throws -> PushResult {
         try requireRemote(remote)
         try requireBranch(branch)
+        try refusePrivateTerms(branch: branch, publishedAs: publishedAs, base: base, remote: remote)
+        return try pushChecked(branch: branch, publishedAs: publishedAs, remote: remote)
+    }
+
+    private func pushChecked(branch: String, publishedAs: String?, remote: String) throws -> PushResult {
         let result = try git(PublishCommand.push(remote: remote, branch: branch, published: publishedAs))
         guard result.status == 0 else {
             throw PublishFailure.pushFailed(branch: branch, detail: Self.detail(result))
@@ -193,8 +269,11 @@ public struct BranchPublisher: Sendable {
     ) throws -> PullRequestResult {
         try requireRemote(remote)
         try requireBranch(branch)
+        try refusePrivateTerms(
+            branch: branch, publishedAs: publishedAs, base: base, remote: remote, title: title, body: body
+        )
         let gh = try requireGh()
-        let pushed = try push(branch: branch, publishedAs: publishedAs, remote: remote)
+        let pushed = try pushChecked(branch: branch, publishedAs: publishedAs, remote: remote)
         let head = publishedAs ?? branch
 
         let created = try ProcessRunner.run(
@@ -226,6 +305,27 @@ public struct BranchPublisher: Sendable {
 
     private func git(_ arguments: [String]) throws -> CommandResult {
         try ProcessRunner.run(executable: gitURL, arguments: arguments, cwd: repoPath)
+    }
+
+    /// `rev-parse --verify --quiet` exits 1 for a ref that is not there; any other failure is git's.
+    private func refExists(_ arguments: [String]) throws -> Bool {
+        let result = try git(arguments)
+        if result.status == 1 { return false }
+        guard result.status == 0 else { throw gitFailure(arguments, result) }
+        return true
+    }
+
+    private func gitFailure(_ arguments: [String], _ result: CommandResult) -> PublishFailure {
+        .gitFailed(
+            command: arguments.joined(separator: " "), repoPath: repoPath.path, status: result.status,
+            stderr: result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private func checked(_ arguments: [String]) throws -> String {
+        let result = try git(arguments)
+        guard result.status == 0 else { throw PublishFailure.privateTermCheckFailed(detail: Self.detail(result)) }
+        return result.stdout
     }
 
     private static func detail(_ result: CommandResult) -> String {

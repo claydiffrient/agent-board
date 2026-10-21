@@ -21,7 +21,8 @@ CREATE TABLE project (
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
                                    -- reviewLevel, reviewRouting, buildCommand, testCommand, archivePolicy,
                                    -- worktreeStrategy, sharedCheckoutMaxAgents, rosterAgentIds,
-                                   -- worktreeTeardownCommand, worktreeTeardownTimeoutSeconds
+                                   -- worktreeTeardownCommand, worktreeTeardownTimeoutSeconds,
+                                   -- prFollowThrough
   created_at      INTEGER NOT NULL,
   workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
 );
@@ -274,7 +275,8 @@ CREATE TABLE roster_agent (
                                                 -- a deny-list, so empty = a full worker's authority
   enabled       INTEGER NOT NULL DEFAULT 1,
   created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
+  updated_at    INTEGER NOT NULL,
+  plugin_dirs   TEXT NOT NULL DEFAULT '[]'  -- JSON array; each is one --plugin-dir at spawn
 );
 
 CREATE TABLE project_roster_agent (
@@ -305,6 +307,86 @@ CREATE TABLE comment_delivery (
   session_id TEXT NOT NULL REFERENCES agent_session(session_id) ON DELETE CASCADE,
   comment_id INTEGER NOT NULL REFERENCES task_comment(id) ON DELETE CASCADE,
   PRIMARY KEY (session_id, comment_id)
+);
+
+-- PR follow-through: one row per watched pull request, keyed by its repository and number.
+CREATE TABLE pr_watch (
+  id               TEXT PRIMARY KEY,
+  project_id       TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  repo_owner       TEXT NOT NULL,
+  repo_name        TEXT NOT NULL,
+  number           INTEGER NOT NULL,
+  url              TEXT NOT NULL,
+  title            TEXT NOT NULL,
+  is_draft         INTEGER NOT NULL DEFAULT 0,
+  head_ref         TEXT NOT NULL,
+  head_oid         TEXT NOT NULL,
+  head_changed_at  INTEGER,           -- the poll that first saw head_oid; null for the head watching began on
+  base_ref         TEXT NOT NULL,
+  state            TEXT NOT NULL,     -- watching | settling | triaging | fixing | checking | publishing |
+                                      -- awaiting_ci | ready_to_verify | verified | stale | parked | merged | closed
+  round            INTEGER NOT NULL DEFAULT 0,
+  review_decision  TEXT,              -- GitHub's reviewDecision, as read
+  checks_state     TEXT,
+  mergeable        TEXT,
+  labels_json      TEXT NOT NULL DEFAULT '[]',
+  paused           INTEGER NOT NULL DEFAULT 0,
+  last_polled_at   INTEGER,
+  last_feedback_at INTEGER,           -- the last poll that brought a new, changed or reopened item
+  verified_at      INTEGER,
+  est_cost_usd     REAL NOT NULL DEFAULT 0,
+  ready_notified_oid TEXT,            -- the head whose Ready to verify banner fired (§13.4)
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,  -- moves only when something other than last_polled_at changes
+  UNIQUE (project_id, repo_owner, repo_name, number)
+);
+CREATE INDEX pr_watch_state ON pr_watch(state);
+
+-- One piece of feedback on a watched PR, keyed by GitHub node id.
+CREATE TABLE pr_item (
+  id                    INTEGER PRIMARY KEY,
+  watch_id              TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+  github_node_id        TEXT NOT NULL,
+  kind                  TEXT NOT NULL,   -- thread | review | check | conflict | verify_failure
+  author                TEXT,
+  body                  TEXT NOT NULL,
+  path                  TEXT,
+  line                  INTEGER,
+  url                   TEXT,
+  state                 TEXT NOT NULL,   -- open | handled | dismissed
+  verdict               TEXT,            -- fix | answer | already_done | follow_up | decision; null until triaged
+  approach              TEXT,
+  decision_question     TEXT,
+  decision_options_json TEXT,
+  decision_answer       TEXT,
+  fix_task_id           TEXT REFERENCES task(id) ON DELETE SET NULL,
+  followup_grade        TEXT,            -- fixed | partly | not_fixed | moot
+  reply_body            TEXT,
+  reply_url             TEXT,
+  round                 INTEGER NOT NULL DEFAULT 0,
+  created_at            INTEGER NOT NULL,
+  updated_at            INTEGER NOT NULL,
+  UNIQUE (watch_id, github_node_id)
+);
+CREATE INDEX pr_item_watch_state ON pr_item(watch_id, state);
+
+CREATE TABLE pr_round (
+  id              INTEGER PRIMARY KEY,
+  watch_id        TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+  number          INTEGER NOT NULL,
+  base_head_oid   TEXT NOT NULL,     -- the PR head the round's branch was cut from
+  pushed_head_oid TEXT,
+  outcome         TEXT,
+  started_at      INTEGER NOT NULL,
+  ended_at        INTEGER,
+  UNIQUE (watch_id, number)
+);
+
+-- An enabled project whose last PR poll could not run `gh` (§13.1); it raises the attention signal.
+CREATE TABLE pr_poll_problem (
+  project_id TEXT PRIMARY KEY REFERENCES project(id) ON DELETE CASCADE,
+  detail     TEXT NOT NULL,
+  since      INTEGER NOT NULL
 );
 ```
 
@@ -405,6 +487,17 @@ never grant itself anything. That is why `NOT NULL DEFAULT '[]'` is the right
 default — an empty list is exactly a full worker's authority, which is the status
 quo for an unrostered one.
 
+`roster_agent.plugin_dirs` lets an archetype's prompt run a skill from a Claude
+Code plugin the worktree does not install, without that plugin's path reaching
+source. Each entry is passed as its own `--plugin-dir` when a session runs as the
+agent, after a leading `~/` is expanded to the home directory, since `claude` is
+spawned without a shell. Only a board-local row carries the list: a disk
+archetype is read from its file, which has no such field, so its pointer row's
+`[]` is all it ever has. A plugin brings its skills, agents, hooks and MCP
+servers; `--disallowedTools` still applies to every tool call, but a plugin hook
+runs its command outside tool permissions, so the list is trusted the way the
+user's own settings are, and only the human edits it.
+
 `roster_agent.role` is a plain string, not an enum: the roster is user-defined,
 so adding a specialty must not need a migration. A project's *usable* set is
 `project_roster_agent` joined to `roster_agent` where `enabled = 1` — disabling
@@ -455,6 +548,20 @@ is Same as Default, and a Default row with an unknown `kind` reads as Any
 reviewer; neither fails the rest of `settings_json`.
 The table is read only under `agent`; the integration-task and shared-checkout
 overrides (§5, §5.1) still apply over it, and there are no per-epic rows.
+
+`PRWatchStore.upsert` records one poll of a pull request. A new watch starts in
+`watching`. Items are matched by `github_node_id`, so the same snapshot twice
+changes nothing but `last_polled_at`. An open item that the snapshot reports
+resolved, or leaves out, becomes `handled`; a resolved item never seen before is
+not stored. A `handled` or `dismissed` item whose body changed — a new reply —
+reopens to `open` with its verdict and grade cleared. `settings_json.prFollowThrough`
+holds every work-specific value — `enabled`, `verificationLabel`,
+`requireApproval`, `settleMinutes`, `roundCap`, `dailyBudgetUSD`,
+`verifyCommand`, `postFactualReplies`, `roles` (`triage`, `fixer`, `reviewer`,
+`followupCheck`, each `{rosterAgentId, model}`) and `privateTerms` — and an
+absent key, or an absent field inside it, decodes to off or empty:
+`enabled` false, `requireApproval` true, `settleMinutes` 10, `roundCap` 3, the
+rest nil or `[]`.
 
 `settings_json.reviewLevel` is one of `none`, `agent`, `task` or `epic` and
 defaults to **`task`**, so a project that predates the setting behaves exactly as

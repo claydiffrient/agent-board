@@ -51,8 +51,8 @@ Subsections stay in their parent's file. Numbers do not change when a title does
 
 - **§10 [Screens](docs/spec/10-screens.md)** — every screen, one bold-titled
   entry each: At a Glance, Shut Down, Orchestrator Command, Stop All, Terminal,
-  Task Board, Status, Roster, Coordinator, Notes, Project sidebar, Ports,
-  Project settings, What's New in Agent Board.
+  Task Board, Status, Roster, Coordinator, Pull Requests, Notes, Project
+  sidebar, Ports, Project settings, What's New in Agent Board.
   [§10.1 Main window size](docs/spec/10-screens.md#101-main-window-size).
 
 - **§11 [Milestones](docs/spec/11-milestones.md)** — M0–M4, what each proved,
@@ -60,3 +60,9 @@ Subsections stay in their parent's file. Numbers do not change when a title does
 
 - **§12 [Open items](docs/spec/12-open-items.md)** — what was verified live,
   what was not, accepted limitations, and what is unresolved.
+
+- **§13 [PR follow-through](docs/spec/13-pr-follow-through.md)** — watching the
+  human's own open pull requests, triaging review feedback, fixing it, and
+  publishing the fix, across four phases. §13.1 State machine · §13.2
+  Verdicts · §13.3 Settings · §13.4 Where it lives in the app · §13.5
+  Guardrails.

@@ -83,6 +83,21 @@ struct CoordinatorRow: View {
     }
 }
 
+/// The Pull Requests row (SPEC §13.4). Its badge counts pull requests ready to verify plus open
+/// decisions, across every project.
+struct PullRequestsRow: View {
+    let count: Int
+
+    static func count(_ counts: [String: PRBadgeCount]) -> Int {
+        counts.values.reduce(0) { $0 + $1.total }
+    }
+
+    var body: some View {
+        Label("Pull Requests", systemImage: "arrow.triangle.pull")
+            .badge(count)
+    }
+}
+
 /// What a collapsed section's badge says: every waiting project inside it, one per line, so the
 /// tooltip answers "which one" as well as "why" without expanding the section.
 func collapsedSectionSummary(_ section: ProjectSection, attention: [String: ProjectAttention]) -> String? {

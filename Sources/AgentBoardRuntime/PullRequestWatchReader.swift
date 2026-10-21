@@ -1,0 +1,238 @@
+import AgentBoardCore
+import Foundation
+
+/// One row of `gh search prs`: an open pull request the user authored.
+public struct AuthoredPullRequest: Sendable, Equatable, Hashable {
+    /// `owner/name` exactly as GitHub spells it.
+    public var repository: String
+    public var number: Int
+    public var url: String
+    public var title: String
+    public var isDraft: Bool
+
+    public init(repository: String, number: Int, url: String, title: String, isDraft: Bool = false) {
+        self.repository = repository
+        self.number = number
+        self.url = url
+        self.title = title
+        self.isDraft = isDraft
+    }
+}
+
+public struct PullRequestWatchFailure: Error, CustomStringConvertible, Equatable, Sendable {
+    public let description: String
+    /// `gh` is missing or not logged in: no later poll can succeed until the human fixes it.
+    public let ghUnavailable: Bool
+
+    public init(_ description: String, ghUnavailable: Bool) {
+        self.description = description
+        self.ghUnavailable = ghUnavailable
+    }
+}
+
+/// Reads the user's open pull requests and their review state for PR follow-through (SPEC §13.1).
+/// Synchronous and blocking: call it off the main actor.
+public struct PullRequestWatchReader: Sendable {
+    public var gh: any GhRunning
+
+    public init(gh: any GhRunning = SystemGh()) {
+        self.gh = gh
+    }
+
+    public static let searchArguments = [
+        "search", "prs", "--author=@me", "--state=open",
+        "--json", "repository,number,url,title,isDraft", "--limit", "1000",
+    ]
+
+    /// `gh` exits 4 when it needs `gh auth login`.
+    static let authRequiredStatus: Int32 = 4
+
+    /// Every open pull request the user authored, drafts included; the caller decides what to skip.
+    public func authored(cwd: URL) throws -> [AuthoredPullRequest] {
+        let stdout = try run(Self.searchArguments, cwd: cwd, what: "gh search prs")
+        guard let hits = Self.parseSearch(stdout) else {
+            throw PullRequestWatchFailure("`gh search prs` printed no list: \(stdout)", ghUnavailable: false)
+        }
+        return hits
+    }
+
+    public static func graphQLArguments(owner: String, name: String, numbers: [Int]) -> [String] {
+        ["api", "graphql", "-f", "query=\(query(numbers: numbers))", "-f", "owner=\(owner)", "-f", "name=\(name)"]
+    }
+
+    /// One query for every listed pull request in `owner/name`. Drafts and anything GitHub no longer
+    /// returns are left out, and feedback the viewer wrote never becomes an item.
+    public func snapshots(owner: String, name: String, numbers: [Int], cwd: URL) throws -> [PRSnapshot] {
+        guard !numbers.isEmpty else { return [] }
+        let arguments = Self.graphQLArguments(owner: owner, name: name, numbers: numbers)
+        let stdout = try run(arguments, cwd: cwd, what: "gh api graphql")
+        guard let snapshots = Self.parseSnapshots(stdout, owner: owner, name: name) else {
+            throw PullRequestWatchFailure("`gh api graphql` printed no repository: \(stdout)", ghUnavailable: false)
+        }
+        return snapshots
+    }
+
+    private func run(_ arguments: [String], cwd: URL, what: String) throws -> String {
+        let result: CommandResult
+        do {
+            result = try gh.run(arguments, cwd: cwd)
+        } catch {
+            throw PullRequestWatchFailure("\(error)", ghUnavailable: true)
+        }
+        guard result.status == 0 else {
+            let said = [result.stderr, result.stdout]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty } ?? "exit \(result.status)"
+            let unauthenticated = result.status == Self.authRequiredStatus || said.contains("gh auth login")
+            if unauthenticated {
+                throw PullRequestWatchFailure("`gh` is not logged in; run `gh auth login`.", ghUnavailable: true)
+            }
+            throw PullRequestWatchFailure("`\(what)` failed: \(said)", ghUnavailable: false)
+        }
+        return result.stdout
+    }
+
+    static func query(numbers: [Int]) -> String {
+        let pullRequests = numbers.map { number in
+            """
+            pr\(number): pullRequest(number: \(number)) {
+              number url title isDraft headRefName headRefOid baseRefName reviewDecision mergeable
+              labels(first: 100) { nodes { name } }
+              commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+              reviewThreads(first: 100) {
+                nodes { id isResolved isOutdated comments(last: 1) { nodes { author { login } body url path line } } }
+              }
+              reviews(last: 50) { nodes { id state body url author { login } } }
+            }
+            """
+        }
+        return """
+        query($owner: String!, $name: String!) {
+          viewer { login }
+          repository(owner: $owner, name: $name) {
+        \(pullRequests.joined(separator: "\n"))
+          }
+        }
+        """
+    }
+
+    public static func parseSearch(_ json: String) -> [AuthoredPullRequest]? {
+        struct Row: Decodable {
+            struct Repository: Decodable { let nameWithOwner: String }
+            let repository: Repository
+            let number: Int
+            let url: String
+            let title: String
+            let isDraft: Bool?
+        }
+        guard let rows = try? JSONDecoder().decode([Row].self, from: Data(json.utf8)) else { return nil }
+        return rows.map {
+            AuthoredPullRequest(
+                repository: $0.repository.nameWithOwner, number: $0.number, url: $0.url, title: $0.title,
+                isDraft: $0.isDraft ?? false
+            )
+        }
+    }
+
+    public static func parseSnapshots(_ json: String, owner: String, name: String) -> [PRSnapshot]? {
+        guard let response = try? JSONDecoder().decode(GraphQLResponse.self, from: Data(json.utf8)),
+              let repository = response.data?.repository
+        else { return nil }
+        let viewer = response.data?.viewer?.login
+        return repository.values.compactMap { $0 }
+            .filter { !$0.isDraft }
+            .sorted { $0.number < $1.number }
+            .map { snapshot(of: $0, owner: owner, name: name, viewer: viewer) }
+    }
+
+    private static func snapshot(of pr: GraphQLResponse.PullRequest, owner: String, name: String, viewer: String?) -> PRSnapshot {
+        func byViewer(_ author: GraphQLResponse.Author?) -> Bool {
+            guard let viewer, let login = author?.login else { return false }
+            return login.caseInsensitiveCompare(viewer) == .orderedSame
+        }
+        var items: [PRSnapshotItem] = []
+        for thread in pr.reviewThreads?.nodes ?? [] where !thread.isResolved && !thread.isOutdated {
+            guard let latest = thread.comments?.nodes.last, !byViewer(latest.author) else { continue }
+            items.append(PRSnapshotItem(
+                githubNodeId: thread.id, kind: .thread, author: latest.author?.login, body: latest.body,
+                path: latest.path, line: latest.line, url: latest.url
+            ))
+        }
+        // A review body stands until its author reviews again; an approval's body is not feedback.
+        var latestByAuthor: [String: GraphQLResponse.Review] = [:]
+        for review in pr.reviews?.nodes ?? [] where review.state != "PENDING" && review.state != "DISMISSED" {
+            guard let login = review.author?.login, !byViewer(review.author) else { continue }
+            latestByAuthor[login.lowercased()] = review
+        }
+        for review in latestByAuthor.values.sorted(by: { $0.id < $1.id })
+        where review.state != "APPROVED" && !review.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            items.append(PRSnapshotItem(
+                githubNodeId: review.id, kind: .review, author: review.author?.login, body: review.body, url: review.url
+            ))
+        }
+        return PRSnapshot(
+            repoOwner: owner, repoName: name, number: pr.number, url: pr.url, title: pr.title, isDraft: pr.isDraft,
+            headRef: pr.headRefName, headOid: pr.headRefOid, baseRef: pr.baseRefName,
+            reviewDecision: pr.reviewDecision,
+            checksState: pr.commits?.nodes.last?.commit.statusCheckRollup?.state,
+            mergeable: pr.mergeable,
+            labels: pr.labels?.nodes.map(\.name) ?? [],
+            items: items
+        )
+    }
+}
+
+private struct GraphQLResponse: Decodable {
+    struct Payload: Decodable {
+        let viewer: Author?
+        let repository: [String: PullRequest?]?
+    }
+
+    struct Author: Decodable { let login: String }
+    struct Nodes<T: Decodable>: Decodable { let nodes: [T] }
+    struct Label: Decodable { let name: String }
+    struct Rollup: Decodable { let state: String }
+    struct Commit: Decodable { let statusCheckRollup: Rollup? }
+    struct CommitNode: Decodable { let commit: Commit }
+
+    struct Comment: Decodable {
+        let author: Author?
+        let body: String
+        let url: String?
+        let path: String?
+        let line: Int?
+    }
+
+    struct Thread: Decodable {
+        let id: String
+        let isResolved: Bool
+        let isOutdated: Bool
+        let comments: Nodes<Comment>?
+    }
+
+    struct Review: Decodable {
+        let id: String
+        let state: String
+        let body: String
+        let url: String?
+        let author: Author?
+    }
+
+    struct PullRequest: Decodable {
+        let number: Int
+        let url: String
+        let title: String
+        let isDraft: Bool
+        let headRefName: String
+        let headRefOid: String
+        let baseRefName: String
+        let reviewDecision: String?
+        let mergeable: String?
+        let labels: Nodes<Label>?
+        let commits: Nodes<CommitNode>?
+        let reviewThreads: Nodes<Thread>?
+        let reviews: Nodes<Review>?
+    }
+
+    let data: Payload?
+}

@@ -68,8 +68,9 @@ per-project signal behind the sidebar badge — on the metering tick, and
 keyed by project and reason. A queue nobody has answered does not banner every
 5s; a growing queue is a bigger badge, not a second banner. The key clears when
 the condition clears, so the same condition occurring again notifies again, and
-a relaunch re-announces whatever is still waiting. Stranded reports and an
-unacknowledged shutdown badge without interrupting. Nothing notifies for the
+a relaunch re-announces whatever is still waiting. Stranded reports, an
+unacknowledged shutdown, and a PR follow-through poll that cannot run `gh`
+(§13.1) badge without interrupting. Nothing notifies for the
 project the human has open while Agent Board is frontmost. Every banner Agent
 Board raises names its project.
 
