@@ -165,7 +165,18 @@ on at all.
 - A notification banner fires when a PR enters readyToVerify (once per head
   oid) and when a decision item arrives.
 - A seventh project-settings tab, **PR Follow-Through**, placed after
-  Advanced (§10), holds every setting in §13.3.
+  Advanced (§10), holds every setting in §13.3 except `roles`, whose agent
+  pickers arrive in phase 2. Its sections are **Watch** (`enabled`, settle
+  window, round cap, daily budget — empty means the spawn caps),
+  **Verification** (label — empty means the merge verifies — required
+  approval, and the verify command with its `{url}` placeholder),
+  **Replies** (`postFactualReplies`, captioned with which verdicts count as
+  factual), and **Publish guard** (the `privateTerms` list: each term a row
+  with a remove button, plus a field that adds one on Return). Save trims
+  terms, drops blanks and case-insensitive repeats, and keeps a term typed
+  into the add field but never added. Save also stores a settle window
+  below 0 as 0, a round cap below 1 as 1, and a budget of 0 or less as
+  empty.
 
 ### 13.5 Guardrails — phase 1 (publish guard) and planned amendments for phase 3
 

@@ -6,7 +6,7 @@ import SwiftUI
 /// The sheet's tabs (SPEC §10, Project settings). Every `ProjectSettingsSection` belongs to exactly
 /// one, which `ProjectSettingsTabTests` pins; a section in no tab is a setting with no UI.
 enum ProjectSettingsTab: String, CaseIterable, Identifiable {
-    case general, agents, limits, workflow, notifications, advanced
+    case general, agents, limits, workflow, notifications, advanced, prFollowThrough
 
     var id: Self { self }
 
@@ -18,6 +18,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
         case .workflow: "Workflow"
         case .notifications: "Notifications"
         case .advanced: "Advanced"
+        case .prFollowThrough: "PR Follow-Through"
         }
     }
 
@@ -29,6 +30,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
         case .workflow: [.verification, .teardown, .isolation, .publishing]
         case .notifications: [.notifications]
         case .advanced: [.autoMode, .extraMcpServers]
+        case .prFollowThrough: [.prWatch, .prVerification, .prReplies, .publishGuard]
         }
     }
 }
@@ -36,6 +38,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
 enum ProjectSettingsSection: String, CaseIterable, Identifiable {
     case repository, workspace, caps, models, review, verification, teardown, isolation, publishing
     case archive, notifications, autonomy, autoMode, extraMcpServers, roster
+    case prWatch, prVerification, prReplies, publishGuard
 
     var id: Self { self }
 
@@ -56,6 +59,10 @@ enum ProjectSettingsSection: String, CaseIterable, Identifiable {
         case .autoMode: "Permission classifier (autoMode)"
         case .extraMcpServers: "Extra MCP servers"
         case .roster: "Roster"
+        case .prWatch: "Watch"
+        case .prVerification: "Verification"
+        case .prReplies: "Replies"
+        case .publishGuard: "Publish guard"
         }
     }
 }
@@ -84,6 +91,7 @@ struct ProjectSettingsSheet: View {
     @State private var projectAgents: [RosterAgent] = []
     @State private var errorMessage: String?
     @State private var integrationDefault: StandaloneIntegration?
+    @State private var newPrivateTerm = ""
 
     init(
         project: Project,
@@ -340,7 +348,90 @@ struct ProjectSettingsSheet: View {
                 .foregroundStyle(.secondary)
         case .roster:
             rosterSelection
+        case .prWatch:
+            Toggle("Watch my open pull requests", isOn: $settings.prFollowThrough.enabled)
+            TextField("Settle window (minutes)", value: $settings.prFollowThrough.settleMinutes, format: .number)
+            TextField("Round cap", value: $settings.prFollowThrough.roundCap, format: .number)
+            TextField(
+                "Daily budget (USD)", value: $settings.prFollowThrough.dailyBudgetUSD, format: .number,
+                prompt: Text("Spawn caps")
+            )
+            Text("Watches every open, non-draft pull request you author in this project. New feedback waits for the settle window to pass with nothing newer before a round starts. Left empty, the daily budget falls back to this project's spawn caps.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .prVerification:
+            TextField("Verification label", text: Binding(
+                get: { settings.prFollowThrough.verificationLabel ?? "" },
+                set: { settings.prFollowThrough.verificationLabel = $0.isEmpty ? nil : $0 }
+            ), prompt: Text("e.g. verified"))
+            Toggle("Require reviewer approval", isOn: $settings.prFollowThrough.requireApproval)
+            TextField("Verify command", text: Binding(
+                get: { settings.prFollowThrough.verifyCommand ?? "" },
+                set: { settings.prFollowThrough.verifyCommand = $0.isEmpty ? nil : $0 }
+            ), prompt: Text("e.g. open {url}"))
+            Text("Mark verified adds the label to the pull request. Left empty, your own merge is the verification. Walk me through it runs the verify command in a terminal, with {url} replaced by the pull request's URL; left empty, that button is hidden.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .prReplies:
+            Toggle("Post factual replies", isOn: $settings.prFollowThrough.postFactualReplies)
+            Text("Factual replies are \"Fixed in <sha>\", an answer to a factual question, a pointer to the commit that already did it, and a note that out-of-scope work is tracked separately. Anything argued waits for you as a decision.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .publishGuard:
+            ForEach(settings.prFollowThrough.privateTerms, id: \.self) { term in
+                HStack {
+                    Text(term)
+                    Spacer()
+                    Button {
+                        settings.prFollowThrough.privateTerms.removeAll { $0 == term }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove \(term)")
+                }
+            }
+            TextField("Add a private term", text: $newPrivateTerm, prompt: Text("Press Return to add"))
+                .onSubmit(addPrivateTerm)
+            Text("Agent Board refuses any push or pull request whose diff, commit messages, branch name, title or body contains one of these, ignoring case. It applies whether or not follow-through is on.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
+    }
+
+    private func addPrivateTerm() {
+        settings.prFollowThrough.privateTerms = Self.privateTerms(
+            settings.prFollowThrough.privateTerms, adding: newPrivateTerm
+        )
+        newPrivateTerm = ""
+    }
+
+    /// Appends `pending` unless it is blank or already listed; matching ignores case, so a second
+    /// spelling of the same term would guard nothing more.
+    static func privateTerms(_ terms: [String], adding pending: String) -> [String] {
+        var result: [String] = []
+        for term in terms + [pending] {
+            let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !result.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame })
+            else { continue }
+            result.append(trimmed)
+        }
+        return result
+    }
+
+    /// What Save stores (SPEC §13.4). A term typed but never added is kept: losing it silently would
+    /// leave the guard open.
+    static func savedFollowThrough(_ draft: PRFollowThroughSettings, pendingTerm: String) -> PRFollowThroughSettings {
+        var saved = draft
+        saved.settleMinutes = max(0, draft.settleMinutes)
+        saved.roundCap = max(1, draft.roundCap)
+        saved.dailyBudgetUSD = draft.dailyBudgetUSD.flatMap { $0 > 0 ? $0 : nil }
+        saved.verificationLabel = draft.verificationLabel?.trimmingCharacters(in: .whitespaces)
+        if saved.verificationLabel?.isEmpty == true { saved.verificationLabel = nil }
+        saved.verifyCommand = draft.verifyCommand?.trimmingCharacters(in: .whitespaces)
+        if saved.verifyCommand?.isEmpty == true { saved.verifyCommand = nil }
+        saved.privateTerms = privateTerms(draft.privateTerms, adding: pendingTerm)
+        return saved
     }
 
     /// One row of the review routing table; `nil` is the Default row.
@@ -435,6 +526,7 @@ struct ProjectSettingsSheet: View {
         updated.worktreeTeardownTimeoutSeconds = WorktreeTeardownCommand.clampedTimeout(settings.worktreeTeardownTimeoutSeconds)
         updated.archivePolicy = ArchivePolicy.make(mode: archiveMode, days: archiveDays)
         updated.notifications.mute = muteChoice.mute(existing: settings.notifications.mute)
+        updated.prFollowThrough = Self.savedFollowThrough(settings.prFollowThrough, pendingTerm: newPrivateTerm)
         let trimmedJSON = autoModeJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.autoModeJSON = trimmedJSON.isEmpty ? nil : trimmedJSON
         updated.extraMcpServers = extraServers
