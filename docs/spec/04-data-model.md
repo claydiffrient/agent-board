@@ -275,7 +275,8 @@ CREATE TABLE roster_agent (
                                                 -- a deny-list, so empty = a full worker's authority
   enabled       INTEGER NOT NULL DEFAULT 1,
   created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
+  updated_at    INTEGER NOT NULL,
+  plugin_dirs   TEXT NOT NULL DEFAULT '[]'  -- JSON array; each is one --plugin-dir at spawn
 );
 
 CREATE TABLE project_roster_agent (
@@ -500,6 +501,17 @@ never grant itself anything. That is why `NOT NULL DEFAULT '[]'` is the right
 default — an empty list is exactly a full worker's authority, which is the status
 quo for an unrostered one.
 
+`roster_agent.plugin_dirs` lets an archetype's prompt run a skill from a Claude
+Code plugin the worktree does not install, without that plugin's path reaching
+source. Each entry is passed as its own `--plugin-dir` when a session runs as the
+agent, after a leading `~/` is expanded to the home directory, since `claude` is
+spawned without a shell. Only a board-local row carries the list: a disk
+archetype is read from its file, which has no such field, so its pointer row's
+`[]` is all it ever has. A plugin brings its skills, agents, hooks and MCP
+servers; `--disallowedTools` still applies to every tool call, but a plugin hook
+runs its command outside tool permissions, so the list is trusted the way the
+user's own settings are, and only the human edits it.
+
 `roster_agent.role` is a plain string, not an enum: the roster is user-defined,
 so adding a specialty must not need a migration. A project's *usable* set is
 `project_roster_agent` joined to `roster_agent` where `enabled = 1` — disabling
@@ -655,8 +667,11 @@ display only.
 Projects registered before that default still carry the old one,
 `~/Library/Application Support/AgentBoard/worktrees/<project-id>`, which the
 space rule rejects. At every launch `WorktreeRootMigration` rewrites such a
-root to the current default, but only if `git worktree list` for the
-project's repository shows no worktree under the old root. Worktrees are not
+root to the current default, but only if the project's repository has no
+worktree registered under the old root. That is read from each
+`.git/worktrees/<id>/gitdir`, not `git worktree list`, which leaves out an entry
+it cannot read; an unreadable one keeps the root, and a dead one (§5) is pruned
+and does not. Worktrees are not
 moved. A project that still has one keeps its root, and the status bar names
 the project and each remaining worktree, because reconcile's reaper (§5) only
 considers worktrees under the current root and would never see one left

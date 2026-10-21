@@ -55,6 +55,15 @@ public enum PullRequestLaunch {
     }
 }
 
+/// The real `gh` acts on the user's own GitHub account, so a test process never runs it.
+public struct RealGhRefusedUnderTest: Error, CustomStringConvertible, Equatable, Sendable {
+    public init() {}
+
+    public var description: String {
+        "refused to run the real `gh` under XCTest; give the code under test a fake GhRunning"
+    }
+}
+
 /// Runs `gh` in `--web` mode in the project repo, falling back to the compare URL.
 public struct PullRequestOpener: Sendable {
     public static let searchPaths = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
@@ -65,12 +74,16 @@ public struct PullRequestOpener: Sendable {
         self.repoPath = repoPath
     }
 
-    public static func ghExecutable() -> URL? {
-        searchPaths.first { FileManager.default.isExecutableFile(atPath: $0) }.map(URL.init(fileURLWithPath:))
+    static let underXCTest = NSClassFromString("XCTestCase") != nil
+
+    /// Every path that execs `gh` resolves it here, so this is where a test process is refused.
+    public static func ghExecutable() throws -> URL? {
+        if underXCTest { throw RealGhRefusedUnderTest() }
+        return searchPaths.first { FileManager.default.isExecutableFile(atPath: $0) }.map(URL.init(fileURLWithPath:))
     }
 
     public func open(baseBranch: String, headBranch: String) throws -> PullRequestOutcome {
-        guard let gh = Self.ghExecutable() else {
+        guard let gh = try Self.ghExecutable() else {
             return try fallback(baseBranch: baseBranch, headBranch: headBranch, reason: "gh is not installed")
         }
         let result = try ProcessRunner.run(

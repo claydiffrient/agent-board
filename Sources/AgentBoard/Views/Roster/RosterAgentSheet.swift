@@ -22,6 +22,7 @@ struct RosterAgentSheet: View {
     @State private var role: String
     @State private var systemPrompt: String
     @State private var model: String?
+    @State private var pluginDirs: String
     @State private var enabled: Bool
     @State private var errorMessage: String?
 
@@ -31,6 +32,7 @@ struct RosterAgentSheet: View {
         _role = State(initialValue: draft.agent?.role ?? "")
         _systemPrompt = State(initialValue: draft.agent?.systemPrompt ?? "")
         _model = State(initialValue: draft.agent?.model)
+        _pluginDirs = State(initialValue: draft.agent?.pluginDirs.joined(separator: "\n") ?? "")
         _enabled = State(initialValue: draft.agent?.enabled ?? true)
     }
 
@@ -57,6 +59,20 @@ struct RosterAgentSheet: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        fieldLabel("Plugin directories")
+                        PlainTextEditor(text: $pluginDirs)
+                            .frame(minHeight: 60)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .strokeBorder(Color.secondary.opacity(0.3))
+                            )
+                    }
+                    Text("One path per line, each passed as --plugin-dir when this agent is spawned.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .formStyle(.grouped)
 
@@ -70,7 +86,7 @@ struct RosterAgentSheet: View {
             }
             .padding()
         }
-        .frame(minWidth: 520, minHeight: 520)
+        .frame(minWidth: 520, minHeight: 600)
         .navigationTitle(draft.agent == nil ? "New Agent" : "Edit \(draft.agent?.name ?? "")")
         .errorAlert($errorMessage)
     }
@@ -103,25 +119,38 @@ struct RosterAgentSheet: View {
     }
 
     private func save() {
-        let store = RosterStore(env.db)
-        let name = name.trimmingCharacters(in: .whitespaces)
-        let role = role.trimmingCharacters(in: .whitespaces)
         do {
-            if var agent = draft.agent {
-                agent.name = name
-                agent.role = role
-                agent.systemPrompt = systemPrompt
-                agent.model = model
-                agent.enabled = enabled
-                try store.update(agent)
-            } else {
-                try store.create(
-                    name: name, role: role, systemPrompt: systemPrompt, model: model, enabled: enabled
-                )
-            }
+            try Self.save(
+                draft, name: name, role: role, systemPrompt: systemPrompt, model: model,
+                pluginDirs: pluginDirs, enabled: enabled, to: RosterStore(env.db)
+            )
             dismiss()
         } catch {
             errorMessage = errorText(error)
+        }
+    }
+
+    static func save(
+        _ draft: RosterAgentDraft, name: String, role: String, systemPrompt: String, model: String?,
+        pluginDirs: String, enabled: Bool, to store: RosterStore
+    ) throws {
+        let name = name.trimmingCharacters(in: .whitespaces)
+        let role = role.trimmingCharacters(in: .whitespaces)
+        let dirs = pluginDirs.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if var agent = draft.agent {
+            agent.name = name
+            agent.role = role
+            agent.systemPrompt = systemPrompt
+            agent.model = model
+            agent.pluginDirs = dirs
+            agent.enabled = enabled
+            try store.update(agent)
+        } else {
+            try store.create(
+                name: name, role: role, systemPrompt: systemPrompt, model: model, pluginDirs: dirs, enabled: enabled
+            )
         }
     }
 }

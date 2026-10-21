@@ -52,6 +52,23 @@ final class WorktreeRootMigrationTests: XCTestCase {
         XCTAssertEqual(try reload().worktreeRoot, newBase.appendingPathComponent(project.id).path)
         XCTAssertTrue(migration.run().isEmpty, "the second launch was not a no-op")
     }
+
+    func testAWorktreeGitCannotReadKeepsTheOldRoot() throws {
+        let manager = WorktreeManager(
+            repoPath: repo, worktreeRoot: URL(fileURLWithPath: project.worktreeRoot), attribution: .unattributable
+        )
+        let worktree = try manager.create(name: "task-1", branch: "agentboard/task-1", base: "main")
+        let admin = try SupervisorFixture.git(["rev-parse", "--absolute-git-dir"], cwd: worktree)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let gitdir = URL(fileURLWithPath: admin).appendingPathComponent("gitdir").path
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: gitdir)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: gitdir) }
+
+        let outcome = migration.run()
+
+        XCTAssertEqual(outcome.migrated, [])
+        XCTAssertEqual(try reload().worktreeRoot, project.worktreeRoot, "the root moved past a worktree git could not read")
+    }
 }
 
 @MainActor
@@ -122,11 +139,11 @@ final class DefaultWorktreeRootTests: XCTestCase {
     /// against the supervisor's own `home`.
     func testATildeRootResolvesUnderTheHomeDirectory() async throws {
         var project = fixture.project
-        project.worktreeRoot = "~/.agentboard/derivita-ui/"
+        project.worktreeRoot = "~/.agentboard/example-ui/"
 
         let root = fixture.supervisor.worktreeManager(for: project).worktreeRoot
 
-        XCTAssertEqual(root.path, fixture.fakeHome.appendingPathComponent(".agentboard/derivita-ui").path)
+        XCTAssertEqual(root.path, fixture.fakeHome.appendingPathComponent(".agentboard/example-ui").path)
     }
 
     func testAWorkerSpawnedUnderTheOverrideCutsItsWorktreeThereAndNotUnderTheHomeDirectory() async throws {

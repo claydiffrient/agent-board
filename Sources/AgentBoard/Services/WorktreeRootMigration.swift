@@ -4,11 +4,11 @@ import Foundation
 import GRDB
 
 /// Rewrites a worktree root that still contains a space — the old Application Support default — to
-/// `worktreeBase/<project-id>`, but only once git lists no worktree under it (SPEC §4). The reaper
+/// `worktreeBase/<project-id>`, but only once git has no worktree registered under it (SPEC §4). The reaper
 /// only looks under the current root, so moving the root past a live worktree would orphan it.
 ///
-/// This is launch-time reconciliation rather than a GRDB migration: it has to run `git worktree
-/// list`, and a project skipped today must be retried on every later launch until its worktrees are
+/// This is launch-time reconciliation rather than a GRDB migration: it has to read git's worktree
+/// records, and a project skipped today must be retried on every later launch until its worktrees are
 /// gone, while a schema migration runs once and is recorded as applied.
 struct WorktreeRootMigration: Sendable {
     var db: AppDatabase
@@ -66,12 +66,12 @@ struct WorktreeRootMigration: Sendable {
         let manager = WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath), worktreeRoot: worktreeBase, attribution: .unattributable
         )
-        return try manager.list()
-            .map { resolved($0.path) }
+        return try manager.registeredWorktreePaths()
+            .map { resolved($0) }
             .filter { $0 == root || $0.hasPrefix(root + "/") }
     }
 
-    /// `git worktree list` prints /private/var where a caller may have stored /var.
+    /// /var and /private/var are one directory, and either spelling may be stored.
     private func resolved(_ url: URL) -> String {
         url.standardizedFileURL.resolvingSymlinksInPath().path
     }

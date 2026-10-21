@@ -28,5 +28,5 @@ yarn install v1.22.22
 [1/4] Resolving packages...
 preinstall ok
 ensuring lint-staged is installed
-/bin/sh: /opt/derivita/bin/lint-staged: No such file or directory
-/bin/sh: line 0: exec: /opt/derivita/bin/lint-staged: cannot execute: No such file or directory
+/bin/sh: /opt/example-app/bin/lint-staged: No such file or directory
+/bin/sh: line 0: exec: /opt/example-app/bin/lint-staged: cannot execute: No such file or directory

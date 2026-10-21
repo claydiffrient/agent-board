@@ -12,7 +12,7 @@ final class StatusRosterAgentRenderTests: XCTestCase {
     func testAReviewingRosteredSessionShowsItsAgentAndAPlainWorkerDoesNot() throws {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
-            name: "derivita-ui", repoPath: "/tmp/status-roster-\(UUID().uuidString)", baseBranch: "main",
+            name: "example-ui", repoPath: "/tmp/status-roster-\(UUID().uuidString)", baseBranch: "main",
             worktreeRoot: "/tmp/status-roster-worktrees", memoryDir: nil
         )
         let rita = try RosterStore(db).create(name: "Rita", role: "Code reviewer", systemPrompt: "Review.")
