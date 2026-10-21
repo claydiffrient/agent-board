@@ -19,7 +19,7 @@ final class StatusSearchTests: XCTestCase {
 
     private func port(
         _ number: Int = 3000, command: String = "node", sessionId: String? = "s-1",
-        taskTitle: String? = "Idle cap watchdog", projectName: String = "derivita-ui"
+        taskTitle: String? = "Idle cap watchdog", projectName: String = "example-ui"
     ) -> AttributedPort {
         AttributedPort(
             port: number, pid: 501, command: command, ownership: sessionId == nil ? .shellConsole : .orphaned,
@@ -66,7 +66,7 @@ final class StatusSearchTests: XCTestCase {
     }
 
     func testAPortDoesNotMatchOnTheProjectNameEveryPortOnThePaneShares() {
-        XCTAssertFalse(matches("derivita", port()))
+        XCTAssertFalse(matches("example", port()))
     }
 
     func testAPortQueryDoesNotMatchASession() {

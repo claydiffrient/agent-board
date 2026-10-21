@@ -147,7 +147,7 @@ nobody reviewed.
   makes the merge commit with both parents, and `update-ref` moves the target
   only if it is still where the merge started. `merge-tree --write-tree` needs
   git 2.38; macOS 14, the oldest the app supports, ships 2.39. A temporary
-  worktree was used before, and it fired `post-checkout`: Derivita's runs its
+  worktree was used before, and it fired `post-checkout`: on a work project this runs its
   setup script, which fails under launchd's `PATH`, so every non-fast-forward
   merge there failed and left its worktree holding the epic branch. Merges into
   one target branch run one at a time, in the order their accepts arrived, so
@@ -728,7 +728,7 @@ than one that is finished; they merge nothing and are not part of this sequence.
 worktree (`<worktree-root>/epic-<epic-id>`, on the epic branch), and a task
 worktree kept for uncommitted changes stays where it is. Once an epic is
 `done` or `abandoned` nothing will push from its branch again, so whatever is
-still on disk for it is a leak: on Derivita, an integration worktree whose work
+still on disk for it is a leak: on a work project, an integration worktree whose work
 moved to another epic held an 11.5 GB output base. `Board.heldWorktrees`
 lists them: every recorded `worktree_path` of a session on a task in the epic,
 its integration task included, plus the epic's integration checkout, each kept
