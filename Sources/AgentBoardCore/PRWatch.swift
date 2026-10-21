@@ -349,15 +349,20 @@ public struct PRBadgeCount: Sendable, Equatable {
 /// The phase-1 moves of SPEC §13.1, decided from one poll. Every other state belongs to a later
 /// phase's driver and is left where it is.
 public enum PRWatchTransition {
+    /// How long a head with no required checks waits for CI to register any before it counts as green.
+    public static let checksGraceMillis: Int64 = 5 * 60 * 1000
+
     public static func next(
-        from state: PRWatchState, snapshot: PRSnapshot, openItems: Int, settings: PRFollowThroughSettings
+        from watch: PRWatch, snapshot: PRSnapshot, openItems: Int, settings: PRFollowThroughSettings,
+        now: Int64 = .nowMillis
     ) -> PRWatchState? {
+        let state = watch.state
         guard [.watching, .readyToVerify, .verified].contains(state) else { return nil }
         let labeled = settings.markVerifiedLabel.map { label in
             snapshot.labels.contains { $0.caseInsensitiveCompare(label) == .orderedSame }
         } ?? false
         let ready = (!settings.requireApproval || approved(snapshot))
-            && checksGreen(snapshot.checksState)
+            && checksGreen(snapshot.checksState, headSeenAt: watch.headChangedAt ?? watch.createdAt, now: now)
             && openItems == 0
         let target: PRWatchState = labeled ? .verified : ready ? .readyToVerify : .watching
         return target == state ? nil : target
@@ -372,8 +377,10 @@ public enum PRWatchTransition {
         return decision == "APPROVED"
     }
 
-    /// A PR with no checks configured has no rollup, and nothing on it is failing.
-    static func checksGreen(_ rollup: String?) -> Bool {
-        rollup == nil || rollup == "SUCCESS"
+    /// No checks state means nothing is required and nothing has reported, which is green only once
+    /// CI has had the grace period to register a check on this head (SPEC §13.1).
+    static func checksGreen(_ checks: String?, headSeenAt: Int64, now: Int64) -> Bool {
+        guard let checks else { return now - headSeenAt >= checksGraceMillis }
+        return checks == "SUCCESS"
     }
 }

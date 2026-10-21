@@ -48,14 +48,6 @@ final class NotificationRoutingMountTests: XCTestCase {
         }
 
         func close() { window.orderOut(nil) }
-
-        func settle(turns: Int = 80) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
     }
 
     private func register(_ db: AppDatabase, _ name: String) throws -> Project {
@@ -75,11 +67,11 @@ final class NotificationRoutingMountTests: XCTestCase {
         let router = NotificationRouter()
         let mount = Mount(db: db, supervisor: supervisor, router: router, collapse: collapse.state)
         defer { mount.close() }
-        mount.settle()
+        pumpBriefly(mount.window)
         XCTAssertEqual(supervisor.focusedProjects, [], "nothing is selected before the click")
 
         router.open(NotificationRoute(projectId: beta.id, subject: .approvals))
-        mount.settle(turns: 40)
+        pump(mount.window) { supervisor.focusedProjects.last == beta.id }
 
         XCTAssertEqual(
             supervisor.focusedProjects.last, beta.id,
@@ -115,16 +107,20 @@ final class NotificationRoutingMountTests: XCTestCase {
         let router = NotificationRouter()
         let mount = Mount(db: db, supervisor: supervisor, router: router, collapse: collapse.state)
         defer { mount.close() }
-        mount.settle()
+        pumpBriefly(mount.window)
 
         router.open(NotificationRoute(projectId: project.0.id, subject: .pullRequest(project.1.id)))
-        var rows: [Int?] = []
-        while rows.count < 40, rows.count < 5 || rows.last == nil || Set(rows.suffix(5)).count > 1 {
-            mount.settle(turns: 5)
-            rows.append(detailRows(mount))
+        var rows: Int?
+        var previous: Int? = -1
+        var agreed = 0
+        pump(mount.window) {
+            rows = detailRows(mount)
+            agreed = rows == previous ? agreed + 1 : 0
+            previous = rows
+            return agreed >= 5 && rows != nil
         }
         XCTAssertEqual(supervisor.focusedProjects.last, .some(nil), "the route must select Pull Requests through MainWindow.select")
-        return try XCTUnwrap(rows.last ?? nil, "no list mounted in the detail pane")
+        return try XCTUnwrap(rows, "no list mounted in the detail pane")
     }
 
     /// SPEC §13.4: a Ready to verify banner opens Pull Requests filtered to its project. Alpha holds
@@ -156,10 +152,10 @@ final class NotificationRoutingMountTests: XCTestCase {
         let router = NotificationRouter()
         let mount = Mount(db: db, supervisor: supervisor, router: router, collapse: collapse.state)
         defer { mount.close() }
-        mount.settle()
+        pumpBriefly(mount.window)
 
         router.open(NotificationRoute(projectId: "p-deleted", subject: .approvals))
-        mount.settle(turns: 40)
+        pumpBriefly(mount.window)
 
         XCTAssertEqual(supervisor.focusedProjects, [], "a route to a missing project must be dropped")
     }

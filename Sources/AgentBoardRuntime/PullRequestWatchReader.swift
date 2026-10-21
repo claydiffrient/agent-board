@@ -98,7 +98,18 @@ public struct PullRequestWatchReader: Sendable {
             pr\(number): pullRequest(number: \(number)) {
               number url title isDraft headRefName headRefOid baseRefName reviewDecision mergeable
               labels(first: 100) { nodes { name } }
-              commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+              baseRef {
+                refUpdateRule { requiredStatusCheckContexts }
+                rules(first: 100) {
+                  nodes { parameters { ... on RequiredStatusChecksParameters { requiredStatusChecks { context } } } }
+                }
+              }
+              commits(last: 1) {
+                nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
+                  ... on CheckRun { name status conclusion }
+                  ... on StatusContext { context state }
+                } } } } }
+              }
               reviewThreads(first: 100) {
                 nodes { id isResolved isOutdated comments(last: 1) { nodes { author { login } body url path line } } }
               }
@@ -183,11 +194,65 @@ public struct PullRequestWatchReader: Sendable {
             headRef: pr.headRefName, headOid: pr.headRefOid, baseRef: pr.baseRefName,
             reviewDecision: pr.reviewDecision,
             approvedBy: standing.approvedBy, changesRequestedBy: standing.changesRequestedBy,
-            checksState: pr.commits?.nodes.last?.commit.statusCheckRollup?.state,
+            checksState: checksState(of: pr),
             mergeable: pr.mergeable,
             labels: pr.labels?.nodes.map(\.name) ?? [],
             items: items
         )
+    }
+
+    /// SPEC §13.1: when the base branch requires checks only those count, and one that has not
+    /// reported is pending; otherwise every reported check and the rollup count. Failure, NEUTRAL
+    /// included, outweighs pending. Nil means nothing is required and nothing has reported.
+    private static func checksState(of pr: GraphQLResponse.PullRequest) -> String? {
+        let rollup = pr.commits?.nodes.last?.commit.statusCheckRollup
+        let reported = rollup?.contexts?.nodes.compactMap(\.check) ?? []
+        let required = Set(
+            (pr.baseRef?.refUpdateRule?.requiredStatusCheckContexts ?? [])
+                + (pr.baseRef?.rules?.nodes ?? []).flatMap { $0.parameters?.requiredStatusChecks ?? [] }.map(\.context)
+        )
+        let outcomes: [CheckOutcome]
+        if required.isEmpty {
+            guard let rollup else { return nil }
+            outcomes = reported.map(\.outcome) + [CheckOutcome(state: rollup.state)]
+        } else {
+            let byName = Dictionary(grouping: reported, by: \.name)
+            outcomes = required.map { byName[$0]?.map(\.outcome).max() ?? .pending }
+        }
+        return (outcomes.max() ?? .success).rawValue
+    }
+}
+
+private enum CheckOutcome: String, Comparable {
+    case success = "SUCCESS"
+    case pending = "PENDING"
+    case failure = "FAILURE"
+
+    private var rank: Int {
+        switch self {
+        case .success: 0
+        case .pending: 1
+        case .failure: 2
+        }
+    }
+
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rank < rhs.rank }
+
+    /// A commit status or rollup state.
+    init(state: String) {
+        switch state {
+        case "SUCCESS": self = .success
+        case "PENDING", "EXPECTED": self = .pending
+        default: self = .failure
+        }
+    }
+
+    init(status: String?, conclusion: String?) {
+        guard status == "COMPLETED", let conclusion else {
+            self = .pending
+            return
+        }
+        self = conclusion == "SUCCESS" || conclusion == "SKIPPED" ? .success : .failure
     }
 }
 
@@ -245,7 +310,36 @@ private struct GraphQLResponse: Decodable {
     struct Author: Decodable { let login: String }
     struct Nodes<T: Decodable>: Decodable { let nodes: [T] }
     struct Label: Decodable { let name: String }
-    struct Rollup: Decodable { let state: String }
+    struct Rollup: Decodable {
+        let state: String
+        let contexts: Nodes<CheckContext>?
+    }
+
+    /// A CheckRun carries name, status and conclusion; a StatusContext carries context and state.
+    struct CheckContext: Decodable {
+        let name: String?
+        let status: String?
+        let conclusion: String?
+        let context: String?
+        let state: String?
+
+        var check: (name: String, outcome: CheckOutcome)? {
+            if let name { return (name, CheckOutcome(status: status, conclusion: conclusion)) }
+            if let context, let state { return (context, CheckOutcome(state: state)) }
+            return nil
+        }
+    }
+
+    struct RefUpdateRule: Decodable { let requiredStatusCheckContexts: [String]? }
+    struct RequiredCheck: Decodable { let context: String }
+    struct RuleParameters: Decodable { let requiredStatusChecks: [RequiredCheck]? }
+    struct Rule: Decodable { let parameters: RuleParameters? }
+
+    struct BaseRef: Decodable {
+        let refUpdateRule: RefUpdateRule?
+        let rules: Nodes<Rule>?
+    }
+
     struct Commit: Decodable { let statusCheckRollup: Rollup? }
     struct CommitNode: Decodable { let commit: Commit }
 
@@ -289,6 +383,7 @@ private struct GraphQLResponse: Decodable {
         let headRefName: String
         let headRefOid: String
         let baseRefName: String
+        let baseRef: BaseRef?
         let reviewDecision: String?
         let mergeable: String?
         let labels: Nodes<Label>?

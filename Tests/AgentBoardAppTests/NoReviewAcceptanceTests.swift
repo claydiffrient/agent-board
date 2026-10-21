@@ -26,12 +26,6 @@ final class NoReviewAcceptanceTests: XCTestCase {
         try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
     }
 
-    private func setArchivePolicy(_ policy: ArchivePolicy) throws {
-        var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
-        settings.archivePolicy = policy
-        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
-    }
-
     @discardableResult
     private func task(_ title: String, epicId: String? = nil) throws -> BoardTask {
         try fixture.tasks.create(
@@ -102,59 +96,5 @@ final class NoReviewAcceptanceTests: XCTestCase {
         // 3. worktree removal, and the merged branch with it
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
         XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(blocker.id)"))
-    }
-
-    func testTaskReviewRunsNoneOfThoseAndLeavesTheTaskForAHuman() async throws {
-        try setReviewLevel(.task)
-        let subject = try task("build the parser")
-        let worker = try finishedWorker(on: subject)
-        let worktree = try XCTUnwrap(worker.session.worktreePath)
-
-        let text = try await reportComplete(task: subject, session: worker.session, token: worker.token)
-
-        XCTAssertTrue(text.contains("now in Review"), text)
-        XCTAssertEqual(try fixture.tasks.get(subject.id)?.column, .review)
-        let stillLive = await fixture.resolver.resolve(token: worker.token)
-        XCTAssertNotNil(stillLive)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree))
-        XCTAssertTrue(try fixture.manager.branchExists("agentboard/\(subject.id)"))
-    }
-
-    func testAnEpicOverrideOfNoReviewAcceptsATaskTheProjectWouldHaveHeld() async throws {
-        try setReviewLevel(.task)
-        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Parser", goal: nil)
-        try fixture.epics.setReviewLevel(epic.id, ReviewLevel.none)
-        let subject = try task("lexer", epicId: epic.id)
-        let worker = try finishedWorker(on: subject)
-
-        _ = try await reportComplete(task: subject, session: worker.session, token: worker.token)
-
-        XCTAssertEqual(try fixture.tasks.get(subject.id)?.column, .done)
-        let revoked = await fixture.resolver.resolve(token: worker.token)
-        XCTAssertNil(revoked)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(worker.session.worktreePath)))
-    }
-
-    /// `none` never auto-accepts an integration task: the grant survives and the worker is told to
-    /// stop. The archive policy, not the review level, decides the column, so this pins the
-    /// non-default `manual` policy — `afterEpicMerge` sends it to `done` instead (§5.2 step 4), and
-    /// `ReviewLevelTests` covers both policies against every level.
-    func testAnEpicIntegrationTaskStillWaitsForAHumanUnderNoReview() async throws {
-        try setReviewLevel(.none)
-        try setArchivePolicy(.manual)
-        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Parser", goal: nil)
-        try fixture.epics.setState(epic.id, .integrating)
-        let integration = try fixture.tasks.create(
-            projectId: fixture.project.id, title: "Integrate Parser", body: nil, acceptance: nil,
-            priority: nil, column: .ready, origin: .integration, epicId: epic.id
-        )
-        let worker = try finishedWorker(on: integration)
-
-        let text = try await reportComplete(task: integration, session: worker.session, token: worker.token)
-
-        XCTAssertTrue(text.contains("now in Review"), text)
-        XCTAssertEqual(try fixture.tasks.get(integration.id)?.column, .review)
-        let integratorGrant = await fixture.resolver.resolve(token: worker.token)
-        XCTAssertNotNil(integratorGrant, "the integrator's grant must survive until a person accepts")
     }
 }

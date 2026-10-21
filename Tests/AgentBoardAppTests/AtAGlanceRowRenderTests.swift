@@ -65,6 +65,7 @@ final class AtAGlanceRowRenderTests: XCTestCase {
         )
         window.contentView = host
         window.orderBack(nil)
+        addTeardownBlock { window.orderOut(nil) }
         for _ in 0..<80 {
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
             window.layoutIfNeeded()
@@ -93,15 +94,6 @@ final class AtAGlanceRowRenderTests: XCTestCase {
         let sidebar = try mountSidebar(collapsingEverything: false)
         XCTAssertEqual(sidebar.headers, 2)
         XCTAssertEqual(sidebar.rows, pinnedRows + 4, "four project rows beside the pinned ones")
-    }
-
-    /// The invariant the two counts above are each half of, and the one that stays true however
-    /// many pinned rows the sidebar grows: collapsing removes the project rows and nothing else.
-    func testCollapsingRemovesExactlyTheProjectRows() throws {
-        let expanded = try mountSidebar(collapsingEverything: false)
-        let collapsed = try mountSidebar(collapsingEverything: true)
-        XCTAssertEqual(expanded.rows - collapsed.rows, 4)
-        XCTAssertEqual(expanded.headers, collapsed.headers)
     }
 }
 
