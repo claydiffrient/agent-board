@@ -16,12 +16,8 @@ final class WorktreeManagerTests: XCTestCase {
         repo = sandbox.appendingPathComponent("repo")
         worktrees = sandbox.appendingPathComponent("worktrees")
         hookSettings = sandbox.appendingPathComponent("settings.json")
-        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-
-        try git(["init", "-q", "-b", "main"], cwd: repo)
-        try "hello\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
-        try git(["add", "."], cwd: repo)
-        try commit("Initial commit", cwd: repo)
+        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: Self.repoTemplate, to: repo)
 
         manager = WorktreeManager(
             repoPath: repo, worktreeRoot: worktrees, hookSettingsURL: hookSettings,
@@ -31,6 +27,33 @@ final class WorktreeManagerTests: XCTestCase {
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: sandbox)
+    }
+
+    /// Built once per `swift test` process and copied into place for every test, rather than paying
+    /// `git init`/`add`/`commit` per test. `copyItem` relocates cleanly: nothing here sets an
+    /// absolute path inside `.git`.
+    private static let repoTemplate: URL = {
+        let template = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agent-board-wt-template-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: template, withIntermediateDirectories: true)
+        try! templateGit(["init", "-q", "-b", "main"], cwd: template)
+        try! "hello\n".write(to: template.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try! templateGit(["add", "."], cwd: template)
+        try! templateGit(
+            ["-c", "user.email=test@example.com", "-c", "user.name=Test", "-c", "commit.gpgsign=false",
+             "commit", "-q", "-m", "Initial commit"],
+            cwd: template
+        )
+        return template
+    }()
+
+    @discardableResult
+    private static func templateGit(_ args: [String], cwd: URL) throws -> String {
+        let result = try ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/git"), arguments: args, cwd: cwd)
+        guard result.status == 0 else {
+            throw AgentRuntimeError("git \(args) failed: \(result.stderr)")
+        }
+        return result.stdout
     }
 
     @discardableResult

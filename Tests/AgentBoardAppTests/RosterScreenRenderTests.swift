@@ -17,14 +17,6 @@ final class RosterScreenRenderTests: XCTestCase {
         let window: NSWindow
         let host: NSView
 
-        func settle(turns: Int = 40) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
-
         func collect<V: NSView>(_ type: V.Type) -> [V] {
             var found: [V] = []
             func walk(_ view: NSView) {
@@ -45,6 +37,7 @@ final class RosterScreenRenderTests: XCTestCase {
         )
         window.contentView = host
         window.orderFront(nil)
+        addTeardownBlock { window.orderOut(nil) }
         return Mounted(window: window, host: host)
     }
 
@@ -71,7 +64,7 @@ final class RosterScreenRenderTests: XCTestCase {
         try roster.create(name: "Bee", role: "reviewer", systemPrompt: "p", enabled: false)
 
         let mounted = mount(RosterView().environment(environment(db)))
-        mounted.settle()
+        pump(mounted.window) { mounted.collect(NSSwitch.self).count == 2 }
 
         let switches = mounted.collect(NSSwitch.self)
         XCTAssertEqual(switches.count, 2, "one enabled switch per rostered agent")
@@ -87,7 +80,7 @@ final class RosterScreenRenderTests: XCTestCase {
         try roster.create(name: "Bee", role: "reviewer", systemPrompt: "p")
 
         let mounted = mount(RosterView().environment(environment(db)))
-        mounted.settle()
+        pump(mounted.window) { mounted.collect(NSSwitch.self).count == 2 }
 
         XCTAssertEqual(
             mounted.collect(NSSwitch.self).map(\.state), [.on, .off],
@@ -115,7 +108,7 @@ final class RosterScreenRenderTests: XCTestCase {
         )
 
         let mounted = mount(RosterView().environment(env))
-        mounted.settle()
+        pump(mounted.window) { mounted.collect(NSSwitch.self).count == 3 }
 
         XCTAssertEqual(mounted.collect(NSSwitch.self).count, 3, "one board-local row and one per definition file")
     }
@@ -123,7 +116,7 @@ final class RosterScreenRenderTests: XCTestCase {
     func testAnEmptyRosterRendersNoSwitches() throws {
         let (db, _) = try board()
         let mounted = mount(RosterView().environment(environment(db)))
-        mounted.settle()
+        pumpBriefly(mounted.window)
 
         XCTAssertTrue(mounted.collect(NSSwitch.self).isEmpty)
     }
@@ -137,12 +130,14 @@ final class RosterScreenRenderTests: XCTestCase {
         XCTAssertNotEqual(SidebarSelection.roster, SidebarSelection.project("p-1"))
     }
 
-    private func sheetSwitches(_ db: AppDatabase, _ project: Project) -> [NSControl.StateValue] {
+    private func sheetSwitches(
+        _ db: AppDatabase, _ project: Project, expecting count: Int
+    ) -> [NSControl.StateValue] {
         let mounted = mount(
             ProjectSettingsSheet(project: project, workspaces: [], initialTab: .agents, onDeleted: {})
                 .environment(environment(db))
         )
-        mounted.settle()
+        pump(mounted.window) { mounted.collect(NSSwitch.self).count == count }
         return mounted.collect(NSSwitch.self).map(\.state)
     }
 
@@ -151,14 +146,14 @@ final class RosterScreenRenderTests: XCTestCase {
     /// one the project opted into must be the one that is on.
     func testTheProjectSettingsSheetGrowsOneTogglePerRosteredAgentSetFromTheProjectsOptIn() throws {
         let (db, project) = try board()
-        let bare = sheetSwitches(db, project)
+        let bare = sheetSwitches(db, project, expecting: 1)
 
         let roster = RosterStore(db)
         let ada = try roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
         try roster.create(name: "Bee", role: "reviewer", systemPrompt: "p")
         try roster.enable(agentId: ada.id, forProject: project.id)
 
-        let withRoster = sheetSwitches(db, project)
+        let withRoster = sheetSwitches(db, project, expecting: bare.count + 2)
         XCTAssertEqual(
             withRoster.count, bare.count + 2,
             "two rostered agents should add two toggles; bare \(bare.count), with roster \(withRoster.count)"
@@ -185,11 +180,13 @@ final class RosterScreenRenderTests: XCTestCase {
         let ada = try roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
         try roster.enable(agentId: ada.id, forProject: project.id)
 
-        let bareOther = sheetSwitches(db, other)
+        // Ada already exists in the roster, so her row still renders here — off, since "other" never
+        // enabled her — alongside autonomy: 2 switches, not 1.
+        let bareOther = sheetSwitches(db, other, expecting: 2)
         XCTAssertEqual(try roster.agents(forProject: other.id).count, 0)
         XCTAssertEqual(
             bareOther.filter { $0 == .on }.count,
-            sheetSwitches(db, project).filter { $0 == .on }.count - 1,
+            sheetSwitches(db, project, expecting: 2).filter { $0 == .on }.count - 1,
             "the other project should be short exactly the one agent this project opted into"
         )
     }

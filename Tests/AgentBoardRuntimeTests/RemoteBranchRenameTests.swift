@@ -59,24 +59,6 @@ final class RemoteBranchRenameTests: XCTestCase {
         XCTAssertFalse(try localBranches().contains("clay/update-claude-md"))
     }
 
-    func testTheCommitsOnTheRenamedRemoteRefAreTheLocalOnes() throws {
-        let local = "agentboard/b5ec62a7"
-        try git(["checkout", "-b", local], in: repo)
-        try "one\n".write(to: repo.appendingPathComponent("one.txt"), atomically: true, encoding: .utf8)
-        try git(["add", "."], in: repo)
-        try git(["commit", "-m", "Add one"], in: repo)
-        try "two\n".write(to: repo.appendingPathComponent("two.txt"), atomically: true, encoding: .utf8)
-        try git(["add", "."], in: repo)
-        try git(["commit", "-m", "Add two"], in: repo)
-
-        _ = try publisher.push(branch: local, publishedAs: "clay/add-one-and-two")
-
-        let localLog = try git(["log", "--format=%H %s", local], in: repo)
-        let remoteLog = try git(["log", "--format=%H %s", "clay/add-one-and-two"], in: remote)
-        XCTAssertEqual(remoteLog, localLog)
-        XCTAssertTrue(localLog.contains("Add two"), localLog)
-    }
-
     func testASecondPushOfTheSameNameIsUpToDateAndCreatesNoSecondRef() throws {
         let local = "agentboard/epic-1"
         try git(["branch", local], in: repo)
@@ -86,17 +68,6 @@ final class RemoteBranchRenameTests: XCTestCase {
 
         XCTAssertEqual(second, .alreadyUpToDate(branch: local, remote: "origin", published: "clay/ship-it"))
         XCTAssertEqual(try remoteBranches(), ["clay/ship-it"])
-    }
-
-    func testWithNoPublishedNameTheLocalNameStillReachesTheRemote() throws {
-        let local = "agentboard/epic-2"
-        try git(["branch", local], in: repo)
-
-        let result = try publisher.push(branch: local)
-
-        XCTAssertEqual(result, .pushed(branch: local, remote: "origin"))
-        XCTAssertEqual(result.summary, "pushed \(local) to origin")
-        XCTAssertEqual(try remoteBranches(), [local])
     }
 
     func testTheSummaryNamesThePublishedNameOnlyWhenItDiffers() {

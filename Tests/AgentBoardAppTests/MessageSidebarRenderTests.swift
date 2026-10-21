@@ -39,15 +39,8 @@ final class MessageSidebarRenderTests: XCTestCase {
         )
         window.contentView = host
         window.orderBack(nil)
+        addTeardownBlock { window.orderOut(nil) }
         return Mounted(window: window, host: host)
-    }
-
-    private func settle(_ mounted: Mounted, turns: Int = 80) {
-        for _ in 0..<turns {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-            mounted.window.layoutIfNeeded()
-            mounted.window.displayIfNeeded()
-        }
     }
 
     private func counts(_ mounted: Mounted) -> [String: Int] {
@@ -77,7 +70,7 @@ final class MessageSidebarRenderTests: XCTestCase {
     func testTheSidebarGainsAMessagesSectionWithAPlaceholderWhenThereIsNoTraffic() throws {
         let (db, alpha, _) = try projects()
         let mounted = mount(db, alpha)
-        settle(mounted)
+        pump(mounted.window) { counts(mounted)["ListTableCellView"] == 5 }
 
         let counts = counts(mounted)
         XCTAssertEqual(
@@ -98,7 +91,7 @@ final class MessageSidebarRenderTests: XCTestCase {
         )
 
         let mounted = mount(db, alpha)
-        settle(mounted)
+        pump(mounted.window) { counts(mounted)["ListTableCellView"] == 6 }
 
         XCTAssertEqual(
             counts(mounted)["ListTableCellView"], 6,
@@ -114,7 +107,7 @@ final class MessageSidebarRenderTests: XCTestCase {
     func testMessagesSentAfterTheMountReachTheListWithoutPolling() throws {
         let (db, alpha, beta) = try projects()
         let mounted = mount(db, alpha)
-        settle(mounted)
+        pump(mounted.window) { counts(mounted)["ListTableCellView"] == 5 }
         XCTAssertEqual(counts(mounted)["ListTableCellView"], 5, "five empty-state rows, nothing else")
 
         let messages = MessageStore(db)
@@ -124,7 +117,7 @@ final class MessageSidebarRenderTests: XCTestCase {
         try messages.send(
             fromProjectId: alpha.id, fromSessionId: nil, toProjectId: beta.id, body: "and a reply"
         )
-        settle(mounted, turns: 60)
+        pump(mounted.window) { counts(mounted)["ListTableCellView"] == 6 }
 
         XCTAssertEqual(
             counts(mounted)["ListTableCellView"], 6,
