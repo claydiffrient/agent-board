@@ -669,6 +669,21 @@ commits from different tasks interleave on one ref, to say afterwards which
 task made which commit, since the branch name can no longer carry that the way
 `agentboard/<task-id>` does.
 
+`hook_event` is a raw log of every hook payload, one row per `PostToolUse`
+among them, so it is pruned rather than kept. The archive sweep's tick
+(`HookEventStore.prune`, every 5 minutes) deletes a row once it is more than 14
+days old (`HookEventStore.retentionMillis`, wall clock, measured from the row's
+own `at`) — unless its `session_id` names an `agent_session` in an active state
+(`setup`, `starting`, `running`, `idle`, `blocked`, `waiting_on_lock`), whose
+rows are kept regardless of age. A row with no session, or one whose session
+has no `agent_session` row, ages out the same as an ended session's. The
+retention is a constant, not a setting. Nothing reads an ended session's rows:
+the table's only readers are spawn's replay of hooks that beat the session row
+(§3.1 step 8), the `PreCompact` trigger lookup when a compacted session restarts
+(§7), and the E2E harness, all of them about a live session. Attention, Status,
+`last_tool`, transcripts and reports read `agent_session`, `progress`,
+`report` or the transcript file, never `hook_event`.
+
 ### 4.1 Opening the database: newer-build refusal and launch backups
 
 The database is `agentboard.sqlite` in the app support directory, or
