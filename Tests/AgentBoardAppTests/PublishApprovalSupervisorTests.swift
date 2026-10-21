@@ -106,6 +106,35 @@ final class PublishApprovalSupervisorTests: XCTestCase {
         XCTAssertTrue(entry.text.contains("no git remote"), entry.text)
     }
 
+    func testAGitFailureReadingTheRemoteIsReportedInGitsWordsNotAsNoRemote() async throws {
+        try addRemote()
+        let task = try TaskStore(fixture.db).create(
+            projectId: fixture.project.id, title: "t", body: nil, acceptance: nil, priority: nil,
+            column: .review, origin: .human, epicId: nil
+        )
+        try SupervisorFixture.git(["branch", "agentboard/\(task.id)"], cwd: fixture.repo)
+        let approval = try pushApproval(branch: "agentboard/\(task.id)", taskId: task.id)
+        try fixture.breakOriginConfig()
+
+        do {
+            try await fixture.supervisor.approve(approvalId: approval.id)
+            XCTFail("expected the push to fail on an unreadable remote")
+        } catch {
+            guard case .gitFailed(_, _, let status, let stderr)? = error as? PublishFailure else {
+                return XCTFail("expected gitFailed, got \(error)")
+            }
+            XCTAssertEqual(status, 128)
+            XCTAssertTrue(stderr.contains("remote.origin.url"), stderr)
+        }
+
+        let entry = try XCTUnwrap(ProgressStore(fixture.db).latest(taskId: task.id))
+        XCTAssertEqual(entry.kind, .error)
+        XCTAssertTrue(entry.text.contains("exited 128") && entry.text.contains("remote.origin.url"), entry.text)
+        let bodies = try ReportStore(fixture.db).unconsumed(projectId: fixture.project.id).map(\.body)
+        XCTAssertTrue(bodies.contains { $0.contains("remote.origin.url") }, "\(bodies)")
+        XCTAssertTrue(try remoteBranches().isEmpty)
+    }
+
     func testAPushWhoseCommitMessageNamesAPrivateTermIsRefusedAndRecordedAsFailed() async throws {
         try addRemote()
         var settings = fixture.project.settings

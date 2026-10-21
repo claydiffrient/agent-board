@@ -5,6 +5,8 @@ import Foundation
 /// reaches the orchestrator as a generic failure it has to spend a round trip diagnosing.
 public enum PublishFailure: Error, CustomStringConvertible, Equatable, Sendable {
     case noRemote(name: String, repoPath: String)
+    /// Git itself failed, so whatever it was asked stays unknown; `stderr` is git's own words.
+    case gitFailed(command: String, repoPath: String, status: Int32, stderr: String)
     case ghMissing
     case ghNotAuthenticated(detail: String)
     case noSuchBranch(String)
@@ -19,6 +21,9 @@ public enum PublishFailure: Error, CustomStringConvertible, Equatable, Sendable 
         case .noRemote(let name, let repoPath):
             return "This project has no git remote named \"\(name)\". \(repoPath) is local-only, "
                 + "so there is nowhere to push. Add a remote and try again."
+        case .gitFailed(let command, let repoPath, let status, let stderr):
+            return "`git \(command)` exited \(status) in \(repoPath): "
+                + (stderr.isEmpty ? "git wrote nothing to stderr." : stderr)
         case .ghMissing:
             return "The GitHub CLI (`gh`) is not installed, so Agent Board cannot open a pull request. "
                 + "Install it with `brew install gh`."
@@ -166,29 +171,33 @@ public struct BranchPublisher: Sendable {
 
     // MARK: Preconditions
 
+    /// `noRemote` only when git says the remote is not configured (exit 2, "No such remote") or
+    /// prints an empty URL; any other failure is `gitFailed`.
     @discardableResult
     public func requireRemote(_ remote: String = "origin") throws -> String {
-        let result = try git(PublishCommand.remoteURL(remote))
+        let arguments = PublishCommand.remoteURL(remote)
+        let result = try git(arguments)
         let url = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard result.status == 0, !url.isEmpty else {
-            throw PublishFailure.noRemote(name: remote, repoPath: repoPath.path)
+        if result.status == 0, !url.isEmpty { return url }
+        guard result.status == 0 || (result.status == 2 && result.stderr.contains("No such remote")) else {
+            throw gitFailure(arguments, result)
         }
-        return url
+        throw PublishFailure.noRemote(name: remote, repoPath: repoPath.path)
     }
 
-    /// SPEC §5: what a project with no stored choice integrates standalone tasks by. Anything that
-    /// stops `origin` being read — no remote, no repository, no git — means local merge.
-    public func defaultStandaloneIntegration() -> StandaloneIntegration {
-        (try? requireRemote()) == nil ? .localMerge : .pullRequest
-    }
-
-    public func standaloneIntegration(_ settings: ProjectSettings) -> StandaloneIntegration {
-        settings.standaloneIntegration ?? defaultStandaloneIntegration()
+    /// SPEC §5: what a project with no stored choice integrates standalone tasks by. Only an
+    /// `origin` git reports as absent means local merge; any other failure to read it throws.
+    public func defaultStandaloneIntegration() throws -> StandaloneIntegration {
+        do {
+            try requireRemote()
+            return .pullRequest
+        } catch PublishFailure.noRemote {
+            return .localMerge
+        }
     }
 
     public func requireBranch(_ branch: String) throws {
-        let result = try git(PublishCommand.branchExists(branch))
-        guard result.status == 0 else { throw PublishFailure.noSuchBranch(branch) }
+        guard try refExists(PublishCommand.branchExists(branch)) else { throw PublishFailure.noSuchBranch(branch) }
     }
 
     /// `gh` present on disk and logged in, as two separate answers.
@@ -215,7 +224,7 @@ public struct BranchPublisher: Sendable {
             return
         }
         let remoteBase = base.map { "refs/remotes/\(remote)/\($0)" }
-        let exclude = try remoteBase.flatMap { try git(PublishCommand.refExists($0)).status == 0 ? $0 : nil }
+        let exclude = try remoteBase.flatMap { try refExists(PublishCommand.refExists($0)) ? $0 : nil }
         let outgoing = OutgoingPublish(
             publishedBranch: publishedAs ?? branch,
             title: title,
@@ -296,6 +305,21 @@ public struct BranchPublisher: Sendable {
 
     private func git(_ arguments: [String]) throws -> CommandResult {
         try ProcessRunner.run(executable: gitURL, arguments: arguments, cwd: repoPath)
+    }
+
+    /// `rev-parse --verify --quiet` exits 1 for a ref that is not there; any other failure is git's.
+    private func refExists(_ arguments: [String]) throws -> Bool {
+        let result = try git(arguments)
+        if result.status == 1 { return false }
+        guard result.status == 0 else { throw gitFailure(arguments, result) }
+        return true
+    }
+
+    private func gitFailure(_ arguments: [String], _ result: CommandResult) -> PublishFailure {
+        .gitFailed(
+            command: arguments.joined(separator: " "), repoPath: repoPath.path, status: result.status,
+            stderr: result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
     }
 
     private func checked(_ arguments: [String]) throws -> String {
