@@ -176,6 +176,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var resuming: Set<String> = []
     /// When a human last opened a terminal on each session. `claude attach` resumes a stopped one.
     @ObservationIgnored private var attachRequestedAt: [String: Int64] = [:]
+    /// The last integration each project's `origin` resolved to, kept for when git fails to read it.
+    @ObservationIgnored private var integrationDefaults: [String: StandaloneIntegration] = [:]
 
     nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
@@ -787,6 +789,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
         }
+        let shipsByPullRequest = try await standaloneIntegration(of: project) == .pullRequest
 
         let manager = worktreeManager(for: project)
         let worktreeName = HeldWorktree.epicWorktreeName(epicId: epicId)
@@ -822,9 +825,6 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             )
         }
         let branches = IntegrationPlan.classify(ordered, facts: facts)
-        let settings = project.settings
-        let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
-        let shipsByPullRequest = (try? await offMain { publisher.standaloneIntegration(settings) }) == .pullRequest
 
         let task = try board.createIntegrationTask(epicId: epicId)
         var assigned: AgentSession?
@@ -1169,6 +1169,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    /// SPEC §5: the stored choice, else what `origin` resolves to. A git failure keeps this project's
+    /// last resolved answer and, with none, throws rather than guess local merge.
+    private func standaloneIntegration(of project: Project) async throws -> StandaloneIntegration {
+        if let stored = project.settings.standaloneIntegration { return stored }
+        let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
+        do {
+            let resolved = try await offMain { try publisher.defaultStandaloneIntegration() }
+            integrationDefaults[project.id] = resolved
+            return resolved
+        } catch {
+            guard let previous = integrationDefaults[project.id] else { throw error }
+            return previous
+        }
+    }
+
     private func mergeTaskBranch(task: BoardTask, epic: Epic?, project: Project, into target: String) async {
         let manager = worktreeManager(for: project)
         let taskBranch = Self.taskBranchPrefix + task.id
@@ -1178,9 +1193,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let epicBranch = epic?.branch
         var byPullRequest = false
         if epic == nil {
-            let settings = project.settings
-            let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
-            byPullRequest = (try? await offMain { publisher.standaloneIntegration(settings) }) == .pullRequest
+            do {
+                byPullRequest = try await standaloneIntegration(of: project) == .pullRequest
+            } catch {
+                recordLanding(
+                    task: task, epic: epic, landing: .unlanded,
+                    detail: "`\(taskBranch)` was not merged into `\(target)`: Agent Board could not read the "
+                        + "project's origin remote to choose between pull request and local merge. \(describe(error))",
+                    advice: "Merge `\(taskBranch)` into `\(target)` by hand or open a pull request for it, and "
+                        + "choose an integration in the project's Publishing settings so the next accept need not ask git."
+                )
+                return
+            }
         }
         let outcome: BranchMerge?
         do {

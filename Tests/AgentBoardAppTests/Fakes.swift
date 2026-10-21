@@ -280,6 +280,15 @@ struct SupervisorFixture {
         try ProjectStore(db).updateSettings(project.id, settings)
     }
 
+    /// A valueless `remote.origin.url`: `git remote get-url origin` exits 128 on it while refs,
+    /// merges, status and worktrees still work — origin configured, but unreadable.
+    func breakOriginConfig() throws {
+        let config = try FileHandle(forWritingTo: repo.appendingPathComponent(".git/config"))
+        defer { try? config.close() }
+        try config.seekToEnd()
+        try config.write(contentsOf: Data("[remote \"origin\"]\n\turl\n".utf8))
+    }
+
     /// A second supervisor over the same database and support directory: what the next launch of
     /// the app builds, with everything the previous one wrote still on disk and in the tables.
     func relaunchedSupervisor() -> WorkerSupervisor {

@@ -291,7 +291,7 @@ struct ProjectSettingsSheet: View {
             .task {
                 let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
                 integrationDefault = await _Concurrency.Task.detached {
-                    publisher.defaultStandaloneIntegration()
+                    try? publisher.defaultStandaloneIntegration()
                 }.value
             }
             TextField("Remote branch name", text: Binding(

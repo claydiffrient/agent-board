@@ -214,9 +214,13 @@ public struct WorktreeManager: Sendable {
         try git(["branch", name, base])
     }
 
+    /// Exit 1 is the only "absent"; any other failure throws with git's stderr.
     public func branchExists(_ name: String) throws -> Bool {
-        let result = try gitRaw(["rev-parse", "--verify", "--quiet", "refs/heads/\(name)"], cwd: repoPath)
-        return result.status == 0
+        let args = ["rev-parse", "--verify", "--quiet", "refs/heads/\(name)"]
+        let result = try gitRaw(args, cwd: repoPath)
+        if result.status == 1 { return false }
+        guard result.status == 0 else { throw AgentRuntimeError(Self.failure(args, result)) }
+        return true
     }
 
     /// What `merge` settles without writing anything — no task branch, no target, or the work is
