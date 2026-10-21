@@ -102,21 +102,24 @@ public enum PublishCommand {
         ["rev-parse", "--verify", "--quiet", "\(ref)^{commit}"]
     }
 
-    public static let emptyTree = ["hash-object", "-t", "tree", "/dev/null"]
-
     /// Every message on `branch` that `exclude` lacks; a nil `exclude` means the branch's whole history.
     public static func commitMessages(branch: String, exclude: String?) -> [String] {
-        ["log", "-z", "--format=%B", exclude.map { "\($0)..refs/heads/\(branch)" } ?? "refs/heads/\(branch)"]
+        ["log", "-z", "--format=%B", range(branch: branch, exclude: exclude)]
     }
 
-    /// `since` is a ref (diffed from its merge base with the branch) or, with `fromTree`, a tree.
-    public static func diff(branch: String, since: String, fromTree: Bool, nameOnly: Bool) -> [String] {
-        let range = fromTree ? [since, "refs/heads/\(branch)"] : ["\(since)...refs/heads/\(branch)"]
-        let shape = nameOnly
-            ? ["--name-only", "-z", "--diff-filter=d"]
-            : ["--src-prefix=a/", "--dst-prefix=b/"]
-        return ["-c", "core.quotepath=false", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"]
-            + shape + range + ["--"]
+    public static let commitMarker = "\u{1}"
+
+    /// The same commits as `commitMessages`, oldest first: each a `commitMarker` + subject line, then
+    /// its patch. `--text` puts binary files' contents in it, and a merge shows only what its author
+    /// changed beyond git's own merge result.
+    public static func commitPatches(branch: String, exclude: String?) -> [String] {
+        ["-c", "core.quotepath=false", "log", "-p", "--text", "--root", "--reverse", "--no-color", "--no-ext-diff",
+         "--no-textconv", "--no-renames", "--diff-filter=d", "--diff-merges=remerge",
+         "--src-prefix=a/", "--dst-prefix=b/", "--format=%x01%s", range(branch: branch, exclude: exclude), "--"]
+    }
+
+    private static func range(branch: String, exclude: String?) -> String {
+        exclude.map { "\($0)..refs/heads/\(branch)" } ?? "refs/heads/\(branch)"
     }
 
     public static func pullRequestCreate(base: String, head: String, title: String, body: String) -> [String] {
@@ -202,7 +205,7 @@ public struct BranchPublisher: Sendable {
     }
 
     /// SPEC §13.5: throws `privateTerm` when anything this publish would send names one of
-    /// `privateTerms`. What is sent is measured from `<remote>/<base>`; with no such ref, from the
+    /// `privateTerms`. What is sent is every commit `<remote>/<base>` lacks; with no such ref, the
     /// branch's whole history.
     public func refusePrivateTerms(
         branch: String, publishedAs: String? = nil, base: String?, remote: String = "origin",
@@ -213,16 +216,12 @@ public struct BranchPublisher: Sendable {
         }
         let remoteBase = base.map { "refs/remotes/\(remote)/\($0)" }
         let exclude = try remoteBase.flatMap { try git(PublishCommand.refExists($0)).status == 0 ? $0 : nil }
-        let since = try exclude ?? checked(PublishCommand.emptyTree).trimmingCharacters(in: .whitespacesAndNewlines)
-        let fromTree = exclude == nil
         let outgoing = OutgoingPublish(
             publishedBranch: publishedAs ?? branch,
             title: title,
             body: body,
             commitMessages: try checked(PublishCommand.commitMessages(branch: branch, exclude: exclude)),
-            changedPaths: try checked(PublishCommand.diff(branch: branch, since: since, fromTree: fromTree, nameOnly: true))
-                .split(separator: "\0").map(String.init),
-            diff: try checked(PublishCommand.diff(branch: branch, since: since, fromTree: fromTree, nameOnly: false))
+            commitPatches: try checked(PublishCommand.commitPatches(branch: branch, exclude: exclude))
         )
         if let match = PrivateTermGuard.firstMatch(terms: privateTerms, in: outgoing) {
             throw PublishFailure.privateTerm(term: match.term, site: match.site)

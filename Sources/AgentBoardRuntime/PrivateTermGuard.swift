@@ -2,7 +2,7 @@ import Foundation
 
 /// Where in an outgoing publish a private term was found.
 public enum PrivateTermSite: Sendable, Equatable, CustomStringConvertible {
-    case file(String)
+    case file(String, commit: String)
     case commit(subject: String)
     case branchName(String)
     case pullRequestTitle
@@ -10,7 +10,7 @@ public enum PrivateTermSite: Sendable, Equatable, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .file(let path): return "the diff of \(path)"
+        case .file(let path, let commit): return "\(path) in commit \"\(commit)\""
         case .commit(let subject): return "the message of commit \"\(subject)\""
         case .branchName(let name): return "the branch name \(name)"
         case .pullRequestTitle: return "the pull request title"
@@ -36,25 +36,24 @@ public struct OutgoingPublish: Sendable, Equatable {
     public var body: String?
     /// `git log -z --format=%B`: NUL-separated messages.
     public var commitMessages: String
-    public var changedPaths: [String]
-    public var diff: String
+    /// `PublishCommand.commitPatches`: each commit's subject line, then its patch.
+    public var commitPatches: String
 
     public init(
         publishedBranch: String, title: String? = nil, body: String? = nil,
-        commitMessages: String = "", changedPaths: [String] = [], diff: String = ""
+        commitMessages: String = "", commitPatches: String = ""
     ) {
         self.publishedBranch = publishedBranch
         self.title = title
         self.body = body
         self.commitMessages = commitMessages
-        self.changedPaths = changedPaths
-        self.diff = diff
+        self.commitPatches = commitPatches
     }
 }
 
 /// SPEC §13.5: the publish guard. A term matches as a case-insensitive substring; blank terms are
-/// dropped, since an empty one would match everything. Only added diff lines count, so a commit
-/// that removes a term is not refused for it.
+/// dropped, since an empty one would match everything. Only added lines count, so a commit that
+/// removes a term is not refused for it; NULs are dropped from them so UTF-16 text still matches.
 public enum PrivateTermGuard {
     public static func firstMatch(terms: [String], in outgoing: OutgoingPublish) -> PrivateTermMatch? {
         let terms = terms.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
@@ -69,8 +68,10 @@ public enum PrivateTermGuard {
             let subject = message.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
             candidates.append((message, .commit(subject: subject)))
         }
-        candidates += outgoing.changedPaths.map { ($0, .file($0)) }
-        candidates += addedLines(inDiff: outgoing.diff).map { ($0.text, .file($0.path)) }
+        for file in changedFiles(inLog: outgoing.commitPatches) {
+            let site = PrivateTermSite.file(file.path, commit: file.subject)
+            candidates += [(file.path, site), (file.added, site)]
+        }
 
         for candidate in candidates {
             if let term = terms.first(where: { candidate.text.range(of: $0, options: .caseInsensitive) != nil }) {
@@ -80,22 +81,68 @@ public enum PrivateTermGuard {
         return nil
     }
 
-    /// Each file's added lines, joined. Expects `--src-prefix=a/ --dst-prefix=b/`.
-    static func addedLines(inDiff diff: String) -> [(path: String, text: String)] {
-        var files: [(path: String, text: String)] = []
+    /// Each commit's files with their added lines joined. Expects `--src-prefix=a/ --dst-prefix=b/`
+    /// and `--no-renames`, so a `diff --git` header names one path twice. `\r\n` is one Swift
+    /// `Character`, so a CRLF file's lines split only when it is a separator too.
+    static func changedFiles(inLog log: String) -> [(subject: String, path: String, added: String)] {
+        var files: [(subject: String, path: String, added: String)] = []
+        var subject = ""
         var inHunk = false
-        for line in diff.split(separator: "\n", omittingEmptySubsequences: false) {
-            if line.hasPrefix("diff --git ") {
-                files.append((path: "", text: ""))
+        for line in log.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r\n" }) {
+            if line.hasPrefix(PublishCommand.commitMarker) {
+                subject = String(line.dropFirst(PublishCommand.commitMarker.count))
+                inHunk = false
+            } else if line.hasPrefix("diff --git ") {
+                files.append((subject, headerPath(line.dropFirst("diff --git ".count)), ""))
                 inHunk = false
             } else if line.hasPrefix("@@") {
                 inHunk = true
-            } else if !inHunk, line.hasPrefix("+++ b/"), !files.isEmpty {
-                files[files.count - 1].path = String(line.dropFirst("+++ b/".count))
             } else if inHunk, line.hasPrefix("+"), !files.isEmpty {
-                files[files.count - 1].text += line.dropFirst() + "\n"
+                files[files.count - 1].added += line.dropFirst().filter { $0 != "\0" } + "\n"
             }
         }
-        return files.filter { !$0.text.isEmpty }
+        return files
+    }
+
+    /// `a/P b/P`, or `"a/Q" "b/Q"` when git C-quotes the path.
+    static func headerPath(_ header: Substring) -> String {
+        let bytes = Array(header.utf8)
+        let second = bytes.suffix((bytes.count - 1) / 2)
+        guard second.first == UInt8(ascii: "\""), second.count >= 4 else {
+            return String(decoding: second.dropFirst(2), as: UTF8.self)
+        }
+        return unquoted(second.dropFirst(3).dropLast())
+    }
+
+    private static let escapes: [UInt8: UInt8] = [
+        UInt8(ascii: "a"): 0x07, UInt8(ascii: "b"): 0x08, UInt8(ascii: "t"): 0x09, UInt8(ascii: "n"): 0x0A,
+        UInt8(ascii: "v"): 0x0B, UInt8(ascii: "f"): 0x0C, UInt8(ascii: "r"): 0x0D,
+    ]
+
+    static func unquoted(_ quoted: ArraySlice<UInt8>) -> String {
+        var bytes: [UInt8] = []
+        var index = quoted.startIndex
+        while index < quoted.endIndex {
+            let byte = quoted[index]
+            index += 1
+            guard byte == UInt8(ascii: "\\"), index < quoted.endIndex else {
+                bytes.append(byte)
+                continue
+            }
+            let escape = quoted[index]
+            index += 1
+            if (UInt8(ascii: "0")...UInt8(ascii: "7")).contains(escape) {
+                var value = Int(escape - UInt8(ascii: "0"))
+                for _ in 0..<2 where index < quoted.endIndex
+                    && (UInt8(ascii: "0")...UInt8(ascii: "7")).contains(quoted[index]) {
+                    value = value * 8 + Int(quoted[index] - UInt8(ascii: "0"))
+                    index += 1
+                }
+                bytes.append(UInt8(truncatingIfNeeded: value))
+            } else {
+                bytes.append(escapes[escape] ?? escape)
+            }
+        }
+        return String(decoding: bytes, as: UTF8.self)
     }
 }
