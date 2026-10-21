@@ -241,6 +241,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// Nil until the human picks one; accept then uses `.pullRequest` when the repository has an
     /// `origin` remote and `.localMerge` otherwise (SPEC §5).
     public var standaloneIntegration: StandaloneIntegration? = nil
+    public var prFollowThrough: PRFollowThroughSettings = PRFollowThroughSettings()
 
     public init(
         caps: Caps = Caps(),
@@ -260,7 +261,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         sharedCheckoutMaxAgents: Int = 3,
         notifications: NotificationPreferences = NotificationPreferences(),
         remoteBranchTemplate: String? = nil,
-        standaloneIntegration: StandaloneIntegration? = nil
+        standaloneIntegration: StandaloneIntegration? = nil,
+        prFollowThrough: PRFollowThroughSettings = PRFollowThroughSettings()
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -280,6 +282,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.notifications = notifications
         self.remoteBranchTemplate = remoteBranchTemplate
         self.standaloneIntegration = standaloneIntegration
+        self.prFollowThrough = prFollowThrough
     }
 
     public init(from decoder: Decoder) throws {
@@ -311,6 +314,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
             ?? NotificationPreferences()
         remoteBranchTemplate = try c.decodeIfPresent(String.self, forKey: .remoteBranchTemplate)
         standaloneIntegration = try c.decodeIfPresent(StandaloneIntegration.self, forKey: .standaloneIntegration)
+        prFollowThrough = try c.decodeIfPresent(PRFollowThroughSettings.self, forKey: .prFollowThrough)
+            ?? PRFollowThroughSettings()
     }
 
     /// Settings written before the routing table named a single reviewer here; it decodes into the

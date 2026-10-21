@@ -216,6 +216,20 @@ final class PullRequestLandingTests: XCTestCase {
         XCTAssertEqual(try headOf("main"), mainBefore, "with an origin the accept must merge nothing")
     }
 
+    func testAnOriginGitCannotReadNeitherMergesLocallyNorHidesGitsError() async throws {
+        try fixture.git(["checkout", "-q", "--detach"], cwd: fixture.repo)
+        let task = try acceptableTask()
+        let mainBefore = try headOf("main")
+        try fixture.breakOriginConfig()
+
+        try await fixture.supervisor.accept(taskId: task.id)
+
+        let accepted = try reload(task)
+        XCTAssertEqual(accepted.landing, .unlanded)
+        XCTAssertTrue(try XCTUnwrap(accepted.landingDetail).contains("remote.origin.url"), accepted.landingDetail ?? "")
+        XCTAssertEqual(try headOf("main"), mainBefore, "a git failure fell back to local merge")
+    }
+
     private func acceptableTask() throws -> BoardTask {
         try acceptableTaskAndSession().task
     }

@@ -68,6 +68,25 @@ final class GlanceHeadlineTests: XCTestCase {
         XCTAssertEqual(text, "1 project needs you. Nothing running, nothing awaiting your review.")
         XCTAssertFalse(text.contains("nothing is waiting on you"))
     }
+
+    func testPullRequestsReadyToVerifyFollowTheReviewCountAndAddNothingAtZero() {
+        XCTAssertEqual(
+            GlanceHeadline.text(workingSessions: 0, tasksInReview: 0, projectsNeedingYou: 0, prsReadyToVerify: 0),
+            "Nothing running, and nothing is waiting on you."
+        )
+        XCTAssertEqual(
+            GlanceHeadline.text(workingSessions: 1, tasksInReview: 1, projectsNeedingYou: 0, prsReadyToVerify: 0),
+            "1 agent working, 1 task awaiting your review."
+        )
+        XCTAssertEqual(
+            GlanceHeadline.text(workingSessions: 0, tasksInReview: 0, projectsNeedingYou: 0, prsReadyToVerify: 1),
+            "Nothing running, nothing awaiting your review, 1 PR ready to verify."
+        )
+        XCTAssertEqual(
+            GlanceHeadline.text(workingSessions: 2, tasksInReview: 1, projectsNeedingYou: 1, prsReadyToVerify: 2),
+            "1 project needs you. 2 agents working, 1 task awaiting your review, 2 PRs ready to verify."
+        )
+    }
 }
 
 final class ProjectGlanceIdleTests: XCTestCase {
