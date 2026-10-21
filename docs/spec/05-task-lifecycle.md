@@ -352,7 +352,12 @@ worker commits, and it exists for a moment before `Board.assign` writes its
 before it creates it and clears the mark once the row is written or the spawn
 fails, and a reap keeps every marked path. Because a reap's list of active
 sessions predates its git scan, it rereads the active rows after the scan and
-before it removes anything. Anything dirty or unmerged is left alone and reported. A task branch
+before it removes anything. The other direction holds as well: a respawn
+reuses the task's worktree when it is still on disk, but not one a reap or
+teardown has already claimed for removal (§3.1). The spawn waits for that
+removal to finish and then creates a fresh worktree at the same path. It waits
+only on a claim for its own path, so it is never held up by removals of other
+worktrees. Anything dirty or unmerged is left alone and reported. A task branch
 cut moments ago sits exactly at its base, so it reads as merged until its
 worker's first commit, and the worktree check alone protects it. That check
 reads each worktree's `HEAD` (and an in-progress rebase's `head-name` or
