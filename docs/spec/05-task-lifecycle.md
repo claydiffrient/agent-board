@@ -331,7 +331,14 @@ nobody reviewed.
 
 Reconcile also reaps worktrees under the project's worktree root that no active
 session owns, and deletes merged `agentboard/*` branches that no longer have a
-worktree. Anything dirty or unmerged is left alone and reported. The teardown
+worktree. Anything dirty or unmerged is left alone and reported. A task branch
+cut moments ago sits exactly at its base, so it reads as merged until its
+worker's first commit, and the worktree check alone protects it. That check
+reads each worktree's `HEAD` (and an in-progress rebase's `head-name`) from
+git's own admin files and keeps the branch when any of them cannot be read:
+`git worktree list` exits 0 in that case while leaving the worktree, or its
+branch, out of the list, and a sweep that trusted it deleted a running task's
+branch. The delete itself is guarded by the tip that was checked. The teardown
 hook runs before each removal (§3.1); a failure goes on the progress of the
 task whose session held the worktree, in a `decision` report of its own, since
 no other report marks the removal. A kept orphan stays a status-bar notice:

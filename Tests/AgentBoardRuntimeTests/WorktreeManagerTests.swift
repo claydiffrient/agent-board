@@ -115,6 +115,29 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: second.appendingPathComponent("wip.txt").path))
     }
 
+    /// A task branch still at its base reads as merged, so only the holder check protects it, and
+    /// `git worktree list` drops the holder whenever it cannot read that worktree's admin files.
+    func testABranchAWorktreeHoldsIsKeptWhenGitCannotReadThatWorktree() throws {
+        for unreadable in ["HEAD", "gitdir"] {
+            let branch = "agentboard/task-held-\(unreadable.lowercased())"
+            let worktree = try manager.create(name: "held-\(unreadable.lowercased())", branch: branch, base: "main")
+            let admin = URL(fileURLWithPath: try git(["rev-parse", "--absolute-git-dir"], cwd: worktree)
+                .trimmingCharacters(in: .whitespacesAndNewlines))
+            let file = admin.appendingPathComponent(unreadable).path
+            try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: file)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file) }
+            XCTAssertNil(try manager.list().first { $0.branch == branch }, "git listed the holder, so nothing here is unreadable")
+
+            let outcome = try manager.deleteBranchIfMerged(branch, into: ["main"])
+
+            guard case .kept = outcome else {
+                XCTFail("unreadable \(unreadable): \(outcome)")
+                continue
+            }
+            XCTAssertTrue(try manager.branchExists(branch), "unreadable \(unreadable)")
+        }
+    }
+
     // MARK: - The ledger a reaped branch leaves behind
 
     func testDeletingAMergedBranchRecordsWhereItStood() throws {
