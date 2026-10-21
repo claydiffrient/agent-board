@@ -611,6 +611,15 @@ than one that is finished; they merge nothing and are not part of this sequence.
    integrator gets a real board card, token scope and report channel like any
    worker; if the spawn fails, that task is deleted and the epic is left where
    it was.
+   Respawning that task — `spawn_worker` on it once an idle cap or a stop has
+   ended its integrator, or a spawn approval for it — goes through
+   `spawnIntegrator` too, never the ordinary task spawn: the same epic
+   checkout on the epic branch, the same task with the next attempt number,
+   and a prompt recomposed from the branches as they stand. A failed respawn
+   keeps the task. Before `git worktree add`, `WorktreeManager` prunes a dead
+   registration (§5) of the path it is about to create, since git refuses
+   that path and does not prune it itself; an epic checkout whose directory
+   is gone but still registered is recreated rather than refused.
 4. The integrator reports. What its report does to the epic depends on how
    the project ships an epic to its base branch. That is the same choice that
    decides standalone tasks (§5, "Integrating standalone tasks by pull

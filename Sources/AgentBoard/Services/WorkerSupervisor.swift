@@ -328,6 +328,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard task.column != .running, task.column != .done, task.column != .closed else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
         }
+        // SPEC §5.2 step 3: a respawned integrator runs where the first one did, on the epic branch.
+        if task.origin == .integration, let epicId = task.epicId, rosterAgentId == nil, scope == .worker {
+            let placeholder = try await spawnIntegrator(epicId: epicId, retrying: task)
+            return WorkerSpawn(
+                setupSessionId: placeholder.sessionId, worktreePath: placeholder.cwd,
+                branch: placeholder.branch ?? ""
+            )
+        }
         guard let project = try projects.get(task.projectId) else {
             throw SupervisorError.projectNotFound(task.projectId)
         }
@@ -766,8 +774,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// §5.2 step 3. The integrator is an ordinary worker on a worktree checked out on the epic
     /// branch, bound to a synthetic task so its token scope, report channel and board card are real.
+    /// `retrying` is an earlier integration task of this epic, respawned instead of creating another.
     @discardableResult
-    private func spawnIntegrator(epicId: String) async throws -> AgentSession {
+    private func spawnIntegrator(epicId: String, retrying existing: BoardTask? = nil) async throws -> AgentSession {
         guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
         guard let project = try projects.get(epic.projectId) else {
             throw SupervisorError.projectNotFound(epic.projectId)
@@ -816,7 +825,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
         let shipsByPullRequest = (try? await offMain { publisher.standaloneIntegration(settings) }) == .pullRequest
 
-        let task = try board.createIntegrationTask(epicId: epicId)
+        if let existing, let holder = try sessions.activeHolder(taskId: existing.id) {
+            throw SupervisorError.taskAlreadyHeld(title: existing.title, sessionId: holder.sessionId)
+        }
+        let task = try existing ?? board.createIntegrationTask(epicId: epicId)
+        let attempt = try sessions.forTask(task.id).count + 1
         var assigned: AgentSession?
         do {
             let placeholder = try board.assign(
@@ -828,7 +841,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         placement: .worktree, cwd: worktree, worktreePath: worktree.path,
                         branch: epicBranch, warnings: []
                     ),
-                    attempt: 1
+                    attempt: attempt
                 )
             )
             assigned = placeholder
@@ -859,7 +872,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             return placeholder
         } catch {
             // A task with a session row on it cannot be deleted; the failure path below owns it.
-            if assigned == nil { try? tasks.delete(task.id) }
+            if assigned == nil, existing == nil { try? tasks.delete(task.id) }
             throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
         }
     }

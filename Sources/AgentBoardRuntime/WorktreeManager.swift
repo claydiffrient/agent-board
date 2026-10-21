@@ -471,6 +471,34 @@ public struct WorktreeManager: Sendable {
 
     /// Leaves out, and prunes, every dead linked entry (`isDead`).
     private func worktreeAdminDirectories() throws -> (common: URL, linked: [URL]) {
+        let (common, linked) = try linkedAdminEntries()
+        return (common, try linked.filter { admin in
+            guard try Self.isDead(admin) else { return true }
+            try? FileManager.default.removeItem(at: admin)
+            return false
+        })
+    }
+
+    /// `git worktree add` refuses a path that a dead entry still registers, and does not prune it
+    /// itself. Only that path's entry is touched, and one that cannot be read is left for git to refuse.
+    private func pruneDeadRegistration(at path: URL) {
+        guard let linked = try? linkedAdminEntries().linked else { return }
+        let target = Self.canonical(path)
+        for admin in linked where (try? Self.isDead(admin)) == true {
+            guard let gitdir = try? Self.adminFile("gitdir", in: admin, required: false),
+                  Self.canonical(Self.gitFile(gitdir, admin: admin).deletingLastPathComponent()) == target
+            else { continue }
+            try? FileManager.default.removeItem(at: admin)
+        }
+    }
+
+    /// Resolves only the parent, which exists: git records the resolved spelling of a path that may be gone.
+    private static func canonical(_ url: URL) -> String {
+        url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
+            .appendingPathComponent(url.lastPathComponent).path
+    }
+
+    private func linkedAdminEntries() throws -> (common: URL, linked: [URL]) {
         let common = URL(fileURLWithPath: try gitChecked(
             ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd: repoPath
         ).stdout.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -484,11 +512,7 @@ public struct WorktreeManager: Sendable {
         } catch {
             throw UnreadableWorktreeRecord(directory: linkedRoot.path, detail: error.localizedDescription)
         }
-        return (common, try linked.filter { admin in
-            guard try Self.isDead(admin) else { return true }
-            try? FileManager.default.removeItem(at: admin)
-            return false
-        })
+        return (common, linked)
     }
 
     /// SPEC §5: an unlocked entry whose `gitdir` is missing or names a `.git` file that is gone —
@@ -796,6 +820,7 @@ public struct WorktreeManager: Sendable {
     /// Git leaves the worktree on disk when the hook fails, and a retry adopts any worktree it finds,
     /// so a worktree this call created is removed again (the branch is kept) — SPEC §3.1 step 2.
     private func addWorktree(_ args: [String], at path: URL) throws {
+        pruneDeadRegistration(at: path)
         let existed = FileManager.default.fileExists(atPath: path.path)
         let result = try gitRaw(args, cwd: repoPath)
         guard result.status != 0 else { return }

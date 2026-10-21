@@ -204,6 +204,19 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(try git(["branch", "--format=%(refname:short)"], cwd: repo), before)
     }
 
+    func testCreateForBranchRecreatesACheckoutWhoseDirectoryIsGoneButStillRegistered() throws {
+        try manager.ensureBranch("agentboard/epic-7", from: "main")
+        let path = try manager.createForBranch(name: "epic-7", branch: "agentboard/epic-7")
+        try FileManager.default.removeItem(at: path)
+
+        let again = try manager.createForBranch(name: "epic-7", branch: "agentboard/epic-7")
+
+        XCTAssertEqual(
+            try git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: again).trimmingCharacters(in: .whitespacesAndNewlines),
+            "agentboard/epic-7"
+        )
+    }
+
     func testCreateForBranchFailsForMissingBranch() {
         XCTAssertThrowsError(try manager.createForBranch(name: "epic-none", branch: "agentboard/epic-none")) { error in
             XCTAssertTrue("\(error)".contains("agentboard/epic-none"), "\(error)")

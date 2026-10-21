@@ -79,6 +79,35 @@ final class EpicIntegrationTests: XCTestCase {
         XCTAssertEqual(try fixture.tasks.get(XCTUnwrap(session.taskId))?.origin, .integration)
     }
 
+    func testRespawningAStoppedIntegratorRunsItOnTheEpicBranchAgain() async throws {
+        let ready = try fixture.epicReadyForIntegration(["api"])
+        try await fixture.supervisor.approve(approvalId: requestIntegration(epicId: ready.epic.id).id)
+        await fixture.supervisor.waitForSetup()
+        let first = try XCTUnwrap(fixture.sessions.all(projectId: fixture.project.id).first)
+        let integration = try XCTUnwrap(first.taskId)
+        try await fixture.supervisor.stop(sessionId: first.sessionId)
+
+        _ = try await fixture.supervisor.spawnWorker(taskId: integration)
+        await fixture.supervisor.waitForSetup()
+
+        let spawns = await fixture.runtime.spawns
+        let respawn = try XCTUnwrap(spawns.last)
+        XCTAssertEqual(
+            respawn.cwd.resolvingSymlinksInPath().path,
+            URL(fileURLWithPath: first.cwd).resolvingSymlinksInPath().path
+        )
+        XCTAssertEqual(
+            try fixture.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: respawn.cwd)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            ready.epic.branch
+        )
+        XCTAssertEqual(
+            try fixture.tasks.list(projectId: fixture.project.id, epicId: ready.epic.id, includeArchived: true)
+                .filter { $0.origin == .integration }.map(\.id),
+            [integration]
+        )
+    }
+
     func testIntegratorGetsTheSameGuardsAsAnyWorker() async throws {
         let ready = try fixture.epicReadyForIntegration(["api"])
         let approval = try requestIntegration(epicId: ready.epic.id)
