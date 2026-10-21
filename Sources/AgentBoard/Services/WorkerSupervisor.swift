@@ -179,6 +179,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Resolved paths of worktrees some teardown is removing now. No other removal touches them, so
     /// a teardown hook never runs twice in one worktree (SPEC §3.1).
     @ObservationIgnored private var tearingDown: Set<String> = []
+    @ObservationIgnored private var teardownWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     /// Worktree paths a spawn is creating, counted per spawn, until its session row is written. Until
     /// then the worktree is clean and at its base, so a reap would take it for an orphan (SPEC §5).
     @ObservationIgnored private var placing: [String: Int] = [:]
@@ -609,6 +610,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let fallbackWarnings = placement == .worktree
             ? warnings
             : preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
+        // SPEC §5: a worktree a reap or teardown has claimed is about to be deleted, so it is not reused.
+        await awaitTeardown(of: manager.worktreeRoot.appendingPathComponent(taskId).path)
         let (worktree, baseWarning) = try await offMain { () -> (URL, String?) in
             if let existing = try Self.existingWorktree(manager, name: taskId) { return (existing, nil) }
             // SPEC §3.1 step 1: a reused task branch keeps whatever it was cut from.
@@ -2232,6 +2235,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func releaseTeardown(_ claim: TeardownClaim) {
         tearingDown.subtract(claim.resolvedPaths)
+        for path in claim.resolvedPaths {
+            teardownWaiters.removeValue(forKey: path)?.forEach { $0.resume() }
+        }
+    }
+
+    private func awaitTeardown(of path: String) async {
+        let resolvedPath = Self.resolved(path)
+        while tearingDown.contains(resolvedPath) {
+            await withCheckedContinuation { teardownWaiters[resolvedPath, default: []].append($0) }
+        }
     }
 
     private func tearDownWorktrees(_ claim: TeardownClaim, task: BoardTask, project: Project) async -> WorktreeCleanup {
