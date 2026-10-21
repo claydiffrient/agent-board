@@ -137,9 +137,11 @@ the verdicts are applied in one transaction:
 
 A fix or follow-up task's body holds the PR's number, title and URL, the
 comment's author, path and line, and URL, the comment quoted and labeled as
-data rather than instructions, and triage's approach. An item whose
-`fix_task_id` still names a task gets no second one, however often it is
-re-triaged. The round's outcome becomes `triaged` and the watch returns to
+data rather than instructions, and triage's approach. An item gets no second
+task while `fix_task_id` names one that fits its verdict: a `follow_through`
+task of type `code` for `fix`, any other `follow_through` task for `follow_up`.
+A fix task still in `backlog` is rewritten with the item's current body, so a
+reply that arrived after it was made reaches the fixer. The round's outcome becomes `triaged` and the watch returns to
 watching, or to settling when an item arrived during triage. Phase 3 replaces
 that return with fixing.
 
@@ -154,8 +156,8 @@ stops a running triager rather than enrolling it: its round's outcome becomes
 settling until the order lifts.
 
 Items are keyed by the GitHub node id of the thread or check they came from,
-so each is handled once per round; a new reply on a thread already handled
-reopens it. The human's own comments, resolved threads, and outdated threads
+so each is handled once per round; a new reply on a thread reopens it for
+triage (§4), whether it was handled or still open with a verdict. The human's own comments, resolved threads, and outdated threads
 are never turned into items.
 
 ### 13.2 Verdicts — phase 2 (triage) and phase 3 (fix, reply)

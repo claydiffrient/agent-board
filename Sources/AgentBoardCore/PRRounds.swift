@@ -108,10 +108,11 @@ extension PRWatchStore {
 }
 
 extension Board {
-    /// Triaging → watching once the round's triage is done (SPEC §13.2): a `fix` becomes a backlog
+    /// Triaging → watching once the round's triage is done (SPEC §13.1): a `fix` becomes a backlog
     /// code task and stays open, a `follow_up` becomes a backlog task and is handled, `answer` and
-    /// `already_done` are handled with their reply kept, and a `decision` stays open. An item that
-    /// already has a task gets no second one. Settling instead when an item arrived during triage.
+    /// `already_done` are handled with their reply kept, and a `decision` stays open. An item whose
+    /// task already matches its verdict gets no second one; a backlog fix task takes the item's new
+    /// body. Settling instead when an item arrived during triage.
     @discardableResult
     public func applyVerdicts(watchId: String, fixerModel: String?, now: Int64 = .nowMillis) throws -> PRWatchState? {
         try db.writer.write { db in
@@ -121,17 +122,25 @@ extension Board {
                 .order(Column("id"))
                 .fetchAll(db)
             for var item in items {
-                let hasTask = try item.fixTaskId.flatMap { try Task.fetchOne(db, key: $0) } != nil
+                let task = try item.fixTaskId.flatMap { try Task.fetchOne(db, key: $0) }
+                let isFollowThrough = task?.origin == .followThrough
                 switch item.verdict {
                 case .fix?:
-                    guard !hasTask else { continue }
+                    if var task, isFollowThrough, task.type == .code {
+                        let body = Self.itemTaskBody(item: item, watch: watch)
+                        guard task.column == .backlog, task.body != body else { continue }
+                        task.body = body
+                        task.updatedAt = now
+                        try task.update(db)
+                        continue
+                    }
                     item.fixTaskId = try TaskStore.insert(
                         db, projectId: watch.projectId, title: Self.itemTaskTitle("Fix", item: item, watch: watch),
                         body: Self.itemTaskBody(item: item, watch: watch), acceptance: nil, priority: nil,
                         column: .backlog, origin: .followThrough, epicId: nil, model: fixerModel, type: .code
                     ).id
                 case .followUp?:
-                    if !hasTask {
+                    if !isFollowThrough || task?.type == .code {
                         item.fixTaskId = try TaskStore.insert(
                             db, projectId: watch.projectId,
                             title: Self.itemTaskTitle("Follow-up", item: item, watch: watch),

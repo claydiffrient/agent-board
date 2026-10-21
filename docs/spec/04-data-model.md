@@ -554,8 +554,13 @@ overrides (§5, §5.1) still apply over it, and there are no per-epic rows.
 `watching`. Items are matched by `github_node_id`, so the same snapshot twice
 changes nothing but `last_polled_at`. An open item that the snapshot reports
 resolved, or leaves out, becomes `handled`; a resolved item never seen before is
-not stored. A `handled` or `dismissed` item whose body changed — a new reply —
-reopens to `open` with its verdict and grade cleared. `settings_json.prFollowThrough`
+not stored. An unresolved item whose body changed — a new reply — loses
+everything triage gave it: `verdict`, `approach`, the `decision_*` fields,
+`reply_body` and `followup_grade`, so the next round triages it afresh. A
+`handled` or `dismissed` one also reopens to `open` and drops `fix_task_id`; the
+task it named stays on the board as the record of the earlier round, and is
+never treated as the item's current task. An item still open keeps its
+`fix_task_id`. `settings_json.prFollowThrough`
 holds every work-specific value — `enabled`, `verificationLabel`,
 `requireApproval`, `settleMinutes`, `roundCap`, `dailyBudgetUSD`,
 `verifyCommand`, `postFactualReplies`, `roles` (`triage`, `fixer`, `reviewer`,

@@ -9,8 +9,8 @@ public struct PRWatchStore: Sendable {
     }
 
     /// Records one poll (SPEC §4). Idempotent by node id: an unchanged snapshot moves only
-    /// `last_polled_at`, and a new head oid stamps `head_changed_at`. An open item that resolved or left the snapshot becomes handled, and a
-    /// non-open item whose body changed (a new reply) reopens.
+    /// `last_polled_at`, and a new head oid stamps `head_changed_at`. An open item that resolved or left the snapshot becomes handled.
+    /// An item whose body changed (a new reply) is open and untriaged again; one that reopens also drops its task.
     @discardableResult
     public func upsert(projectId: String, snapshot: PRSnapshot, now: Int64 = .nowMillis) throws -> PRWatch {
         try db.writer.write { db in
@@ -77,10 +77,16 @@ public struct PRWatchStore: Sendable {
                 } else if bodyChanged {
                     if item.state != .open {
                         item.state = .open
-                        item.verdict = nil
-                        item.followupGrade = nil
+                        item.fixTaskId = nil
                         item.round = watch.round
                     }
+                    item.verdict = nil
+                    item.approach = nil
+                    item.decisionQuestion = nil
+                    item.decisionOptionsJSON = nil
+                    item.decisionAnswer = nil
+                    item.replyBody = nil
+                    item.followupGrade = nil
                     feedbackArrived = true
                 }
                 if item != before {
