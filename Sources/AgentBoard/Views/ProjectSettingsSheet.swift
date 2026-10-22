@@ -374,7 +374,17 @@ struct ProjectSettingsSheet: View {
                 get: { settings.prFollowThrough.verifyCommand ?? "" },
                 set: { settings.prFollowThrough.verifyCommand = $0.isEmpty ? nil : $0 }
             ), prompt: Text("e.g. open {url}"))
-            Text("Mark verified adds the label to the pull request. Left empty, your own merge is the verification. Walk me through it runs the verify command in a terminal, with {url} replaced by the pull request's URL; left empty, that button is hidden.")
+            if let claudeForm = PRFollowThroughSettings.claudeForm(
+                ofSlashCommand: settings.prFollowThrough.verifyCommand ?? ""
+            ) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("This runs in a shell, where a slash command is read as a file path. To run a Claude command, use \(claudeForm).")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Button("Use \(claudeForm)") { settings.prFollowThrough.verifyCommand = claudeForm }
+                }
+            }
+            Text("Mark verified adds the label to the pull request. Left empty, your own merge is the verification. Walk me through it runs the verify command as a shell command in a terminal, the way your own terminal would, with {url} replaced by the pull request's URL; left empty, that button is hidden. A Claude command goes through claude, e.g. claude \"/review:verify {url}\".")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .prReplies:
