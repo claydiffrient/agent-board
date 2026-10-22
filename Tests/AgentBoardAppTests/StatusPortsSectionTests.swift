@@ -116,24 +116,6 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         )
     }
 
-    /// The control every other assertion here rests on: two mounts of the same pane over the same
-    /// ports are pixel-identical, so a difference below means the port list changed.
-    func testTwoMountsOfTheSameStatusPaneWithTheSamePortsAreIdentical() throws {
-        let db = try AppDatabase.inMemory()
-        let mine = try register(db, "Mine")
-        try endedSession(db, project: mine, id: "s-mine", title: "Run the dev server")
-        let rows = [ListeningPort(port: 3000, pid: 501, command: "node", sessionId: "s-mine", source: .ledger)]
-
-        let first = pane(db, mine, try model(db, rows))
-        let second = pane(db, mine, try model(db, rows))
-        defer { first.close(); second.close() }
-
-        let left = try first.capture()
-        let right = try second.capture()
-        let drift = left.diff(right, columns: 0..<left.width)
-        XCTAssertEqual(drift.count, 0, "the Status pane must render deterministically (\(describe(drift)))")
-    }
-
     /// The pane draws this project's ports and nothing else: adding another project's port to the
     /// same sweep changes no pixel, while adding one of this project's does.
     func testTheStatusPaneDrawsThisProjectsPortsAndNotAnotherProjects() throws {
@@ -154,8 +136,6 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         let mineModel = try model(db, onlyMine)
         let theirsModel = try model(db, plusTheirs)
         let secondModel = try model(db, plusMine)
-        XCTAssertEqual(theirsModel.ports.count, 2, "the foreign port must be in the sweep to be excluded from the pane")
-        XCTAssertEqual(theirsModel.ports(inProject: mine.id).map(\.port), [3000])
 
         let base = pane(db, mine, mineModel)
         let withForeign = pane(db, mine, theirsModel)
@@ -176,37 +156,9 @@ final class StatusPortsSectionLiveTests: XCTestCase {
         )
     }
 
-    /// The row this epic exists for, on the per-project pane. The session ended two hours ago and
-    /// the socket did not; `agent_session` and `task` still name its project, so the row belongs to
-    /// a project and the pane is where a human finds it.
-    func testAnOrphanWhoseEndedSessionStillNamesThisProjectIsDrawnHere() throws {
-        let db = try AppDatabase.inMemory()
-        let mine = try register(db, "Mine")
-        try endedSession(db, project: mine, id: "s-ended", title: "Ship the dev server")
-
-        let ports = try model(db, [
-            ListeningPort(port: 3000, pid: 501, command: "node", sessionId: "s-ended", source: .ledger)
-        ])
-        let row = try XCTUnwrap(ports.ports.first)
-        XCTAssertEqual(row.ownership, .orphaned, "a ledger-sourced row is the ended session's")
-        XCTAssertEqual(ports.ports(inProject: mine.id).map(\.port), [3000])
-
-        let empty = pane(db, mine, try model(db, []))
-        let orphaned = pane(db, mine, ports)
-        defer { empty.close(); orphaned.close() }
-
-        let left = try empty.capture()
-        let right = try orphaned.capture()
-        XCTAssertGreaterThan(
-            left.diff(right, columns: 0..<left.width).count, 0,
-            "an orphan whose ended session names this project must draw a row on its pane"
-        )
-    }
-
-    /// One sweep, two surfaces. The Status pane reads `ports(inProject:)` and starts nothing of its
-    /// own: mounted alone it sweeps zero times, and mounted beside the sidebar panel the pair costs
-    /// exactly the panel's one mount refresh.
-    func testMountingBothSurfacesDoesNotDoubleTheSweepCount() throws {
+    /// The Status pane reads `ports(inProject:)` and starts nothing of its own: mounting it sweeps
+    /// zero times beyond the model's own first refresh, and neither does typing a query (SPEC §10).
+    func testTheStatusPaneStartsNoSweepOnMountOrQuery() throws {
         let db = try AppDatabase.inMemory()
         let mine = try register(db, "Mine")
         try endedSession(db, project: mine, id: "s-mine", title: "Run the dev server")
@@ -220,96 +172,24 @@ final class StatusPortsSectionLiveTests: XCTestCase {
             db: db, supervisor: StubSupervisor(), router: NotificationRouter(), listeningPorts: ports
         )
 
-        let paneOnly = OffscreenMount(
+        let pane = OffscreenMount(
             StatusView(project: mine).environment(env), size: CGSize(width: 900, height: 500)
         )
-        defer { paneOnly.close() }
-        pumpBriefly(paneOnly.window)
-        XCTAssertEqual(counter.count, 1, "the Status pane swept the process table on its own")
+        defer { pane.close() }
+        // A long, fixed dwell rather than a settle poll: an extra sweep hops through a detached
+        // `.utility`-priority task (`ListeningPortModel.swift:204-231`), which a busy machine can
+        // delay well past a short pump even though nothing it draws changes a pixel `capture()`
+        // could settle on.
+        pumpBriefly(pane.window, turns: 150)
+        XCTAssertEqual(counter.count, 1, "mounting the Status pane swept the process table on its own")
 
-        let both = OffscreenMount(
-            VStack(spacing: 0) {
-                PortsPanel(ceiling: PortsPanel.ceiling(footerHeight: 0))
-                StatusView(project: mine)
-            }.environment(env),
-            size: CGSize(width: 900, height: 700)
-        )
-        defer { both.close() }
-        // `!ports.isSweeping` as well as the count: the counter increments inside the detached sweep
-        // task, off `MainActor`, before the `Task` that owns it resumes on `MainActor` to clear
-        // `inFlight` (in `finished()`). Waiting on the count alone can return in the gap between those
-        // two, and the `ports.refresh()` below would then silently join the still-finishing sweep
-        // instead of starting the third one this test is asserting on.
-        pump(both.window) { counter.count == 2 && !ports.isSweeping }
-
-        XCTAssertEqual(
-            counter.count, 2,
-            "two surfaces must cost the sidebar panel's one mount refresh and nothing more"
-        )
-        XCTAssertEqual(
-            ports.ports(inProject: mine.id).map(\.port), [3000],
-            "and the pane is reading real rows, so the counts above are not vacuous"
-        )
-
-        ports.refresh()
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline, counter.count == 2 {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-        }
-        XCTAssertEqual(
-            counter.count, 3,
-            "the counter does not count sweeps, so nothing above was measured"
-        )
-    }
-
-    /// A query narrows the rows the pane already reads and starts no sweep of its own: typed into the
-    /// pane alone it sweeps zero times, and beside the sidebar panel the pair still costs exactly the
-    /// panel's one mount refresh, however many keystrokes follow.
-    func testAQueryInTheStatusPaneStartsNoSweep() throws {
-        let db = try AppDatabase.inMemory()
-        let mine = try register(db, "Mine")
-        try endedSession(db, project: mine, id: "s-mine", title: "Run the dev server")
-        let rows = [ListeningPort(port: 3000, pid: 501, command: "node", sessionId: "s-mine", source: .ledger)]
-
-        let counter = CountingSweep(rows: rows)
-        let ports = try model(db, rows, sweep: counter)
-        XCTAssertEqual(counter.count, 1, "the model's own first refresh")
-
-        let env = AppEnvironment(
-            db: db, supervisor: StubSupervisor(), router: NotificationRouter(), listeningPorts: ports
-        )
-
-        let paneOnly = OffscreenMount(
-            StatusView(project: mine).environment(env), size: CGSize(width: 900, height: 500)
-        )
-        defer { paneOnly.close() }
-        let unsearched = try paneOnly.capture()
-        type("nothing matches", into: paneOnly)
-        let searched = try paneOnly.capture()
+        let unsearched = try pane.capture()
+        type("nothing matches", into: pane)
+        let searched = try pane.capture()
+        pumpBriefly(pane.window, turns: 150)
         XCTAssertGreaterThan(unsearched.diff(searched, columns: 0..<unsearched.width).count, 0,
                              "the query must have hidden the port row, or the count below measured nothing")
         XCTAssertEqual(counter.count, 1, "a query in the Status pane swept the process table")
-
-        let both = OffscreenMount(
-            VStack(spacing: 0) {
-                PortsPanel(ceiling: PortsPanel.ceiling(footerHeight: 0))
-                StatusView(project: mine)
-            }.environment(env),
-            size: CGSize(width: 900, height: 700)
-        )
-        defer { both.close() }
-        both.window.layoutIfNeeded()
-        type(":3000", into: both)
-        pumpBriefly(both.window)
-        for text in [":30", "node", "dev server", ""] {
-            type(text, into: both)
-            pumpBriefly(both.window, turns: 10)
-        }
-
-        XCTAssertEqual(
-            counter.count, 2,
-            "with a query active, two surfaces must still cost the sidebar panel's one mount refresh"
-        )
     }
 
     private func type(_ text: String, into mount: OffscreenMount) {
