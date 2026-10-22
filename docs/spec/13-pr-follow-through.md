@@ -527,7 +527,7 @@ project that never opts in pays nothing:
 | `dailyBudgetUSD` | `nil` (use the spawn caps, §8) | 1 |
 | `verificationLabel` | `nil` (the human's own merge is the verification) | 1 |
 | `requireApproval` | `true` | 1 |
-| `verifyCommand` | `nil` — a command template with `{url}` the Walk me through it row action runs in a terminal | 1 (button shown only once a value is set) |
+| `verifyCommand` | `nil` — a shell command template with `{url}` that the Walk me through it row action runs in a terminal through an interactive login shell; a Claude command goes through `claude`, e.g. `claude "/review:verify {url}"` | 1 (button shown only once a value is set) |
 | `postFactualReplies` | `false` | 3 (no replies exist before phase 3) |
 | `roles.triage` / `roles.fixer` / `roles.reviewer` / `roles.followupCheck` | each `{rosterAgentId?, model?}`, unset | 2 (`triage`), 3 (the rest) |
 | `privateTerms` | `[]` | 1 |
@@ -574,13 +574,25 @@ on at all.
   changes nothing.
 - **Walk me through it** opens a new **Verify Pull Request** window, one per
   watch, running `verifyCommand` with `{url}` replaced by the PR's URL. The
-  user's login shell runs it with `-c`, in the project's checkout, with the
+  user's login shell runs it interactively (`-i -c`, with a `-` on argv0), so it
+  reads `.zshrc` and finds what a terminal would — `claude` in `~/.local/bin`
+  included — in the project's checkout, with the
   human-shell environment the Worktree Shell window uses: no board token and no
   agent-session variables. It does not type into the project's Terminal
   screen, whose shell may be mid-command, and nothing in the app writes into a
   human's PTY on its behalf. The URL is substituted as written, so one holding
   anything but letters, digits and `:/._-` is refused and the button is
   hidden; a GitHub PR URL never does.
+- `verifyCommand` is a shell command, so a Claude Code slash command typed
+  there (`/review:verify {url}`) is run as a file path and fails. The
+  settings field notes any value whose first word starts with `/` and holds
+  no other `/` — an absolute path such as `/usr/local/bin/verify` is not
+  flagged — and offers **Use claude "…"**, which rewrites the field to
+  `claude "/review:verify {url}"` (`PRFollowThroughSettings.claudeForm`).
+  The Verify Pull Request window never rewrites the command at run time;
+  when such a command exits non-zero within its first second and no file
+  exists at its first word, the window shows the same `claude "…"` form
+  above the exit line, under the shell's own error.
 - **Needs you (phase 2).** Each open decision is listed under its PR's row:
   the comment's author and text, triage's `decision_question`, one button per
   `decision_options` entry, and a free-text **Reply instead** field.

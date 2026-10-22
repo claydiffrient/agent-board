@@ -87,6 +87,21 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         return template.replacingOccurrences(of: "{url}", with: url)
     }
 
+    /// `claude "<command>"` for a verify command typed as a Claude Code slash command, which a shell
+    /// would run as a file path (SPEC §13.4); nil for anything else, an absolute path included.
+    public static func claudeForm(ofSlashCommand command: String) -> String? {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.split(whereSeparator: \.isWhitespace).first,
+              first.count > 1, first.hasPrefix("/"), !first.dropFirst().contains("/")
+        else { return nil }
+        var quoted = ""
+        for c in trimmed {
+            if "\\\"$`".contains(c) { quoted.append("\\") }
+            quoted.append(c)
+        }
+        return "claude \"\(quoted)\""
+    }
+
     private static func isShellInert(_ c: Character) -> Bool {
         c.isASCII && (c.isLetter || c.isNumber || ":/._-".contains(c))
     }

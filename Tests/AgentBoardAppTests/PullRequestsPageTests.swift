@@ -268,6 +268,36 @@ final class PullRequestsPageTests: XCTestCase {
         XCTAssertEqual(try PRWatchStore(db).get(elsewhere.id)?.state, .readyToVerify)
     }
 
+    func testTheVerifyCommandRunsInAnInteractiveLoginShellInTheCheckout() throws {
+        let db = try AppDatabase.inMemory()
+        var project = try project(db, label: label)
+        project.settings.prFollowThrough.verifyCommand = #"claude "/review:verify {url}""#
+        let watch = try watch(db, project, number: 7, title: "Seven", state: .readyToVerify)
+
+        let command = try XCTUnwrap(PRVerifyCommand.make(watch: watch, project: project, base: ["SHELL": "/bin/zsh"]))
+        XCTAssertEqual(command.executable, "/bin/zsh")
+        XCTAssertEqual(command.execName, "-zsh")
+        XCTAssertEqual(command.arguments, ["-i", "-c", #"claude "/review:verify https://github.com/example-org/app/pull/7""#])
+        XCTAssertEqual(command.directory, project.repoPath)
+    }
+
+    func testAVerifyCommandTypedAsASlashCommandGetsTheClaudeHintOnlyWhenTheShellFailsFast() {
+        let template = "/review:verify {url}"
+        let missing: (String) -> Bool = { _ in false }
+        XCTAssertEqual(
+            PRVerifyCommand.slashCommandHint(template: template, exitCode: 127, elapsed: .milliseconds(40), fileExists: missing),
+            #"/review:verify is a slash command, which only runs inside Claude. Set the verify command to claude "/review:verify {url}" to run it there."#
+        )
+        XCTAssertNil(PRVerifyCommand.slashCommandHint(template: template, exitCode: 0, elapsed: .milliseconds(40), fileExists: missing))
+        XCTAssertNil(PRVerifyCommand.slashCommandHint(template: template, exitCode: 1, elapsed: .seconds(5), fileExists: missing))
+        XCTAssertNil(PRVerifyCommand.slashCommandHint(
+            template: template, exitCode: 1, elapsed: .milliseconds(40), fileExists: { _ in true }
+        ))
+        XCTAssertNil(PRVerifyCommand.slashCommandHint(
+            template: "/usr/local/bin/verify {url}", exitCode: 127, elapsed: .milliseconds(40), fileExists: missing
+        ))
+    }
+
     func testTheSidebarBadgeCountsThePullRequestsReadyToVerify() throws {
         let db = try AppDatabase.inMemory()
         let first = try project(db, label: label)

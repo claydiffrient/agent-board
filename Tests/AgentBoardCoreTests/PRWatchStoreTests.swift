@@ -415,4 +415,15 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertEqual(settings.verifyCommand(for: url), "verify-example --pr \(url)")
         XCTAssertNil(settings.verifyCommand(for: url + ";touch x"))
     }
+
+    func testASlashCommandGetsItsClaudeFormAndAPathOrAClaudeCallDoesNot() {
+        XCTAssertEqual(
+            PRFollowThroughSettings.claudeForm(ofSlashCommand: " /review:verify {url} "),
+            #"claude "/review:verify {url}""#
+        )
+        XCTAssertEqual(PRFollowThroughSettings.claudeForm(ofSlashCommand: #"/review "$x""#), #"claude "/review \"\$x\"""#)
+        XCTAssertNil(PRFollowThroughSettings.claudeForm(ofSlashCommand: "/usr/local/bin/verify {url}"))
+        XCTAssertNil(PRFollowThroughSettings.claudeForm(ofSlashCommand: #"claude "/review:verify {url}""#))
+        XCTAssertNil(PRFollowThroughSettings.claudeForm(ofSlashCommand: "/ {url}"))
+    }
 }
