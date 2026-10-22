@@ -27,7 +27,7 @@ public actor CommitsInFlight {
         let commit = Commit {
             let result: Result<ScopedCommitOutcome, Error>
             do { result = .success(try await body()) } catch { result = .failure(error) }
-            await self.finished(sessionId: sessionId, id: id)
+            self.finished(sessionId: sessionId, id: id)
             return try result.get()
         }
         bySession[sessionId] = Entry(id: id, taskId: taskId, commit: commit)

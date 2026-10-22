@@ -150,19 +150,27 @@ final class SlowSharedCommitTests: XCTestCase {
         let pending = try await f.call("commit_my_work", ["message": .string("Add my work")], as: me)
         XCTAssertTrue(pending.text.contains("still running"), pending.text)
 
-        await XCTAssertThrowsErrorAsync(
-            try await f.call("report_complete", ["summary": .string("Done.")], as: me),
-            "report_complete accepted the task while its commit was still running"
-        )
+        let completing = await refusal(of: try await f.call("report_complete", ["summary": .string("Done.")], as: me))
+        XCTAssertTrue(completing.contains("commit_my_work"), "report_complete was not refused for the running commit: \(completing)")
         try f.tasks.move(mine.id, to: .review)
-        await XCTAssertThrowsErrorAsync(
-            try await f.call("accept_task", ["verdict": .string("Fine.")], as: f.reviewerIdentity(sessionId: "rita", taskId: mine.id)),
-            "accept_task accepted the task while its worker's commit was still running"
-        )
+        try f.session("rita", taskId: mine.id)
+        let rita = f.reviewerIdentity(sessionId: "rita", taskId: mine.id)
+        let accepting = await refusal(of: try await f.call("accept_task", ["verdict": .string("Fine.")], as: rita))
+        XCTAssertTrue(accepting.contains("commit_my_work"), "accept_task was not refused for the running commit: \(accepting)")
 
         let accepted = await f.control.accepted
         XCTAssertEqual(accepted.map(\.taskId), [])
         XCTAssertEqual(try f.tasks.get(mine.id)?.column, .review)
+    }
+
+    private func refusal(of call: @autoclosure () async throws -> ToolResult) async -> String {
+        do {
+            return "answered: " + (try await call()).text
+        } catch let error as ToolError {
+            return error.message
+        } catch {
+            return "\(error)"
+        }
     }
 
     func testALateDeliveryLeavesTheSessionsNewerCommitInFlight() async throws {
