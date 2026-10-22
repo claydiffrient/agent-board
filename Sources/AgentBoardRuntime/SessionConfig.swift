@@ -45,6 +45,9 @@ public enum SessionConfigWriter {
     /// round trip measures 4.1ms p50 / 14.8ms p95 over loopback including the session write, which
     /// is not worth paying on every `Read` and `Grep` to mark a call that returns in milliseconds.
     public static let guardedPreToolUseMatcher = "Bash"
+    /// A triager's guard also sees the write tools, so they are denied in-process as well as by
+    /// `--disallowedTools` (SPEC §6).
+    public static let readOnlyPreToolUseMatcher = "Bash|Edit|MultiEdit|Write|NotebookEdit"
 
     public static func settingsURL(configDir: URL, configId: String) -> URL {
         configDir.appendingPathComponent("settings-\(configId).json")
@@ -70,12 +73,13 @@ public enum SessionConfigWriter {
         token: String,
         autoModeJSON: String? = nil,
         extraMcpServers: [String: JSONObjectString]? = nil,
-        fileLocks: Bool = false
+        fileLocks: Bool = false,
+        readOnly: Bool = false
     ) throws -> SessionConfigFiles {
         try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
 
         let settings = try settingsObject(
-            port: port, token: token, autoModeJSON: autoModeJSON, fileLocks: fileLocks
+            port: port, token: token, autoModeJSON: autoModeJSON, fileLocks: fileLocks, readOnly: readOnly
         )
         let mcp = try mcpConfigObject(port: port, token: token, extraMcpServers: extraMcpServers)
 
@@ -89,7 +93,7 @@ public enum SessionConfigWriter {
     }
 
     static func settingsObject(
-        port: Int, token: String, autoModeJSON: String?, fileLocks: Bool = false
+        port: Int, token: String, autoModeJSON: String?, fileLocks: Bool = false, readOnly: Bool = false
     ) throws -> [String: Any] {
         let url = hookURL(port: port, token: token)
         let httpHook: [String: Any] = ["type": "http", "url": url, "timeout": 5]
@@ -98,7 +102,8 @@ public enum SessionConfigWriter {
             "command": "curl -s -m 5 -X POST -H 'Content-Type: application/json' --data-binary @- '\(url)' >/dev/null",
         ]
 
-        var preToolUse: [[String: Any]] = [["matcher": guardedPreToolUseMatcher, "hooks": [httpHook]]]
+        let guarded = readOnly ? readOnlyPreToolUseMatcher : guardedPreToolUseMatcher
+        var preToolUse: [[String: Any]] = [["matcher": guarded, "hooks": [httpHook]]]
         if fileLocks {
             // Its own entry rather than a wider matcher on the guard's: this one may hold the
             // response for the whole of `FileLockPolicy.waitTimeout`, and every Bash call would
