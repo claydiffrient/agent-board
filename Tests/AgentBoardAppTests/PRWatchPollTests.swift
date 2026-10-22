@@ -48,7 +48,7 @@ final class PRWatchPollTests: XCTestCase {
     private func pullRequest(
         _ number: Int = 12, head: String = "c0ffee", labels: [String] = [], checks: String? = "SUCCESS",
         required: [String] = [], reported: [[String: Any]] = [], threads: [[String: Any]] = [],
-        reviews: [[String: Any]] = []
+        reviews: [[String: Any]] = [], mergeable: String = "MERGEABLE", fork: String? = nil
     ) -> [String: Any] {
         let rollup: Any = checks.map { ["state": $0, "contexts": ["nodes": reported]] } ?? NSNull()
         let protection: Any = required.isEmpty ? NSNull() : ["requiredStatusCheckContexts": required]
@@ -56,7 +56,9 @@ final class PRWatchPollTests: XCTestCase {
             "number": number, "url": "https://github.com/\(repository)/pull/\(number)", "title": "Add widgets",
             "isDraft": false, "headRefName": "add-widgets", "headRefOid": head, "baseRefName": "main",
             "baseRef": ["refUpdateRule": protection, "rules": ["nodes": []]],
-            "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
+            "reviewDecision": "APPROVED", "mergeable": mergeable,
+            "isCrossRepository": fork != nil,
+            "headRepository": ["nameWithOwner": fork ?? repository],
             "labels": ["nodes": labels.map { ["name": $0] }],
             "commits": ["nodes": [["commit": ["statusCheckRollup": rollup]]]],
             "reviewThreads": ["nodes": threads],
@@ -266,6 +268,34 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertEqual(watch.state, .settling)
         let open = try watches.items(watchId: watch.id).filter { $0.state == .open }
         XCTAssertEqual(open.map(\.githubNodeId), ["T_open"])
+    }
+
+    /// SPEC §13.1: a conflict is feedback keyed to its head, and it is handled once GitHub can merge the PR.
+    func testAConflictingPullRequestGetsAConflictItemUntilItMergesCleanly() async throws {
+        try enable()
+        answer(pullRequest(mergeable: "CONFLICTING"))
+        await fixture.supervisor.pollPRWatches()
+
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .settling)
+        let conflict = try XCTUnwrap(try watches.items(watchId: watch.id).first)
+        XCTAssertEqual(conflict.kind, .conflict)
+        XCTAssertEqual(conflict.githubNodeId, PRItem.conflictNodeId(head: "c0ffee"))
+        XCTAssertEqual(conflict.state, .open)
+
+        answer(pullRequest())
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try watches.items(watchId: watch.id).map(\.state), [.handled])
+    }
+
+    func testAForkPullRequestParksWithAReasonNamingTheFork() async throws {
+        try enable()
+        answer(pullRequest(threads: [thread("T_open", by: "reviewer")], fork: "someone/app"))
+        await fixture.supervisor.pollPRWatches()
+
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .parked)
+        XCTAssertTrue(watch.parkedReason?.contains("`someone/app`") == true, watch.parkedReason ?? "")
     }
 
     func testADraftIsIgnored() async throws {

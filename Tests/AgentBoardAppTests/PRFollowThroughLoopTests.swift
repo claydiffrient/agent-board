@@ -621,7 +621,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
         XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), moved)
         let watch = try onlyWatch()
-        XCTAssertEqual(watch.state, .settling)
+        XCTAssertEqual(watch.state, .stale, "the page shows the restart until the next poll settles it")
         XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["stale"])
         XCTAssertNil(try watches.items(watchId: watch.id).first?.verdict, "the item goes back to triage")
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))

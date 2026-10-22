@@ -144,6 +144,47 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertNil(try f.board.createFixRoundTask(watchId: watch.id, model: nil))
     }
 
+    /// SPEC §13.1: the cap counts the rounds run since the last resume, so Resume allows a fresh set.
+    func testRunningPastTheRoundCapParksWithAReasonAndResumeStartsANewCap() throws {
+        let f = try Fixture.make()
+        var settings = try XCTUnwrap(f.projects.get(f.project.id)).settings
+        settings.prFollowThrough.roundCap = 2
+        try f.projects.updateSettings(f.project.id, settings)
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: []), now: 1_000)
+        for now: Int64 in [2_000, 3_000] {
+            try store.setState(.settling, watchId: watch.id, now: now)
+            XCTAssertNotNil(try store.beginTriageRound(watchId: watch.id, now: now))
+            XCTAssertEqual(try f.board.applyVerdicts(watchId: watch.id, now: now), .watching)
+        }
+
+        try store.setState(.settling, watchId: watch.id, now: 4_000)
+        XCTAssertNil(try store.beginTriageRound(watchId: watch.id, now: 4_000))
+        let parked = try XCTUnwrap(store.get(watch.id))
+        XCTAssertEqual(parked.state, .parked)
+        XCTAssertTrue(parked.parkedReason?.contains("round cap of 2") == true, parked.parkedReason ?? "")
+
+        XCTAssertEqual(try store.resume(watchId: watch.id, now: 5_000)?.state, .settling)
+        XCTAssertNotNil(try store.beginTriageRound(watchId: watch.id, now: 6_000))
+    }
+
+    func testAResumedWatchsNextFailedTriageDoesNotParkItAgain() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try store.setState(.settling, watchId: watch.id, now: 1_000)
+        for attempt in 1...PRWatchStore.failedSessionsBeforePark {
+            let now = Int64(1_000 + attempt * 1_000)
+            XCTAssertNotNil(try store.beginTriageRound(watchId: watch.id, now: now))
+            try store.abandonTriageRound(watchId: watch.id, failure: "the session vanished", now: now)
+        }
+        XCTAssertEqual(try store.get(watch.id)?.state, .parked)
+
+        XCTAssertEqual(try store.resume(watchId: watch.id, now: 10_000)?.state, .settling)
+        XCTAssertNotNil(try store.beginTriageRound(watchId: watch.id, now: 11_000))
+        XCTAssertEqual(try store.abandonTriageRound(watchId: watch.id, failure: "the session vanished", now: 11_000), .settling)
+    }
+
     func testAReplyOnADecisionClearsItsVerdictAndAnswerWhetherItWasHandledOrStillOpen() throws {
         let f = try Fixture.make()
         let store = PRWatchStore(f.db)
