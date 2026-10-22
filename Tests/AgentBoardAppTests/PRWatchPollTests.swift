@@ -46,9 +46,9 @@ final class PRWatchPollTests: XCTestCase {
     }
 
     private func pullRequest(
-        _ number: Int = 12, head: String = "c0ffee", labels: [String] = [], checks: String? = "SUCCESS",
-        required: [String] = [], reported: [[String: Any]] = [], threads: [[String: Any]] = [],
-        reviews: [[String: Any]] = []
+        _ number: Int = 12, head: String = "c0ffee", decision: String? = "APPROVED", labels: [String] = [],
+        checks: String? = "SUCCESS", required: [String] = [], reported: [[String: Any]] = [],
+        threads: [[String: Any]] = [], reviews: [[String: Any]]? = nil, requests: [[String: Any]] = []
     ) -> [String: Any] {
         let rollup: Any = checks.map { ["state": $0, "contexts": ["nodes": reported]] } ?? NSNull()
         let protection: Any = required.isEmpty ? NSNull() : ["requiredStatusCheckContexts": required]
@@ -56,11 +56,23 @@ final class PRWatchPollTests: XCTestCase {
             "number": number, "url": "https://github.com/\(repository)/pull/\(number)", "title": "Add widgets",
             "isDraft": false, "headRefName": "add-widgets", "headRefOid": head, "baseRefName": "main",
             "baseRef": ["refUpdateRule": protection, "rules": ["nodes": []]],
-            "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
+            "reviewDecision": decision ?? NSNull(), "mergeable": "MERGEABLE",
             "labels": ["nodes": labels.map { ["name": $0] }],
             "commits": ["nodes": [["commit": ["statusCheckRollup": rollup]]]],
             "reviewThreads": ["nodes": threads],
-            "reviews": ["nodes": reviews],
+            "reviews": ["nodes": reviews ?? [review("R_ok", by: "approver", state: "APPROVED", at: "2026-10-20T09:00:00Z")]],
+            "timelineItems": ["nodes": requests],
+        ]
+    }
+
+    private func review(_ id: String, by author: String, state: String, at submitted: String) -> [String: Any] {
+        ["id": id, "state": state, "body": "", "url": "\(url)#\(id)", "submittedAt": submitted, "author": ["login": author]]
+    }
+
+    private func reviewRequest(of reviewer: String, at created: String, removed: Bool = false) -> [String: Any] {
+        [
+            "__typename": removed ? "ReviewRequestRemovedEvent" : "ReviewRequestedEvent",
+            "createdAt": created, "requestedReviewer": ["login": reviewer],
         ]
     }
 
@@ -144,6 +156,66 @@ final class PRWatchPollTests: XCTestCase {
 
         XCTAssertEqual(try onlyWatch().state, .readyToVerify)
         XCTAssertTrue(banners.isEmpty)
+    }
+
+    /// Branch protection's required counts and code owners live only in GitHub's decision.
+    func testOneApprovalIsNotReadyWhileGitHubStillRequiresReview() async throws {
+        try enable()
+        answer(pullRequest(decision: "REVIEW_REQUIRED"))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .watching)
+    }
+
+    func testAReRequestedChangesRequestedWaitsOnReviewersWithoutBecomingReady() async throws {
+        try enable()
+        answer(pullRequest(
+            head: "decaf0", decision: "CHANGES_REQUESTED",
+            reviews: [
+                review("R_ok", by: "approver", state: "APPROVED", at: "2026-10-20T09:00:00Z"),
+                review("R_changes", by: "reviewer", state: "CHANGES_REQUESTED", at: "2026-10-20T10:00:00Z"),
+            ],
+            requests: [reviewRequest(of: "reviewer", at: "2026-10-20T11:00:00Z")]
+        ))
+        await fixture.supervisor.pollPRWatches()
+
+        XCTAssertEqual(try onlyWatch().state, .watching)
+        XCTAssertEqual(try watches.page(projectId: fixture.project.id).map(\.group), [.waitingOnReviewers])
+    }
+
+    /// With no review requirement GitHub's decision is null, and each reviewer's standing decides.
+    func testWithNoReviewRequirementOneApprovalIsReadyUntilAReviewerBlocks() async throws {
+        try enable()
+        let approval = review("R_ok", by: "approver", state: "APPROVED", at: "2026-10-20T09:00:00Z")
+        answer(pullRequest(decision: nil, reviews: [approval]))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+
+        answer(pullRequest(
+            decision: nil,
+            reviews: [approval, review("R_changes", by: "reviewer", state: "CHANGES_REQUESTED", at: "2026-10-20T10:00:00Z")],
+            requests: [reviewRequest(of: "reviewer", at: "2026-10-20T08:00:00Z")]
+        ))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .watching, "a request older than the CHANGES_REQUESTED does not clear it")
+    }
+
+    func testRemovingAReRequestRestoresTheBlock() async throws {
+        try enable()
+        let reviews = [
+            review("R_ok", by: "approver", state: "APPROVED", at: "2026-10-20T09:00:00Z"),
+            review("R_changes", by: "reviewer", state: "CHANGES_REQUESTED", at: "2026-10-20T10:00:00Z"),
+        ]
+        let request = reviewRequest(of: "reviewer", at: "2026-10-20T11:00:00Z")
+        answer(pullRequest(decision: nil, reviews: reviews, requests: [request]))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+
+        answer(pullRequest(
+            decision: nil, reviews: reviews,
+            requests: [request, reviewRequest(of: "reviewer", at: "2026-10-20T12:00:00Z", removed: true)]
+        ))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().state, .watching)
     }
 
     private func decideEveryOpenItem(_ watch: PRWatch) throws {

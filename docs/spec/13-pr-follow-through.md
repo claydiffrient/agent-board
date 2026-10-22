@@ -60,9 +60,21 @@ triage.
   red)* — green goes to watching; red goes to watching with a failed-checks
   decision item, which phase 4 replaces with going straight to triaging, the
   failed checks and their log tails as items.
-- **readyToVerify** *(phase 1)* — `reviewDecision == APPROVED` (when
-  `requireApproval`), checks green, no open item or decision, and the
-  verification label absent. The checks on the head commit reduce to one
+- **readyToVerify** *(phase 1)* — approved (when `requireApproval`), checks
+  green, no open item or decision, and the verification label absent. Approved
+  means GitHub's `reviewDecision` is `APPROVED`: that is where branch
+  protection's required approval count and code owner reviews are enforced, so
+  `REVIEW_REQUIRED` is not approved however many reviewers have approved, and a
+  `CHANGES_REQUESTED` keeps the PR out of Ready to verify until that reviewer
+  reviews again, even after their review is re-requested — it lists under
+  Waiting on reviewers meanwhile, since it is still watching. Only a repository
+  with no review requirement, where `reviewDecision` is null, falls back to a
+  per-reviewer rule: at least one reviewer approves and none still blocks. Each
+  reviewer stands by their latest `APPROVED` or `CHANGES_REQUESTED` review (a
+  comment review changes nothing, a dismissal clears it); a review request for
+  that reviewer made after their `CHANGES_REQUESTED` leaves them pending —
+  neither approving nor blocking — until a later removal of that request
+  restores the block. The checks on the head commit reduce to one
   of success, pending or failure, and only success is green:
   - When the base branch requires checks — the contexts its branch
     protection (`refUpdateRule.requiredStatusCheckContexts`) or a ruleset's
@@ -121,9 +133,12 @@ are never watched. A thread becomes an item while it is neither resolved nor
 outdated and its latest comment is not the viewer's; that comment is the item's
 body, so a reply changes it. A review body becomes an item while it is its
 author's latest review and that review is not an approval, since a review is
-never resolved and an approving body is not feedback. The poll itself moves a
-watch only among watching, settling, readyToVerify and verified, by the rules
-above, and a
+never resolved and an approving body is not feedback. The same query reads
+each PR's reviews with their submission times and its review requests
+and their removals (`timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT,
+REVIEW_REQUEST_REMOVED_EVENT])`) with theirs, which is all the per-reviewer
+fallback above needs. The poll itself moves a watch only among watching,
+settling, readyToVerify and verified, by the rules above, and a
 watch whose PR has left the open list settles to merged or closed by
 `gh pr view`. A PR converted back to draft still appears in the search, marked
 draft; its watch is deleted with its items, and undrafting it brings it back
