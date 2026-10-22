@@ -386,7 +386,7 @@ struct ProjectSettingsSheet: View {
             ForEach(FollowThroughRole.allCases) { role in
                 roleRows(role)
             }
-            Text("Default runs the built-in prompt for the role on the project's default model; a chosen agent's own model applies unless one is picked here. Only Triage runs today. Fixer, Reviewer and Follow-up check take effect once automatic fix rounds ship.")
+            Text("Default runs the built-in prompt for the role on the project's default model; a chosen agent's own model applies unless one is picked here. Triage classifies each review item; Fixer makes the round's code changes; Reviewer reviews the round's diff; Follow-up check grades whether each item actually got fixed. All four run.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .publishGuard:
