@@ -5,6 +5,9 @@ extension PRItem {
     /// The node id of the item a head's failed checks become: one per head, since a rollup has no id.
     public static func checksNodeId(head: String) -> String { "checks:\(head)" }
 
+    /// The node id of a head's merge conflict with its base, which GitHub gives no id of its own.
+    public static func conflictNodeId(head: String) -> String { "conflict:\(head)" }
+
     /// What publishing posts for this item (SPEC §13.2), or nil when it has nothing factual to say.
     public func factualReply(pushedHeadOid: String?) -> String? {
         switch verdict {
@@ -186,9 +189,9 @@ extension Board {
     }
 
     /// The head moved under a publishing round (SPEC §13.1 stale): nothing is pushed, the round's fix items
-    /// go back to triage against the new head, and the watch settles.
+    /// go back to triage against the new head, and the watch is stale until the next poll settles it.
     public func markRoundStale(watchId: String, now: Int64 = .nowMillis) throws {
-        try endPublishing(watchId: watchId, outcome: .stale, state: .settling, now: now) { db, watch, round in
+        try endPublishing(watchId: watchId, outcome: .stale, state: .stale, now: now) { db, watch, round in
             guard let taskId = round.fixTaskId else { return }
             try db.execute(
                 sql: """

@@ -597,6 +597,11 @@ enum Schema {
     ALTER TABLE pr_item ADD COLUMN reply_abandoned_at INTEGER;
     """
 
+    /// When the human last resumed a parked watch (SPEC §13.1).
+    static let prWatchResumed = """
+    ALTER TABLE pr_watch ADD COLUMN resumed_at INTEGER;
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",

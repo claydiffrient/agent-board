@@ -439,7 +439,12 @@ item count, and "pushed …" from `head_changed_at` — or, for a PR whose head 
 not moved since watching began, "updated …" from `updated_at`. Row actions: **Mark verified**
 (hidden once verified, disabled when the project sets no verification label),
 **Walk me through it** (only once the project sets a `verifyCommand`), and
-**Pause**, which sets `paused` and becomes **Resume**. A row in Needs you lists
+**Pause**, which sets `paused` and becomes **Resume**. A stale row, shown under
+In progress until the next poll settles it, adds "restarted: head moved" to its
+details. A parked row shows its `parked_reason` under the details, and in place
+of Pause offers **Resume**, which returns it to settling with a fresh round cap
+and failure streak, and **Stop watching**, which drops it from the page for good
+(§13.4). A row in Needs you lists
 each open decision under it (`PRDecisionRow`): the comment's author and text
 on one or two lines, triage's question, one button per option, and a **Reply
 instead** field with **Send reply**. An option answers the decision as a fix

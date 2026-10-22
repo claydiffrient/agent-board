@@ -215,6 +215,9 @@ public final class AppDatabase: Sendable {
                 arguments: [Int64.nowMillis]
             )
         }
+        migrator.registerMigration("pr_watch_resumed") { db in
+            try db.execute(sql: Schema.prWatchResumed)
+        }
         return migrator
     }
 }

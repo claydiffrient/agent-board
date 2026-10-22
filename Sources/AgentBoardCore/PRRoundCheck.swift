@@ -268,10 +268,41 @@ extension Board {
         }
     }
 
+    /// SPEC §13.1 parked: a fixing round whose last `failedSessionsBeforePark` fixer sessions each ended
+    /// without a report parks, naming the last one's stop reason. A session wound down for a shutdown order
+    /// is not a failure and does not break the run. Returns whether it parked.
+    public func parkIfFixersFailing(watchId: String, now: Int64 = .nowMillis) throws -> Bool {
+        try db.writer.write { db in
+            guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .fixing,
+                  let round = try PRWatchStore.round(db, watchId: watchId, number: watch.round),
+                  let taskId = round.fixTaskId
+            else { return false }
+            let windDown = SessionTermination.shutdownAcknowledged(note: nil).reason
+            let fixers = try AgentSession.fetchAll(
+                db,
+                sql: """
+                SELECT * FROM agent_session WHERE task_id = ? AND review_head IS NULL
+                ORDER BY started_at DESC, attempt DESC
+                """,
+                arguments: [taskId]
+            ).filter { $0.stopReason != windDown }
+            let failed = fixers.prefix { !$0.state.isActive && $0.state != .completed }
+            guard failed.count >= PRWatchStore.failedSessionsBeforePark else { return false }
+            try Self.parkRound(
+                db, watch: &watch, round: round, outcome: .fixerFailed,
+                reason: "Round \(round.number)'s fixer ended without a report \(failed.count) times in a row. The last: "
+                    + (failed.first?.stopReason ?? "no reason recorded"),
+                now: now
+            )
+            return true
+        }
+    }
+
     private static func parkRound(
-        _ db: Database, watch: inout PRWatch, round: PRRound, reason: String, now: Int64
+        _ db: Database, watch: inout PRWatch, round: PRRound, outcome: PRRoundOutcome = .checkFailed,
+        reason: String, now: Int64
     ) throws {
-        try PRWatchStore.endRound(db, watchId: watch.id, number: round.number, outcome: .checkFailed, now: now)
+        try PRWatchStore.endRound(db, watchId: watch.id, number: round.number, outcome: outcome, now: now)
         for taskId in [round.fixTaskId, round.followupTaskId].compactMap({ $0 }) {
             guard let task = try Task.fetchOne(db, key: taskId), task.column != .done, task.column != .closed,
                   try SessionStore.activeHolder(db, taskId: taskId) == nil

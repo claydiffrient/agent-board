@@ -97,6 +97,7 @@ public struct PullRequestWatchReader: Sendable {
             """
             pr\(number): pullRequest(number: \(number)) {
               number url title isDraft headRefName headRefOid baseRefName reviewDecision mergeable
+              isCrossRepository headRepository { nameWithOwner }
               labels(first: 100) { nodes { name } }
               baseRef {
                 refUpdateRule { requiredStatusCheckContexts }
@@ -181,6 +182,12 @@ public struct PullRequestWatchReader: Sendable {
                 githubNodeId: review.id, kind: .review, author: review.author?.login, body: review.body, url: review.url
             ))
         }
+        if pr.mergeable == "CONFLICTING" {
+            items.append(PRSnapshotItem(
+                githubNodeId: PRItem.conflictNodeId(head: pr.headRefOid), kind: .conflict,
+                body: "`\(pr.headRefName)` conflicts with `\(pr.baseRefName)`, so GitHub cannot merge it.", url: pr.url
+            ))
+        }
         return PRSnapshot(
             repoOwner: owner, repoName: name, number: pr.number, url: pr.url, title: pr.title, isDraft: pr.isDraft,
             headRef: pr.headRefName, headOid: pr.headRefOid, baseRef: pr.baseRefName,
@@ -188,7 +195,9 @@ public struct PullRequestWatchReader: Sendable {
             checksState: checksState(of: pr),
             mergeable: pr.mergeable,
             labels: pr.labels?.nodes.map(\.name) ?? [],
-            items: items
+            items: items,
+            isCrossRepository: pr.isCrossRepository ?? false,
+            headRepository: pr.headRepository?.nameWithOwner
         )
     }
 
@@ -266,6 +275,7 @@ private struct GraphQLResponse: Decodable {
     struct Author: Decodable { let login: String }
     struct Nodes<T: Decodable>: Decodable { let nodes: [T] }
     struct Label: Decodable { let name: String }
+    struct Repository: Decodable { let nameWithOwner: String }
     struct Rollup: Decodable {
         let state: String
         let contexts: Nodes<CheckContext>?
@@ -338,6 +348,8 @@ private struct GraphQLResponse: Decodable {
         let baseRef: BaseRef?
         let reviewDecision: String?
         let mergeable: String?
+        let isCrossRepository: Bool?
+        let headRepository: Repository?
         let labels: Nodes<Label>?
         let commits: Nodes<CommitNode>?
         let reviewThreads: Nodes<Thread>?
