@@ -21,6 +21,7 @@ final class PRWatchPollTests: XCTestCase {
     private var fixture: SupervisorFixture!
     private var clock: SteppedClock!
     private let repository = "example-org/app"
+    private let otherRepository = "other-org/widgets"
     private let label = "verified-example"
     private var url: String { "https://github.com/\(repository)/pull/12" }
     private var watches: PRWatchStore { PRWatchStore(fixture.db) }
@@ -45,21 +46,40 @@ final class PRWatchPollTests: XCTestCase {
         try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
     }
 
+    /// A second project with its own repository and PR follow-through on, for the tests that check a
+    /// Refresh keeps another project's watches and failures out of its own section.
+    private func registerProjectB() throws -> Project {
+        let repoPath = fixture.supportDir.appendingPathComponent("repoB")
+        try SupervisorFixture.initRepo(at: repoPath)
+        try fixture.git(["remote", "add", "origin", "git@github.com:\(otherRepository).git"], cwd: repoPath)
+        let project = try ProjectStore(fixture.db).register(
+            name: "Other", repoPath: repoPath.path, baseBranch: "main",
+            worktreeRoot: fixture.supportDir.appendingPathComponent("worktreesB").path,
+            memoryDir: fixture.supportDir.appendingPathComponent("memoryB").path
+        )
+        var settings = project.settings
+        settings.prFollowThrough = PRFollowThroughSettings(enabled: true, verificationLabel: label)
+        try ProjectStore(fixture.db).updateSettings(project.id, settings)
+        return project
+    }
+
     private func pullRequest(
-        _ number: Int = 12, head: String = "c0ffee", decision: String? = "APPROVED", labels: [String] = [],
+        _ number: Int = 12, repository: String? = nil, head: String = "c0ffee", decision: String? = "APPROVED",
+        labels: [String] = [],
         checks: String? = "SUCCESS", required: [String] = [], reported: [[String: Any]] = [],
         threads: [[String: Any]] = [], reviews: [[String: Any]]? = nil, requests: [[String: Any]] = [],
         mergeable: String = "MERGEABLE", fork: String? = nil
     ) -> [String: Any] {
+        let repo = repository ?? self.repository
         let rollup: Any = checks.map { ["state": $0, "contexts": ["nodes": reported]] } ?? NSNull()
         let protection: Any = required.isEmpty ? NSNull() : ["requiredStatusCheckContexts": required]
         return [
-            "number": number, "url": "https://github.com/\(repository)/pull/\(number)", "title": "Add widgets",
+            "number": number, "url": "https://github.com/\(repo)/pull/\(number)", "title": "Add widgets",
             "isDraft": false, "headRefName": "add-widgets", "headRefOid": head, "baseRefName": "main",
             "baseRef": ["refUpdateRule": protection, "rules": ["nodes": []]],
             "reviewDecision": decision ?? NSNull(), "mergeable": mergeable,
             "isCrossRepository": fork != nil,
-            "headRepository": ["nameWithOwner": fork ?? repository],
+            "headRepository": ["nameWithOwner": fork ?? repo],
             "labels": ["nodes": labels.map { ["name": $0] }],
             "commits": ["nodes": [["commit": ["statusCheckRollup": rollup]]]],
             "reviewThreads": ["nodes": threads],
@@ -80,9 +100,16 @@ final class PRWatchPollTests: XCTestCase {
     }
 
     private func checkRun(
-        _ name: String, status: String = "COMPLETED", conclusion: String?, startedAt: String? = nil
+        _ name: String, status: String = "COMPLETED", conclusion: String?, startedAt: String? = nil, required: Bool = false
     ) -> [String: Any] {
-        ["name": name, "status": status, "conclusion": conclusion ?? NSNull(), "startedAt": startedAt ?? NSNull()]
+        [
+            "name": name, "status": status, "conclusion": conclusion ?? NSNull(), "startedAt": startedAt ?? NSNull(),
+            "isRequired": required,
+        ]
+    }
+
+    private func statusContext(_ context: String, state: String, required: Bool = false) -> [String: Any] {
+        ["context": context, "state": state, "isRequired": required]
     }
 
     private func backdateHeadPastTheChecksGracePeriod() throws {
@@ -303,6 +330,38 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertEqual(try onlyWatch().state, .readyToVerify)
     }
 
+    func testThePullRequestsOwnRequiredFlagsGateReadinessWhenProtectionReadsNothing() async throws {
+        try enable()
+        let unflagged = [
+            checkRun("build", conclusion: "SUCCESS"), checkRun("lint", conclusion: "SUCCESS"),
+            statusContext("manual-check", state: "PENDING"),
+        ]
+        answer(pullRequest(checks: "PENDING", reported: unflagged))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().checksState, "PENDING", "with nothing required, every check and the rollup count")
+
+        answer(pullRequest(checks: "PENDING", reported: [
+            checkRun("build", conclusion: "SUCCESS", required: true),
+            checkRun("lint", conclusion: "SUCCESS", required: true),
+            statusContext("manual-check", state: "PENDING"),
+        ]))
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.checksState, "SUCCESS")
+        XCTAssertEqual(watch.state, .readyToVerify)
+    }
+
+    func testARequiredCheckOnlyProtectionNamesIsPendingUntilItReports() async throws {
+        try enable()
+        answer(pullRequest(checks: "SUCCESS", required: ["deploy"], reported: [
+            checkRun("build", conclusion: "SUCCESS", required: true),
+        ]))
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.checksState, "PENDING")
+        XCTAssertEqual(watch.state, .watching)
+    }
+
     func testAPassingRerunClearsTheFailedRunOfTheSameRequiredCheck() async throws {
         try enable()
         answer(pullRequest(checks: "FAILURE", required: ["build"], reported: [
@@ -484,5 +543,135 @@ final class PRWatchPollTests: XCTestCase {
         try await _Concurrency.Task.sleep(for: .milliseconds(300))
 
         XCTAssertEqual(searches, 2, "only the direct call polled after the slow one")
+    }
+
+    /// SPEC §13.4 Refresh: a section's button reads only that section's pull requests and applies
+    /// what they now say without waiting for a tick.
+    func testRefreshingASectionPollsOnlyItsWatchesAndAppliesTheirTransition() async throws {
+        try enable()
+        let numbers = [12, 13]
+        fixture.gh.answerSearch(numbers.map {
+            AuthoredPullRequest(repository: repository, number: $0, url: "https://github.com/\(repository)/pull/\($0)", title: "Add widgets")
+        })
+        fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: numbers.map { pullRequest($0, checks: "PENDING") })
+        await fixture.supervisor.pollPRWatches()
+        let live = try watches.live(projectId: fixture.project.id)
+        let waiting = try XCTUnwrap(live.first { $0.number == 12 })
+        let elsewhere = try XCTUnwrap(live.first { $0.number == 13 })
+        try watches.setState(.settling, watchId: elsewhere.id)
+        try await fixture.db.writer.write {
+            try $0.execute(sql: "UPDATE pr_watch SET last_polled_at = 1 WHERE id = ?", arguments: [elsewhere.id])
+        }
+
+        fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: numbers.map { pullRequest($0) })
+        try await fixture.supervisor.pollPRWatches(watchIds: [waiting.id])
+
+        XCTAssertEqual(try watches.get(waiting.id)?.state, .readyToVerify)
+        let untouched = try XCTUnwrap(watches.get(elsewhere.id))
+        XCTAssertEqual(untouched.state, .settling)
+        XCTAssertEqual(untouched.lastPolledAt, 1)
+        XCTAssertEqual(
+            fixture.gh.calls.last { $0.first == "api" },
+            PullRequestWatchReader.graphQLArguments(owner: "example-org", name: "app", numbers: [12])
+        )
+    }
+
+    func testARefreshDuringATickPollJoinsItAndStillAppliesItsResult() async throws {
+        try enable()
+        answer(pullRequest(checks: "PENDING"))
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+
+        answer(pullRequest())
+        fixture.gh.holdSearch()
+        await fixture.supervisor.meterTick()
+        for _ in 0..<500 where searches == 1 { try await _Concurrency.Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(searches, 2)
+        XCTAssertTrue(fixture.supervisor.isPollingPRWatches)
+
+        let refresh = _Concurrency.Task { try await fixture.supervisor.pollPRWatches(watchIds: [watch.id]) }
+        try await _Concurrency.Task.sleep(for: .milliseconds(100))
+        fixture.gh.releaseSearch()
+        try await refresh.value
+
+        XCTAssertEqual(searches, 2, "the refresh joined the tick's poll")
+        XCTAssertEqual(try watches.get(watch.id)?.state, .readyToVerify)
+        XCTAssertFalse(fixture.supervisor.isPollingPRWatches)
+    }
+
+    /// SPEC §13.4 Refresh: a Refresh that joins a wider poll keeps only the failures for its own
+    /// projects (Rita's review of cfd04afd). Project A's `origin` is unreadable throughout; a Refresh
+    /// for project B's section, joining the tick poll that read both, must not see A's failure — while
+    /// A's own repeated failures still raise its attention exactly as an unscoped poll would.
+    func testARefreshJoiningATickPollDropsAnotherProjectsOriginFailure() async throws {
+        try enable()
+        let projectB = try registerProjectB()
+
+        fixture.gh.answerSearch([AuthoredPullRequest(
+            repository: otherRepository, number: 7, url: "https://github.com/\(otherRepository)/pull/7", title: "Add gadgets"
+        )])
+        fixture.gh.answerGraphQL(
+            repository: otherRepository, viewer: "me", pullRequests: [pullRequest(7, repository: otherRepository)]
+        )
+        await fixture.supervisor.pollPRWatches()
+        let watchB = try XCTUnwrap(try watches.live(projectId: projectB.id).first)
+
+        try fixture.breakOriginConfig()
+        fixture.gh.holdSearch()
+        await fixture.supervisor.meterTick()
+        for _ in 0..<500 where searches == 1 { try await _Concurrency.Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(searches, 2)
+        XCTAssertTrue(fixture.supervisor.isPollingPRWatches)
+
+        let refresh = _Concurrency.Task { try await fixture.supervisor.pollPRWatches(watchIds: [watchB.id]) }
+        try await _Concurrency.Task.sleep(for: .milliseconds(100))
+        fixture.gh.releaseSearch()
+        try await refresh.value
+
+        let attention = ProjectAttentionStore(fixture.db)
+        for _ in 1..<WorkerSupervisor.prWatchFailuresBeforeAttention {
+            await fixture.supervisor.pollPRWatches()
+        }
+        let cause = try XCTUnwrap(try attention.attention(projectId: fixture.project.id)?.cause(.prPollUnavailable))
+        XCTAssertTrue(cause.text.contains("origin"), cause.text)
+    }
+
+    /// SPEC §13.4 Refresh: the advance step is scoped too, not only the read (Rita's review of
+    /// cfd04afd). A settling watch whose settle window has already passed is ready to start triage the
+    /// moment `advancePRWatches` reaches it; a Refresh for a different watch must still leave it alone.
+    func testARefreshDoesNotAdvanceASettledWatchOutsideItsScope() async throws {
+        try enable()
+        fixture.supervisor.isOnACPower = { true }
+
+        let numbers = [12, 13]
+        fixture.gh.answerSearch(numbers.map {
+            AuthoredPullRequest(repository: repository, number: $0, url: "https://github.com/\(repository)/pull/\($0)", title: "Add widgets")
+        })
+        fixture.gh.answerGraphQL(
+            repository: repository, viewer: "me", pullRequests: numbers.map { pullRequest($0, threads: [thread("T_\($0)", by: "reviewer")]) }
+        )
+        await fixture.supervisor.pollPRWatches()
+        let live = try watches.live(projectId: fixture.project.id)
+        let inScope = try XCTUnwrap(live.first { $0.number == 12 })
+        let outOfScope = try XCTUnwrap(live.first { $0.number == 13 })
+        XCTAssertEqual(outOfScope.state, .settling)
+        XCTAssertEqual(outOfScope.round, 0)
+
+        // The settle window just passed for every watch, so advancePRWatches is now ready to start a
+        // triage round for anything in its scope.
+        var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
+        settings.prFollowThrough.settleMinutes = 0
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+
+        fixture.gh.answerGraphQL(
+            repository: repository, viewer: "me", pullRequests: numbers.map { pullRequest($0, threads: [thread("T_\($0)", by: "reviewer")]) }
+        )
+        try await fixture.supervisor.pollPRWatches(watchIds: [inScope.id])
+
+        let touched = try XCTUnwrap(watches.get(inScope.id))
+        XCTAssertEqual(touched.round, 1, "the in-scope watch should have started a triage round, proving the window had passed")
+        let untouched = try XCTUnwrap(watches.get(outOfScope.id))
+        XCTAssertEqual(untouched.round, 0, "advancePRWatches must not start a round for a watch outside the Refresh's scope")
+        XCTAssertEqual(untouched.state, .settling)
     }
 }

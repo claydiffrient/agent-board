@@ -48,6 +48,9 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
     public var roles: PRFollowThroughRoles = PRFollowThroughRoles()
     /// Matched case-insensitively by the publish guard.
     public var privateTerms: [String] = []
+    /// Check-run names or status contexts, matched exactly, left out of whether CI passed (SPEC §13.1):
+    /// checks that only go green once a human has verified the PR.
+    public var checksAwaitingVerification: [String] = []
 
     public init(
         enabled: Bool = false,
@@ -59,7 +62,8 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         verifyCommand: String? = nil,
         postFactualReplies: Bool = false,
         roles: PRFollowThroughRoles = PRFollowThroughRoles(),
-        privateTerms: [String] = []
+        privateTerms: [String] = [],
+        checksAwaitingVerification: [String] = []
     ) {
         self.enabled = enabled
         self.verificationLabel = verificationLabel
@@ -71,6 +75,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         self.postFactualReplies = postFactualReplies
         self.roles = roles
         self.privateTerms = privateTerms
+        self.checksAwaitingVerification = checksAwaitingVerification
     }
 
     /// The label Mark verified adds, or nil when none is set and the merge is the verification.
@@ -85,6 +90,21 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         let template = verifyCommand?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !template.isEmpty, !url.isEmpty, url.allSatisfy(Self.isShellInert) else { return nil }
         return template.replacingOccurrences(of: "{url}", with: url)
+    }
+
+    /// `claude "<command>"` for a verify command typed as a Claude Code slash command, which a shell
+    /// would run as a file path (SPEC §13.4); nil for anything else, an absolute path included.
+    public static func claudeForm(ofSlashCommand command: String) -> String? {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.split(whereSeparator: \.isWhitespace).first,
+              first.count > 1, first.hasPrefix("/"), !first.dropFirst().contains("/")
+        else { return nil }
+        var quoted = ""
+        for c in trimmed {
+            if "\\\"$`".contains(c) { quoted.append("\\") }
+            quoted.append(c)
+        }
+        return "claude \"\(quoted)\""
     }
 
     private static func isShellInert(_ c: Character) -> Bool {
@@ -105,5 +125,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         postFactualRepliesSince = try c.decodeIfPresent(Int64.self, forKey: .postFactualRepliesSince)
         roles = try c.decodeIfPresent(PRFollowThroughRoles.self, forKey: .roles) ?? defaults.roles
         privateTerms = try c.decodeIfPresent([String].self, forKey: .privateTerms) ?? defaults.privateTerms
+        checksAwaitingVerification = try c.decodeIfPresent([String].self, forKey: .checksAwaitingVerification)
+            ?? defaults.checksAwaitingVerification
     }
 }

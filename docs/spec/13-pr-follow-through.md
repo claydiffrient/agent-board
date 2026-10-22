@@ -75,11 +75,16 @@ triage.
   neither approving nor blocking — until a later removal of that request
   restores the block. The checks on the head commit reduce to one
   of success, pending or failure, and only success is green:
-  - When the base branch requires checks — the contexts its branch
-    protection (`refUpdateRule.requiredStatusCheckContexts`) or a ruleset's
-    required status checks name — only those count. A required check that
-    has not reported yet is pending, so a PR is never ready in the moment
-    after a push before CI has registered anything.
+  - When the PR requires checks, only those count. The required set is the
+    union of the reported contexts whose own
+    `isRequired(pullRequestNumber:)` is true — the source of truth, since it
+    needs only read access — and the contexts the base branch's protection
+    (`refUpdateRule.requiredStatusCheckContexts`) or a ruleset's required
+    status checks name. Those two reads can come back empty for a token
+    without admin access or a rule set at the organization, but they are the
+    only source for a required check that has not reported yet. A required
+    check that has not reported is pending, so a PR is never ready in the
+    moment after a push before CI has registered anything.
   - Otherwise every reported check counts, along with the
     `statusCheckRollup` state.
   - Failure outweighs pending, and pending outweighs success. A commit
@@ -102,6 +107,15 @@ triage.
     the head changed (`head_changed_at`, or the watch's `created_at` for the
     head watching began on). A repository with no CI at all becomes ready
     once the grace period has passed.
+  - The checks named in `checksAwaitingVerification` (§13.3), by exact
+    check-run name or status context, are dropped from both the required
+    and the reported set before any of the above, for awaitingCI as for
+    readyToVerify: such a check goes green only once a human has verified
+    the PR, so counting it would hold the PR out of ready forever. Once one
+    of them has reported, the rollup state no longer counts either, since
+    GitHub computed it over that check too; a head where nothing else has
+    reported then has no state, and waits out the grace period like a head
+    with no rollup. An unlisted pending check still holds the PR.
   The required checks and each check's result come from the same per-repo
   `gh api graphql` query as the rest of the poll, so no `gh` call is added
   per PR. New feedback arriving here first sends the PR back to settling.
@@ -164,6 +178,11 @@ cleared once `origin` reads again. Polls never overlap: one requested while
 another runs waits for it to finish and then runs in full, so it reads every
 write made before it was requested. The 60s tick is the exception: it skips its
 poll while one is still running, so a slow `gh` never queues polls behind it.
+A section's **Refresh** (§13.4) is the same poll scoped to that section's watches
+(`pollPRWatches(watchIds:)`): the one search, a snapshot of only those pull
+requests, and the advance step for only those watches. A Refresh requested while
+a poll runs that already covers its watches — the tick's always does — joins it
+and reports that poll's outcome instead of starting another.
 
 **Pause.** A paused watch keeps following its pull request: every poll still
 records its items, head, checks and labels and moves it among watching,
@@ -351,7 +370,7 @@ other head was pushed over the round, and goes to watching.
 
 **Failed checks (phase 4).** On red, each counted check (readyToVerify's rule:
 the required ones, else every reported one, latest run only, so a passing
-rerun leaves nothing) whose latest run failed becomes one untriaged item of
+rerun leaves nothing, and never one in `checksAwaitingVerification`) whose latest run failed becomes one untriaged item of
 kind `check`, keyed by the check run's or commit status's node id, so a run
 already recorded adds nothing on a later poll. Its body names the check and
 the head and links the run (`url`). For a GitHub Actions run (its check suite's
@@ -498,7 +517,8 @@ handed back, rebuilt from the `pr_triage` row.
 
 The triage task never enters review and lands nothing. When `set_verdicts`
 leaves no open item without a verdict, the task goes straight to `done` with
-no report to the orchestrator, which did not ask for it, and once the
+no `complete` report to the orchestrator, which did not ask for it (the round's
+outcome reaches it as a §13.6 milestone instead), and once the
 session has stopped its detached worktree is removed the way an accepted
 task's is. The orphan sweep (§5) would never take it: a PR head's commits are
 outside the project's bases, so it keeps that checkout.
@@ -527,10 +547,11 @@ project that never opts in pays nothing:
 | `dailyBudgetUSD` | `nil` (use the spawn caps, §8) | 1 |
 | `verificationLabel` | `nil` (the human's own merge is the verification) | 1 |
 | `requireApproval` | `true` | 1 |
-| `verifyCommand` | `nil` — a command template with `{url}` the Walk me through it row action runs in a terminal | 1 (button shown only once a value is set) |
+| `verifyCommand` | `nil` — a shell command template with `{url}` that the Walk me through it row action runs in a terminal through an interactive login shell; a Claude command goes through `claude`, e.g. `claude "/review:verify {url}"` | 1 (button shown only once a value is set) |
 | `postFactualReplies` | `false` | 3 (no replies exist before phase 3) |
 | `roles.triage` / `roles.fixer` / `roles.reviewer` / `roles.followupCheck` | each `{rosterAgentId?, model?}`, unset | 2 (`triage`), 3 (the rest) |
 | `privateTerms` | `[]` | 1 |
+| `checksAwaitingVerification` | `[]` — check-run names or status contexts, matched exactly, ignored when deciding whether CI has passed (§13.1) | 4 |
 
 `roles` names a roster agent (§4) for each of the four model-driven jobs; a
 work-specific lens for a role — a follow-up grading rubric, a house style for
@@ -558,6 +579,17 @@ on at all.
   it up without a fresh triage. Stop watching (`PRWatchStore.stopWatching`)
   dismisses the open items and moves the watch to stopped (§13.1). A stale row
   shows "restarted: head moved" while it waits for the next poll.
+- **Refresh (phase 4).** Each group's header has a **Refresh** button that
+  polls GitHub now for the watches in that group and applies their transitions
+  (§13.1's poll, scoped), so CI settling or new feedback shows without waiting
+  for the tick. While that refresh or any poll runs the header shows a spinner,
+  and a press then joins the running poll. A refresh that cannot read the
+  group's pull requests shows why inline at the top of the group. VoiceOver
+  hears the button as "Refresh <group>" and is told when the refresh starts,
+  finishes or fails.
+- **Last polled.** Each row adds "polled …" from `last_polled_at`, stamped
+  each time a poll reads the PR from GitHub whether or not anything changed,
+  so a row that is current but unchanged can be told from a stale one.
 - Row actions: **Mark verified** (`gh pr edit --add-label <label>`), **Walk
   me through it** (shown only when `verifyCommand` is set), **Send back**
   (phase 4; shown only while the watch is readyToVerify or verified), **Open
@@ -574,13 +606,25 @@ on at all.
   changes nothing.
 - **Walk me through it** opens a new **Verify Pull Request** window, one per
   watch, running `verifyCommand` with `{url}` replaced by the PR's URL. The
-  user's login shell runs it with `-c`, in the project's checkout, with the
+  user's login shell runs it interactively (`-i -c`, with a `-` on argv0), so it
+  reads `.zshrc` and finds what a terminal would — `claude` in `~/.local/bin`
+  included — in the project's checkout, with the
   human-shell environment the Worktree Shell window uses: no board token and no
   agent-session variables. It does not type into the project's Terminal
   screen, whose shell may be mid-command, and nothing in the app writes into a
   human's PTY on its behalf. The URL is substituted as written, so one holding
   anything but letters, digits and `:/._-` is refused and the button is
   hidden; a GitHub PR URL never does.
+- `verifyCommand` is a shell command, so a Claude Code slash command typed
+  there (`/review:verify {url}`) is run as a file path and fails. The
+  settings field notes any value whose first word starts with `/` and holds
+  no other `/` — an absolute path such as `/usr/local/bin/verify` is not
+  flagged — and offers **Use claude "…"**, which rewrites the field to
+  `claude "/review:verify {url}"` (`PRFollowThroughSettings.claudeForm`).
+  The Verify Pull Request window never rewrites the command at run time;
+  when such a command exits non-zero within its first second and no file
+  exists at its first word, the window shows the same `claude "…"` form
+  above the exit line, under the shell's own error.
 - **Needs you (phase 2).** Each open decision is listed under its PR's row:
   the comment's author and text, triage's `decision_question`, one button per
   `decision_options` entry, and a free-text **Reply instead** field.
@@ -622,11 +666,15 @@ on at all.
   to the project, scrolled to the row. It is the **Pull requests ready to
   verify** notification category, on by default; turning it off or muting the
   project still records the head, so unmuting does not replay old banners.
+  Both claims also queue the orchestrator's report (§13.6), so it hears of
+  each once too.
 - A seventh project-settings tab, **PR Follow-Through**, placed after
   Advanced (§10), holds every setting in §13.3. Its sections are **Watch**
   (`enabled`, settle window, round cap, daily budget — empty means the spawn
   caps), **Verification** (label — empty means the merge verifies — required
-  approval, and the verify command with its `{url}` placeholder),
+  approval, the verify command with its `{url}` placeholder, and **Checks
+  that wait on verification**, a comma-separated `checksAwaitingVerification`
+  field whose save trims names and drops blanks and repeats),
   **Replies** (`postFactualReplies`, captioned with which verdicts count as
   factual), **Publish guard** (the `privateTerms` list: each term a row
   with a remove button, plus a field that adds one on Return), and **Roles**
@@ -690,3 +738,34 @@ No agent in this feature runs with authority this section doesn't name here:
 a worker still never pushes (§1, §8), and the fast-forward path above is the
 only new authority either amendment grants — every other push and
 pull-request path keeps its existing human gate.
+
+### 13.6 Reports to the orchestrator
+
+Follow-through runs inside the app, but the owning project's orchestrator
+hears what it did: each milestone below queues one `pr_follow_through` report
+in that project's queue, the one `list_reports` drains (§6), and the poll ends
+by announcing it (§9.1). The report is written in the same transaction as the
+transition it reports, so a milestone is never reported without happening or
+twice for one transition.
+
+| Milestone | `state` | When |
+|---|---|---|
+| Ready to verify | `ready_to_verify` | The Ready to verify banner's claim (§13.4): once per head oid |
+| Parked | `parked` | Every park, with the first line of `parked_reason` |
+| New decision | `decision` | The decision banner's claim (§13.4): once per item, with the first line of triage's question |
+| Round outcome | `round_published` / `round_stale` / `round_fixer_failed` / `round_triaged` | A round pushed (with the pushed sha), went stale, ended `fixer_failed`, or ended `triaged` with no fix item open |
+| Merged or closed | `merged` / `closed` | The poll settles the watch to either |
+
+The body is two lines: `#<n> <title> — <url>`, then `<state>: <reason>`, the
+reason one line of at most 200 characters. It never carries a comment body, a
+CI log or a reply, which are untrusted and long; a decision's question is
+triage's own wording. A round that ends `check_failed` or `publish_failed`
+parks, and that park is its report; `triage_failed`, `interrupted` and
+`frozen` rounds report nothing of their own.
+
+The banners' gate applies: a paused watch, or one in a project with
+follow-through off, queues nothing, and since the claims are still made while
+paused, resuming replays none. The orchestrator's briefing (§9) describes these
+reports as information, not requests to act: Agent Board runs the loop itself,
+and a decision or a parked PR is the human's to handle on the Pull Requests
+page.
