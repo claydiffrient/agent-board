@@ -441,6 +441,26 @@ struct SupervisorFixture {
         try Self.commit("Do the work", cwd: url)
     }
 
+    /// Installs the repository hook `name`. The first run that meets `condition` blocks until the
+    /// returned file exists, or for 30 seconds, so a call that waits for the hook fails its
+    /// assertion instead of hanging; every run then does `finish`.
+    func installGatedHook(_ name: String, when condition: String, then finish: String = "") throws -> URL {
+        let gate = supportDir.appendingPathComponent("\(name)-gate")
+        let used = supportDir.appendingPathComponent("\(name)-used")
+        let hook = repo.appendingPathComponent(".git/hooks/\(name)")
+        try FileManager.default.createDirectory(at: hook.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try """
+        #!/bin/sh
+        if \(condition) && [ ! -e '\(used.path)' ]; then
+          touch '\(used.path)'
+          i=0; while [ ! -e '\(gate.path)' ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+        fi
+        \(finish)
+        """.write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+        return gate
+    }
+
     func mergeIntoBase(_ branch: String) throws {
         let repo = URL(fileURLWithPath: project.repoPath)
         try Self.git(["-c", "user.email=test@example.com", "-c", "user.name=Test", "merge", "-q", "--no-ff", "-m", "Merge \(branch)", branch], cwd: repo)
@@ -511,6 +531,7 @@ struct SupervisorFixture {
     /// that otherwise outlive this fixture for the rest of the process, piling up across a run until
     /// the thread pool a leftover `git` call needs to drain stderr can never be scheduled.
     func cleanUp() async {
+        await supervisor.waitForTeardowns()
         await supervisor.stop()
         let worktreeRoot = URL(fileURLWithPath: project.worktreeRoot)
         let names = (try? FileManager.default.contentsOfDirectory(atPath: worktreeRoot.path)) ?? []

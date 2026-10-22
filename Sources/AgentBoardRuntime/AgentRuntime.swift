@@ -116,9 +116,18 @@ public protocol AgentRuntime: Sendable {
 
 public struct BackgroundSessionRuntime: AgentRuntime {
     public var registrationTimeout: TimeInterval
+    /// Bounds `claude stop` and `claude agents`, which `stop_worker` and an accept wait on inside
+    /// Claude Code's 60s wait for an MCP answer (SPEC §6).
+    public var queryTimeout: TimeInterval
+    public var claudeCandidates: [String]
 
-    public init(registrationTimeout: TimeInterval = 10) {
+    public init(
+        registrationTimeout: TimeInterval = 10, queryTimeout: TimeInterval = 15,
+        claudeCandidates: [String] = ClaudeCLI.candidatePaths()
+    ) {
         self.registrationTimeout = registrationTimeout
+        self.queryTimeout = queryTimeout
+        self.claudeCandidates = claudeCandidates
     }
 
     /// The prompt is positional and must come first: `--disallowedTools` is variadic and would swallow it.
@@ -174,7 +183,8 @@ public struct BackgroundSessionRuntime: AgentRuntime {
     }
 
     public func stop(shortId: String) async throws {
-        try await offMain { try ClaudeCLI.stop(shortId: shortId) }
+        let (timeout, candidates) = (queryTimeout, claudeCandidates)
+        try await offMain { try ClaudeCLI.stop(shortId: shortId, timeout: timeout, candidates: candidates) }
     }
 
     public func remove(shortId: String) async throws {
@@ -182,7 +192,8 @@ public struct BackgroundSessionRuntime: AgentRuntime {
     }
 
     public func listSessions() async throws -> [AgentInfo] {
-        try await offMain { try ClaudeCLI.listAgents() }
+        let (timeout, candidates) = (queryTimeout, claudeCandidates)
+        return try await offMain { try ClaudeCLI.listAgents(timeout: timeout, candidates: candidates) }
     }
 
     public func attachCommand(shortId: String) -> (executable: String, arguments: [String]) {

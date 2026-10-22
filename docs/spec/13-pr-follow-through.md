@@ -76,6 +76,16 @@ triage.
     or `FAILURE`. A check run is pending until `COMPLETED`, passes on
     `SUCCESS` or `SKIPPED`, and fails on any other conclusion, `NEUTRAL`
     included.
+  - Only the latest run of each check counts, so a passing rerun clears
+    the failure it reran. Runs of one name are ordered by `startedAt`, then
+    `completedAt`, then the order GitHub lists them in.
+  - The query reads the first 100 of the head commit's contexts and does
+    not page further, since paging would add a `gh` call per page. Past
+    100, a required check that is not among them reads as pending, and a
+    rerun that is not among them cannot clear its failure. Either way the
+    PR is held out of ready rather than shown green, and the rollup state,
+    which GitHub computes over every context, still counts when nothing is
+    required.
   - A head with no rollup is green only when the base branch requires no
     checks and none has registered within a grace period of 5 minutes after
     the head changed (`head_changed_at`, or the watch's `created_at` for the

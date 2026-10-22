@@ -29,7 +29,11 @@ legacy `decision: "block"`/`reason` pair — so the block lands whichever the
 installed CLI reads. Every other event replies `{}`.
 
 Spend metering tails the session's JSONL transcript rather than relying on
-hooks, since hooks do not carry `usage`.
+hooks, since hooks do not carry `usage`. Each metered session keeps one
+`TranscriptTailer` from its first tick until it is no longer metered (its final
+spend read, 15s after it ends), so a tick reads only the bytes appended since the
+last. A transcript that shrinks below the tailer's offset, or whose path now names
+a different file (device and inode), is re-read from the start.
 
 **Human comments reach a running session.** A `--bg` session cannot be written
 to, so a human comment is queued in `comment_delivery` for every live worker and
