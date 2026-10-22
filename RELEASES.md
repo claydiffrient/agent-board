@@ -9,6 +9,75 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.6.0 — 2026-10-21
+
+- **Pull requests.** A new pinned sidebar page, **Pull Requests**, watches
+  every open, non-draft pull request you author in a project with PR
+  Follow-Through turned on, polling GitHub roughly once a minute. Rows
+  group into Ready to verify, Needs you, In progress, Waiting on
+  reviewers, Verified and Parked, each showing the PR's title, round,
+  open items, and when the watch last changed. Unresolved feedback is
+  triaged automatically into a fix, an answer, an already-done note, a
+  follow-up task, or a decision that lands in Needs you for you to pick
+  an option or type a reply. A fix now runs end to end: a fixer session
+  commits on a branch cut from the PR's head, a reviewer and a follow-up
+  check grade the round, and a passing round is pushed for you
+  (fast-forward only, never a force push) and watched through its checks;
+  three failed rounds in a row parks the PR with the reason shown. A
+  parked PR is actionable again — **Resume** puts it back in the loop and
+  resets the round and failure counts, **Stop watching** drops it from
+  the page for good — and a stale PR (its head moved mid-round) now says
+  "restarted: head moved" instead of disappearing. A failed required
+  check becomes its own item instead of waiting to be noticed, an
+  unmergeable PR is fixed by merging the base branch in rather than
+  rebasing, and **Send back** records what failed when you verify a PR by
+  hand and reopens the loop (or, on an already-verified PR, becomes a
+  decision waiting on you, since a verified PR is never pushed to again).
+  **Mark verified** and **Walk me through it** (runs the project's
+  configured verify command against the PR) sit alongside Open PR and
+  Pause/Resume on each row. Project Settings gains a **PR Follow-Through**
+  tab: Watch (on/off, settle window, round cap, daily budget),
+  Verification (label, approval requirement, verify command), Roles (an
+  agent and model for each of Triage, Fixer, Reviewer and Follow-up
+  check) and a Publish guard for private terms. Separately, Ready to
+  verify is stricter now: it waits for GitHub's actual per-reviewer review
+  decision rather than just a tally of approvals, so re-requesting review
+  after changes are requested keeps a PR out of Ready to verify until
+  that reviewer re-reviews, even after you push a fix; it also won't go
+  green before any check has reported, and a required check that fails
+  and then passes on a rerun now clears instead of reading as failed
+  forever.
+- **Worktrees.** Project Settings → Isolation gains **Reusable worktree
+  slots** (0 by default, meaning every task still gets its own worktree).
+  Set it above 0 and workers take turns in that many worktrees that stay
+  on disk between tasks, so build output inside them stays warm instead
+  of every task paying for a cold checkout; a slot's teardown hook runs
+  only when the count is lowered and a slot is retired. Several races
+  around spawning, resuming and cleaning up worktrees under load are also
+  fixed: a freshly cut task branch with no commits yet could be swept up
+  as "already merged" and deleted out from under its own worker, a
+  respawned integrator could land in an ordinary task worktree instead of
+  its epic's checkout and never move the epic branch, and an orphaned
+  worktree could be reaped away from a worker whose session row hadn't
+  been written yet, or from a retry still waiting behind an earlier
+  worktree's removal.
+- **Sessions.** Resuming a stopped worker in a shared checkout now keeps
+  the protection that stops two workers editing the same file at once —
+  before, a resumed worker lost it. Resuming a reviewer no longer pulls
+  its task back out of review, a reviewer whose task has already left
+  review is refused outright, and so is resuming into a worktree or task
+  another active session already holds. Starting or accepting a task no
+  longer shows a false timeout while the work quietly continues in the
+  background — a slow repository setup hook, an in-flight commit, or a
+  tool-call accept's cleanup now all answer promptly and finish
+  afterwards — and accepting or finishing a task while its own commit is
+  still running is refused instead of risking a half-committed task.
+- **Roster.** A rostered agent's sheet gains a **Plugin directories**
+  field — one path per line, each passed as `--plugin-dir` when that
+  agent is spawned.
+- **Projects.** Deleting a project that had ever used the shared
+  worktree strategy no longer fails with a database error.
+
 ## 0.5.0 — 2026-10-20
 
 - **Tasks.** An orchestrator can now close a task it decides is obsolete,
