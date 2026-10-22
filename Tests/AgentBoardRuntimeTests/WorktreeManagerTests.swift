@@ -263,7 +263,7 @@ final class WorktreeManagerTests: XCTestCase {
         try git(["-c", "user.email=test@example.com", "-c", "user.name=Test", "-c", "commit.gpgsign=false", "merge", "--no-ff", "-q", "-m", "Merge task", "agentboard/task-merged"], cwd: epic)
 
         let status = try manager.mergeStatus(
-            worktree: epic,
+            into: "refs/heads/agentboard/epic-8",
             branches: ["agentboard/task-merged", "agentboard/task-unmerged", "agentboard/task-ghost"]
         )
         XCTAssertEqual(status, [

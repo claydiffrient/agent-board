@@ -10,6 +10,36 @@ and prompt lists, worker and orchestrator alike — with two exceptions: a
 resource either. `initialize`'s advertised `capabilities` includes `resources` and `prompts` only when a handler for it is
 wired, so `tools: {}` alone still means what it used to.
 
+### No tool call holds its answer past 60 seconds
+
+**No tool call may hold its response past Claude Code's 60-second wait for
+response headers.** Measured against Claude Code 2.1.285 on 2026-09-29: its
+HTTP transport aborts a `tools/call` whose headers have not arrived 60 seconds
+after the POST, the model sees `The operation timed out.`, and the call is not
+retried. `BoardServer` writes one JSON response when the handler returns and no
+headers before that, so a handler that runs longer is reported as failed while
+it carries on and changes board or git state, and the caller acts on a failure
+that did not happen.
+
+Work with no bound well under that — a repository hook, a build, a queue
+behind either — therefore happens after the answer, and the answer says only
+what has already happened. The outcome reaches the caller another way: a
+report through `list_reports`, the session leaving `setup`, or a later call to
+the same tool. Work bounded well under 60 seconds stays inline.
+
+| Tool | What used to hold the answer | Now |
+|---|---|---|
+| `spawn_worker`, `assign_to_agent` | `git worktree add` and its `post-checkout` hook, for a task's worktree and an integration task's epic worktree | Created in setup after the answer (§3.1); a failure is a `failed` report. The base fetch before it stays, bounded at 10s |
+| `report_complete` (no-review accept), `accept_task` | Landing (a shared branch's `git checkout` runs `post-checkout`) and worktree removal (`WorktreeRemove` and teardown hooks) | Run after the answer, under a claim taken first (§5); a landing problem is a `decision` report |
+| `commit_my_work` | `git commit` and the repository's commit hooks | Waits at most 30s. A commit still running answers that it is, and the next `commit_my_work` from that session returns its outcome instead of committing again. The ledger row is written when the commit lands, whoever asks |
+| `stop_worker` | `claude agents --json --all` and `claude stop`, with no timeout | Each bounded at 15s |
+
+`report_complete`'s routing to a rostered reviewer stays inline: it reuses the
+worker's existing worktree and runs only local git reads. `push_branch`,
+`open_pull_request` and `request_integration` only write an approval row; the
+push and the pull request run when a human approves in the app, not inside a
+tool call.
+
 ### Resources
 
 One resource per note in the caller's project, at
