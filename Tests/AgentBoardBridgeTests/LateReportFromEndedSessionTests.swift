@@ -100,13 +100,13 @@ final class LateReportFromEndedSessionTests: XCTestCase {
         try f.sessions.markResumed("second", at: .nowMillis + 1_000)
         try f.tasks.move(task.id, to: .running)
 
-        do {
-            _ = try await f.scoped.call(
+        await XCTAssertToolError(
+            try await f.scoped.call(
                 "report_complete", arguments: .object(["summary": .string("done")]),
                 identity: f.workerIdentity(sessionId: "first", taskId: task.id)
-            )
-            XCTFail("a session another one has taken the task from completed it")
-        } catch {}
+            ),
+            containing: "is not the agent currently working task \(task.id); another session holds it"
+        )
 
         XCTAssertEqual(try f.tasks.get(task.id)?.column, .running)
         XCTAssertEqual(try f.sessions.get("second")?.state, .running)

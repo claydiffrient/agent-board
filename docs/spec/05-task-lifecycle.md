@@ -388,7 +388,9 @@ another active session holds the task or the worktree, as a spawn is: resuming
 a worker whose rostered reviewer is still reviewing would put two agents in one
 checkout. A resumed session keeps what it was spawned as, read from its grant's
 scope rather than its row's role: a reviewer gets a `reviewer` grant back and its
-task stays in `review`, where a worker's task moves to `running`. The other direction holds as well: a respawn
+task stays in `review`, where a worker's task moves to `running`. A reviewer whose
+task has left `review` since it stopped is refused, since its verdict would land
+on a task nobody asked it to judge. The other direction holds as well: a respawn
 reuses the task's worktree when it is still on disk, but not one a reap or
 teardown has already claimed for removal (§3.1). The spawn waits for that
 removal to finish and then creates a fresh worktree at the same path. It waits

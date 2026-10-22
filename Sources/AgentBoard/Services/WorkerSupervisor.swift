@@ -27,6 +27,7 @@ enum SupervisorError: LocalizedError {
     case setupStillRunning(title: String, path: String)
     case taskBeingDiscarded(taskId: String)
     case worktreeBeingRemoved(path: String)
+    case reviewTaskNotInReview(title: String, column: TaskColumn)
     case approvalNotFound(String)
     case rosterAgentNotUsable(id: String, projectName: String)
     case epicCloseRefused(String)
@@ -92,6 +93,9 @@ enum SupervisorError: LocalizedError {
         case .worktreeBeingRemoved(let path):
             return "\(path) is being removed by a cleanup that claimed it first, so a session resumed there would "
                 + "lose its checkout; spawn the task again instead, which waits for the removal and creates a fresh worktree"
+        case .reviewTaskNotInReview(let title, let column):
+            return "\"\(title)\" is in \(column.rawValue), no longer in review, so its reviewer is not resumed: "
+                + "a verdict from it would land on a task nobody asked it to judge"
         case .globalShutdownIncomplete(let failures):
             return "some projects could not be wound down:\n" + failures.joined(separator: "\n")
         case .dependencyNotOnBranch(let id, let title, let commit, let branch, let landing):
@@ -1595,10 +1599,6 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(session.projectId) else {
                 throw SupervisorError.projectNotFound(session.projectId)
             }
-            // SPEC §13.2: the grant and config below are a worker's, and a triage is cheap to start over.
-            if let task = try tasks.get(taskId), task.origin.isPullRequestReader {
-                throw SupervisorError.triageNotResumable(title: task.title)
-            }
             if let holder = try sessions.activeHolder(taskId: taskId), holder.sessionId != sessionId {
                 let title = (try? tasks.get(taskId))??.title ?? taskId
                 throw SupervisorError.taskAlreadyHeld(title: title, sessionId: holder.sessionId)
@@ -1611,6 +1611,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let granted = try grants.forSession(sessionId)
             let live = granted.first { !$0.isRevoked }
             let scope = (live ?? granted.last)?.scope ?? .worker
+            if scope == .reviewer, let task = try tasks.get(taskId), task.column != .review {
+                throw SupervisorError.reviewTaskNotInReview(title: task.title, column: task.column)
+            }
+            // SPEC §13.2: the grant and config below are a worker's, and a triage is cheap to start over.
+            if let task = try tasks.get(taskId), task.origin.isPullRequestReader {
+                throw SupervisorError.triageNotResumable(title: task.title)
+            }
             let token: String
             if let grant = live {
                 token = grant.token

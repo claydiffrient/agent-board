@@ -127,6 +127,23 @@ final class ReviewInterruptionTests: XCTestCase {
         XCTAssertEqual(live.map(\.scope), [.reviewer])
     }
 
+    func testResumingAReviewerIsRefusedOnceItsTaskHasLeftReview() async throws {
+        let (task, _, reviewer) = try await taskUnderReview()
+        try await fixture.supervisor.stop(sessionId: reviewer.sessionId)
+        try fixture.tasks.move(task.id, to: .ready)
+
+        do {
+            try await fixture.supervisor.resume(sessionId: reviewer.sessionId)
+            XCTFail("a reviewer was resumed onto a task no longer in review")
+        } catch SupervisorError.reviewTaskNotInReview(_, let column) {
+            XCTAssertEqual(column, .ready)
+        }
+
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .ready)
+        let resumed = await fixture.runtime.resumed
+        XCTAssertEqual(resumed, [])
+    }
+
     func testResumingTheWorkerIsRefusedWhileTheReviewerHoldsTheTask() async throws {
         let (task, worker, reviewer) = try await taskUnderReview()
 
