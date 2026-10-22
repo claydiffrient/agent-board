@@ -10,9 +10,10 @@ public struct PRWatchStore: Sendable {
 
     /// Records one poll (SPEC §4). Idempotent by node id: an unchanged snapshot moves only
     /// `last_polled_at`, and a new head oid stamps `head_changed_at`. An open item that resolved or left the snapshot becomes handled,
-    /// except the failed-checks item of a head whose checks still fail.
+    /// except a verify failure, which GitHub never reports; a check item does once its run is no longer a failed check.
     /// An item whose body changed (a new reply) is open and untriaged again, owing a fresh reply; one that
-    /// reopens also drops its task.
+    /// reopens also drops its task. A fork parks from any state the poll moves (SPEC §13.1), and a stopped
+    /// watch records nothing.
     @discardableResult
     public func upsert(projectId: String, snapshot: PRSnapshot, now: Int64 = .nowMillis) throws -> PRWatch {
         try db.writer.write { db in
@@ -21,6 +22,7 @@ public struct PRWatchStore: Sendable {
                 sql: "SELECT * FROM pr_watch WHERE project_id = ? AND repo_owner = ? AND repo_name = ? AND number = ?",
                 arguments: [projectId, snapshot.repoOwner, snapshot.repoName, snapshot.number]
             )
+            if let existing, existing.state == .stopped { return existing }
             var watch = existing ?? PRWatch(
                 id: PRWatch.newId(), projectId: projectId, repoOwner: snapshot.repoOwner,
                 repoName: snapshot.repoName, number: snapshot.number, url: snapshot.url, title: snapshot.title,
@@ -103,9 +105,9 @@ public struct PRWatchStore: Sendable {
                     try item.update(db)
                 }
             }
-            let failingChecks = PRWatchTransition.checksFailed(snapshot.checksState)
-                ? PRItem.checksNodeId(head: snapshot.headOid) : nil
-            for var gone in stored.values where gone.state == .open && gone.githubNodeId != failingChecks {
+            let failing = Set(snapshot.failedChecks.map(\.githubNodeId))
+            for var gone in stored.values where gone.state == .open
+            && (gone.kind == .check ? !failing.contains(gone.githubNodeId) : gone.kind != .verifyFailure) {
                 gone.state = .handled
                 gone.handledAt = now
                 gone.updatedAt = now
@@ -114,6 +116,14 @@ public struct PRWatchStore: Sendable {
 
             if feedbackArrived {
                 watch.lastFeedbackAt = now
+                watch.updatedAt = now
+                try watch.update(db)
+            }
+            if snapshot.isCrossRepository, [.watching, .settling, .readyToVerify, .verified].contains(watch.state) {
+                let fork = snapshot.headRepository.map { "the fork `\($0)`" } ?? "a fork GitHub no longer has"
+                watch.state = .parked
+                watch.parkedReason = "#\(watch.number) comes from \(fork), and Agent Board pushes only to "
+                    + "`\(watch.repoOwner)/\(watch.repoName)`, so follow-through does not run on it."
                 watch.updatedAt = now
                 try watch.update(db)
             }
@@ -190,12 +200,72 @@ public struct PRWatchStore: Sendable {
         }
     }
 
+    /// Records one project's problem between polls, keeping a row it already has.
+    public func addPollProblem(projectId: String, detail: String, now: Int64 = .nowMillis) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "INSERT OR IGNORE INTO pr_poll_problem (project_id, detail, since) VALUES (?, ?, ?)",
+                arguments: [projectId, detail, now]
+            )
+        }
+    }
+
     public func setPaused(_ paused: Bool, watchId: String, now: Int64 = .nowMillis) throws {
         try db.writer.write { db in
             try db.execute(
                 sql: "UPDATE pr_watch SET paused = ?, updated_at = ? WHERE id = ?",
                 arguments: [paused, now, watchId]
             )
+        }
+    }
+
+    /// Parked → settling (SPEC §13.4 Resume). Stamping `resumed_at` restarts the round cap and the
+    /// failure streak, and each open `fix` item moves past the current round, so the next round takes it
+    /// up without a fresh triage. Nil unless the watch is parked.
+    @discardableResult
+    public func resume(watchId: String, now: Int64 = .nowMillis) throws -> PRWatch? {
+        try db.writer.write { db in
+            guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .parked else { return nil }
+            try db.execute(
+                sql: """
+                UPDATE pr_item SET round = ?, updated_at = ?
+                WHERE watch_id = ? AND state = 'open' AND verdict = 'fix' AND round <= ?
+                """,
+                arguments: [watch.round + 1, now, watchId, watch.round]
+            )
+            watch.state = .settling
+            watch.parkedReason = nil
+            watch.resumedAt = now
+            watch.updatedAt = now
+            try watch.update(db)
+            return watch
+        }
+    }
+
+    /// Stop watching a parked PR (SPEC §13.4): its open items are dismissed and the watch stays, stopped,
+    /// so the next poll does not start it over.
+    public func stopWatching(watchId: String, now: Int64 = .nowMillis) throws {
+        try db.writer.write { db in
+            guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .parked else { return }
+            try db.execute(
+                sql: "UPDATE pr_item SET state = 'dismissed', updated_at = ? WHERE watch_id = ? AND state = 'open'",
+                arguments: [now, watchId]
+            )
+            watch.state = .stopped
+            watch.updatedAt = now
+            try watch.update(db)
+        }
+    }
+
+    /// Stale → settling on the poll after publishing found the head moved, so the page shows the restart
+    /// until then (SPEC §13.1). Nil unless the watch is stale.
+    public func restartStale(watchId: String, now: Int64 = .nowMillis) throws -> PRWatch? {
+        try db.writer.write { db in
+            guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .stale else { return nil }
+            watch.state = .settling
+            watch.updatedAt = now
+            try watch.update(db)
+            return watch
         }
     }
 

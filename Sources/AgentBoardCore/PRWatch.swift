@@ -17,6 +17,8 @@ public enum PRWatchState: String, Codable, Sendable, CaseIterable, Equatable, Da
     case parked
     case merged
     case closed
+    /// The human chose Stop watching: the poll records nothing more on it and the page lists it nowhere.
+    case stopped
 
     public var isTerminal: Bool { self == .merged || self == .closed }
 }
@@ -85,6 +87,8 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
     /// The head whose Ready to verify banner has fired, so a PR announces itself once per head.
     public var readyNotifiedOid: String? = nil
     public var parkedReason: String? = nil
+    /// When the human last resumed it from parked, which bounds the round cap and the failure streak.
+    public var resumedAt: Int64? = nil
     public var createdAt: Int64
     public var updatedAt: Int64
 
@@ -114,6 +118,7 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
         case estCostUSD = "est_cost_usd"
         case readyNotifiedOid = "ready_notified_oid"
         case parkedReason = "parked_reason"
+        case resumedAt = "resumed_at"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -299,15 +304,26 @@ public struct PRSnapshot: Sendable, Equatable {
     public var headOid: String
     public var baseRef: String
     public var reviewDecision: String?
+    /// Reviewers whose standing review approves, and those whose standing review still blocks (SPEC §13.1).
+    public var approvedBy: [String]
+    public var changesRequestedBy: [String]
     public var checksState: String?
     public var mergeable: String?
     public var labels: [String]
     public var items: [PRSnapshotItem]
+    /// The head branch lives in another repository than the base: a fork, which follow-through parks.
+    public var isCrossRepository: Bool
+    /// The head repository's `owner/name`, nil when GitHub no longer has it.
+    public var headRepository: String?
+    /// The counted checks whose latest run on the head failed (SPEC §13.1 awaitingCI).
+    public var failedChecks: [PRFailedCheck]
 
     public init(
         repoOwner: String, repoName: String, number: Int, url: String, title: String, isDraft: Bool = false,
         headRef: String, headOid: String, baseRef: String, reviewDecision: String? = nil,
-        checksState: String? = nil, mergeable: String? = nil, labels: [String] = [], items: [PRSnapshotItem] = []
+        approvedBy: [String] = [], changesRequestedBy: [String] = [],
+        checksState: String? = nil, mergeable: String? = nil, labels: [String] = [], items: [PRSnapshotItem] = [],
+        isCrossRepository: Bool = false, headRepository: String? = nil, failedChecks: [PRFailedCheck] = []
     ) {
         self.repoOwner = repoOwner
         self.repoName = repoName
@@ -319,10 +335,45 @@ public struct PRSnapshot: Sendable, Equatable {
         self.headOid = headOid
         self.baseRef = baseRef
         self.reviewDecision = reviewDecision
+        self.approvedBy = approvedBy
+        self.changesRequestedBy = changesRequestedBy
         self.checksState = checksState
         self.mergeable = mergeable
         self.labels = labels
         self.items = items
+        self.isCrossRepository = isCrossRepository
+        self.headRepository = headRepository
+        self.failedChecks = failedChecks
+    }
+}
+
+/// One failed check run or commit status, keyed by its GitHub node id, so each run becomes at most one item.
+public struct PRFailedCheck: Sendable, Equatable {
+    public var githubNodeId: String
+    public var name: String
+    public var url: String?
+    public var summary: String
+    /// Set only for a GitHub Actions run, whose check run id is the job id `gh run view --job` reads.
+    public var jobId: Int64?
+    /// The end of the job's failed-step log, once the poller has read it.
+    public var logTail: String?
+
+    public init(
+        githubNodeId: String, name: String, url: String? = nil, summary: String, jobId: Int64? = nil,
+        logTail: String? = nil
+    ) {
+        self.githubNodeId = githubNodeId
+        self.name = name
+        self.url = url
+        self.summary = summary
+        self.jobId = jobId
+        self.logTail = logTail
+    }
+
+    func itemBody(head: String) -> String {
+        let lead = "`\(name)` failed on \(head.prefix(7))" + (url.map { ": \($0)" } ?? ".")
+        guard let logTail else { return "\(lead)\n\n\(summary)" }
+        return "\(lead)\n\nThe end of its failed steps' log:\n\(logTail)"
     }
 }
 
@@ -373,7 +424,7 @@ public enum PRPageGroup: String, Sendable, CaseIterable, Equatable {
         case .parked: return .parked
         case .watching: return .waitingOnReviewers
         case .settling, .triaging, .fixing, .checking, .publishing, .awaitingCI, .stale: return .inProgress
-        case .merged, .closed: return nil
+        case .merged, .closed, .stopped: return nil
         }
     }
 }
@@ -436,13 +487,22 @@ public enum PRWatchTransition {
         let labeled = settings.markVerifiedLabel.map { label in
             snapshot.labels.contains { $0.caseInsensitiveCompare(label) == .orderedSame }
         } ?? false
-        let ready = (!settings.requireApproval || snapshot.reviewDecision == "APPROVED")
+        let ready = (!settings.requireApproval || approved(snapshot))
             && checksGreen(snapshot.checksState, headSeenAt: watch.headChangedAt ?? watch.createdAt, now: now)
             && openItems == 0
         let target: PRWatchState = labeled ? .verified
             : itemsAwaitingRound > 0 ? .settling
             : ready ? .readyToVerify : .watching
         return target == state ? nil : target
+    }
+
+    /// GitHub's `reviewDecision` carries branch protection's required counts and code owners. Only a
+    /// repository with no review requirement, where it is null, falls back to the per-reviewer standing.
+    static func approved(_ snapshot: PRSnapshot) -> Bool {
+        guard let decision = snapshot.reviewDecision else {
+            return !snapshot.approvedBy.isEmpty && snapshot.changesRequestedBy.isEmpty
+        }
+        return decision == "APPROVED"
     }
 
     /// No checks state means nothing is required and nothing has reported, which is green only once

@@ -142,11 +142,12 @@ struct BridgeFixture {
         let events = RecordingEventSink()
         let control = FakeWorkerControl(board: Board(db))
         let orchestrator = OrchestratorToolHandler(db: db, control: control, events: events)
+        let commitsInFlight = CommitsInFlight()
         let worker = WorkerToolHandler(
             db: db, control: control, events: events, scopedCommits: scopedCommits,
-            commitAnswerWithin: commitAnswerWithin
+            commitsInFlight: commitsInFlight, commitAnswerWithin: commitAnswerWithin
         )
-        let reviewer = ReviewerToolHandler(db: db, control: control, events: events)
+        let reviewer = ReviewerToolHandler(db: db, control: control, events: events, commitsInFlight: commitsInFlight)
         return BridgeFixture(
             db: db,
             project: project,

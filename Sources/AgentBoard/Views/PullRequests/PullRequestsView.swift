@@ -119,7 +119,10 @@ struct PullRequestsView: View {
                 isMarking: marking.contains(listing.id),
                 markVerified: { markVerified(listing.watch, project: project) },
                 walkThrough: { openWindow(id: PRVerifyScene.id, value: listing.watch.id) },
-                togglePause: { togglePause(listing.watch) }
+                sendBack: { sendBack(listing.watch, failure: $0) },
+                togglePause: { togglePause(listing.watch) },
+                resume: { perform { try actions.resume(listing.watch) } },
+                stopWatching: { perform { try actions.stopWatching(listing.watch) } }
             )
             ForEach(listing.decisions) { decision in
                 PRDecisionRow(decision: decision) { choice in
@@ -152,9 +155,23 @@ struct PullRequestsView: View {
         }
     }
 
-    private func togglePause(_ watch: PRWatch) {
+    private func sendBack(_ watch: PRWatch, failure: String) -> Bool {
         do {
-            try actions.setPaused(!watch.paused, watch: watch)
+            try actions.sendBack(watch, failure: failure)
+            return true
+        } catch {
+            errorMessage = errorText(error)
+            return false
+        }
+    }
+
+    private func togglePause(_ watch: PRWatch) {
+        perform { try actions.setPaused(!watch.paused, watch: watch) }
+    }
+
+    private func perform(_ action: () throws -> Void) {
+        do {
+            try action()
         } catch {
             errorMessage = errorText(error)
         }
@@ -180,8 +197,21 @@ struct PullRequestActions {
         try PRWatchStore(db).markVerified(watchId: watch.id, label: label)
     }
 
+    /// Records what verifying the PR turned up as a verify failure (SPEC §13.1).
+    func sendBack(_ watch: PRWatch, failure: String) throws {
+        try PRWatchStore(db).addVerifyFailure(watchId: watch.id, body: failure)
+    }
+
     func setPaused(_ paused: Bool, watch: PRWatch) throws {
         try PRWatchStore(db).setPaused(paused, watchId: watch.id)
+    }
+
+    func resume(_ watch: PRWatch) throws {
+        try PRWatchStore(db).resume(watchId: watch.id)
+    }
+
+    func stopWatching(_ watch: PRWatch) throws {
+        try PRWatchStore(db).stopWatching(watchId: watch.id)
     }
 
     func answer(_ decision: PRItem, choice: PRDecisionChoice) throws {
@@ -254,9 +284,19 @@ struct PullRequestRow: View {
     let isMarking: Bool
     let markVerified: () -> Void
     let walkThrough: () -> Void
+    /// Returns whether the failure was recorded.
+    let sendBack: (String) -> Bool
     let togglePause: () -> Void
+    let resume: () -> Void
+    let stopWatching: () -> Void
+
+    @State private var sendingBack = false
+    @State private var failure = ""
 
     private var watch: PRWatch { listing.watch }
+    private var canSendBack: Bool { watch.state == .readyToVerify || watch.state == .verified }
+    private var trimmedFailure: String { failure.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var isParked: Bool { watch.state == .parked }
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -269,6 +309,11 @@ struct PullRequestRow: View {
                 Text(details)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if isParked {
+                    Text(watch.parkedReason ?? "Follow-through parked this pull request.")
+                        .font(.caption)
+                        .lineLimit(4)
+                }
             }
             Spacer(minLength: 8)
             if watch.state != .verified {
@@ -281,13 +326,54 @@ struct PullRequestRow: View {
                 Button("Walk me through it", action: walkThrough)
                     .help("Run this project's verify command for this pull request in a new terminal window")
             }
-            Button(watch.paused ? "Resume" : "Pause", action: togglePause)
+            if canSendBack {
+                Button("Send back") { sendingBack = true }
+                    .help(watch.state == .verified
+                        ? "Record what verifying turned up; the PR stays frozen until you remove the label"
+                        : "Record what verifying turned up, so follow-through fixes it")
+                    .popover(isPresented: $sendingBack, arrowEdge: .bottom) { sendBackForm }
+            }
+            if isParked {
+                Button("Resume", action: resume)
+                    .help("Start follow-through on this pull request again, with a fresh round cap")
+                Button("Stop watching", action: stopWatching)
+                    .help("Leave this pull request to you; follow-through will not watch it again")
+            } else {
+                Button(watch.paused ? "Resume" : "Pause", action: togglePause)
+            }
         }
         .padding(.vertical, 2)
     }
 
+    private var sendBackForm: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("What failed?")
+                .fontWeight(.semibold)
+            TextField("What you did, what you expected, what happened", text: $failure, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(4...10)
+                .frame(width: 360)
+            HStack {
+                Spacer()
+                Button("Cancel") { sendingBack = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Send back", action: submitSendBack)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmedFailure.isEmpty)
+            }
+        }
+        .padding(12)
+    }
+
+    private func submitSendBack() {
+        guard !trimmedFailure.isEmpty, sendBack(trimmedFailure) else { return }
+        failure = ""
+        sendingBack = false
+    }
+
     private var details: String {
         var parts = ["\(watch.repoOwner)/\(watch.repoName) #\(watch.number)", watch.state.title]
+        if watch.state == .stale { parts.append("restarted: head moved") }
         if watch.round > 0 { parts.append("round \(watch.round)") }
         parts.append(listing.openItems == 1 ? "1 open item" : "\(listing.openItems) open items")
         if let pushed = watch.headChangedAt {
@@ -341,6 +427,7 @@ extension PRWatchState {
         case .parked: "parked"
         case .merged: "merged"
         case .closed: "closed"
+        case .stopped: "stopped"
         }
     }
 }

@@ -282,8 +282,11 @@ public struct Board: Sendable {
     /// The only path that creates a worker session row. The two guards run inside the write
     /// transaction, so a handed-off task cannot be assigned twice concurrently: one caller wins and
     /// the other throws rather than launching a second agent into the same checkout.
+    ///
+    /// With `slots`, the session's checkout is the slot leased here (SPEC §3.1 step 2), chosen in
+    /// the same transaction so two spawns can never lease one slot; `noFreeWorktreeSlot` when none is free.
     @discardableResult
-    public func assign(taskId: String, session: AgentSession) throws -> AgentSession {
+    public func assign(taskId: String, session: AgentSession, leasingSlotFrom slots: WorktreeSlotPool? = nil) throws -> AgentSession {
         try db.writer.write { db in
             guard let task = try Task.fetchOne(db, key: taskId) else {
                 throw BoardError.taskNotFound(taskId)
@@ -294,6 +297,14 @@ public struct Board: Sendable {
             if let holder = try SessionStore.activeHolder(db, taskId: taskId) {
                 throw BoardError.taskAlreadyHeld(taskId: taskId, sessionId: holder.sessionId)
             }
+            var session = session
+            if let slots {
+                guard let slot = try WorktreeSlotStore.lease(db, projectId: task.projectId, taskId: taskId, pool: slots) else {
+                    throw BoardError.noFreeWorktreeSlot(projectId: task.projectId)
+                }
+                session.worktreePath = slots.path(slot)
+                session.cwd = slots.path(slot)
+            }
             if let path = session.worktreePath, let holder = try SessionStore.activeHolder(db, worktreePath: path) {
                 throw BoardError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
             }
@@ -302,7 +313,6 @@ public struct Board: Sendable {
                 sql: "SELECT COUNT(*) FROM agent_session WHERE task_id = ?",
                 arguments: [taskId]
             ) ?? 0
-            var session = session
             session.taskId = taskId
             session.projectId = task.projectId
             session.role = .worker
@@ -400,6 +410,10 @@ public struct Board: Sendable {
             }
             if let session = try AgentSession.fetchOne(db, key: sessionId), !session.state.isActive {
                 return try Self.lateCompletion(db, task: task, session: session, summary: summary)
+            }
+            // SPEC §5.1: a live session another one has taken the task from must not move it.
+            if let holder = try SessionStore.activeHolder(db, taskId: taskId), holder.sessionId != sessionId {
+                throw BoardError.sessionNotOnTask(sessionId: sessionId, taskId: taskId)
             }
             if task.origin == .fixRound {
                 return try Self.completeFixRound(db, task: task, sessionId: sessionId, summary: summary)
@@ -885,8 +899,8 @@ public struct Board: Sendable {
 
     /// Ends a worker session that will not report for itself and queues a `failed` report, so the
     /// orchestrator stops believing the worker is running. A task stranded in `running` leaves it:
-    /// for `review` when `salvage` shows commits on its branch, otherwise back to `ready`. A triage
-    /// task is closed instead, with no report (SPEC §13.2).
+    /// for `review` when `salvage` shows commits on its branch, otherwise, and always for a fix round,
+    /// back to `ready`. A triage task is closed instead, with no report (SPEC §13.2).
     ///
     /// An already-inactive session row is not a reason to stop. The worker's `SessionEnd` hook races
     /// this call and writes `stopped` first often enough that bailing there strands the task in
@@ -948,7 +962,8 @@ public struct Board: Sendable {
             if cause.flagsTaskFailed {
                 try TaskStore.setFailed(db, taskId, true, reason: reason)
             }
-            let destination = Self.landingColumn(stranded: stranded, cause: cause, salvage: salvage)
+            let destination = task.origin == .fixRound && stranded
+                ? .ready : Self.landingColumn(stranded: stranded, cause: cause, salvage: salvage)
             if let destination {
                 try TaskStore.move(db, taskId, to: destination, before: nil)
             }

@@ -1,5 +1,6 @@
 import AgentBoardBridge
 import AgentBoardCore
+import AgentBoardRuntime
 import AgentBoardServer
 import Foundation
 import XCTest
@@ -126,5 +127,41 @@ final class NoReviewAcceptanceTests: XCTestCase {
         await fixture.supervisor.waitForTeardowns()
         XCTAssertTrue(try fixture.manager.isMerged(commit: tip, into: "refs/heads/\(epic.branch)"))
         XCTAssertEqual(try fixture.tasks.get(done.id)?.landing, .landed)
+    }
+
+    /// The accept a tool call makes stops live sessions in the background, behind the answer
+    /// (`WorkerSupervisor.accept(taskId:acceptedBy:)`). When that stop fails, the task must still
+    /// reach `done`, but as `.unlanded` with its worktree kept rather than landed out from under a
+    /// session that may still be working in it.
+    func testAToolCallAcceptWhoseBackgroundStopFailsLeavesTheTaskUnlandedWithTheWorktreeKept() async throws {
+        let blocker = try task("build the parser")
+        let session = try fixture.worktreeWorker(task: blocker, state: .running)
+        try fixture.commitInto(try XCTUnwrap(session.worktreePath))
+        let shortId = try XCTUnwrap(session.shortId)
+        await fixture.runtime.failStop(shortId: shortId, FixtureError("permission denied"))
+        await fixture.runtime.setListed([
+            AgentInfo(id: shortId, cwd: session.cwd, kind: "bg", sessionId: session.sessionId, status: "running"),
+        ])
+
+        try await fixture.supervisor.accept(taskId: blocker.id, acceptedBy: .policy(.none))
+
+        XCTAssertEqual(
+            try fixture.tasks.get(blocker.id)?.column, .done,
+            "a stop that is still pending in the background must not hold the task out of done"
+        )
+        await fixture.supervisor.waitForTeardowns()
+
+        let accepted = try XCTUnwrap(try fixture.tasks.get(blocker.id))
+        XCTAssertEqual(accepted.landing, .unlanded)
+        XCTAssertTrue(accepted.needsLanding)
+        let decision = try XCTUnwrap(
+            ReportStore(fixture.db).unconsumed(projectId: fixture.project.id).first { $0.body.contains("but its branch") }
+        )
+        XCTAssertTrue(decision.body.contains("was not landed and its worktree was kept"), decision.body)
+        XCTAssertTrue(decision.body.contains("permission denied"), decision.body)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: try XCTUnwrap(session.worktreePath)),
+            "a session that could not be stopped may still be working in the checkout"
+        )
     }
 }

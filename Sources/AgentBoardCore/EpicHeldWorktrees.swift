@@ -64,9 +64,11 @@ extension Board {
                 isIntegration: (row[3] as TaskOrigin?) == .integration
             )
         }
-        let epicCheckout = WorktreeRootRule.url(project.worktreeRoot, home: FileManager.default.homeDirectoryForCurrentUser)
-            .appendingPathComponent(HeldWorktree.epicWorktreeName(epicId: epicId)).path
+        let root = WorktreeRootRule.url(project.worktreeRoot, home: FileManager.default.homeDirectoryForCurrentUser)
+        let epicCheckout = root.appendingPathComponent(HeldWorktree.epicWorktreeName(epicId: epicId)).path
         candidates.append(HeldWorktree(path: epicCheckout, taskId: nil, taskTitle: nil, isIntegration: true))
+        // A pooled slot outlives the task that ran in it and goes back to the pool, never to removal.
+        candidates.removeAll { WorktreeSlot.index(ofPath: $0.path, root: root.path) != nil }
 
         var seen: Set<String> = [resolved(project.repoPath)]
         return candidates.filter { candidate in

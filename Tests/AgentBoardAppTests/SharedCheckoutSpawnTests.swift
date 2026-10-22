@@ -251,6 +251,28 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.repo.appendingPathComponent(".git").path))
     }
 
+    /// `--bg --resume` reuses the spawn's settings path, so the rewrite on resume is what the worker runs with.
+    func testAResumedSharedWorkerKeepsItsFileLockHook() async throws {
+        try fixture.setWorktreeStrategy(.shared)
+        let task = try makeTask()
+        try await assign(task)
+        let sessionId = try session(of: task).sessionId
+
+        try await fixture.supervisor.stop(sessionId: sessionId)
+        try await fixture.supervisor.resume(sessionId: sessionId)
+
+        let spawns = await fixture.runtime.spawns
+        let settingsURL = try XCTUnwrap(spawns.last).configFiles.settingsURL
+        let settings = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: settingsURL)) as? [String: Any]
+        )
+        let preToolUse = try XCTUnwrap((settings["hooks"] as? [String: Any])?["PreToolUse"] as? [[String: Any]])
+        XCTAssertTrue(
+            preToolUse.contains { $0["matcher"] as? String == FileLockPolicy.toolMatcher },
+            "the resumed shared worker lost its file-lock hook: \(preToolUse)"
+        )
+    }
+
     /// The default path has to be what it was before this change existed.
     func testTheDefaultStrategyStillCutsAWorktree() async throws {
         XCTAssertEqual(fixture.project.settings.worktreeStrategy, .worktree)

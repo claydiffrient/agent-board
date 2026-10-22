@@ -80,6 +80,14 @@ public enum BranchMerge: Sendable, Equatable {
     case noTargetBranch(String)
 }
 
+public enum SlotRelease: Sendable, Equatable {
+    case released
+    /// The slot's directory is gone or no longer a worktree of this repository.
+    case gone
+    /// Uncommitted paths, as `uncommittedPaths` lists them; the slot stays leased.
+    case dirty([String])
+}
+
 /// Where a branch cut from the project base starts (SPEC §3.1 step 1).
 public struct BaseStartPoint: Sendable, Equatable {
     /// The remote's base commit when local `base` is behind or equal to it, otherwise `base` itself.
@@ -148,6 +156,43 @@ public struct WorktreeManager: Sendable {
         let path = worktreeRoot.appendingPathComponent(name)
         try addWorktree(["worktree", "add", path.path, branch], at: path)
         return path
+    }
+
+    /// SPEC §3.1 step 2: puts pooled slot `slot` on `branch`, adding the slot's worktree the first
+    /// time. `start` is where `branch` is cut when it does not exist yet. A slot already on `branch`
+    /// is left as it is, and one with uncommitted changes is refused rather than carried over.
+    @discardableResult
+    public func occupySlot(_ slot: Int, branch: String, start: String) throws -> URL {
+        let path = worktreeRoot.appendingPathComponent(WorktreeSlot.name(slot))
+        guard try registeredWorktreePaths().contains(where: { Self.samePath($0, path) }) else {
+            return try create(name: WorktreeSlot.name(slot), branch: branch, base: start)
+        }
+        if try currentBranch(at: path) == branch { return path }
+        if try hasUncommittedChanges(worktree: path) {
+            throw AgentRuntimeError("\(path.path) has uncommitted changes, so it cannot be switched to \(branch)")
+        }
+        if try branchExists(branch) {
+            try gitChecked(["switch", branch], cwd: path)
+        } else {
+            defer { if (try? branchExists(branch)) == true { recordBranchBase(branch, base: start) } }
+            try gitChecked(["switch", "-c", branch, start], cwd: path)
+        }
+        return path
+    }
+
+    /// SPEC §5: hands a slot back to the pool detached at its last commit, so its branch can be
+    /// merged or deleted, with untracked files cleaned and ignored ones — a build directory — kept.
+    /// A slot with uncommitted changes is left exactly as it is.
+    public func releaseSlot(at path: URL) throws -> SlotRelease {
+        guard FileManager.default.fileExists(atPath: path.path),
+              try registeredWorktreePaths().contains(where: { Self.samePath($0, path) })
+        else { return .gone }
+        let dirty = try uncommittedPaths(worktree: path)
+        guard dirty.isEmpty else { return .dirty(dirty) }
+        // Detaching changes no file, so the repository's post-checkout hook has nothing to set up.
+        try gitChecked(["-c", "core.hooksPath=/dev/null", "switch", "--detach"], cwd: path)
+        try gitChecked(["clean", "-fd"], cwd: path)
+        return .released
     }
 
     /// A worktree with a detached HEAD at `commit`, for a session that reads a revision and owns no branch.

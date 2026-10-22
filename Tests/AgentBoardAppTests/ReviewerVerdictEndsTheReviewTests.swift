@@ -101,6 +101,37 @@ final class ReviewerVerdictEndsTheReviewTests: XCTestCase {
         XCTAssertTrue(try fixture.manager.isMerged(commit: tip, into: "refs/heads/\(epic.branch)"))
     }
 
+    /// SPEC §6: `claude stop` on another live session can take 15s per step, so it runs after the answer.
+    func testAcceptTaskAnswersBeforeStoppingTheTasksOtherLiveSessions() async throws {
+        let (task, reviewer, _, token) = try await taskUnderReview()
+        let worker = try XCTUnwrap(fixture.sessions.forTask(task.id).first { $0.sessionId != reviewer.sessionId })
+        try fixture.sessions.setState(worker.sessionId, .running)
+        let workerShortId = try XCTUnwrap(worker.shortId)
+        let gate = FileManager.default.temporaryDirectory.appendingPathComponent("stop-gate-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: gate) }
+        await fixture.runtime.whenStopped(shortId: workerShortId) {
+            for _ in 0..<300 where !FileManager.default.fileExists(atPath: gate.path) {
+                try? await _Concurrency.Task.sleep(for: .milliseconds(100))
+            }
+        }
+        let sink = LateBoundSink()
+        sink.target = fixture.supervisor
+
+        _ = try await ReviewerToolHandler(db: fixture.db, control: sink, events: sink).call(
+            "accept_task", arguments: .object(["verdict": .string("Ran the parser tests; they pass.")]),
+            identity: try await fixture.identity(token: token)
+        )
+
+        let stoppedAtAnswer = await fixture.runtime.stopped
+        XCTAssertEqual(stoppedAtAnswer, [], "accept_task waited for claude stop on the worker before answering")
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .done)
+        XCTAssertTrue(try XCTUnwrap(fixture.grants.forSession(worker.sessionId).first).isRevoked)
+        FileManager.default.createFile(atPath: gate.path, contents: nil)
+        await fixture.supervisor.waitForTeardowns()
+        let stopped = await fixture.runtime.stopped
+        XCTAssertEqual(stopped, [workerShortId])
+    }
+
     func testAReviewerWhoseTurnEndsWithoutAVerdictIsRemindedOnceThenRaisesOneReport() async throws {
         let (task, reviewer, rita, token) = try await taskUnderReview()
         let hooks = StoreHookSink(db: fixture.db, events: ClosureBoardEventSink())

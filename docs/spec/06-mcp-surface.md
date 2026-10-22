@@ -30,9 +30,17 @@ the same tool. Work bounded well under 60 seconds stays inline.
 | Tool | What used to hold the answer | Now |
 |---|---|---|
 | `spawn_worker`, `assign_to_agent` | `git worktree add` and its `post-checkout` hook, for a task's worktree and an integration task's epic worktree | Created in setup after the answer (§3.1); a failure is a `failed` report. The base fetch before it stays, bounded at 10s |
-| `report_complete` (no-review accept), `accept_task` | Landing (a shared branch's `git checkout` runs `post-checkout`) and worktree removal (`WorktreeRemove` and teardown hooks) | Run after the answer, under a claim taken first (§5); a landing problem is a `decision` report |
+| `report_complete` (no-review accept), `accept_task` | Stopping the task's other live sessions (`claude agents --json --all` and `claude stop`, 15s each, per session), landing (a shared branch's `git checkout` runs `post-checkout`) and worktree removal (`WorktreeRemove` and teardown hooks) | Run after the answer, in that order, under a claim taken first (§5); every session's grant is revoked before the answer. A landing problem, or a session that would not stop, is a `decision` report |
 | `commit_my_work` | `git commit` and the repository's commit hooks | Waits at most 30s. A commit still running answers that it is, and the next `commit_my_work` from that session returns its outcome instead of committing again. The ledger row is written when the commit lands, whoever asks |
 | `stop_worker` | `claude agents --json --all` and `claude stop`, with no timeout | Each bounded at 15s |
+
+A commit still running holds the project checkout's index, and landing a
+shared branch runs `git checkout` there, so no accept a tool call makes may
+land while one runs. `report_complete` is refused while the calling session's
+`commit_my_work` has not delivered its outcome, and the refusal says to call
+`commit_my_work` again first. `accept_task` is refused while any session's
+commit on that task is still running. Both refusals change nothing on the
+task, and the accept runs on the next call.
 
 `report_complete`'s routing to a rostered reviewer stays inline: it reuses the
 worker's existing worktree and runs only local git reads. `push_branch`,
@@ -210,6 +218,7 @@ Everything in worker scope over any task in the project, plus:
 | `send_message(project_id, body)` | Queues a §9.2 message into that project's report queue. Confirms queueing, never delivery. Refused for the caller's own project, for an unknown id, for a blank body, and for a body over 4000 characters |
 | `delete_message(message_id)` | Deletes a §9.3 message this project received, and its report, for both projects. Refused for a message this project did not receive |
 | `reply_to_request(request_id, state, body, epic_ids?)` | Answers a §9.4 request addressed to this project: `accepted`, `declined` or `done`, with this project's epics linked. Queues a `reply` report for the Coordinator. Refused for a request sent elsewhere or unknown (the same answer), for a closed or withdrawn one, for another project's epic, and for a body over 4000 characters |
+| `add_pr_item(pr_url, body)` | Records a verification failure as a `verify_failure` item on a pull request this project watches (§13.1): a watching, settling or readyToVerify watch goes to settling, a verified one keeps its state and gets the item as a frozen decision, and any other live state keeps the item for its next round. The URL matches by owner, repository and number. Refused for a pull request the project does not watch or that is merged or closed (the same answer), for a blank body, and for a body over 4000 characters |
 | `promote_proposal(task_id)` | Only when autonomy is on |
 | `request_integration(epic_id)` | Refused unless every task in the epic is `done` or `closed`, with at least one `done` (names how many remain); otherwise creates a human approval row, or returns the one already pending |
 | `close_epic(epic_id, state)` | Ends the epic without integrating it. `state` is `done` or `abandoned`; both are terminal. Board state and a `decision` report and nothing else — no merge, no push, no branch or worktree deleted, no task deleted, archived or moved out. Refused while any session in the epic is active, and refused for an epic that is already terminal |

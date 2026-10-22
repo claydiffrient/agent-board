@@ -92,4 +92,24 @@ final class LateReportFromEndedSessionTests: XCTestCase {
         XCTAssertEqual(after.reviewerAgentId, integrated.reviewerAgentId)
         XCTAssertEqual(try f.sessions.get("first")?.state, .failed)
     }
+
+    func testAReportFromASessionThatNoLongerHoldsItsTaskMovesNothing() async throws {
+        let task = try f.task("Parser checks", column: .ready)
+        try f.session("first", taskId: task.id)
+        try f.session("second", taskId: task.id)
+        try f.sessions.markResumed("second", at: .nowMillis + 1_000)
+        try f.tasks.move(task.id, to: .running)
+
+        await XCTAssertToolError(
+            try await f.scoped.call(
+                "report_complete", arguments: .object(["summary": .string("done")]),
+                identity: f.workerIdentity(sessionId: "first", taskId: task.id)
+            ),
+            containing: "is not the agent currently working task \(task.id); another session holds it"
+        )
+
+        XCTAssertEqual(try f.tasks.get(task.id)?.column, .running)
+        XCTAssertEqual(try f.sessions.get("second")?.state, .running)
+        XCTAssertNil(try f.reports.latest(taskId: task.id))
+    }
 }

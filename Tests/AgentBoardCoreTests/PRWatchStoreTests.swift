@@ -117,6 +117,43 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertTrue(closed.closedReason?.contains("round 1") == true, closed.closedReason ?? "")
     }
 
+    /// SPEC §13.1 parked: three fixer sessions ending without a report park the watch `fixer_failed`,
+    /// naming the last stop reason. A shutdown wind-down sandwiched between them is not a failure and
+    /// does not count toward the three. Also covers Board.terminate: a stranded fix_round task always
+    /// returns to `ready`, even when its branch carries commits that would otherwise land in `review`.
+    func testThreeFailedFixerSessionsParkTheWatchAndIgnoreAShutdownWindDown() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try triage(f, watchId: watch.id, as: .fix)
+        let task = try XCTUnwrap(f.board.createFixRoundTask(watchId: watch.id, model: nil))
+
+        func failFixerSession(_ id: String, cause: SessionTermination, commitsAheadOfBase: Int) throws {
+            try f.board.assign(taskId: task.id, session: f.session(id))
+            try f.sessions.setState(id, .running)
+            let salvage = BranchSalvage(branch: "agentboard/\(task.id)", commitsAheadOfBase: commitsAheadOfBase)
+            _ = try f.board.terminate(sessionId: id, cause: cause, salvage: salvage)
+            XCTAssertEqual(
+                try f.tasks.get(task.id)?.column, .ready,
+                "a stranded fix_round task must go back to ready, never review"
+            )
+        }
+
+        try failFixerSession("fixer-1", cause: .vanished, commitsAheadOfBase: 0)
+        try failFixerSession(
+            "fixer-2", cause: .shutdownAcknowledged(note: "wound down mid-fix"), commitsAheadOfBase: 2
+        )
+        try failFixerSession("fixer-3", cause: .vanished, commitsAheadOfBase: 0)
+        try failFixerSession("fixer-4", cause: .capBreach("idle cap reached"), commitsAheadOfBase: 4)
+
+        XCTAssertTrue(try f.board.parkIfFixersFailing(watchId: watch.id))
+        let parked = try XCTUnwrap(store.get(watch.id))
+        XCTAssertEqual(parked.state, .parked)
+        XCTAssertTrue(parked.parkedReason?.contains("ended without a report 3 times in a row") == true, parked.parkedReason ?? "")
+        XCTAssertTrue(parked.parkedReason?.contains("idle cap reached") == true, parked.parkedReason ?? "")
+        XCTAssertEqual(try store.rounds(watchId: watch.id).first?.outcome, PRRoundOutcome.fixerFailed.rawValue)
+    }
+
     func testAFixRoundSkipsSpawnApprovalOnlyWhereFollowThroughIsOn() throws {
         let f = try Fixture.make()
         let store = PRWatchStore(f.db)
@@ -142,6 +179,47 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertEqual(try triage(f, watchId: watch.id, as: .fix), .parked)
         XCTAssertTrue(try store.get(watch.id)?.parkedReason?.contains("feature/lower-layer") == true)
         XCTAssertNil(try f.board.createFixRoundTask(watchId: watch.id, model: nil))
+    }
+
+    /// SPEC §13.1: the cap counts the rounds run since the last resume, so Resume allows a fresh set.
+    func testRunningPastTheRoundCapParksWithAReasonAndResumeStartsANewCap() throws {
+        let f = try Fixture.make()
+        var settings = try XCTUnwrap(f.projects.get(f.project.id)).settings
+        settings.prFollowThrough.roundCap = 2
+        try f.projects.updateSettings(f.project.id, settings)
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: []), now: 1_000)
+        for now: Int64 in [2_000, 3_000] {
+            try store.setState(.settling, watchId: watch.id, now: now)
+            XCTAssertNotNil(try store.beginTriageRound(watchId: watch.id, now: now))
+            XCTAssertEqual(try f.board.applyVerdicts(watchId: watch.id, now: now), .watching)
+        }
+
+        try store.setState(.settling, watchId: watch.id, now: 4_000)
+        XCTAssertNil(try store.beginTriageRound(watchId: watch.id, now: 4_000))
+        let parked = try XCTUnwrap(store.get(watch.id))
+        XCTAssertEqual(parked.state, .parked)
+        XCTAssertTrue(parked.parkedReason?.contains("round cap of 2") == true, parked.parkedReason ?? "")
+
+        XCTAssertEqual(try store.resume(watchId: watch.id, now: 5_000)?.state, .settling)
+        XCTAssertNotNil(try store.beginTriageRound(watchId: watch.id, now: 6_000))
+    }
+
+    func testAResumedWatchsNextFailedTriageDoesNotParkItAgain() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try store.setState(.settling, watchId: watch.id, now: 1_000)
+        for attempt in 1...PRWatchStore.failedSessionsBeforePark {
+            let now = Int64(1_000 + attempt * 1_000)
+            XCTAssertNotNil(try store.beginTriageRound(watchId: watch.id, now: now))
+            try store.abandonTriageRound(watchId: watch.id, failure: "the session vanished", now: now)
+        }
+        XCTAssertEqual(try store.get(watch.id)?.state, .parked)
+
+        XCTAssertEqual(try store.resume(watchId: watch.id, now: 10_000)?.state, .settling)
+        XCTAssertNotNil(try store.beginTriageRound(watchId: watch.id, now: 11_000))
+        XCTAssertEqual(try store.abandonTriageRound(watchId: watch.id, failure: "the session vanished", now: 11_000), .settling)
     }
 
     func testAReplyOnADecisionClearsItsVerdictAndAnswerWhetherItWasHandledOrStillOpen() throws {
@@ -309,6 +387,23 @@ final class PRWatchStoreTests: XCTestCase {
             privateTerms: ["example-org"]
         )
         XCTAssertEqual(ProjectSettings.decode(settings.encoded()), settings)
+    }
+
+    func testAVerifyFailureSentBackMidRoundLeavesTheRoundAlone() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try store.setState(.settling, watchId: watch.id)
+        XCTAssertEqual(try store.beginTriageRound(watchId: watch.id, now: 2_000)?.number, 1)
+        XCTAssertEqual(try store.get(watch.id)?.state, .triaging)
+
+        let item = try store.addVerifyFailure(watchId: watch.id, body: "Still broken in prod.", now: 3_000)
+
+        let after = try XCTUnwrap(store.get(watch.id))
+        XCTAssertEqual(after.state, .triaging, "a send-back mid-round must not force the watch to settling")
+        XCTAssertEqual(after.round, 1, "the round must not be disturbed")
+        XCTAssertEqual(item.round, 1, "the item carries the round in progress")
+        XCTAssertEqual(after.lastFeedbackAt, 3_000)
     }
 
     func testVerifyCommandFillsInTheURLAndRefusesOneAShellWouldParse() {

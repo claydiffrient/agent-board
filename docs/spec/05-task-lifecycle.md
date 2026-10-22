@@ -103,8 +103,13 @@ nobody reviewed.
   whose process is already gone — absent from `claude agents`, or `starting`
   with no short id and nothing listed under its id — is ended as vanished and
   does not block the decision; only an agent still listed as live that refuses
-  to stop aborts the accept or reopen before anything is written. The accept
-  then lands the task's branch, below, and only after that is every attempt's
+  to stop aborts the accept or reopen before anything is written. An accept a
+  tool call makes (`report_complete` under no review, `accept_task`) is the
+  exception to that order: it moves the task to `done` and revokes every
+  session's grant before answering, and stops the live sessions after the
+  answer (§6). There a session that refuses to stop leaves the task in `done`
+  with `landing` `unlanded` and its worktree kept, reported as a `decision`.
+  The accept then lands the task's branch, below, and only after that is every attempt's
   worktree removed, running the project's teardown hook first (§3.1, "Removing
   a worktree") and then any `WorktreeRemove` hook in `~/.claude/settings.json`,
   with `agentboard/<task-id>` deleted once it is merged into the
@@ -150,6 +155,17 @@ nobody reviewed.
   refused if the discard is under way when it would write its `setup` row, and
   a reviewer's spawn, which creates its worktree before any row, is refused if
   the task is being discarded or gone once it is past the teardown's claim.
+
+  A task leased a worktree slot (§3.1 step 2) has it *released* instead of
+  removed, by accept and discard alike: `git switch --detach` at its last
+  commit, so its branch is no longer checked out and can be merged or deleted
+  like any other, then `git clean -fd` — never `-x`, which would delete the
+  ignored build output the slot is kept for. No teardown hook runs, and the
+  repository's `post-checkout` hook is skipped for the detach, which changes
+  no file. A slot with uncommitted changes stays leased, out of the pool,
+  reported under **Worktree cleanup:** like a kept worktree, until a person
+  resolves it; `reconcile` then releases it, as it does any lease an accept
+  or discard did not get to.
 
   The merge takes the task's branch into the branch meant to carry it:
   `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling
@@ -372,7 +388,14 @@ no suspension point between, so a spawn or resume either marked its path first
 or waits on the claim. Resuming a stopped session marks its worktree the same
 way until the session is active again, and is refused when a reap or teardown
 has already claimed that worktree: the removal is already running, and a
-session resumed there would lose its checkout. The other direction holds as well: a respawn
+session resumed there would lose its checkout. A resume is also refused while
+another active session holds the task or the worktree, as a spawn is: resuming
+a worker whose rostered reviewer is still reviewing would put two agents in one
+checkout. A resumed session keeps what it was spawned as, read from its grant's
+scope rather than its row's role: a reviewer gets a `reviewer` grant back and its
+task stays in `review`, where a worker's task moves to `running`. A reviewer whose
+task has left `review` since it stopped is refused, since its verdict would land
+on a task nobody asked it to judge. The other direction holds as well: a respawn
 reuses the task's worktree when it is still on disk, but not one a reap or
 teardown has already claimed for removal (§3.1). The spawn waits for that
 removal to finish and then creates a fresh worktree at the same path. It waits
@@ -479,7 +502,10 @@ kept as a `decision` headed "Late report_complete from a session Agent Board had
 already ended", and the task's column, landing, archive state, review routing and
 epic are left as they are. The answer says the session had already ended and
 names the column the task stays in, and the stop still follows it. A resend finds
-that decision report and inserts no second one. On 2026-10-07 the idle-capped
+that decision report and inserts no second one. A session whose row is still
+active but which no longer holds the task, because a newer active session is
+working it, is refused outright: the call errors, nothing is recorded, and the
+task stays where the newer session has it. On 2026-10-07 the idle-capped
 first integrator of task 006dfd78 reported two minutes after the second
 integrator had closed the epic and archived the task, and pulled the archived
 task back into `review` with its landing cleared.

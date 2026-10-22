@@ -11,6 +11,8 @@ struct WorktreeCleanup: Sendable {
 
     var notices: [String] = []
     var findings: [Finding] = []
+    /// Slots handed back to the pool, whose leases the caller still has to free.
+    var releasedSlots: [Int] = []
 
     mutating func add(_ text: String, at path: String) {
         notices.append(text)

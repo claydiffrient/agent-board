@@ -494,6 +494,8 @@ public enum BoardError: Error, Equatable, Sendable {
     case taskAlreadyHeld(taskId: String, sessionId: String)
     /// An active session already holds the worktree the new session was about to be launched into.
     case worktreeAlreadyHeld(path: String, sessionId: String)
+    /// Every pooled worktree slot is leased or unusable; the caller falls back to a worktree of the task's own.
+    case noFreeWorktreeSlot(projectId: String)
     /// The session is not the one currently working the task it is acting on.
     case sessionNotOnTask(sessionId: String, taskId: String)
     case workspaceNotFound(String)
