@@ -73,6 +73,8 @@ public enum TriagePrompt {
     A `check` item is a required check that failed after Agent Board pushed a fix round, with the end of its \
     log. It is `fix` when the pull request's code broke it, and `decision` when the failure looks unrelated, \
     such as a flaky test or a CI outage.
+    An item that asks for nothing, such as a status banner, a verdict line, a pointer to feedback posted \
+    elsewhere, or a plain approval note, is `answer` with no `reply_body`, and nothing is posted for it.
     Reserve `decision` for a choice a reasonable engineer could make either way. A change that is clearly \
     right and in scope is `fix`, however large; do not pass a judgment up because it is hard.
     """

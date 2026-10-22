@@ -69,7 +69,9 @@ public struct PRWatchStore: Sendable {
                     continue
                 }
                 let before = item
+                // SPEC §13.1: a body stored before hidden comments were stripped is rewritten, not reopened.
                 let bodyChanged = item.body != incoming.body
+                    && PRSnapshotItem.visibleText(item.body) != incoming.body
                 item.kind = incoming.kind
                 item.author = incoming.author
                 item.body = incoming.body
