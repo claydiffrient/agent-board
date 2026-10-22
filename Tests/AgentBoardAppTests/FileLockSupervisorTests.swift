@@ -86,7 +86,7 @@ final class FileLockSupervisorTests: XCTestCase {
         XCTAssertEqual(try locks.held(projectId: fixture.project.id).count, 3)
 
         let relaunched = fixture.relaunchedSupervisor()
-        defer { await relaunched.stop() }
+        addTeardownBlock { await relaunched.stop() }
         await relaunched.start()
 
         XCTAssertEqual(
