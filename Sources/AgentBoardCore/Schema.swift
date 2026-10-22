@@ -551,6 +551,52 @@ enum Schema {
     ALTER TABLE pr_watch ADD COLUMN ready_notified_oid TEXT;
     """
 
+    /// The task a triager session is bound to, the watch it triages, and the diff it was given.
+    static let prTriage = """
+    CREATE TABLE pr_triage (
+      task_id    TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
+      watch_id   TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+      base_oid   TEXT NOT NULL,
+      head_oid   TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX pr_triage_watch ON pr_triage(watch_id);
+    """
+
+    /// The round each triage was spawned for, and why a watch is parked.
+    static let prTriageRound = """
+    ALTER TABLE pr_triage ADD COLUMN round INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE pr_watch ADD COLUMN parked_reason TEXT;
+    """
+
+    static let prItemDecisionNotified = """
+    ALTER TABLE pr_item ADD COLUMN decision_notified_at INTEGER;
+    """
+
+    /// The fixer task a round's fix items went to.
+    static let prRoundFixTask = """
+    ALTER TABLE pr_round ADD COLUMN fix_task_id TEXT REFERENCES task(id) ON DELETE SET NULL;
+    """
+
+    /// A round's check (SPEC §13.1): the reviewer's verdict, the follow-up check task, the head they
+    /// judged, how many checks have failed, and each item's grade note.
+    static let prRoundCheck = """
+    ALTER TABLE pr_round ADD COLUMN check_failures INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE pr_round ADD COLUMN review_verdict TEXT;
+    ALTER TABLE pr_round ADD COLUMN review_findings TEXT;
+    ALTER TABLE pr_round ADD COLUMN followup_task_id TEXT REFERENCES task(id) ON DELETE SET NULL;
+    ALTER TABLE pr_round ADD COLUMN checked_head_oid TEXT;
+    ALTER TABLE pr_item ADD COLUMN followup_note TEXT;
+    """
+
+    /// When an item became handled, which bounds the replies turning `postFactualReplies` on may post,
+    /// and the last failed post, with when one was given up on (SPEC §13.2).
+    static let prItemReplyBounds = """
+    ALTER TABLE pr_item ADD COLUMN handled_at INTEGER;
+    ALTER TABLE pr_item ADD COLUMN reply_error TEXT;
+    ALTER TABLE pr_item ADD COLUMN reply_abandoned_at INTEGER;
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
@@ -558,6 +604,6 @@ enum Schema {
         "task_commit",
         "roster_agent", "project_roster_agent", "task_comment", "comment_delivery", "coordinator",
         "coordinator_request", "request_event", "request_epic", "pr_watch", "pr_item", "pr_round",
-        "pr_poll_problem",
+        "pr_poll_problem", "pr_triage",
     ]
 }

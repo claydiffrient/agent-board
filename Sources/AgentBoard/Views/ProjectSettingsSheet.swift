@@ -30,7 +30,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
         case .workflow: [.verification, .teardown, .isolation, .publishing]
         case .notifications: [.notifications]
         case .advanced: [.autoMode, .extraMcpServers]
-        case .prFollowThrough: [.prWatch, .prVerification, .prReplies, .publishGuard]
+        case .prFollowThrough: [.prWatch, .prVerification, .prReplies, .publishGuard, .prRoles]
         }
     }
 }
@@ -38,7 +38,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
 enum ProjectSettingsSection: String, CaseIterable, Identifiable {
     case repository, workspace, caps, models, review, verification, teardown, isolation, publishing
     case archive, notifications, autonomy, autoMode, extraMcpServers, roster
-    case prWatch, prVerification, prReplies, publishGuard
+    case prWatch, prVerification, prReplies, prRoles, publishGuard
 
     var id: Self { self }
 
@@ -62,6 +62,7 @@ enum ProjectSettingsSection: String, CaseIterable, Identifiable {
         case .prWatch: "Watch"
         case .prVerification: "Verification"
         case .prReplies: "Replies"
+        case .prRoles: "Roles"
         case .publishGuard: "Publish guard"
         }
     }
@@ -377,6 +378,13 @@ struct ProjectSettingsSheet: View {
             Text("Factual replies are \"Fixed in <sha>\", an answer to a factual question, a pointer to the commit that already did it, and a note that out-of-scope work is tracked separately. Anything argued waits for you as a decision.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        case .prRoles:
+            ForEach(FollowThroughRole.allCases) { role in
+                roleRows(role)
+            }
+            Text("Default runs the built-in prompt for the role on the project's default model; a chosen agent's own model applies unless one is picked here. Only Triage runs today. Fixer, Reviewer and Follow-up check take effect once automatic fix rounds ship.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .publishGuard:
             ForEach(settings.prFollowThrough.privateTerms, id: \.self) { term in
                 HStack {
@@ -432,6 +440,33 @@ struct ProjectSettingsSheet: View {
         if saved.verifyCommand?.isEmpty == true { saved.verifyCommand = nil }
         saved.privateTerms = privateTerms(draft.privateTerms, adding: pendingTerm)
         return saved
+    }
+
+    private func roleRows(_ role: FollowThroughRole) -> some View {
+        let current = settings.prFollowThrough.roles[keyPath: role.keyPath]
+        return Group {
+            Picker(role.title, selection: Binding(
+                get: { current?.rosterAgentId },
+                set: { id in
+                    settings.prFollowThrough.roles[keyPath: role.keyPath] = Self.updating(current) { $0.rosterAgentId = id }
+                }
+            )) {
+                ForEach(Self.roleAgentOptions(
+                    projectAgents: projectAgents, rosterAgents: roster.value, current: current?.rosterAgentId
+                ), id: \.agentId) { option in
+                    Text(option.title).tag(option.agentId)
+                }
+            }
+            ModelPicker(
+                label: "\(role.title) model", inheritLabel: "Agent's model or project default",
+                model: Binding(
+                    get: { current?.model },
+                    set: { model in
+                        settings.prFollowThrough.roles[keyPath: role.keyPath] = Self.updating(current) { $0.model = model }
+                    }
+                )
+            )
+        }
     }
 
     /// One row of the review routing table; `nil` is the Default row.
@@ -646,6 +681,59 @@ struct ProjectSettingsSheet: View {
         } else if let assignee {
             table.defaultAssignee = assignee
         }
+    }
+
+    enum FollowThroughRole: CaseIterable, Identifiable {
+        case triage, fixer, reviewer, followupCheck
+
+        var id: Self { self }
+
+        var title: String {
+            switch self {
+            case .triage: "Triage"
+            case .fixer: "Fixer"
+            case .reviewer: "Reviewer"
+            case .followupCheck: "Follow-up check"
+            }
+        }
+
+        var keyPath: WritableKeyPath<PRFollowThroughRoles, PRFollowThroughRole?> {
+            switch self {
+            case .triage: \.triage
+            case .fixer: \.fixer
+            case .reviewer: \.reviewer
+            case .followupCheck: \.followupCheck
+            }
+        }
+    }
+
+    struct RoleAgentOption: Equatable {
+        let agentId: String?
+        let title: String
+    }
+
+    /// Default, then the project's enabled agents. A stored agent the project can no longer spawn
+    /// stays listed, marked, so the picker shows what the spawn will refuse rather than a blank.
+    static func roleAgentOptions(
+        projectAgents: [RosterAgent], rosterAgents: [RosterAgent], current: String?
+    ) -> [RoleAgentOption] {
+        let enabled = projectAgents.filter(\.enabled)
+        var options = [RoleAgentOption(agentId: nil, title: "Default")]
+        options += enabled.map { RoleAgentOption(agentId: $0.id, title: $0.name) }
+        if let current, !enabled.contains(where: { $0.id == current }) {
+            let name = rosterAgents.first { $0.id == current }?.name ?? current
+            options.append(RoleAgentOption(agentId: current, title: "\(name) (not available)"))
+        }
+        return options
+    }
+
+    /// A role with neither field set is stored as absent, so clearing both pickers leaves no trace.
+    static func updating(
+        _ role: PRFollowThroughRole?, _ change: (inout PRFollowThroughRole) -> Void
+    ) -> PRFollowThroughRole? {
+        var updated = role ?? PRFollowThroughRole()
+        change(&updated)
+        return updated == PRFollowThroughRole() ? nil : updated
     }
 
     static func reviewLevelBlurb(_ level: ReviewLevel) -> String {

@@ -21,6 +21,7 @@ public enum ReviewPrompt {
         sections.append(howToReview(
             branch: branch, base: base, verification: verification, workingDirectory: workingDirectory
         ))
+        if task.origin == .fixRound { sections.append(fixRound(verification: verification)) }
         sections.append(verdict)
         sections.append(turnEnding)
         return sections.joined(separator: "\n\n")
@@ -97,6 +98,15 @@ public enum ReviewPrompt {
                 + "record that is not your verdict."
         )
         return lines.joined(separator: "\n")
+    }
+
+    /// SPEC §13.5: D8's fast-forward push follows this acceptance with no person in between.
+    static func fixRound(verification: VerificationCommands) -> String {
+        let tests = verification.test.map { "`\($0)`" } ?? "the project's tests"
+        return "## This is a pull request fix round\n"
+            + "Accepting it lets Agent Board push the round onto the pull request with no person in between, "
+            + "so run \(tests) on the suites the diff touches before you accept, and accept only when they pass. "
+            + "Reopen when the tests fail or when a fix does not do what its item asked."
     }
 
     static let verdict = """

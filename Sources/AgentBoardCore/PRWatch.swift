@@ -50,6 +50,11 @@ public enum PRFollowupGrade: String, Codable, Sendable, CaseIterable, Equatable,
     case moot
 }
 
+public enum PRRoundReview: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case accepted
+    case reopened
+}
+
 public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
     public static let databaseTableName = "pr_watch"
 
@@ -79,6 +84,7 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
     public var estCostUSD: Double
     /// The head whose Ready to verify banner has fired, so a PR announces itself once per head.
     public var readyNotifiedOid: String? = nil
+    public var parkedReason: String? = nil
     public var createdAt: Int64
     public var updatedAt: Int64
 
@@ -107,6 +113,7 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
         case verifiedAt = "verified_at"
         case estCostUSD = "est_cost_usd"
         case readyNotifiedOid = "ready_notified_oid"
+        case parkedReason = "parked_reason"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -146,11 +153,17 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
     public var decisionAnswer: String?
     public var fixTaskId: String?
     public var followupGrade: PRFollowupGrade?
+    public var followupNote: String? = nil
     public var replyBody: String?
     public var replyURL: String?
     public var round: Int
     public var createdAt: Int64
     public var updatedAt: Int64
+    public var decisionNotifiedAt: Int64? = nil
+    public var handledAt: Int64? = nil
+    public var replyError: String? = nil
+    /// Set once the item's comment is gone from GitHub, so its reply is never tried again (SPEC §13.2).
+    public var replyAbandonedAt: Int64? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -170,11 +183,16 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
         case decisionAnswer = "decision_answer"
         case fixTaskId = "fix_task_id"
         case followupGrade = "followup_grade"
+        case followupNote = "followup_note"
         case replyBody = "reply_body"
         case replyURL = "reply_url"
         case round
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case decisionNotifiedAt = "decision_notified_at"
+        case handledAt = "handled_at"
+        case replyError = "reply_error"
+        case replyAbandonedAt = "reply_abandoned_at"
     }
 
     public mutating func didInsert(_ inserted: InsertionSuccess) {
@@ -182,6 +200,45 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
     }
 
     public var isOpenDecision: Bool { state == .open && verdict == .decision }
+
+    public var decisionOptions: [PRDecisionOption] {
+        guard let json = decisionOptionsJSON else { return [] }
+        return (try? JSONDecoder().decode([PRDecisionOption].self, from: Data(json.utf8))) ?? []
+    }
+}
+
+/// One choice on a decision (SPEC §13.4): choosing it answers the item as `verdict`, `fix` or
+/// `answer`, and an `answer` posts `replyBody`. A bare string, the form stored before options carried
+/// a verdict, decodes as a `fix`.
+public struct PRDecisionOption: Codable, Sendable, Equatable, Hashable {
+    public var label: String
+    public var verdict: PRItemVerdict
+    public var replyBody: String?
+
+    public init(label: String, verdict: PRItemVerdict, replyBody: String? = nil) {
+        self.label = label
+        self.verdict = verdict
+        self.replyBody = replyBody
+    }
+
+    public enum CodingKeys: String, CodingKey {
+        case label
+        case verdict
+        case replyBody = "reply_body"
+    }
+
+    public init(from decoder: Decoder) throws {
+        if let label = try? decoder.singleValueContainer().decode(String.self) {
+            self.init(label: label, verdict: .fix)
+            return
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            label: try container.decode(String.self, forKey: .label),
+            verdict: try container.decode(PRItemVerdict.self, forKey: .verdict),
+            replyBody: try container.decodeIfPresent(String.self, forKey: .replyBody)
+        )
+    }
 }
 
 public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Sendable, Equatable {
@@ -195,6 +252,13 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
     public var outcome: String?
     public var startedAt: Int64
     public var endedAt: Int64?
+    public var fixTaskId: String? = nil
+    public var checkFailures: Int = 0
+    public var reviewVerdict: PRRoundReview? = nil
+    public var reviewFindings: String? = nil
+    public var followupTaskId: String? = nil
+    /// The round branch's tip when its follow-up check started: the head the check judged.
+    public var checkedHeadOid: String? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -205,6 +269,17 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
         case outcome
         case startedAt = "started_at"
         case endedAt = "ended_at"
+        case fixTaskId = "fix_task_id"
+        case checkFailures = "check_failures"
+        case reviewVerdict = "review_verdict"
+        case reviewFindings = "review_findings"
+        case followupTaskId = "followup_task_id"
+        case checkedHeadOid = "checked_head_oid"
+    }
+
+    /// The branch a round's fixer commits on (SPEC §13.1).
+    public static func branch(pullRequest number: Int, round: Int) -> String {
+        "\(TaskStore.branchPrefix)pr-\(number)-r\(round)"
     }
 
     public mutating func didInsert(_ inserted: InsertionSuccess) {
@@ -306,15 +381,17 @@ public enum PRPageGroup: String, Sendable, CaseIterable, Equatable {
 public struct PRWatchListing: Sendable, Equatable, Identifiable {
     public var watch: PRWatch
     public var openItems: Int
-    public var openDecisions: Int
+    /// The open decision items, oldest first, which the Needs you group lists under the row.
+    public var decisions: [PRItem]
 
-    public init(watch: PRWatch, openItems: Int, openDecisions: Int) {
+    public init(watch: PRWatch, openItems: Int, decisions: [PRItem] = []) {
         self.watch = watch
         self.openItems = openItems
-        self.openDecisions = openDecisions
+        self.decisions = decisions
     }
 
     public var id: String { watch.id }
+    public var openDecisions: Int { decisions.count }
 }
 
 public struct PRWatchGroup: Sendable, Equatable {
@@ -327,7 +404,8 @@ public struct PRWatchGroup: Sendable, Equatable {
     }
 }
 
-/// What a project's Pull Requests badge counts: PRs ready to verify plus open decisions.
+/// What a project's Pull Requests badge counts: PRs ready to verify plus open decisions, in projects
+/// with follow-through on and on watches that are not paused (SPEC §13.4).
 public struct PRBadgeCount: Sendable, Equatable {
     public var readyToVerify: Int
     public var openDecisions: Int
@@ -340,25 +418,30 @@ public struct PRBadgeCount: Sendable, Equatable {
     public var total: Int { readyToVerify + openDecisions }
 }
 
-/// The phase-1 moves of SPEC §13.1, decided from one poll. Every other state belongs to a later
-/// phase's driver and is left where it is.
+/// The moves of SPEC §13.1 decided from one poll: among watching, settling, readyToVerify and
+/// verified. Leaving settling for triaging, and every later state, belongs to the follow-through driver.
 public enum PRWatchTransition {
     /// How long a head with no required checks waits for CI to register any before it counts as green.
     public static let checksGraceMillis: Int64 = 5 * 60 * 1000
 
+    /// `itemsAwaitingRound` counts open items with no verdict yet and `fix` answers to decisions not
+    /// yet in a round (SPEC §13.4); any other open decision or fix still counts in `openItems`, so it
+    /// keeps a PR from being ready without sending it back to triage.
     public static func next(
-        from watch: PRWatch, snapshot: PRSnapshot, openItems: Int, settings: PRFollowThroughSettings,
-        now: Int64 = .nowMillis
+        from watch: PRWatch, snapshot: PRSnapshot, openItems: Int, itemsAwaitingRound: Int,
+        settings: PRFollowThroughSettings, now: Int64 = .nowMillis
     ) -> PRWatchState? {
         let state = watch.state
-        guard [.watching, .readyToVerify, .verified].contains(state) else { return nil }
+        guard [.watching, .settling, .readyToVerify, .verified].contains(state) else { return nil }
         let labeled = settings.markVerifiedLabel.map { label in
             snapshot.labels.contains { $0.caseInsensitiveCompare(label) == .orderedSame }
         } ?? false
         let ready = (!settings.requireApproval || snapshot.reviewDecision == "APPROVED")
             && checksGreen(snapshot.checksState, headSeenAt: watch.headChangedAt ?? watch.createdAt, now: now)
             && openItems == 0
-        let target: PRWatchState = labeled ? .verified : ready ? .readyToVerify : .watching
+        let target: PRWatchState = labeled ? .verified
+            : itemsAwaitingRound > 0 ? .settling
+            : ready ? .readyToVerify : .watching
         return target == state ? nil : target
     }
 
@@ -367,5 +450,9 @@ public enum PRWatchTransition {
     static func checksGreen(_ checks: String?, headSeenAt: Int64, now: Int64) -> Bool {
         guard let checks else { return now - headSeenAt >= checksGraceMillis }
         return checks == "SUCCESS"
+    }
+
+    static func checksFailed(_ rollup: String?) -> Bool {
+        rollup == "FAILURE" || rollup == "ERROR"
     }
 }

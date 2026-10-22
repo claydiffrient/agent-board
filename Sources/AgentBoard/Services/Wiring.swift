@@ -46,7 +46,8 @@ enum Wiring {
             worker: WorkerToolHandler(db: db, control: sink, events: sink, scopedCommits: scopedCommits),
             orchestrator: orchestrator,
             reviewer: ReviewerToolHandler(db: db, control: sink, events: sink),
-            coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: sink)
+            coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: sink),
+            triager: TriagerToolHandler(db: db, events: sink)
         )
     }
 }

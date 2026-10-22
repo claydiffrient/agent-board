@@ -43,7 +43,7 @@ struct NotificationRoute: Equatable, Hashable {
         case .blockedWorker: .blockedTask(id)
         case .strandedReports: .reports
         case .overdueShutdown: .shutdown
-        case .prPollUnavailable: .project
+        case .prPollUnavailable, .parkedPullRequest, .pullRequestDecision: .project
         }
     }
 

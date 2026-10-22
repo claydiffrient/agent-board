@@ -14,6 +14,8 @@ public enum NotificationCategory: String, Codable, Sendable, CaseIterable, Equat
     case workerFailures
     /// A watched pull request entered Ready to verify on a head not yet announced (SPEC §13.4).
     case prReadyToVerify
+    /// Triage left a decision on a watched pull request; one banner per decision (SPEC §13.4).
+    case prDecisions
 
     public var id: String { rawValue }
 
@@ -24,6 +26,7 @@ public enum NotificationCategory: String, Codable, Sendable, CaseIterable, Equat
         case .capsAndStalls: return "Cap breaches and stalls"
         case .workerFailures: return "Worker failures"
         case .prReadyToVerify: return "Pull requests ready to verify"
+        case .prDecisions: return "Pull request decisions"
         }
     }
 }
@@ -92,6 +95,7 @@ public struct NotificationPreferences: Codable, Sendable, Equatable {
     public var capsAndStalls: Bool = true
     public var workerFailures: Bool = true
     public var prReadyToVerify: Bool = true
+    public var prDecisions: Bool = true
     /// One control for "I am deliberately letting this project run unattended", rather than four
     /// switches to flip down and four to remember to flip back.
     public var mute: NotificationMute = .none
@@ -102,6 +106,7 @@ public struct NotificationPreferences: Codable, Sendable, Equatable {
         capsAndStalls: Bool = true,
         workerFailures: Bool = true,
         prReadyToVerify: Bool = true,
+        prDecisions: Bool = true,
         mute: NotificationMute = .none
     ) {
         self.approvals = approvals
@@ -109,6 +114,7 @@ public struct NotificationPreferences: Codable, Sendable, Equatable {
         self.capsAndStalls = capsAndStalls
         self.workerFailures = workerFailures
         self.prReadyToVerify = prReadyToVerify
+        self.prDecisions = prDecisions
         self.mute = mute
     }
 
@@ -119,6 +125,7 @@ public struct NotificationPreferences: Codable, Sendable, Equatable {
         capsAndStalls = try c.decodeIfPresent(Bool.self, forKey: .capsAndStalls) ?? true
         workerFailures = try c.decodeIfPresent(Bool.self, forKey: .workerFailures) ?? true
         prReadyToVerify = try c.decodeIfPresent(Bool.self, forKey: .prReadyToVerify) ?? true
+        prDecisions = try c.decodeIfPresent(Bool.self, forKey: .prDecisions) ?? true
         mute = try c.decodeIfPresent(NotificationMute.self, forKey: .mute) ?? .none
     }
 
@@ -129,6 +136,7 @@ public struct NotificationPreferences: Codable, Sendable, Equatable {
         case .capsAndStalls: return capsAndStalls
         case .workerFailures: return workerFailures
         case .prReadyToVerify: return prReadyToVerify
+        case .prDecisions: return prDecisions
         }
     }
 
@@ -139,6 +147,7 @@ public struct NotificationPreferences: Codable, Sendable, Equatable {
         case .capsAndStalls: capsAndStalls = on
         case .workerFailures: workerFailures = on
         case .prReadyToVerify: prReadyToVerify = on
+        case .prDecisions: prDecisions = on
         }
     }
 
