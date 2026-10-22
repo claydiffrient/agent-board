@@ -21,11 +21,7 @@ public struct AgentRuntimeError: Error, CustomStringConvertible, Sendable {
 }
 
 enum ProcessRunner {
-    /// However long a subprocess legitimately runs, its stderr pipe must drain in this long once
-    /// stdout has. Past it the drain never scheduling is worth failing loudly for, rather than the
-    /// semaphore below waiting forever with no signal to say why: measured cause of a `swift test`
-    /// run that outlived its own watchdog by hours (2026-09-26), once enough leaked background
-    /// `Task`s elsewhere had exhausted libdispatch's worker-thread pool.
+    /// How long stderr may stay open once stdout has closed, as when a grandchild still holds it.
     static let pipeDrainTimeout: TimeInterval = 60
 
     static func run(
@@ -57,22 +53,8 @@ enum ProcessRunner {
 
         try process.run()
 
-        if let stdinPipe, let stdin {
-            let writer = stdinPipe.fileHandleForWriting
-            DispatchQueue.global().async {
-                try? writer.write(contentsOf: stdin)
-                try? writer.close()
-            }
-        }
-
-        let stderrBox = DataBox()
-        let stderrDone = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            stderrBox.data = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            stderrDone.signal()
-        }
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        guard stderrDone.wait(timeout: .now() + pipeDrainTimeout) == .success else {
+        guard let output = exchange(stdout: stdoutPipe, stderr: stderrPipe, stdin: stdinPipe.map { ($0, stdin ?? Data()) })
+        else {
             process.terminate()
             throw AgentRuntimeError(
                 "\(executable.lastPathComponent) \(arguments.joined(separator: " ")) did not finish "
@@ -83,9 +65,63 @@ enum ProcessRunner {
 
         return CommandResult(
             status: process.terminationStatus,
-            stdout: String(decoding: stdoutData, as: UTF8.self),
-            stderr: String(decoding: stderrBox.data, as: UTF8.self)
+            stdout: String(decoding: output.stdout, as: UTF8.self),
+            stderr: String(decoding: output.stderr, as: UTF8.self)
         )
+    }
+
+    /// Feeds stdin and drains both pipes on the calling thread; nil when stderr outlives stdout by
+    /// `pipeDrainTimeout`. Handing a pipe to a dispatch queue instead deadlocks once as many callers
+    /// block here as the machine has cores: libdispatch then schedules none of their readers.
+    private static func exchange(stdout: Pipe, stderr: Pipe, stdin: (Pipe, Data)?) -> (stdout: Data, stderr: Data)? {
+        let writer = stdin?.0.fileHandleForWriting
+        let input = stdin?.1 ?? Data()
+        var written = 0
+        if let writer {
+            _ = fcntl(writer.fileDescriptor, F_SETFL, fcntl(writer.fileDescriptor, F_GETFL) | O_NONBLOCK)
+            _ = fcntl(writer.fileDescriptor, F_SETNOSIGPIPE, 1)
+            if input.isEmpty { try? writer.close() }
+        }
+        var fds = [
+            pollfd(fd: stdout.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0),
+            pollfd(fd: stderr.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0),
+            pollfd(fd: writer.flatMap { input.isEmpty ? nil : $0.fileDescriptor } ?? -1, events: Int16(POLLOUT), revents: 0),
+        ]
+        var collected = [Data(), Data()]
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        var stderrDeadline: DispatchTime?
+
+        while fds[0].fd >= 0 || fds[1].fd >= 0 {
+            var wait: Int32 = -1
+            if let stderrDeadline {
+                let now = DispatchTime.now()
+                guard now < stderrDeadline else { return nil }
+                wait = Int32(min((stderrDeadline.uptimeNanoseconds - now.uptimeNanoseconds) / 1_000_000 + 1, 1000))
+            }
+            guard poll(&fds, nfds_t(fds.count), wait) > 0 else { continue }
+
+            for index in 0..<2 where fds[index].fd >= 0 && fds[index].revents != 0 {
+                let count = read(fds[index].fd, &buffer, buffer.count)
+                if count > 0 {
+                    collected[index].append(buffer, count: count)
+                } else if count == 0 || (errno != EINTR && errno != EAGAIN) {
+                    fds[index].fd = -1
+                    if index == 0, fds[1].fd >= 0 { stderrDeadline = .now() + pipeDrainTimeout }
+                }
+            }
+            if let writer, fds[2].fd >= 0, fds[2].revents != 0 {
+                let count = input.withUnsafeBytes { bytes in
+                    Darwin.write(fds[2].fd, bytes.baseAddress! + written, bytes.count - written)
+                }
+                if count > 0 { written += count }
+                if written == input.count || (count < 0 && errno != EINTR && errno != EAGAIN) {
+                    fds[2].fd = -1
+                    try? writer.close()
+                }
+            }
+        }
+        if fds[2].fd >= 0 { try? writer?.close() }
+        return (collected[0], collected[1])
     }
 
     /// Bounded from launch: past `timeout` the child is terminated and this throws. Each pipe drains
@@ -145,10 +181,6 @@ enum ProcessRunner {
         }
         return result
     }
-}
-
-private final class DataBox: @unchecked Sendable {
-    var data = Data()
 }
 
 private final class PipeCapture: @unchecked Sendable {
