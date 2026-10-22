@@ -282,6 +282,10 @@ struct ProjectSettingsSheet: View {
             Text("A worktree per task is the default and always isolates. Shared runs workers in this project's own checkout on one branch, skipping a full repository setup per task; Auto shares only when a compatible group already holds the checkout. A task that cannot join gets a worktree. Co-resident agents take a per-file lock before every write, so a collision is a wait rather than an overwrite.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            TextField("Reusable worktree slots", value: $settings.worktreeSlots, format: .number)
+            Text("Workers take turns in this many worktrees that stay on disk between tasks, so build output inside them stays warm. A slot is switched to the task's branch and kept until the task is accepted or discarded, and the teardown hook runs only when a slot is retired by lowering this number. When every slot is taken, a task gets its own worktree. 0 gives every task its own.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .publishing:
             Picker("Integrate standalone tasks and epics by", selection: $settings.standaloneIntegration) {
                 Text(Self.defaultIntegrationTitle(integrationDefault)).tag(StandaloneIntegration?.none)

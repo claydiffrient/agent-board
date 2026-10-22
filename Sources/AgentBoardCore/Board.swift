@@ -282,8 +282,11 @@ public struct Board: Sendable {
     /// The only path that creates a worker session row. The two guards run inside the write
     /// transaction, so a handed-off task cannot be assigned twice concurrently: one caller wins and
     /// the other throws rather than launching a second agent into the same checkout.
+    ///
+    /// With `slots`, the session's checkout is the slot leased here (SPEC §3.1 step 2), chosen in
+    /// the same transaction so two spawns can never lease one slot; `noFreeWorktreeSlot` when none is free.
     @discardableResult
-    public func assign(taskId: String, session: AgentSession) throws -> AgentSession {
+    public func assign(taskId: String, session: AgentSession, leasingSlotFrom slots: WorktreeSlotPool? = nil) throws -> AgentSession {
         try db.writer.write { db in
             guard let task = try Task.fetchOne(db, key: taskId) else {
                 throw BoardError.taskNotFound(taskId)
@@ -294,6 +297,14 @@ public struct Board: Sendable {
             if let holder = try SessionStore.activeHolder(db, taskId: taskId) {
                 throw BoardError.taskAlreadyHeld(taskId: taskId, sessionId: holder.sessionId)
             }
+            var session = session
+            if let slots {
+                guard let slot = try WorktreeSlotStore.lease(db, projectId: task.projectId, taskId: taskId, pool: slots) else {
+                    throw BoardError.noFreeWorktreeSlot(projectId: task.projectId)
+                }
+                session.worktreePath = slots.path(slot)
+                session.cwd = slots.path(slot)
+            }
             if let path = session.worktreePath, let holder = try SessionStore.activeHolder(db, worktreePath: path) {
                 throw BoardError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
             }
@@ -302,7 +313,6 @@ public struct Board: Sendable {
                 sql: "SELECT COUNT(*) FROM agent_session WHERE task_id = ?",
                 arguments: [taskId]
             ) ?? 0
-            var session = session
             session.taskId = taskId
             session.projectId = task.projectId
             session.role = .worker

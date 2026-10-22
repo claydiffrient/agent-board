@@ -227,6 +227,9 @@ public final class AppDatabase: Sendable {
                 arguments: [Int64.nowMillis]
             )
         }
+        migrator.registerMigration("worktree_slot") { db in
+            try db.execute(sql: Schema.worktreeSlot)
+        }
         return migrator
     }
 }

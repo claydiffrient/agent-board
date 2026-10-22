@@ -20,7 +20,7 @@ CREATE TABLE project (
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
                                    -- reviewLevel, reviewRouting, buildCommand, testCommand, archivePolicy,
-                                   -- worktreeStrategy, sharedCheckoutMaxAgents, rosterAgentIds,
+                                   -- worktreeStrategy, sharedCheckoutMaxAgents, worktreeSlots, rosterAgentIds,
                                    -- worktreeTeardownCommand, worktreeTeardownTimeoutSeconds,
                                    -- prFollowThrough
   created_at      INTEGER NOT NULL,
@@ -396,6 +396,14 @@ CREATE TABLE pr_round (
   UNIQUE (watch_id, number)
 );
 
+CREATE TABLE worktree_slot (       -- pooled worktrees (§3.1 step 2)
+  project_id TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  slot       INTEGER NOT NULL,      -- <worktree_root>/slot-<slot>, from 1
+  task_id    TEXT,                  -- the lease; null = free
+  leased_at  INTEGER,
+  PRIMARY KEY (project_id, slot)
+);                                  -- unique index on task_id where it is not null
+
 -- An enabled project whose last PR poll could not run `gh` (§13.1); it raises the attention signal.
 CREATE TABLE pr_poll_problem (
   project_id TEXT PRIMARY KEY REFERENCES project(id) ON DELETE CASCADE,
@@ -656,6 +664,25 @@ only read back from `agent_session` rows with `role = worker` and no
 `worktree_path`, sharing one `branch` — a detached worker that outlives the app
 is still found in it on the next launch, with no separate row to fall out of
 sync with the sessions it describes.
+
+`worktreeSlots` is how many pooled worktrees, at `<worktree_root>/slot-<n>`, a
+worker is leased before it gets one of its own (§3.1 step 2). 0, the default
+for every project, gives every task its own worktree as before. It sits on
+the Isolation tab beside `worktreeStrategy`. Lowering it retires each free slot
+above the new number on the next `reconcile`, running the teardown hook in it;
+a leased one is retired once its task releases it.
+
+`worktree_slot` holds a row for each slot that has ever been leased. `task_id`
+is the lease: set by `Board.assign` in the transaction that writes the
+worker's session row, kept for the task across retries, hand-offs and its
+reviewer, and cleared when accept or discard releases the slot (§5). It is not
+a foreign key, because a discarded task's row is deleted while its slot may
+still hold its uncommitted work. A lease whose task is gone, `done` or
+`closed` is released by `reconcile`. `agent_session.worktree_path` stops
+identifying a task once slots are in use, since every task leased slot `n`
+over time records the same path; a slot path counts as a task's own worktree
+only while `worktree_slot` says the task holds it, which is what keeps one
+task's accept, diff or salvage from reading another task's checkout.
 
 `worktreeTeardownCommand` is the project's teardown hook, run in a worktree just
 before Agent Board removes it (§3.1, "Removing a worktree"); nil or blank runs

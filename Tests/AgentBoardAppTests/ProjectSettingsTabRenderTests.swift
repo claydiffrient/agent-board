@@ -521,15 +521,16 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
             $0.worktreeTeardownTimeoutSeconds = 90
             $0.worktreeStrategy = .shared
             $0.sharedCheckoutMaxAgents = 5
+            $0.worktreeSlots = 2
             $0.standaloneIntegration = .localMerge
         })
 
-        XCTAssertEqual(mounted.fields.map(\.stringValue), ["make", "", "make clean", "90", "5", ""])
+        XCTAssertEqual(mounted.fields.map(\.stringValue), ["make", "", "make clean", "90", "5", "2", ""])
         XCTAssertEqual(
             mounted.fields.map(\.placeholderString),
             [
                 "e.g. swift build", "e.g. swift test",
-                "e.g. [ \"$(bazel info workspace)\" = \"$PWD\" ] && bazel clean --expunge", nil, nil,
+                "e.g. [ \"$(bazel info workspace)\" = \"$PWD\" ] && bazel clean --expunge", nil, nil, nil,
                 "e.g. clay/{slug}",
             ]
         )

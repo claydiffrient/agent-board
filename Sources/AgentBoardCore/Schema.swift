@@ -602,6 +602,18 @@ enum Schema {
     ALTER TABLE pr_watch ADD COLUMN resumed_at INTEGER;
     """
 
+    /// One row per pooled worktree slot that has ever been leased (SPEC §3.1 step 2, §4).
+    static let worktreeSlot = """
+    CREATE TABLE worktree_slot (
+      project_id TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+      slot       INTEGER NOT NULL,
+      task_id    TEXT,
+      leased_at  INTEGER,
+      PRIMARY KEY (project_id, slot)
+    );
+    CREATE UNIQUE INDEX worktree_slot_task ON worktree_slot(task_id) WHERE task_id IS NOT NULL;
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
@@ -609,6 +621,6 @@ enum Schema {
         "task_commit",
         "roster_agent", "project_roster_agent", "task_comment", "comment_delivery", "coordinator",
         "coordinator_request", "request_event", "request_epic", "pr_watch", "pr_item", "pr_round",
-        "pr_poll_problem", "pr_triage",
+        "pr_poll_problem", "pr_triage", "worktree_slot",
     ]
 }
