@@ -889,8 +889,8 @@ public struct Board: Sendable {
 
     /// Ends a worker session that will not report for itself and queues a `failed` report, so the
     /// orchestrator stops believing the worker is running. A task stranded in `running` leaves it:
-    /// for `review` when `salvage` shows commits on its branch, otherwise back to `ready`. A triage
-    /// task is closed instead, with no report (SPEC §13.2).
+    /// for `review` when `salvage` shows commits on its branch, otherwise, and always for a fix round,
+    /// back to `ready`. A triage task is closed instead, with no report (SPEC §13.2).
     ///
     /// An already-inactive session row is not a reason to stop. The worker's `SessionEnd` hook races
     /// this call and writes `stopped` first often enough that bailing there strands the task in
@@ -952,7 +952,8 @@ public struct Board: Sendable {
             if cause.flagsTaskFailed {
                 try TaskStore.setFailed(db, taskId, true, reason: reason)
             }
-            let destination = Self.landingColumn(stranded: stranded, cause: cause, salvage: salvage)
+            let destination = task.origin == .fixRound && stranded
+                ? .ready : Self.landingColumn(stranded: stranded, cause: cause, salvage: salvage)
             if let destination {
                 try TaskStore.move(db, taskId, to: destination, before: nil)
             }

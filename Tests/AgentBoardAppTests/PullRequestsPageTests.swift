@@ -216,6 +216,37 @@ final class PullRequestsPageTests: XCTestCase {
         XCTAssertEqual(mount.sidebarContent, SidebarContent(rows: 4, headers: 4))
     }
 
+    /// SPEC §13.4: a parked row shows why, and offers Resume and Stop watching in place of Pause.
+    func testAParkedRowShowsItsReasonWithResumeAndStopWatching() throws {
+        let db = try AppDatabase.inMemory()
+        let project = try project(db, label: label)
+        let parked = try watch(db, project, number: 6, title: "Fennel", state: .parked)
+        try db.writer.write {
+            try $0.execute(
+                sql: "UPDATE pr_watch SET parked_reason = ? WHERE id = ?",
+                arguments: ["#6 has run its round cap of 3 rounds without the feedback settling.", parked.id]
+            )
+        }
+
+        let mount = OffscreenMount(
+            PullRequestsView(projects: [project]).environment(renderEnvironment(db: db)),
+            size: CGSize(width: 900, height: 800)
+        )
+        defer { mount.close() }
+        // The Parked row plus the empty Ready to verify, In progress, Waiting and Verified placeholders.
+        _ = try mount.capture(showing: SidebarContent(rows: 5, headers: 5))
+        let shot = try XCTUnwrap(CGWindowListCreateImage(
+            .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+            [.boundsIgnoreFraming, .bestResolution]
+        ))
+        let words = ["Parked", "Fennel", "round cap", "Resume", "Stop watching"]
+        let text = try recognizedLines(in: shot, words: words).map(\.text).joined(separator: " | ")
+        for word in words {
+            XCTAssertTrue(text.localizedCaseInsensitiveContains(word), "\(word) not drawn: \(text)")
+        }
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("Pause"), "a parked row has no Pause: \(text)")
+    }
+
     func testMarkVerifiedAddsTheConfiguredLabelThroughGhAndNothingRunsWithoutOne() async throws {
         let db = try AppDatabase.inMemory()
         let labeled = try project(db, label: label)

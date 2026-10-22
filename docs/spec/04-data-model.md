@@ -324,7 +324,8 @@ CREATE TABLE pr_watch (
   head_changed_at  INTEGER,           -- the poll that first saw head_oid; null for the head watching began on
   base_ref         TEXT NOT NULL,
   state            TEXT NOT NULL,     -- watching | settling | triaging | fixing | checking | publishing |
-                                      -- awaiting_ci | ready_to_verify | verified | stale | parked | merged | closed
+                                      -- awaiting_ci | ready_to_verify | verified | stale | parked | merged | closed |
+                                      -- stopped
   round            INTEGER NOT NULL DEFAULT 0,
   review_decision  TEXT,              -- GitHub's reviewDecision, as read
   checks_state     TEXT,              -- SUCCESS | PENDING | FAILURE by §13.1's checks rule; null when nothing is required or reported
@@ -337,6 +338,7 @@ CREATE TABLE pr_watch (
   est_cost_usd     REAL NOT NULL DEFAULT 0,
   ready_notified_oid TEXT,            -- the head whose Ready to verify banner fired (§13.4)
   parked_reason    TEXT,              -- why follow-through parked it, e.g. the last of three failed triages (§13.1)
+  resumed_at       INTEGER,           -- the last Resume from parked; bounds the round cap and failure streak (§13.4)
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,  -- moves only when something other than last_polled_at changes
   UNIQUE (project_id, repo_owner, repo_name, number)
@@ -367,7 +369,7 @@ CREATE TABLE pr_item (
   reply_body            TEXT,
   reply_url             TEXT,            -- the reply publishing posted (§13.2); null until one is
   reply_error           TEXT,            -- the last failed post's error (§13.2)
-  reply_abandoned_at    INTEGER,         -- when a post found the comment gone; no reply is tried again
+  reply_abandoned_at    INTEGER,         -- when a post found the comment gone on a PR that still reads; no reply is tried again
   handled_at            INTEGER,         -- when it last became handled; bounds the replies §13.2 posts
   round                 INTEGER NOT NULL DEFAULT 0,  -- the round it arrived in, then the round that handled it, whose replies post it
   created_at            INTEGER NOT NULL,
@@ -382,7 +384,7 @@ CREATE TABLE pr_round (
   number          INTEGER NOT NULL,
   base_head_oid   TEXT NOT NULL,     -- the PR head the round's branch was cut from
   pushed_head_oid TEXT,              -- the round branch's tip publishing fast-forwarded the PR to
-  outcome         TEXT,              -- triaged | triage_failed | interrupted | check_failed | published | stale | frozen | publish_failed; null while the round runs
+  outcome         TEXT,              -- triaged | triage_failed | interrupted | check_failed | published | stale | frozen | publish_failed | fixer_failed; null while the round runs
   started_at      INTEGER NOT NULL,
   ended_at        INTEGER,
   fix_task_id     TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the round's `fix_round` task (§13.1)

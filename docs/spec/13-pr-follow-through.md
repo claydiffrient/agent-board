@@ -57,9 +57,8 @@ triage.
   ref, then posts factual replies when `postFactualReplies` is on. It never
   resolves threads.
 - **awaitingCI** *(phase 3 reads green/red; phase 4 adds the log-tail items on
-  red)* — green goes to watching; red goes to watching with a failed-checks
-  decision item, which phase 4 replaces with going straight to triaging, the
-  failed checks and their log tails as items.
+  red)* — green goes to watching; red goes straight to triaging, with each
+  failed check and its log tail as an item (below).
 - **readyToVerify** *(phase 1)* — approved (when `requireApproval`), checks
   green, no open item or decision, and the verification label absent. Approved
   means GitHub's `reviewDecision` is `APPROVED`: that is where branch
@@ -112,7 +111,8 @@ triage.
   decision item rather than restarting the round. Removing the label
   re-evaluates it: readyToVerify if it still qualifies, otherwise watching.
 - **stale** *(phase 3 for a publish; phase 4 for the rest)* — the head moved
-  out from under the round. Drop the round's worktree and go to settling.
+  out from under the round. Drop the round's worktree; the next poll goes on to
+  settling, so the page shows the restart under In progress until then.
 - **parked** *(phase 2 for the forked case and failed triages; phase 3 for a
   stacked PR, a round's third failed check, and a refused publish; phase 4 for the round-cap and fixer cases)* — reached
   when the round cap is hit, a round fails its check three times, three
@@ -120,6 +120,10 @@ triage.
   project's default branch and the stack needs a restack the human must do),
   or the PR is from a fork. Waits for the human to Resume or Stop watching
   from the Pull Requests page (§13.4).
+- **stopped** *(phase 4)* — the human chose Stop watching on a parked PR. Its
+  open items are dismissed, the poll records nothing more on it, and the page
+  lists it nowhere; the row stays so the next poll's search does not start a new
+  watch. A PR that merges or closes still settles to merged or closed.
 - **merged** / **closed** *(phase 1)* — terminal states. The round tasks are
   archived.
 
@@ -140,7 +144,13 @@ REVIEW_REQUEST_REMOVED_EVENT])`) with theirs, which is all the per-reviewer
 fallback above needs. The poll itself moves a watch only among watching,
 settling, readyToVerify and verified, by the rules above, and a
 watch whose PR has left the open list settles to merged or closed by
-`gh pr view`. A PR converted back to draft still appears in the search, marked
+`gh pr view`. A PR whose GitHub `mergeable` is `CONFLICTING` gets one item of
+kind `conflict`, keyed `conflict:<head oid>`, which is handled once GitHub can
+merge that head or the head moves. A PR whose head branch lives in another
+repository (`isCrossRepository`) is a fork: the poll parks its watch from
+watching, settling, readyToVerify or verified, with a `parked_reason` naming
+the fork, since publishing pushes only to the project's `origin`. Resuming a
+fork parks it again at the next poll. A PR converted back to draft still appears in the search, marked
 draft; its watch is deleted with its items, and undrafting it brings it back
 through the search as a new watch. A `gh` that is missing or not logged in
 records one `pr_poll_problem` row per enabled project, which raises that
@@ -172,12 +182,16 @@ verdict or is a `fix` answer to a decision whose `round` is past the watch's
 (§13.4), so any other open decision or fix item keeps a PR from being ready
 without sending it back to triage. A settling watch leaves for triaging only when it is
 not paused, at least `settleMinutes` have passed since `last_feedback_at` (so an
-item arriving during settling restarts the wait), and nothing holds it: a
+item arriving during settling restarts the wait) or a `check` item awaits
+triage (phase 4, below), and nothing holds it: a
 shutdown order on the project, a Mac whose providing power source IOKit reports
 as anything but AC (an unreadable source counts as AC), the triage and fixer
 sessions started since local midnight having cost `dailyBudgetUSD` or more, or a §8
 spawn cap refusing. A hold leaves it settling and is re-checked on the next
-poll. Leaving increments `round`, records a `pr_round` holding the head oid it
+poll. Once `roundCap` rounds have started since the watch was last resumed
+(`resumed_at`, or ever), interrupted and failed triages aside, leaving parks it
+instead, with a `parked_reason` naming the cap; this applies to the answered-fix
+round below as well. Leaving increments `round`, records a `pr_round` holding the head oid it
 starts from, and moves the watch to triaging in one transaction that only a
 settling watch passes, so two polls never start two rounds; then it spawns the
 round's triager (§13.2), whose `pr_triage` row carries the round. A watch
@@ -212,15 +226,23 @@ round's one task, in a transaction that only a fixing watch whose round has
 no task yet passes: a `ready` task of type `code`, origin `fix_round`, titled
 "Fix round r of #n: …", its model `roles.fixer.model` or unset. Its body names
 the round branch, says new commits only with no amend, rebase or push, and
-holds a section per open `fix` item, each built like a follow-up's body. The
+holds a section per open `fix` item, each built like a follow-up's body; a
+`conflict` item's section says to resolve it by merging `origin/<base>` into
+the round branch and committing the merge, never by rebasing, and its fixer's
+spawn also fetches the base into `refs/remotes/origin/<base>`. The
 task goes in the round's `fix_task_id` and in each of those items'
 `fix_task_id`, and every `backlog` `follow_through` task of type `code` that an
 item of the watch names — a fix task phase 2 made — is closed with a reason
 naming the round.
 
 The fixer is spawned only while its task is `ready` and its fixer sessions
-(those with no `review_head`) do not outnumber the round's `check_failures`:
-once per check, so a fixer that failed is not respawned in a loop. A fixing
+(those with no `review_head`) that reported do not outnumber the round's
+`check_failures`: one that reported starts again only after a failed check. A
+fixer that ends without a report puts its task back in `ready` (never `review`,
+since the next fixer reuses the worktree and branch) and is retried; the third
+in a row, not counting one wound down for a shutdown order, ends the round
+`fixer_failed`, closes its task, and parks the watch with the last session's
+stop reason. A fixing
 round with no task and no open `fix` item — every one answered on GitHub or
 reopened for triage before its task was made — ends with outcome `triaged`,
 and the watch goes to settling when an item awaits triage, else to watching. It holds under the
@@ -323,12 +345,30 @@ A push ends the round `published` with the tip in `pushed_head_oid`, marks its
 fix items handled in that round, removes its worktree, moves the watch to
 awaitingCI, and then posts the round's replies (§13.2). An awaitingCI watch is
 settled by the poll once GitHub reports the pushed head: green (§13.1
-readyToVerify's rule) goes to watching, and `FAILURE` or `ERROR` to watching
-with a decision item of kind `check`, keyed `checks:<head oid>`, that stays
-while that head's checks still fail. Its options, "Fix the checks myself" and
-"Wait for review feedback", are both `answer` options with no reply. A head still at `base_head_oid` is GitHub
-not having caught up, and waits; any other head was pushed over the round,
-and goes to watching.
+readyToVerify's rule) goes to watching, and `FAILURE` or `ERROR` as below. A
+head still at `base_head_oid` is GitHub not having caught up, and waits; any
+other head was pushed over the round, and goes to watching.
+
+**Failed checks (phase 4).** On red, each counted check (readyToVerify's rule:
+the required ones, else every reported one, latest run only, so a passing
+rerun leaves nothing) whose latest run failed becomes one untriaged item of
+kind `check`, keyed by the check run's or commit status's node id, so a run
+already recorded adds nothing on a later poll. Its body names the check and
+the head and links the run (`url`). For a GitHub Actions run (its check suite's
+app is `github-actions`) the body holds the last 200 lines of
+`gh run view --job <check run id> --log-failed`, read once, when the item is
+first recorded; the job, not the whole workflow run, so two failed jobs of one
+run each carry only their own log. Any other check, or a log `gh` cannot read,
+carries the check's summary instead. The watch goes to settling, stamping
+`last_feedback_at`, and leaves for triaging on the same poll without the settle
+wait, under the same holds and the same round cap, so a red, fix, push, red
+loop parks once `roundCap` rounds have run. Red with no new failed check to
+record goes to watching. A check item becomes handled once its run is no longer
+a failed check on the head the poll reads (a rerun, or a new head); the
+triager is told it is usually `fix`, or `decision` when the failure looks
+unrelated to the change. Phase 3's single decision item per red head, keyed
+`checks:<head oid>`, is gone: migration `pr_item_failed_checks` dismisses any
+still open.
 
 **The verified freeze (phase 3).** On every poll, a verified watch's open items
 with no verdict become decisions whose question says the PR is verified and
@@ -339,11 +379,24 @@ option, so once the label is gone the item goes to the next fix round. Once the 
 frozen decisions lose their verdict, and the next poll sends the watch to
 settling to triage them.
 
+**Verify failures (phase 4).** What the human finds while verifying a PR by
+hand re-enters the loop as an item of kind `verify_failure`, recorded either by
+the **Send back** row action (§13.4) or by an agent through the orchestrator's
+`add_pr_item(pr_url, body)` (§6), which a manual-verification skill's agent
+calls. The item has no author, path or URL, and its node id is
+`verify:<uuid>`, so it never collides with a GitHub id; the poll never sees it
+on GitHub and so never marks it handled for leaving the snapshot. On a
+verified watch it becomes a frozen decision at once, as above, and the watch
+stays verified until the human removes the label. From watching, settling or
+readyToVerify the watch goes to settling, with the settle wait restarted; in
+any later state it waits, like any feedback that arrives mid-round, for the
+next round. No reply is ever posted for it (§13.2).
+
 A round's triage that never starts, or whose task is closed (§13.2), fails
 the round: its outcome becomes `triage_failed` and the watch returns to
 settling, so the next poll retries with a new round. The third failed round in
-a row, not counting interrupted ones, parks the watch instead, with a
-`parked_reason` naming the last failure. A parked watch raises its project's
+a row since the watch was last resumed, not counting interrupted ones, parks
+the watch instead, with a `parked_reason` naming the last failure. A parked watch raises its project's
 attention signal, its detail the PR number and that reason. A shutdown order
 stops a running triager rather than enrolling it: its round's outcome becomes
 `interrupted`, which never counts toward parking, and the watch waits in
@@ -365,6 +418,9 @@ Triage gives every open item exactly one verdict:
   that commit.
 - **follow_up** — out of scope for this PR (a refactor belongs in its own).
   Creates a backlog task; the reply says the work is tracked separately.
+A `conflict` item is always `fix`: the built-in prompt says the fixer merges
+the base into the branch.
+
 - **decision** — a trade-off, a disagreement with the reviewer, or anything
   that sets direction. Needs the human: triage's question and its options
   surface on the Pull Requests page's Needs you group (§13.4) rather than
@@ -401,9 +457,14 @@ item is answered on its thread with `gh api graphql`'s
 pull-request comment through `gh api repos/<owner>/<name>/issues/<n>/comments`,
 led by a link to the review. The reply's URL is stored in `reply_url`, so
 nothing is posted twice. A failed post is logged and its error kept in
-`reply_error`; it is tried again at the next point, except when `gh` reports
-the comment gone (`NOT_FOUND` or HTTP 404), which sets `reply_abandoned_at` and
-ends the attempts. An item reopened by a new reply loses `reply_url`,
+`reply_error`; it is tried again at the next point. When `gh` reports the
+comment gone (`NOT_FOUND`, HTTP 404 or "Could not resolve to a node"), the
+pull request is read once with `gh pr view`, since GitHub answers the same for
+a repository the token cannot see. If it reads, the thread itself is gone: the
+post sets `reply_abandoned_at` and ends the attempts. If it does not, the item
+keeps only its `reply_error` and stays owed, and the project gets a
+`pr_poll_problem` row naming the PR, which stays through later polls until one
+reads that PR again (or its watch ends). An item reopened by a new reply loses `reply_url`,
 `reply_error` and `reply_abandoned_at`, so once it is handled again it gets a
 fresh reply. No thread is ever resolved: resolving is the reviewer's call.
 
@@ -488,9 +549,22 @@ on at all.
   **In progress**, **Waiting on reviewers**, **Verified**, and **Parked**,
   with a project filter. Needs you and the decision items inside it ship in
   phase 2; the other groups read directly off `pr_watch.state` from phase 1.
+- **Parked (phase 4).** A parked row shows its `parked_reason`, and offers
+  **Resume** and **Stop watching** in place of Pause. Resume
+  (`PRWatchStore.resume`) returns the watch to settling, clears the reason, and
+  stamps `resumed_at`, which restarts both the round cap and the failed-session
+  streak, so a resumed watch's next single failure does not park it again. Each
+  open `fix` item moves to the round after the watch's, so the next round takes
+  it up without a fresh triage. Stop watching (`PRWatchStore.stopWatching`)
+  dismisses the open items and moves the watch to stopped (§13.1). A stale row
+  shows "restarted: head moved" while it waits for the next poll.
 - Row actions: **Mark verified** (`gh pr edit --add-label <label>`), **Walk
-  me through it** (shown only when `verifyCommand` is set), **Open PR**,
-  **Pause**. Opening the PR is the row's title, a link to its URL.
+  me through it** (shown only when `verifyCommand` is set), **Send back**
+  (phase 4; shown only while the watch is readyToVerify or verified), **Open
+  PR**, **Pause**. Opening the PR is the row's title, a link to its URL.
+- **Send back** opens a popover asking what failed and records the text as a
+  `verify_failure` item (§13.1): a readyToVerify PR goes to settling, and a
+  verified one stays frozen with the failure as a decision.
 - **Mark verified** runs `gh pr edit <url> --add-label <verificationLabel>`
   through `PullRequestLabeler` in the project's checkout, then records the
   watch as verified with the label added, so the row moves without waiting for
@@ -516,7 +590,7 @@ on at all.
   leaves the item open, with no task, for the next round's fixer (§13.1),
   whose section for it quotes the question the answer was given to. An
   `answer` option handles the item with the option's `reply_body` and makes no
-  task; the app's own decisions (the verified freeze and failed checks, §13.1)
+  task; the app's own decisions (the verified freeze, §13.1)
   carry `answer` options with no reply, which handle it with nothing to post. A typed reply answers it as an `answer`: the item is handled, with the
   reply as its `reply_body`. Either way it is no longer a decision.
 - The row's badge counts Ready to verify plus open decision items, both only in

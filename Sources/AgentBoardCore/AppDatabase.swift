@@ -215,6 +215,18 @@ public final class AppDatabase: Sendable {
                 arguments: [Int64.nowMillis]
             )
         }
+        migrator.registerMigration("pr_watch_resumed") { db in
+            try db.execute(sql: Schema.prWatchResumed)
+        }
+        migrator.registerMigration("pr_item_failed_checks") { db in
+            try db.execute(
+                sql: """
+                UPDATE pr_item SET state = 'dismissed', updated_at = ?
+                WHERE kind = 'check' AND github_node_id LIKE 'checks:%' AND state = 'open'
+                """,
+                arguments: [Int64.nowMillis]
+            )
+        }
         return migrator
     }
 }

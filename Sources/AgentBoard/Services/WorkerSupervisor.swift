@@ -174,6 +174,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var prWatchSearchFailures = 0
     /// Consecutive polls on which git could not read a project's `origin`, by project id.
     @ObservationIgnored private var prWatchRemoteFailures: [String: Int] = [:]
+    /// Watches whose pull request could not be read after a reply to it came back not found (SPEC
+    /// §13.2), with their project and detail. Each stays among the poll's problems until a poll reads it.
+    @ObservationIgnored private var prReplyReadFailures: [String: (projectId: String, detail: String)] = [:]
     /// Millis of the last pull request merge check; 0 means none yet, so the first tick after
     /// launch checks.
     @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
@@ -1048,7 +1051,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §13.1 fixing: an ordinary worker on the round's branch, cut at the head its triage read
     /// once the PR's head ref is fetched from origin, in a worktree named for the task. A retry reuses
-    /// both. The role's roster agent and model apply unless the caller names an agent.
+    /// both. A round holding a conflict also fetches the base, which its fixer merges. The role's roster
+    /// agent and model apply unless the caller names an agent.
     private func spawnFixer(
         task: BoardTask, rosterAgentId: String?, project: Project, port: Int
     ) async throws -> WorkerSpawn {
@@ -1069,12 +1073,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let manager = worktreeManager(for: project)
         let headRef = watch.headRef
         let baseHeadOid = round.baseHeadOid
+        let mergeBase = try prWatches.items(watchId: watch.id)
+            .contains { $0.fixTaskId == task.id && $0.kind == .conflict && $0.state == .open } ? watch.baseRef : nil
         do {
             try await offMain {
                 _ = try manager.fetchRemoteTip(headRef)
                 guard try manager.fetchCommitIfMissing(baseHeadOid, from: "origin") else {
                     throw AgentRuntimeError("origin has no commit \(baseHeadOid)")
                 }
+                if let mergeBase { _ = try manager.fetchRemoteTip(mergeBase) }
             }
         } catch {
             throw SupervisorError.pullRequestNotFetched(describe(error))
@@ -1974,7 +1981,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func runPRWatchPoll() async {
         let enabled = ((try? projects.list()) ?? []).filter { $0.settings.prFollowThrough.enabled }
         guard !enabled.isEmpty else {
-            try? prWatches.setPollProblems([:])
+            setPRPollProblems([:], enabled: [])
             return
         }
         await refreshPRWatches(enabled)
@@ -2012,7 +2019,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             projectByRepo[slug] = project
         }
         guard let anyProject = projectByRepo.values.first else {
-            try? prWatches.setPollProblems(problems)
+            setPRPollProblems(problems, enabled: enabled)
             return
         }
 
@@ -2022,10 +2029,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let cwd = URL(fileURLWithPath: anyProject.repoPath)
             authored = try await offMain { try reader.authored(cwd: cwd) }
             prWatchSearchFailures = 0
-            try? prWatches.setPollProblems(problems)
         } catch let failure as PullRequestWatchFailure where failure.ghUnavailable {
             for project in enabled { problems[project.id] = failure.description }
-            try? prWatches.setPollProblems(problems)
+            setPRPollProblems(problems, enabled: enabled)
             return
         } catch {
             prWatchSearchFailures += 1
@@ -2035,7 +2041,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     problems[project.id] =
                         "`gh search prs` has failed \(prWatchSearchFailures) times in a row: \(describe(error))"
                 }
-                try? prWatches.setPollProblems(problems)
+                setPRPollProblems(problems, enabled: enabled)
             }
             return
         }
@@ -2054,7 +2060,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try reader.snapshots(owner: parts[0], name: parts[1], numbers: numbers, cwd: cwd)
             }) else { continue }
             for snapshot in snapshots {
-                applyPRSnapshot(snapshot, project: project)
+                await applyPRSnapshot(snapshot, project: project)
             }
         }
 
@@ -2076,12 +2082,50 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
             }
         }
+        setPRPollProblems(problems, enabled: enabled)
     }
 
-    private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) {
+    /// The failed checks on an awaitingCI watch's pushed head that have no item yet, each GitHub Actions
+    /// run with the end of its failed-step log (SPEC §13.1). Empty in any other state, so a log is read
+    /// once per run.
+    private func newFailedChecks(_ snapshot: PRSnapshot, watch: PRWatch, project: Project) async throws -> [PRFailedCheck] {
+        guard watch.state == .awaitingCI, !snapshot.failedChecks.isEmpty,
+              try prWatches.currentRound(watchId: watch.id)?.pushedHeadOid == watch.headOid
+        else { return [] }
+        let known = Set(try prWatches.items(watchId: watch.id).map(\.githubNodeId))
+        let reader = pullRequestWatch
+        let cwd = URL(fileURLWithPath: project.repoPath)
+        var checks: [PRFailedCheck] = []
+        for var check in snapshot.failedChecks where !known.contains(check.githubNodeId) {
+            if let jobId = check.jobId {
+                let owner = snapshot.repoOwner, name = snapshot.repoName
+                check.logTail = await offMainResult {
+                    reader.failedLogTail(owner: owner, name: name, jobId: jobId, cwd: cwd)
+                }
+            }
+            checks.append(check)
+        }
+        return checks
+    }
+
+    /// `problems` plus each live watch's unreadable pull request from posting replies.
+    private func setPRPollProblems(_ problems: [String: String], enabled: [Project]) {
+        if !prReplyReadFailures.isEmpty {
+            let live = Set(enabled.flatMap { (try? prWatches.live(projectId: $0.id)) ?? [] }.map(\.id))
+            prReplyReadFailures = prReplyReadFailures.filter { live.contains($0.key) }
+        }
+        let all = prReplyReadFailures.values.reduce(into: problems) { $0[$1.projectId] = $0[$1.projectId] ?? $1.detail }
+        try? prWatches.setPollProblems(all)
+    }
+
+    private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) async {
         do {
             var watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
-            if let settled = try prWatches.settleAwaitingCI(watchId: watch.id) { watch.state = settled }
+            prReplyReadFailures[watch.id] = nil
+            let failed = try await newFailedChecks(snapshot, watch: watch, project: project)
+            if let settled = try prWatches.settleAwaitingCI(watchId: watch.id, failedChecks: failed) {
+                watch.state = settled
+            }
             let open = try prWatches.openItems(watchId: watch.id)
             if let next = PRWatchTransition.next(
                 from: watch, snapshot: snapshot, openItems: open.count,
@@ -2116,6 +2160,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 case .fixing: await startFixRound(watch, project: project)
                 case .checking: await advanceCheck(watch, project: project)
                 case .publishing: await publishRound(watch, project: project)
+                case .stale:
+                    if let restarted = try? prWatches.restartStale(watchId: watch.id) {
+                        await startTriageIfSettled(restarted, project: project)
+                    }
                 default: break
                 }
                 announceDecisions(watchId: watch.id, project: project)
@@ -2137,9 +2185,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func startTriageIfSettled(_ watch: PRWatch, project: Project) async {
         let settleMillis = Int64(max(project.settings.prFollowThrough.settleMinutes, 0)) * 60_000
-        guard !watch.paused, Int64.nowMillis - (watch.lastFeedbackAt ?? watch.updatedAt) >= settleMillis,
-              !isFollowThroughHeld(project: project)
-        else { return }
+        let settled = Int64.nowMillis - (watch.lastFeedbackAt ?? watch.updatedAt) >= settleMillis
+            || (try? prWatches.hasUntriagedCheck(watchId: watch.id)) == true
+        guard !watch.paused, settled, !isFollowThroughHeld(project: project) else { return }
         guard ((try? prWatches.untriagedItemCount(watchId: watch.id)) ?? 0) > 0 else {
             if (try? board.beginAnsweredFixRound(watchId: watch.id)) == .fixing {
                 await startFixRound(watch, project: project)
@@ -2193,9 +2241,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// SPEC §13.1 fixing and §13.5's §8 amendment: the round's one fixer task, spawned with no
-    /// approval while follow-through is on, under the settling holds and every §8 cap. A fixer starts
-    /// here once per check, only while the task's fixer sessions do not outnumber its failed checks, so
-    /// a failed fixer is not retried in a loop. A round left with nothing to fix ends.
+    /// approval while follow-through is on, under the settling holds and every §8 cap. A fixer that
+    /// reported starts again only after a failed check; one that ended without a report is retried
+    /// until `failedSessionsBeforePark` in a row park the watch. A round left with nothing to fix ends.
     private func startFixRound(_ watch: PRWatch, project: Project) async {
         do {
             guard let round = try prWatches.currentRound(watchId: watch.id) else { return }
@@ -2204,8 +2252,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try board.endFixRoundWithoutFixes(watchId: watch.id)
                 return
             }
+            if try board.parkIfFixersFailing(watchId: watch.id) { return }
             guard try tasks.get(taskId)?.column == .ready,
-                  try sessions.forTask(taskId).filter({ $0.reviewHead == nil }).count <= round.checkFailures,
+                  try sessions.forTask(taskId).filter({ $0.reviewHead == nil && $0.state == .completed }).count
+                      <= round.checkFailures,
                   !isFollowThroughHeld(project: project),
                   case .proceed = try board.requestSpawn(taskId: taskId, requestedBy: "follow-through")
             else { return }
@@ -2355,7 +2405,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §13.2: with `postFactualReplies` on, each handled thread item still owed a reply gets one and
     /// each review body a PR comment, its URL recorded. Nothing is resolved. A failed post is recorded on
-    /// the item, and abandoned when GitHub says its comment is gone.
+    /// the item, and abandoned when GitHub says its comment is gone while the pull request still reads:
+    /// GitHub says the same of a whole repository the token cannot see.
     private func postFactualReplies(watchId: String, project: Project) async {
         guard project.settings.prFollowThrough.postFactualReplies, let watch = try? prWatches.get(watchId),
               let items = try? prWatches.pendingReplies(watchId: watchId), !items.isEmpty
@@ -2366,6 +2417,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
         let replier = pullRequestReplies
         let cwd = URL(fileURLWithPath: project.repoPath)
+        var readable: Bool?
         for item in items {
             guard let id = item.id, let text = item.factualReply(pushedHeadOid: pushed[item.round] ?? nil) else { continue }
             let body = item.kind == .review ? item.url.map { "In reply to \($0):\n\n\(text)" } ?? text : text
@@ -2381,8 +2433,30 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try prWatches.recordReply(itemId: id, url: url)
             } catch {
                 NSLog("PR follow-through: the reply to %@ on %@ was not posted: %@", item.githubNodeId, watch.url, describe(error))
-                try? prWatches.recordReplyFailure(itemId: id, error: describe(error), gone: error is PullRequestReplyTargetGone)
+                var gone = false
+                if error is PullRequestReplyTargetGone {
+                    if readable == nil { readable = await pullRequestReadsForReplies(watch, project: project) }
+                    gone = readable == true
+                }
+                try? prWatches.recordReplyFailure(itemId: id, error: describe(error), gone: gone)
             }
+        }
+    }
+
+    /// One `gh pr view` of the watch's pull request. One that fails raises the project's PR watch
+    /// attention until a poll reads the pull request again.
+    private func pullRequestReadsForReplies(_ watch: PRWatch, project: Project) async -> Bool {
+        let states = pullRequestStates
+        let (url, cwd) = (watch.url, URL(fileURLWithPath: project.repoPath))
+        do {
+            _ = try await offMain { try states.state(of: url, cwd: cwd) }
+            prReplyReadFailures[watch.id] = nil
+            return true
+        } catch {
+            let detail = "replies to #\(watch.number) are held because the pull request could not be read: \(describe(error))"
+            prReplyReadFailures[watch.id] = (project.id, detail)
+            try? prWatches.addPollProblem(projectId: project.id, detail: detail)
+            return false
         }
     }
 

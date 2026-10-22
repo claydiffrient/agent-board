@@ -164,6 +164,10 @@ final class FakeGh: GhRunning, @unchecked Sendable {
         lock.withLock { answers[Self.graphQLKey(repository)] = CommandResult(status: 0, stdout: json, stderr: "") }
     }
 
+    func failGraphQL(repository: String, stderr: String) {
+        lock.withLock { answers[Self.graphQLKey(repository)] = CommandResult(status: 1, stdout: "", stderr: stderr) }
+    }
+
     /// What posting a thread reply and a PR comment print, each naming `url`.
     func answerReplies(url: String) {
         let reply = #"{"data":{"addPullRequestReviewThreadReply":{"comment":{"url":"\#(url)"}}}}"#
@@ -181,14 +185,24 @@ final class FakeGh: GhRunning, @unchecked Sendable {
         }
     }
 
+    /// What `gh run view --job <jobId> --log-failed` prints.
+    func answerFailedLog(jobId: Int64, log: String) {
+        lock.withLock { answers[Self.failedLogKey(jobId)] = CommandResult(status: 0, stdout: log, stderr: "") }
+    }
+
     private static let searchKey = "search prs"
     private static let replyKey = "reply"
     private static let commentKey = "comment"
 
     private static func graphQLKey(_ repository: String) -> String { "graphql \(repository)" }
 
+    private static func failedLogKey(_ jobId: Int64) -> String { "run log \(jobId)" }
+
     private static func key(for arguments: [String]) -> String {
         if arguments.starts(with: ["search", "prs"]) { return searchKey }
+        if arguments.starts(with: ["run", "view", "--job"]), arguments.count > 3, let job = Int64(arguments[3]) {
+            return failedLogKey(job)
+        }
         if arguments.starts(with: ["api", "graphql"]), arguments.contains(where: { $0.hasPrefix("query=mutation") }) {
             return replyKey
         }

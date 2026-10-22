@@ -72,6 +72,21 @@ public struct PullRequestWatchReader: Sendable {
         return snapshots
     }
 
+    public static let logTailLines = 200
+
+    public static func failedLogArguments(owner: String, name: String, jobId: Int64) -> [String] {
+        ["run", "view", "--job", "\(jobId)", "--log-failed", "--repo", "\(owner)/\(name)"]
+    }
+
+    /// The last `logTailLines` lines of a GitHub Actions job's failed steps, or nil when `gh` cannot read them.
+    public func failedLogTail(owner: String, name: String, jobId: Int64, cwd: URL) -> String? {
+        let arguments = Self.failedLogArguments(owner: owner, name: name, jobId: jobId)
+        guard let result = try? gh.run(arguments, cwd: cwd), result.status == 0 else { return nil }
+        var lines = result.stdout.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        while lines.last?.allSatisfy(\.isWhitespace) == true { lines.removeLast() }
+        return lines.isEmpty ? nil : lines.suffix(Self.logTailLines).joined(separator: "\n")
+    }
+
     private func run(_ arguments: [String], cwd: URL, what: String) throws -> String {
         let result: CommandResult
         do {
@@ -97,6 +112,7 @@ public struct PullRequestWatchReader: Sendable {
             """
             pr\(number): pullRequest(number: \(number)) {
               number url title isDraft headRefName headRefOid baseRefName reviewDecision mergeable
+              isCrossRepository headRepository { nameWithOwner }
               labels(first: 100) { nodes { name } }
               baseRef {
                 refUpdateRule { requiredStatusCheckContexts }
@@ -106,8 +122,11 @@ public struct PullRequestWatchReader: Sendable {
               }
               commits(last: 1) {
                 nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
-                  ... on CheckRun { name status conclusion startedAt completedAt }
-                  ... on StatusContext { context state }
+                  ... on CheckRun {
+                    id databaseId name status conclusion startedAt completedAt detailsUrl summary
+                    checkSuite { app { slug } }
+                  }
+                  ... on StatusContext { id context state targetUrl description }
                 } } } } }
               }
               reviewThreads(first: 100) {
@@ -189,6 +208,12 @@ public struct PullRequestWatchReader: Sendable {
             ))
         }
         let standing = standings(of: pr, byViewer: byViewer)
+        if pr.mergeable == "CONFLICTING" {
+            items.append(PRSnapshotItem(
+                githubNodeId: PRItem.conflictNodeId(head: pr.headRefOid), kind: .conflict,
+                body: "`\(pr.headRefName)` conflicts with `\(pr.baseRefName)`, so GitHub cannot merge it.", url: pr.url
+            ))
+        }
         return PRSnapshot(
             repoOwner: owner, repoName: name, number: pr.number, url: pr.url, title: pr.title, isDraft: pr.isDraft,
             headRef: pr.headRefName, headOid: pr.headRefOid, baseRef: pr.baseRefName,
@@ -197,7 +222,10 @@ public struct PullRequestWatchReader: Sendable {
             checksState: checksState(of: pr),
             mergeable: pr.mergeable,
             labels: pr.labels?.nodes.map(\.name) ?? [],
-            items: items
+            items: items,
+            isCrossRepository: pr.isCrossRepository ?? false,
+            headRepository: pr.headRepository?.nameWithOwner,
+            failedChecks: failedChecks(of: pr)
         )
     }
 
@@ -207,29 +235,42 @@ public struct PullRequestWatchReader: Sendable {
     /// required and nothing has reported.
     private static func checksState(of pr: GraphQLResponse.PullRequest) -> String? {
         let rollup = pr.commits?.nodes.last?.commit.statusCheckRollup
-        let reported = latestRuns(rollup?.contexts?.nodes.compactMap(\.check) ?? [])
-        let required = Set(
-            (pr.baseRef?.refUpdateRule?.requiredStatusCheckContexts ?? [])
-                + (pr.baseRef?.rules?.nodes ?? []).flatMap { $0.parameters?.requiredStatusChecks ?? [] }.map(\.context)
-        )
+        let reported = latestRuns(of: pr)
+        let required = requiredChecks(of: pr)
         let outcomes: [CheckOutcome]
         if required.isEmpty {
             guard let rollup else { return nil }
-            outcomes = Array(reported.values) + [CheckOutcome(state: rollup.state)]
+            outcomes = reported.values.map(\.outcome) + [CheckOutcome(state: rollup.state)]
         } else {
-            outcomes = required.map { reported[$0] ?? .pending }
+            outcomes = required.map { reported[$0]?.outcome ?? .pending }
         }
         return (outcomes.max() ?? .success).rawValue
     }
 
+    /// The counted checks, by the same rule as `checksState`, whose latest run failed, in name order.
+    private static func failedChecks(of pr: GraphQLResponse.PullRequest) -> [PRFailedCheck] {
+        let reported = latestRuns(of: pr)
+        let required = requiredChecks(of: pr)
+        let counted = required.isEmpty ? Array(reported.values) : required.compactMap { reported[$0] }
+        return counted.filter { $0.outcome == .failure }.sorted { $0.name < $1.name }.compactMap(\.failed)
+    }
+
+    private static func requiredChecks(of pr: GraphQLResponse.PullRequest) -> Set<String> {
+        Set(
+            (pr.baseRef?.refUpdateRule?.requiredStatusCheckContexts ?? [])
+                + (pr.baseRef?.rules?.nodes ?? []).flatMap { $0.parameters?.requiredStatusChecks ?? [] }.map(\.context)
+        )
+    }
+
     /// Ordered by start time, then completion time, then list order, so a rerun replaces the run it reran.
-    private static func latestRuns(_ checks: [GraphQLResponse.Check]) -> [String: CheckOutcome] {
+    private static func latestRuns(of pr: GraphQLResponse.PullRequest) -> [String: GraphQLResponse.Check] {
+        let checks = pr.commits?.nodes.last?.commit.statusCheckRollup?.contexts?.nodes.compactMap(\.check) ?? []
         var latest: [String: GraphQLResponse.Check] = [:]
         for check in checks {
             if let held = latest[check.name]?.ranAt, let ranAt = check.ranAt, ranAt < held { continue }
             latest[check.name] = check
         }
-        return latest.mapValues(\.outcome)
+        return latest
     }
 }
 
@@ -320,28 +361,68 @@ private struct GraphQLResponse: Decodable {
     struct Author: Decodable { let login: String }
     struct Nodes<T: Decodable>: Decodable { let nodes: [T] }
     struct Label: Decodable { let name: String }
+    struct Repository: Decodable { let nameWithOwner: String }
     struct Rollup: Decodable {
         let state: String
         let contexts: Nodes<CheckContext>?
     }
 
-    /// GitHub's ISO 8601 timestamps all end in `Z`, so they order correctly as strings.
-    typealias Check = (name: String, outcome: CheckOutcome, ranAt: String?)
+    struct Check {
+        let name: String
+        let outcome: CheckOutcome
+        /// GitHub's ISO 8601 timestamps all end in `Z`, so they order correctly as strings.
+        let ranAt: String?
+        /// Nil when GitHub gave the run no node id.
+        let failed: PRFailedCheck?
+    }
+
+    struct App: Decodable { let slug: String? }
+    struct CheckSuite: Decodable { let app: App? }
 
     /// A CheckRun carries name, status, conclusion and its run times; a StatusContext carries context and state.
     struct CheckContext: Decodable {
+        let id: String?
+        let databaseId: Int64?
         let name: String?
         let status: String?
         let conclusion: String?
         let startedAt: String?
         let completedAt: String?
+        let detailsUrl: String?
+        let summary: String?
+        let checkSuite: CheckSuite?
         let context: String?
         let state: String?
+        let targetUrl: String?
+        let description: String?
 
         var check: Check? {
-            if let name { return (name, CheckOutcome(status: status, conclusion: conclusion), startedAt ?? completedAt) }
-            if let context, let state { return (context, CheckOutcome(state: state), nil) }
+            if let name {
+                let outcome = CheckOutcome(status: status, conclusion: conclusion)
+                let failed = id.map { id in
+                    PRFailedCheck(
+                        githubNodeId: id, name: name, url: detailsUrl,
+                        summary: Self.text(summary) ?? "It concluded \(conclusion ?? status ?? "without a result").",
+                        jobId: checkSuite?.app?.slug == "github-actions" ? databaseId : nil
+                    )
+                }
+                return Check(name: name, outcome: outcome, ranAt: startedAt ?? completedAt, failed: failed)
+            }
+            if let context, let state {
+                let failed = id.map { id in
+                    PRFailedCheck(
+                        githubNodeId: id, name: context, url: targetUrl,
+                        summary: Self.text(description) ?? "Its status is \(state)."
+                    )
+                }
+                return Check(name: context, outcome: CheckOutcome(state: state), ranAt: nil, failed: failed)
+            }
             return nil
+        }
+
+        private static func text(_ value: String?) -> String? {
+            guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+            return trimmed
         }
     }
 
@@ -401,6 +482,8 @@ private struct GraphQLResponse: Decodable {
         let baseRef: BaseRef?
         let reviewDecision: String?
         let mergeable: String?
+        let isCrossRepository: Bool?
+        let headRepository: Repository?
         let labels: Nodes<Label>?
         let commits: Nodes<CommitNode>?
         let reviewThreads: Nodes<Thread>?
