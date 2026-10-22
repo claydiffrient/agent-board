@@ -112,6 +112,30 @@ final class EpicIntegrationTests: XCTestCase {
         )
     }
 
+    func testSpawningAnIntegrationTaskAnswersWhileThePostCheckoutHookIsStillRunning() async throws {
+        let ready = try fixture.epicReadyForIntegration(["api"])
+        let integration = try fixture.board.createIntegrationTask(epicId: ready.epic.id)
+        let gate = try fixture.installGatedHook("post-checkout", when: "[ \"$3\" = \"1\" ]", then: "touch setup-ran")
+
+        let spawn = try await fixture.supervisor.spawnWorker(taskId: integration.id)
+
+        let ran = URL(fileURLWithPath: spawn.worktreePath).appendingPathComponent("setup-ran")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: ran.path),
+            "spawn_worker on an integration task waited for the post-checkout hook before answering"
+        )
+        XCTAssertEqual(try fixture.sessions.get(spawn.setupSessionId)?.state, .setup)
+        FileManager.default.createFile(atPath: gate.path, contents: nil)
+        await fixture.supervisor.waitForSetup()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ran.path))
+        XCTAssertEqual(
+            try fixture.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: URL(fileURLWithPath: spawn.worktreePath))
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            ready.epic.branch
+        )
+        XCTAssertEqual(try fixture.sessions.forTask(integration.id).first?.state.isActive, true)
+    }
+
     func testIntegratorGetsTheSameGuardsAsAnyWorker() async throws {
         let ready = try fixture.epicReadyForIntegration(["api"])
         let approval = try requestIntegration(epicId: ready.epic.id)
