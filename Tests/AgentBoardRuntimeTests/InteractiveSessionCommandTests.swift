@@ -135,6 +135,25 @@ final class LoginShellPathTests: XCTestCase {
         XCTAssertTrue(environment.contains("PATH=/from/profile:/usr/bin"))
     }
 
+    /// Every caller holds a thread before the first one makes the lookup, as when `LoginShellPath.shared`
+    /// is first touched by a burst of `ProcessRunner.run` calls.
+    func testAsManyConcurrentFirstCallsAsCoresShareOneLookup() throws {
+        let shell = try fakeShell(#"PATH=/from/profile:/usr/bin; shift 3; eval "$1""#)
+        let callers = ProcessInfo.processInfo.activeProcessorCount
+        let burst = Burst(size: callers) { LoginShellPathLookup { LoginShellPath.query(shell: shell, base: [:]) } }
+        let paths = EventLog()
+        let returned = expectation(description: "every caller returned")
+        returned.expectedFulfillmentCount = callers
+        for _ in 0..<callers {
+            _Concurrency.Task(priority: .userInitiated) {
+                paths.append(burst.lookup.resolved ?? "nil")
+                returned.fulfill()
+            }
+        }
+        wait(for: [returned], timeout: 10)
+        XCTAssertEqual(Set(paths.events), ["/from/profile:/usr/bin"])
+    }
+
     func testEveryReaderAfterTheLookupGetsItsPath() async {
         let lookup = LoginShellPathLookup { "/from/profile:/usr/bin" }
         XCTAssertEqual(lookup.resolved, "/from/profile:/usr/bin")
@@ -154,5 +173,28 @@ private final class EventLog: @unchecked Sendable {
 
     var events: [String] {
         lock.withLock { recorded }
+    }
+}
+
+private final class Burst: @unchecked Sendable {
+    private let condition = NSCondition()
+    private let size: Int
+    private let make: () -> LoginShellPathLookup
+    private var arrived = 0
+    private var made: LoginShellPathLookup?
+
+    init(size: Int, make: @escaping () -> LoginShellPathLookup) {
+        self.size = size
+        self.make = make
+    }
+
+    var lookup: LoginShellPathLookup {
+        condition.lock()
+        defer { condition.unlock() }
+        arrived += 1
+        condition.broadcast()
+        while arrived < size { condition.wait() }
+        if made == nil { made = make() }
+        return made!
     }
 }

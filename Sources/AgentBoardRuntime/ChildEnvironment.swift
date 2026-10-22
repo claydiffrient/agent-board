@@ -80,7 +80,7 @@ public enum LoginShell {
 public enum LoginShellPath {
     static let marker = "__AGENTBOARD_PATH__="
 
-    /// Started on first access and run once per launch.
+    /// Run once per launch, by the first caller to need it.
     public static let shared = LoginShellPathLookup { query(shell: LoginShell.path()) }
 
     /// Blocks until the lookup finishes, up to `query`'s timeout, so it is for off-main callers only.
@@ -109,10 +109,8 @@ public enum LoginShellPath {
         process.standardOutput = handle
         process.standardError = FileHandle.nullDevice
 
-        let exited = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in exited.signal() }
         do { try process.run() } catch { return nil }
-        if exited.wait(timeout: .now() + timeout) == .timedOut {
+        guard waitForExit(process.processIdentifier, timeout: timeout) else {
             // An interactive zsh ignores SIGTERM.
             kill(process.processIdentifier, SIGKILL)
             return nil
@@ -120,6 +118,30 @@ public enum LoginShellPath {
 
         guard let data = try? Data(contentsOf: output) else { return nil }
         return parse(String(decoding: data, as: UTF8.self))
+    }
+
+    /// kqueue rather than `terminationHandler`, whose dispatch source never fires while a burst of
+    /// callers holds every worker thread. Registering on a child that has already exited fails with ESRCH.
+    private static func waitForExit(_ pid: pid_t, timeout: TimeInterval) -> Bool {
+        let queue = kqueue()
+        guard queue >= 0 else { return false }
+        defer { close(queue) }
+        var change = kevent(
+            ident: UInt(pid), filter: Int16(EVFILT_PROC), flags: UInt16(EV_ADD | EV_ONESHOT),
+            fflags: NOTE_EXIT, data: 0, udata: nil
+        )
+        let deadline = DispatchTime.now() + timeout
+        while true {
+            let now = DispatchTime.now()
+            guard now < deadline else { return false }
+            let remaining = deadline.uptimeNanoseconds - now.uptimeNanoseconds
+            var wait = timespec(tv_sec: Int(remaining / 1_000_000_000), tv_nsec: Int(remaining % 1_000_000_000))
+            var event = kevent()
+            let count = kevent(queue, &change, 1, &event, 1, &wait)
+            if count < 0, errno == EINTR { continue }
+            guard count > 0 else { return false }
+            return event.flags & UInt16(EV_ERROR) == 0 || event.data == Int(ESRCH)
+        }
     }
 
     static func parse(_ output: String) -> String? {
@@ -130,29 +152,49 @@ public enum LoginShellPath {
     }
 }
 
-/// One run of a login-shell PATH query, started at init on a background queue.
+/// One run of a login-shell PATH query, made by whichever caller asks first, on its own thread. Callers
+/// that arrive while it runs wait for that run; blocking on work handed to a dispatch queue deadlocks once
+/// as many callers wait as the machine has cores.
 public final class LoginShellPathLookup: @unchecked Sendable {
-    private let finished = DispatchGroup()
-    /// Written once before `finished` is left, and read only after it has been.
-    private var path: String?
+    private enum State {
+        case idle
+        case running
+        case finished(String?)
+    }
+
+    private let query: @Sendable () -> String?
+    private let condition = NSCondition()
+    private var state = State.idle
 
     public init(query: @escaping @Sendable () -> String?) {
-        finished.enter()
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            path = query()
-            finished.leave()
-        }
+        self.query = query
     }
 
     public var resolved: String? {
-        finished.wait()
-        return path
+        condition.lock()
+        defer { condition.unlock() }
+        while true {
+            switch state {
+            case .finished(let path):
+                return path
+            case .running:
+                condition.wait()
+            case .idle:
+                state = .running
+                condition.unlock()
+                let path = query()
+                condition.lock()
+                state = .finished(path)
+                condition.broadcast()
+                return path
+            }
+        }
     }
 
     public var value: String? {
         get async {
             await withCheckedContinuation { continuation in
-                finished.notify(queue: .global(qos: .userInitiated)) { continuation.resume(returning: self.path) }
+                Thread.detachNewThread { continuation.resume(returning: self.resolved) }
             }
         }
     }
