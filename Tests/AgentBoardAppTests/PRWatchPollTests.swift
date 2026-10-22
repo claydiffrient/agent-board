@@ -121,11 +121,13 @@ final class PRWatchPollTests: XCTestCase {
         }
     }
 
-    private func thread(_ id: String, by author: String, resolved: Bool = false, outdated: Bool = false) -> [String: Any] {
+    private func thread(
+        _ id: String, by author: String, body: String = "Rename this.", resolved: Bool = false, outdated: Bool = false
+    ) -> [String: Any] {
         [
             "id": id, "isResolved": resolved, "isOutdated": outdated,
             "comments": ["nodes": [[
-                "author": ["login": author], "body": "Rename this.", "url": "\(url)#\(id)",
+                "author": ["login": author], "body": body, "url": "\(url)#\(id)",
                 "path": "Sources/App.swift", "line": 3,
             ]]],
         ]
@@ -403,13 +405,13 @@ final class PRWatchPollTests: XCTestCase {
     }
 
     /// SPEC §13.1: triage never sees what a reviewer hid from humans in an HTML comment.
-    func testHiddenHTMLCommentsAreStrippedAndAReviewWithNothingVisibleIsNoItem() async throws {
+    func testHiddenHTMLCommentsAreStrippedAndFeedbackWithNothingVisibleIsNoItem() async throws {
         try enable()
         var hidden = review("R_hidden", by: "bot", state: "COMMENTED", at: "2026-10-20T10:00:00Z")
         hidden["body"] = "<!-- bot {\"findings\": [\"rename x\"]} -->\n  \n"
         var visible = review("R_visible", by: "reviewer", state: "COMMENTED", at: "2026-10-20T10:00:00Z")
         visible["body"] = "Please add a test.\n<!-- bot\n{\"findings\": []}\n-->"
-        answer(pullRequest(reviews: [hidden, visible]))
+        answer(pullRequest(threads: [thread("T_hidden", by: "bot", body: "<!-- bot {} -->")], reviews: [hidden, visible]))
         await fixture.supervisor.pollPRWatches()
 
         let items = try watches.items(watchId: try onlyWatch().id)

@@ -155,7 +155,11 @@ never resolved and an approving body is not feedback. Every `<!-- … -->` HTML
 comment is removed from a thread's latest comment and a review body first (an
 unterminated `<!--` hides the rest, as GitHub renders it), so the stored body,
 triage and the Pull Requests page see only what a reader on GitHub sees; a
-thread or review whose remaining text is blank is not an item. The same query reads
+thread or review whose remaining text is blank is not an item. A stored body
+that differs from the incoming one only by those comments, kept from before
+they were stripped, is rewritten to the incoming text without counting as a
+change: the item keeps its state, verdict, reply and `handled_at`, and is not
+reopened. The same query reads
 each PR's reviews with their submission times and its review requests
 and their removals (`timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT,
 REVIEW_REQUEST_REMOVED_EVENT])`) with theirs, which is all the per-reviewer

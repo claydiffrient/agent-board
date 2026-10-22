@@ -199,7 +199,7 @@ public struct PullRequestWatchReader: Sendable {
         var items: [PRSnapshotItem] = []
         for thread in pr.reviewThreads?.nodes ?? [] where !thread.isResolved && !thread.isOutdated {
             guard let latest = thread.comments?.nodes.last, !byViewer(latest.author) else { continue }
-            let body = visibleText(latest.body)
+            let body = PRSnapshotItem.visibleText(latest.body)
             guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             items.append(PRSnapshotItem(
                 githubNodeId: thread.id, kind: .thread, author: latest.author?.login, body: body,
@@ -213,7 +213,7 @@ public struct PullRequestWatchReader: Sendable {
             latestByAuthor[login.lowercased()] = review
         }
         for review in latestByAuthor.values.sorted(by: { $0.id < $1.id }) where review.state != "APPROVED" {
-            let body = visibleText(review.body)
+            let body = PRSnapshotItem.visibleText(review.body)
             guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             items.append(PRSnapshotItem(
                 githubNodeId: review.id, kind: .review, author: review.author?.login, body: body, url: review.url
@@ -239,12 +239,6 @@ public struct PullRequestWatchReader: Sendable {
             headRepository: pr.headRepository?.nameWithOwner,
             failedChecks: failedChecks(of: pr, ignoring: ignoring)
         )
-    }
-
-    /// SPEC §13.1: a comment body as GitHub renders it, with every `<!-- … -->` removed. An unterminated
-    /// `<!--` hides the rest of the body, as it does on GitHub.
-    static func visibleText(_ body: String) -> String {
-        body.replacing(#/(?s)<!--.*?(?:-->|\z)/#, with: "")
     }
 
     /// SPEC §13.1: when the PR requires checks only those count, and one that has not

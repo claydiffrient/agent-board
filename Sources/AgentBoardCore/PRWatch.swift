@@ -401,6 +401,12 @@ public struct PRSnapshotItem: Sendable, Equatable {
         self.url = url
         self.isResolved = isResolved
     }
+
+    /// SPEC §13.1: a comment body as GitHub renders it, with every `<!-- … -->` removed. An unterminated
+    /// `<!--` hides the rest of the body, as it does on GitHub.
+    public static func visibleText(_ body: String) -> String {
+        body.replacing(#/(?s)<!--.*?(?:-->|\z)/#, with: "")
+    }
 }
 
 /// The Pull Requests page's groups, in display order. Merged and closed watches are in none.
