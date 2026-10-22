@@ -175,6 +175,88 @@ final class WorktreeCleanupTests: XCTestCase {
         XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(task.id)"))
     }
 
+    /// A reviewer creates its worktree inline, before any session row exists (WorkerSupervisor.swift
+    /// ~674), so discard's setup-cancellation path never finds it — only the `discarding`/task-exists
+    /// check in `createWorktree` can refuse it.
+    func testAReviewerSpawnDuringADiscardsTeardownLeavesNoWorktreeOrBranch() async throws {
+        await fixture.supervisor.start()
+        try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
+        let rita = try RosterStore(fixture.db).create(name: "Rita", role: "reviewer", systemPrompt: "Review it.")
+        try RosterStore(fixture.db).enable(agentId: rita.id, forProject: fixture.project.id)
+        let task = try makeTask()
+        try fixture.worktreeWorker(task: task)
+        try fixture.tasks.move(task.id, to: .review)
+        try fixture.tasks.setReviewer(task.id, rita.id)
+
+        let started = fixture.supportDir.appendingPathComponent("teardown-started").path
+        let go = fixture.supportDir.appendingPathComponent("teardown-go").path
+        try setTeardown("touch '\(started)'; until [ -f '\(go)' ]; do sleep 0.05; done")
+
+        let discard = _Concurrency.Task { try await fixture.supervisor.discard(taskId: task.id) }
+        for _ in 0..<600 where !FileManager.default.fileExists(atPath: started) {
+            try await _Concurrency.Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: started), "the discard never ran its teardown hook")
+
+        var reachedCreation = false
+        fixture.supervisor.beforeCheckoutCreated = { reachedCreation = true }
+        let spawn = _Concurrency.Task {
+            try await fixture.supervisor.assignAgent(taskId: task.id, rosterAgentId: rita.id, scope: .reviewer)
+        }
+        FileManager.default.createFile(atPath: go, contents: nil)
+        try await discard.value
+        let result = await spawn.result
+
+        XCTAssertThrowsError(try result.get(), "a reviewer spawn began while its task was being discarded")
+        XCTAssertFalse(reachedCreation, "the reviewer's createWorktree should refuse before creating anything")
+        XCTAssertEqual(try worktreePaths(), [], "the reviewer created a worktree for a discarded task")
+        XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(task.id)"))
+    }
+
+    /// `tasks.get` failing to read is not the same thing as the task having been discarded — the
+    /// check in `createWorktree` must let a read error surface as itself.
+    ///
+    /// An orphan reap claims the same worktree path a reviewer spawn targets (both key off the
+    /// task id), so the spawn's `awaitTeardown` cannot return until the reap's teardown hook is
+    /// released. Renaming the `task` table away before that release, and only releasing afterward,
+    /// guarantees the break happens before the spawn's own `tasks.get` call runs, however the two
+    /// tasks happen to be scheduled. `DROP TABLE` is not usable here: with foreign keys enforced,
+    /// it fails outright once another table (e.g. `agent_session`) still references a row in it.
+    func testATaskReadErrorInCreateWorktreeSurfacesAsItselfNotADiscard() async throws {
+        await fixture.supervisor.start()
+        try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
+        let rita = try RosterStore(fixture.db).create(name: "Rita", role: "reviewer", systemPrompt: "Review it.")
+        try RosterStore(fixture.db).enable(agentId: rita.id, forProject: fixture.project.id)
+        let task = try makeTask()
+        try fixture.worktreeWorker(task: task, state: .failed)
+        try fixture.tasks.move(task.id, to: .review)
+        try fixture.tasks.setReviewer(task.id, rita.id)
+
+        let started = fixture.supportDir.appendingPathComponent("reap-started").path
+        let go = fixture.supportDir.appendingPathComponent("reap-go").path
+        try setTeardown("touch '\(started)'; until [ -f '\(go)' ]; do sleep 0.05; done")
+
+        let reap = _Concurrency.Task { await fixture.supervisor.reconcile(projectId: fixture.project.id) }
+        for _ in 0..<600 where !FileManager.default.fileExists(atPath: started) {
+            try await _Concurrency.Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: started), "the reap never ran its teardown hook")
+
+        let spawn = _Concurrency.Task {
+            try await fixture.supervisor.assignAgent(taskId: task.id, rosterAgentId: rita.id, scope: .reviewer)
+        }
+        try await fixture.db.writer.write { db in try db.execute(sql: "ALTER TABLE task RENAME TO task_quarantined") }
+        FileManager.default.createFile(atPath: go, contents: nil)
+        await reap.value
+        let result = await spawn.result
+
+        XCTAssertThrowsError(try result.get()) { error in
+            if case SupervisorError.taskBeingDiscarded = error {
+                XCTFail("a task read failure was reported as the task being discarded: \(error)")
+            }
+        }
+    }
+
     // MARK: - Reaper
 
     func testReconcileReapsACleanOrphanedWorktree() async throws {
