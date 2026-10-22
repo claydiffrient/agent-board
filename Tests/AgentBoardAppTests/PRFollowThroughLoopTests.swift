@@ -80,10 +80,12 @@ final class PRFollowThroughLoopTests: XCTestCase {
         ]
     }
 
-    /// `failedRun` is a GitHub Actions check run that failed on `head`, by node id and job id, and
-    /// `pendingStatus` a status context still pending beside a passing build.
+    /// `failedRun` is a GitHub Actions check run that failed on `head`, by node id and job id,
+    /// `pendingStatus` a status context still pending beside a passing build, and `failedListed` a
+    /// second failed check run, `CR_listed`.
     private func answer(
-        threads: [[String: Any]], failedRun: (node: String, job: Int64)? = nil, pendingStatus: String? = nil
+        threads: [[String: Any]], failedRun: (node: String, job: Int64)? = nil, pendingStatus: String? = nil,
+        failedListed: String? = nil
     ) {
         var contexts: [[String: Any]] = failedRun.map { run in [[
             "id": run.node, "databaseId": run.job, "name": "build", "status": "COMPLETED", "conclusion": "FAILURE",
@@ -95,6 +97,9 @@ final class PRFollowThroughLoopTests: XCTestCase {
                 ["id": "CR_ok", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"],
                 ["id": "SC_1", "context": pendingStatus, "state": "PENDING"],
             ]
+        }
+        if let failedListed {
+            contexts.append(["id": "CR_listed", "name": failedListed, "status": "COMPLETED", "conclusion": "FAILURE"])
         }
         let state = failedRun != nil ? "FAILURE" : pendingStatus != nil ? "PENDING" : "SUCCESS"
         let rollup: [String: Any] = ["state": state, "contexts": ["nodes": contexts]]
@@ -613,6 +618,19 @@ final class PRFollowThroughLoopTests: XCTestCase {
         let watch = try onlyWatch()
         XCTAssertEqual(watch.state, .readyToVerify)
         XCTAssertEqual(watch.checksState, "SUCCESS")
+    }
+
+    func testAFailedCheckListedAsWaitingOnVerificationBecomesNoItem() async throws {
+        let (tip, _) = try await passedRound()
+        await poll()
+        var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
+        settings.prFollowThrough.checksAwaitingVerification = ["example-verification"]
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+
+        head = tip
+        answer(threads: [], failedRun: ("CR_1", 101), failedListed: "example-verification")
+        await poll()
+        XCTAssertEqual(try checkItems.map(\.githubNodeId), ["CR_1"])
     }
 
     private var checkItems: [PRItem] {

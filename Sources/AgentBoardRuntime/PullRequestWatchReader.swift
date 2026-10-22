@@ -127,9 +127,11 @@ public struct PullRequestWatchReader: Sendable {
                 nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
                   ... on CheckRun {
                     id databaseId name status conclusion startedAt completedAt detailsUrl summary
-                    checkSuite { app { slug } }
+                    checkSuite { app { slug } } isRequired(pullRequestNumber: \(number))
                   }
-                  ... on StatusContext { id context state targetUrl description }
+                  ... on StatusContext {
+                    id context state targetUrl description isRequired(pullRequestNumber: \(number))
+                  }
                 } } } } }
               }
               reviewThreads(first: 100) {
@@ -236,7 +238,7 @@ public struct PullRequestWatchReader: Sendable {
         )
     }
 
-    /// SPEC §13.1: when the base branch requires checks only those count, and one that has not
+    /// SPEC §13.1: when the PR requires checks only those count, and one that has not
     /// reported is pending; otherwise every reported check and the rollup count. Only each check's
     /// latest run counts. Failure, NEUTRAL included, outweighs pending. Nil means nothing is
     /// required and nothing counted has reported. Ignored checks leave both sets, and the rollup too
@@ -266,18 +268,25 @@ public struct PullRequestWatchReader: Sendable {
         return counted.filter { $0.outcome == .failure }.sorted { $0.name < $1.name }.compactMap(\.failed)
     }
 
+    /// The contexts' own `isRequired` flags, plus what protection and rulesets name: those reads may
+    /// come back empty, but they alone cover a required check that has not reported yet (SPEC §13.1).
     private static func requiredChecks(of pr: GraphQLResponse.PullRequest) -> Set<String> {
-        Set(
-            (pr.baseRef?.refUpdateRule?.requiredStatusCheckContexts ?? [])
+        let flagged = contexts(of: pr).filter(\.isRequired).map(\.name)
+        return Set(
+            flagged
+                + (pr.baseRef?.refUpdateRule?.requiredStatusCheckContexts ?? [])
                 + (pr.baseRef?.rules?.nodes ?? []).flatMap { $0.parameters?.requiredStatusChecks ?? [] }.map(\.context)
         )
     }
 
+    private static func contexts(of pr: GraphQLResponse.PullRequest) -> [GraphQLResponse.Check] {
+        pr.commits?.nodes.last?.commit.statusCheckRollup?.contexts?.nodes.compactMap(\.check) ?? []
+    }
+
     /// Ordered by start time, then completion time, then list order, so a rerun replaces the run it reran.
     private static func latestRuns(of pr: GraphQLResponse.PullRequest) -> [String: GraphQLResponse.Check] {
-        let checks = pr.commits?.nodes.last?.commit.statusCheckRollup?.contexts?.nodes.compactMap(\.check) ?? []
         var latest: [String: GraphQLResponse.Check] = [:]
-        for check in checks {
+        for check in contexts(of: pr) {
             if let held = latest[check.name]?.ranAt, let ranAt = check.ranAt, ranAt < held { continue }
             latest[check.name] = check
         }
@@ -385,6 +394,7 @@ private struct GraphQLResponse: Decodable {
         let ranAt: String?
         /// Nil when GitHub gave the run no node id.
         let failed: PRFailedCheck?
+        let isRequired: Bool
     }
 
     struct App: Decodable { let slug: String? }
@@ -406,6 +416,7 @@ private struct GraphQLResponse: Decodable {
         let state: String?
         let targetUrl: String?
         let description: String?
+        let isRequired: Bool?
 
         var check: Check? {
             if let name {
@@ -417,7 +428,10 @@ private struct GraphQLResponse: Decodable {
                         jobId: checkSuite?.app?.slug == "github-actions" ? databaseId : nil
                     )
                 }
-                return Check(name: name, outcome: outcome, ranAt: startedAt ?? completedAt, failed: failed)
+                return Check(
+                    name: name, outcome: outcome, ranAt: startedAt ?? completedAt, failed: failed,
+                    isRequired: isRequired ?? false
+                )
             }
             if let context, let state {
                 let failed = id.map { id in
@@ -426,7 +440,10 @@ private struct GraphQLResponse: Decodable {
                         summary: Self.text(description) ?? "Its status is \(state)."
                     )
                 }
-                return Check(name: context, outcome: CheckOutcome(state: state), ranAt: nil, failed: failed)
+                return Check(
+                    name: context, outcome: CheckOutcome(state: state), ranAt: nil, failed: failed,
+                    isRequired: isRequired ?? false
+                )
             }
             return nil
         }

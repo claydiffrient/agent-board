@@ -75,11 +75,16 @@ triage.
   neither approving nor blocking — until a later removal of that request
   restores the block. The checks on the head commit reduce to one
   of success, pending or failure, and only success is green:
-  - When the base branch requires checks — the contexts its branch
-    protection (`refUpdateRule.requiredStatusCheckContexts`) or a ruleset's
-    required status checks name — only those count. A required check that
-    has not reported yet is pending, so a PR is never ready in the moment
-    after a push before CI has registered anything.
+  - When the PR requires checks, only those count. The required set is the
+    union of the reported contexts whose own
+    `isRequired(pullRequestNumber:)` is true — the source of truth, since it
+    needs only read access — and the contexts the base branch's protection
+    (`refUpdateRule.requiredStatusCheckContexts`) or a ruleset's required
+    status checks name. Those two reads can come back empty for a token
+    without admin access or a rule set at the organization, but they are the
+    only source for a required check that has not reported yet. A required
+    check that has not reported is pending, so a PR is never ready in the
+    moment after a push before CI has registered anything.
   - Otherwise every reported check counts, along with the
     `statusCheckRollup` state.
   - Failure outweighs pending, and pending outweighs success. A commit
