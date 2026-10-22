@@ -70,6 +70,7 @@ public struct ProjectStore: Sendable {
             try db.execute(sql: "DELETE FROM shutdown_order WHERE project_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM token_grant WHERE project_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM report WHERE project_id = ?", arguments: [id])
+            try db.execute(sql: "DELETE FROM file_lock WHERE project_id = ?", arguments: [id])
             try db.execute(
                 sql: "DELETE FROM progress WHERE task_id IN (SELECT id FROM task WHERE project_id = ?)",
                 arguments: [id]

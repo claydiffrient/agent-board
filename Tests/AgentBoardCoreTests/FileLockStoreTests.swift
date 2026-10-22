@@ -148,6 +148,16 @@ final class FileLockStoreTests: XCTestCase {
         XCTAssertTrue(try locks.held(projectId: f.project.id).isEmpty)
     }
 
+    func testHandingOffASessionReleasesItsLocks() throws {
+        let task = try f.task("t", column: .running)
+        try insertSession("s1", taskId: task.id)
+        try locks.acquire(projectId: f.project.id, path: "App.swift", sessionId: "s1", taskId: task.id)
+
+        try f.board.handOff(taskId: task.id, sessionId: "s1", summary: "my portion", nextRole: nil, filesChanged: [])
+
+        XCTAssertTrue(try locks.held(projectId: f.project.id).isEmpty)
+    }
+
     func testEveryTerminationRouteReleasesLocksIncludingACapKill() throws {
         let causes: [SessionTermination] = [
             .capBreach("idle cap reached"), .stopped(by: .human), .vanished,

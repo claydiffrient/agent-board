@@ -204,6 +204,7 @@ final class EpicAcceptMergeTests: XCTestCase {
 
         try fixture.markMerged(epic: epic, branch: "agentboard/\(dependency.id)")
         try await fixture.supervisor.assign(taskId: dependent.id)
+        await fixture.supervisor.waitForSetup()
         XCTAssertTrue(try isAncestor(commit, of: "agentboard/\(dependent.id)"))
     }
 
