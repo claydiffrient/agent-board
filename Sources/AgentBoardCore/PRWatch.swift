@@ -17,6 +17,8 @@ public enum PRWatchState: String, Codable, Sendable, CaseIterable, Equatable, Da
     case parked
     case merged
     case closed
+    /// The human chose Stop watching: the poll records nothing more on it and the page lists it nowhere.
+    case stopped
 
     public var isTerminal: Bool { self == .merged || self == .closed }
 }
@@ -85,6 +87,8 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
     /// The head whose Ready to verify banner has fired, so a PR announces itself once per head.
     public var readyNotifiedOid: String? = nil
     public var parkedReason: String? = nil
+    /// When the human last resumed it from parked, which bounds the round cap and the failure streak.
+    public var resumedAt: Int64? = nil
     public var createdAt: Int64
     public var updatedAt: Int64
 
@@ -114,6 +118,7 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
         case estCostUSD = "est_cost_usd"
         case readyNotifiedOid = "ready_notified_oid"
         case parkedReason = "parked_reason"
+        case resumedAt = "resumed_at"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -303,11 +308,16 @@ public struct PRSnapshot: Sendable, Equatable {
     public var mergeable: String?
     public var labels: [String]
     public var items: [PRSnapshotItem]
+    /// The head branch lives in another repository than the base: a fork, which follow-through parks.
+    public var isCrossRepository: Bool
+    /// The head repository's `owner/name`, nil when GitHub no longer has it.
+    public var headRepository: String?
 
     public init(
         repoOwner: String, repoName: String, number: Int, url: String, title: String, isDraft: Bool = false,
         headRef: String, headOid: String, baseRef: String, reviewDecision: String? = nil,
-        checksState: String? = nil, mergeable: String? = nil, labels: [String] = [], items: [PRSnapshotItem] = []
+        checksState: String? = nil, mergeable: String? = nil, labels: [String] = [], items: [PRSnapshotItem] = [],
+        isCrossRepository: Bool = false, headRepository: String? = nil
     ) {
         self.repoOwner = repoOwner
         self.repoName = repoName
@@ -323,6 +333,8 @@ public struct PRSnapshot: Sendable, Equatable {
         self.mergeable = mergeable
         self.labels = labels
         self.items = items
+        self.isCrossRepository = isCrossRepository
+        self.headRepository = headRepository
     }
 }
 
@@ -373,7 +385,7 @@ public enum PRPageGroup: String, Sendable, CaseIterable, Equatable {
         case .parked: return .parked
         case .watching: return .waitingOnReviewers
         case .settling, .triaging, .fixing, .checking, .publishing, .awaitingCI, .stale: return .inProgress
-        case .merged, .closed: return nil
+        case .merged, .closed, .stopped: return nil
         }
     }
 }

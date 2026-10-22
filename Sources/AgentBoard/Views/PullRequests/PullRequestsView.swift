@@ -119,7 +119,9 @@ struct PullRequestsView: View {
                 isMarking: marking.contains(listing.id),
                 markVerified: { markVerified(listing.watch, project: project) },
                 walkThrough: { openWindow(id: PRVerifyScene.id, value: listing.watch.id) },
-                togglePause: { togglePause(listing.watch) }
+                togglePause: { togglePause(listing.watch) },
+                resume: { perform { try actions.resume(listing.watch) } },
+                stopWatching: { perform { try actions.stopWatching(listing.watch) } }
             )
             ForEach(listing.decisions) { decision in
                 PRDecisionRow(decision: decision) { choice in
@@ -153,8 +155,12 @@ struct PullRequestsView: View {
     }
 
     private func togglePause(_ watch: PRWatch) {
+        perform { try actions.setPaused(!watch.paused, watch: watch) }
+    }
+
+    private func perform(_ action: () throws -> Void) {
         do {
-            try actions.setPaused(!watch.paused, watch: watch)
+            try action()
         } catch {
             errorMessage = errorText(error)
         }
@@ -182,6 +188,14 @@ struct PullRequestActions {
 
     func setPaused(_ paused: Bool, watch: PRWatch) throws {
         try PRWatchStore(db).setPaused(paused, watchId: watch.id)
+    }
+
+    func resume(_ watch: PRWatch) throws {
+        try PRWatchStore(db).resume(watchId: watch.id)
+    }
+
+    func stopWatching(_ watch: PRWatch) throws {
+        try PRWatchStore(db).stopWatching(watchId: watch.id)
     }
 
     func answer(_ decision: PRItem, choice: PRDecisionChoice) throws {
@@ -255,8 +269,11 @@ struct PullRequestRow: View {
     let markVerified: () -> Void
     let walkThrough: () -> Void
     let togglePause: () -> Void
+    let resume: () -> Void
+    let stopWatching: () -> Void
 
     private var watch: PRWatch { listing.watch }
+    private var isParked: Bool { watch.state == .parked }
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -269,6 +286,11 @@ struct PullRequestRow: View {
                 Text(details)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if isParked {
+                    Text(watch.parkedReason ?? "Follow-through parked this pull request.")
+                        .font(.caption)
+                        .lineLimit(4)
+                }
             }
             Spacer(minLength: 8)
             if watch.state != .verified {
@@ -281,13 +303,21 @@ struct PullRequestRow: View {
                 Button("Walk me through it", action: walkThrough)
                     .help("Run this project's verify command for this pull request in a new terminal window")
             }
-            Button(watch.paused ? "Resume" : "Pause", action: togglePause)
+            if isParked {
+                Button("Resume", action: resume)
+                    .help("Start follow-through on this pull request again, with a fresh round cap")
+                Button("Stop watching", action: stopWatching)
+                    .help("Leave this pull request to you; follow-through will not watch it again")
+            } else {
+                Button(watch.paused ? "Resume" : "Pause", action: togglePause)
+            }
         }
         .padding(.vertical, 2)
     }
 
     private var details: String {
         var parts = ["\(watch.repoOwner)/\(watch.repoName) #\(watch.number)", watch.state.title]
+        if watch.state == .stale { parts.append("restarted: head moved") }
         if watch.round > 0 { parts.append("round \(watch.round)") }
         parts.append(listing.openItems == 1 ? "1 open item" : "\(listing.openItems) open items")
         if let pushed = watch.headChangedAt {
@@ -341,6 +371,7 @@ extension PRWatchState {
         case .parked: "parked"
         case .merged: "merged"
         case .closed: "closed"
+        case .stopped: "stopped"
         }
     }
 }

@@ -68,6 +68,8 @@ public enum TriagePrompt {
     verdict `fix` or `answer`. A `fix` option changes code; an `answer` option changes none and carries \
     `reply_body`, the reply that explains the choice to the reviewer. For example, "Change the helper" is \
     `fix`, and "Keep it local" is `answer` with a short reason as its reply.
+    A `conflict` item is the pull request conflicting with its base. It is `fix`: the fixer merges the base \
+    into the branch.
     Reserve `decision` for a choice a reasonable engineer could make either way. A change that is clearly \
     right and in scope is `fix`, however large; do not pass a judgment up because it is hard.
     """

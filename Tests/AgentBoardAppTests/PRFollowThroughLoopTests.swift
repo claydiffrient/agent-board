@@ -222,7 +222,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         try enable()
         answer(threads: [thread("T_1")])
         await poll()
-        for attempt in 1...PRWatchStore.failedTriagesBeforePark {
+        for attempt in 1...PRWatchStore.failedSessionsBeforePark {
             let session = try runningTriager()
             let worktree = try XCTUnwrap(session.worktreePath)
             try await fixture.supervisor.stop(sessionId: session.sessionId)
@@ -231,7 +231,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: worktree), "attempt \(attempt) kept its checkout")
 
             await poll()
-            if attempt < PRWatchStore.failedTriagesBeforePark {
+            if attempt < PRWatchStore.failedSessionsBeforePark {
                 XCTAssertEqual(try onlyWatch().state, .settling)
                 await poll()
                 let spawned = await spawnCount
@@ -247,7 +247,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertTrue(cause.text.contains("#12") && cause.text.contains("3 times"), cause.text)
         await poll()
         let spawned = await spawnCount
-        XCTAssertEqual(spawned, PRWatchStore.failedTriagesBeforePark)
+        XCTAssertEqual(spawned, PRWatchStore.failedSessionsBeforePark)
     }
 
     func testBatteryPowerAndASpentDailyBudgetKeepASettledWatchSettling() async throws {
