@@ -97,6 +97,7 @@ final class CoordinatorSessionTests: XCTestCase {
 
         console.stop()
         let relaunched = fixture.relaunchedSupervisor()
+        addTeardownBlock { await relaunched.stop() }
         await relaunched.start()
         try XCTSkipIf(relaunched.serverPort == nil, "the relaunched board server could not bind a port")
         relaunched.coordinatorSessionConsole().start()
@@ -145,6 +146,7 @@ final class CoordinatorSessionTests: XCTestCase {
             sessionId: orphan, projectId: "", role: .coordinator, cwd: fixture.coordinatorDir.path, state: .running
         ))
         let relaunched = fixture.relaunchedSupervisor()
+        addTeardownBlock { await relaunched.stop() }
         await relaunched.start()
         XCTAssertEqual(try fixture.sessions.get(orphan)?.state, .stopped)
     }

@@ -185,6 +185,7 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         try await assign(first)
 
         let relaunched = fixture.relaunchedSupervisor()
+        addTeardownBlock { await relaunched.stop() }
         await relaunched.start()
         try XCTSkipIf(relaunched.serverPort == nil, "the relaunched board server could not bind a port")
 
@@ -223,6 +224,7 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         )
 
         let relaunched = fixture.relaunchedSupervisor()
+        addTeardownBlock { await relaunched.stop() }
         await relaunched.start()
 
         XCTAssertEqual(try fixture.sessions.get(placeholder.sessionId)?.state, .failed)

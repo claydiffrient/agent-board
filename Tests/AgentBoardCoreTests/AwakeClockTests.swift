@@ -27,18 +27,24 @@ final class AwakeClockTests: XCTestCase {
 
     // MARK: - CLOCK_UPTIME_RAW on this machine
 
-    /// The claim the whole fix rests on, checked against the real clocks rather than taken on
-    /// faith: `CLOCK_UPTIME_RAW` never runs ahead of `CLOCK_MONOTONIC_RAW` — they share a tick
-    /// source, so the comparison holds exactly even on a boot that hasn't slept, unlike
-    /// `CLOCK_MONOTONIC` (NTP-corrected) which the raw clocks can drift several seconds ahead of
-    /// within hours. On a machine that has slept, `uptime` is strictly behind, and the gap is
-    /// printed so a run on a never-slept machine is still legible.
+    /// The claim the whole fix rests on, checked against the real clock rather than taken on
+    /// faith: `DarwinClock().uptimeSeconds` reads `CLOCK_UPTIME_RAW` and nothing else, so it must
+    /// fall between two direct `CLOCK_UPTIME_RAW` reads taken immediately before and after it.
+    /// `CLOCK_MONOTONIC_RAW` is a *different* clock and is not a safe bracket for this: on CI it
+    /// has been measured 13µs ahead of `CLOCK_UPTIME_RAW` with no sleep in between, so a
+    /// cross-clock comparison can fail on skew alone. `CLOCK_MONOTONIC` (NTP-corrected) drifts
+    /// further still. The gap between `CLOCK_MONOTONIC_RAW` and the bracketed uptime is only
+    /// printed, as a legible probe of how long the machine has slept this boot.
     func testUptimeRawDoesNotCountSystemSleep() {
-        var monotonic = timespec()
-        clock_gettime(CLOCK_MONOTONIC, &monotonic)
-        let monotonicSeconds = TimeInterval(monotonic.tv_sec) + TimeInterval(monotonic.tv_nsec) / 1_000_000_000
+        var before = timespec()
+        clock_gettime(CLOCK_UPTIME_RAW, &before)
+        let beforeSeconds = TimeInterval(before.tv_sec) + TimeInterval(before.tv_nsec) / 1_000_000_000
 
         let uptime = DarwinClock().uptimeSeconds
+
+        var after = timespec()
+        clock_gettime(CLOCK_UPTIME_RAW, &after)
+        let afterSeconds = TimeInterval(after.tv_sec) + TimeInterval(after.tv_nsec) / 1_000_000_000
 
         var monotonicRaw = timespec()
         clock_gettime(CLOCK_MONOTONIC_RAW, &monotonicRaw)
@@ -50,11 +56,12 @@ final class AwakeClockTests: XCTestCase {
         let wallSinceBoot = Date().timeIntervalSince1970 - TimeInterval(boot.tv_sec)
 
         XCTAssertGreaterThan(uptime, 0)
-        XCTAssertLessThanOrEqual(uptime, monotonicRawSeconds)
+        XCTAssertGreaterThanOrEqual(uptime, beforeSeconds)
+        XCTAssertLessThanOrEqual(uptime, afterSeconds)
         print(
-            "PROBE clocks: wall-since-boot \(Int(wallSinceBoot))s, CLOCK_MONOTONIC "
-            + "\(Int(monotonicSeconds))s, CLOCK_MONOTONIC_RAW \(Int(monotonicRawSeconds))s, "
-            + "CLOCK_UPTIME_RAW \(Int(uptime))s, slept \(Int(monotonicRawSeconds - uptime))s"
+            "PROBE clocks: wall-since-boot \(Int(wallSinceBoot))s, CLOCK_MONOTONIC_RAW "
+            + "\(Int(monotonicRawSeconds))s, CLOCK_UPTIME_RAW \(Int(uptime))s, "
+            + "slept \(Int(monotonicRawSeconds - uptime))s"
         )
     }
 

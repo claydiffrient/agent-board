@@ -157,6 +157,7 @@ final class SetupHandoffTests: XCTestCase {
             projectsRoot: fixture.supportDir.appendingPathComponent("claude-projects"),
             gh: fixture.gh
         )
+        addTeardownBlock { await restarted.stop() }
         await restarted.start()
 
         XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .ready)

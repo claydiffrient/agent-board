@@ -54,7 +54,10 @@ final class WorktreeTeardownHookTests: XCTestCase {
     /// The orphan reaper sees an accepted task's worktree as an orphan while its hook is still running.
     func testReconcileDuringASlowAcceptHookNeitherRunsItAgainNorReportsACleanupFinding() async throws {
         let marker = fixture.supportDir.appendingPathComponent("teardown-marker")
-        try setTeardown("echo ran >> '\(marker.path)'; sleep 2")
+        let release = fixture.supportDir.appendingPathComponent("teardown-release")
+        try setTeardown(
+            "echo ran >> '\(marker.path)'; for i in $(seq 1 2400); do [ -f '\(release.path)' ] && break; sleep 0.05; done"
+        )
         let task = try makeTask()
         let worktree = try XCTUnwrap(try fixture.worktreeWorker(task: task).worktreePath)
 
@@ -64,6 +67,7 @@ final class WorktreeTeardownHookTests: XCTestCase {
             try await _Concurrency.Task.sleep(nanoseconds: 50_000_000)
         }
         await fixture.supervisor.reconcile(projectId: fixture.project.id)
+        try Data().write(to: release)
         await fixture.supervisor.waitForTeardowns()
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
@@ -80,7 +84,7 @@ final class WorktreeTeardownHookTests: XCTestCase {
         let marker = fixture.supportDir.appendingPathComponent("teardown-marker")
         let release = fixture.supportDir.appendingPathComponent("teardown-release")
         try setTeardown(
-            "for i in $(seq 1 200); do [ -f '\(release.path)' ] && break; sleep 0.05; done; echo ran >> '\(marker.path)'"
+            "for i in $(seq 1 2400); do [ -f '\(release.path)' ] && break; sleep 0.05; done; echo ran >> '\(marker.path)'"
         )
         let epic = try EpicStore(fixture.db).create(projectId: fixture.project.id, title: "Roster", goal: "ship it")
         try fixture.manager.ensureBranch(epic.branch, from: "main")
