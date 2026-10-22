@@ -221,6 +221,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored var afterCheckoutCreated: @MainActor () async -> Void = {}
     /// Runs while a spawn holds its mark and before `git worktree add`, so a test can act in that gap.
     @ObservationIgnored var beforeCheckoutCreated: @MainActor () async -> Void = {}
+    /// Off in a test that drives every `pollPRWatches()` itself, so the tick's poll cannot advance a watch between two of its own.
+    @ObservationIgnored var pollsPRWatchesOnTick = true
     /// Tasks a discard is waiting out the setup of; that setup's end is not a cue to retry.
     @ObservationIgnored private var discarding: Set<String> = []
     /// A resume starts the process before it moves the task back to `running`, so until then its
@@ -4065,7 +4067,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             lastPullRequestCheck = now
             _Concurrency.Task { await self.refreshPullRequestLandings() }
         }
-        if now - lastPRWatchPoll >= Self.prWatchPollIntervalMillis {
+        if pollsPRWatchesOnTick, now - lastPRWatchPoll >= Self.prWatchPollIntervalMillis {
             lastPRWatchPoll = now
             // A slow `gh` must not queue a poll per tick behind the one still running.
             if prWatchPoll == nil { _Concurrency.Task { await self.pollPRWatches() } }

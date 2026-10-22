@@ -46,6 +46,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         _ = try fixture.git(["push", "-q", remote.path, "add-widgets"])
         onAC = true
         fixture.supervisor.isOnACPower = { [unowned self] in self.onAC }
+        fixture.supervisor.pollsPRWatchesOnTick = false
         await fixture.supervisor.start()
         try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
     }
@@ -543,9 +544,8 @@ final class PRFollowThroughLoopTests: XCTestCase {
     }
 
     /// A round that has passed its check, with GitHub reporting the PR open at `remoteHead` (default
-    /// `head`) carrying `labels` and accepting replies. Everything is staged before the check passes,
-    /// since the metering tick may poll on its own and publish. Returns the round branch's tip and the
-    /// round's worktree.
+    /// `head`) carrying `labels` and accepting replies. Returns the round branch's tip and the round's
+    /// worktree.
     private func passedRound(
         label: String? = nil, replies: Bool = false, question: Bool = false, labels: [String] = [],
         remoteHead: String? = nil, repliesGone: Bool = false
@@ -668,9 +668,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
         try await answerStaleFix(watch)
 
-        // The watch's own state keeps advancing (e.g. on to readyToVerify) once the round closes, so
-        // assert on the closed round rather than an instant of `state` a background metering poll can race past.
-        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["stale", "triaged"])
+        XCTAssertEqual(try onlyWatch().state, .watching)
         XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question", "thread=T_fix"])
         XCTAssertEqual(replyCalls.map(\.last), ["body=Three retries.", "body=It was renamed upstream."])
     }
