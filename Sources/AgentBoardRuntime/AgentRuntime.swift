@@ -29,6 +29,10 @@ public struct SpawnRequest: Sendable {
         "ScheduleWakeup", "Monitor", "CronCreate",
     ]
 
+    /// Layered onto the default for a PR round's fixer, whose commits are fast-forward pushed onto the
+    /// pull request's head, so history it already has must stay as it is (SPEC §13.1).
+    public static let fixerDisallowedTools = ["Bash(git commit*--amend*)", "Bash(git rebase*)"]
+
     /// A triager's whole deny list besides the board deny (SPEC §6): a reviewer's, plus `gh` and the
     /// git commands that write refs or config, since it reads a pull request and changes nothing.
     public static let triagerDisallowedTools = defaultDisallowedTools + reviewerDisallowedTools + [

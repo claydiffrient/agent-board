@@ -199,6 +199,22 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("pr_item_decision_notified") { db in
             try db.execute(sql: Schema.prItemDecisionNotified)
         }
+        migrator.registerMigration("pr_round_fix_task") { db in
+            try db.execute(sql: Schema.prRoundFixTask)
+        }
+        migrator.registerMigration("pr_round_check") { db in
+            try db.execute(sql: Schema.prRoundCheck)
+        }
+        migrator.registerMigration("pr_item_reply_bounds") { db in
+            try db.execute(sql: Schema.prItemReplyBounds)
+            try db.execute(
+                sql: """
+                UPDATE project SET settings_json = json_set(settings_json, '$.prFollowThrough.postFactualRepliesSince', ?)
+                WHERE json_extract(settings_json, '$.prFollowThrough.postFactualReplies') = 1
+                """,
+                arguments: [Int64.nowMillis]
+            )
+        }
         return migrator
     }
 }

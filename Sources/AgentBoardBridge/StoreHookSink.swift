@@ -297,7 +297,8 @@ public final class StoreHookSink: HookSink {
             return (try? ReviewPrompt.postCompactionBrief(db: db, session: session)) ?? nil
         }
         if scope == .triager {
-            return (try? TriagePrompt.postCompactionBrief(db: db, session: session)) ?? nil
+            return ((try? TriagePrompt.postCompactionBrief(db: db, session: session)) ?? nil)
+                ?? ((try? FollowupCheckPrompt.postCompactionBrief(db: db, session: session)) ?? nil)
         }
         guard let taskId, let task = try? tasks.get(taskId) else { return nil }
         let epic = task.epicId.flatMap { try? epics.get($0) } ?? nil

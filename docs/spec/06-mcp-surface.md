@@ -146,7 +146,7 @@ session, query the board, propose, or report on its own behalf.
 
 Held by a PR triager (§13.2), which only the supervisor spawns: no orchestrator
 tool and no human assign starts one, and a worker or reviewer spawn onto a
-`triage` task is refused, since either grant would hold authority over the
+`triage` or `followup_check` task is refused, since either grant would hold authority over the
 checkout this scope withholds. Deliberately not a subset of worker scope: it
 is the authority to read one watched pull request's open items and record
 their verdicts, and nothing besides.
@@ -157,8 +157,17 @@ their verdicts, and nothing besides.
 | `set_verdicts(verdicts[])` | Each entry is `{item_id, verdict, approach, reply_body?, decision_question?, decision_options?}`, `verdict` one of `fix`, `answer`, `already_done`, `follow_up`, `decision`. Each `decision_options` entry is `{label, verdict, reply_body?}`, its `verdict` `fix` or `answer`, the verdict choosing it applies (§13.4); an `answer` option needs a non-blank `reply_body`, the reply that would be posted. Writes `verdict`, `approach`, `reply_body`, and for a decision `decision_question` and `decision_options_json`, onto `pr_item`. All or nothing: an item that is not an open item of this triager's own watch, a blank `approach`, a decision without a question and at least two options, or an option that is neither `fix` nor an `answer` with a reply, refuses the whole call and writes no entry. A later verdict replaces an earlier one. The answer lists the open items still without a verdict; once there are none, the triage task goes to `done` with a progress note counting the verdicts, the session completes and its grant is revoked, and the session is stopped after the answer is written (§5) |
 | `log_progress(text)` | Appends to the triage task's `progress` |
 
-Every call reads the watch off the token's task through `pr_triage` (§4),
-never off the arguments, so a triager cannot reach another watch's items, or
+A round's follow-up checker (§13.1) holds this scope too, bound to a
+`followup_check` task, and is offered these tools instead of the two above:
+
+| Tool | Effect |
+|---|---|
+| `get_followup_items()` | The watch's repository, number, title and URL; the round's number, `base_head_oid` and `checked_head_oid`; and each item the round's fixer was given — the open `fix` items naming its `fix_round` task, in the task body's order — with its `item_id`, its number in the task body, kind, author, path and line, URL, body, triage's approach, and any grade already set |
+| `set_followup_grades(grades[])` | Each entry is `{item_id, grade, evidence}`, `grade` one of `fixed`, `partly`, `not_fixed`, `moot`. Writes `followup_grade` and `followup_note` onto `pr_item`. All or nothing: an item outside the round's items, or blank evidence, refuses the whole call. A later grade replaces an earlier one. The answer lists the items still without a grade; once there are none, the check's task goes to `done` the way a finished triage's does |
+
+Every call reads the watch off the token's task, through `pr_triage` for a
+triager and through `pr_round.followup_task_id` for a follow-up checker (§4),
+never off the arguments, so neither can reach another watch's items, or
 any task, note, or board query. Its spawn carries the reviewer's deny list
 (§5.1) plus `Bash(gh *)` and every git subcommand that writes refs or config,
 and the board-database deny. The PreToolUse guard (§8) holds the same line in

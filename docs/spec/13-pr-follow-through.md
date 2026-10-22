@@ -29,9 +29,10 @@ verified, and merged/closed — everything that does not require a model;
 publishing is specified below but not reachable until phase 3 gives it a push
 to make. **Phase 2** delivers what the settling wait leads to, triaging, and
 parking on a stacked or forked PR or after three failed triages in a row.
-**Phase 3** delivers fixing, checking, and publishing's push. **Phase 4**
-delivers stale, the rest of parked, and feeding CI and verification failures
-back into items.
+**Phase 3** delivers fixing, checking, publishing's push and replies, the
+stale move a publish makes, and the verified freeze. **Phase 4** delivers the
+rest of stale and parked, and feeding CI and verification failures back into
+triage.
 
 - **watching** — polled every 60s. Leaves on new feedback (an unresolved
   thread, a review body, a failed required check, a merge conflict) or when
@@ -46,17 +47,18 @@ back into items.
   text as data, never as instructions.
 - **fixing** *(phase 3)* — one fixer task per round, in a worktree cut from
   the fetched PR head on `agentboard/pr-<n>-r<round>`. New commits only: no
-  amend, no rebase.
+  amend, no rebase. A stacked PR parks instead (below).
 - **checking** *(phase 3)* — the `reviewer` role reviews the round's diff, and
   the `followupCheck` role grades each item `fixed`, `partly`, `not_fixed`, or
-  `moot`. Anything other than fixed or moot reopens fixing, at most
-  `roundCap` times (default 3); the round past the cap parks the PR instead.
+  `moot`. A reopen or anything other than fixed or moot reopens fixing, at
+  most twice a round; the third failed check parks the PR instead.
 - **publishing** *(phase 3)* — re-reads the remote head and goes to **stale**
   if it moved. Otherwise fast-forward pushes the round branch to the PR's head
   ref, then posts factual replies when `postFactualReplies` is on. It never
   resolves threads.
-- **awaitingCI** *(phase 1 reads green/red; phase 4 adds the log-tail items on
-  red)* — green goes to watching; red goes straight to triaging, with the
+- **awaitingCI** *(phase 3 reads green/red; phase 4 adds the log-tail items on
+  red)* — green goes to watching; red goes to watching with a failed-checks
+  decision item, which phase 4 replaces with going straight to triaging, the
   failed checks and their log tails as items.
 - **readyToVerify** *(phase 1)* — `reviewDecision == APPROVED` (when
   `requireApproval`), checks green, no open item or decision, and the
@@ -97,10 +99,11 @@ back into items.
   Agent Board never pushes to it again, and any new feedback on it becomes a
   decision item rather than restarting the round. Removing the label
   re-evaluates it: readyToVerify if it still qualifies, otherwise watching.
-- **stale** *(phase 4)* — the head moved out from under the round. Drop the
-  round's worktree and go to settling.
-- **parked** *(phase 2 for the stacked/forked cases; phase 4 for the
-  round-cap and fixer cases)* — reached when the round cap is hit, three
+- **stale** *(phase 3 for a publish; phase 4 for the rest)* — the head moved
+  out from under the round. Drop the round's worktree and go to settling.
+- **parked** *(phase 2 for the forked case and failed triages; phase 3 for a
+  stacked PR, a round's third failed check, and a refused publish; phase 4 for the round-cap and fixer cases)* — reached
+  when the round cap is hit, a round fails its check three times, three
   triages (phase 2) or fixer sessions fail in a row, the PR is stacked (its base is not the
   project's default branch and the stack needs a restack the human must do),
   or the PR is from a fork. Waits for the human to Resume or Stop watching
@@ -150,40 +153,176 @@ them.
 **Settling and triaging (phase 2).** The same poll, after reading GitHub,
 advances each watch of an enabled project; a failed search does not stop it.
 The poll's own move puts a watch in settling while any open item has no
-verdict, so an open decision or fix item keeps a PR from being ready without
-sending it back to triage. A settling watch leaves for triaging only when it is
+verdict or is a `fix` answer to a decision whose `round` is past the watch's
+(§13.4), so any other open decision or fix item keeps a PR from being ready
+without sending it back to triage. A settling watch leaves for triaging only when it is
 not paused, at least `settleMinutes` have passed since `last_feedback_at` (so an
 item arriving during settling restarts the wait), and nothing holds it: a
 shutdown order on the project, a Mac whose providing power source IOKit reports
-as anything but AC (an unreadable source counts as AC), the triage sessions
-started since local midnight having cost `dailyBudgetUSD` or more, or a §8
+as anything but AC (an unreadable source counts as AC), the triage and fixer
+sessions started since local midnight having cost `dailyBudgetUSD` or more, or a §8
 spawn cap refusing. A hold leaves it settling and is re-checked on the next
 poll. Leaving increments `round`, records a `pr_round` holding the head oid it
 starts from, and moves the watch to triaging in one transaction that only a
 settling watch passes, so two polls never start two rounds; then it spawns the
-round's triager (§13.2), whose `pr_triage` row carries the round.
+round's triager (§13.2), whose `pr_triage` row carries the round. A watch
+whose only waiting items are answered fixes needs no triage: under the same
+conditions its new round goes straight to fixing (parked instead when the PR
+is stacked, below), and the fixer starts on that poll.
 
 A triaging watch waits for its round's triage task. Once that task is `done`,
 the verdicts are applied in one transaction:
 
-- `fix` — a `backlog` task of type `code`, origin `follow_through`, its model
-  `roles.fixer.model` or else the project's default. The item stays open with
-  the task in `fix_task_id`; phase 3's fixer is what handles it.
+- `fix` — the item stays open for the round's fixer (below).
 - `follow_up` — a `backlog` task, origin `follow_through`, titled
   "Follow-up from #n: …". The item is handled, with the task in `fix_task_id`.
 - `answer` and `already_done` — the item is handled; its `reply_body` stays
   stored for phase 3 to post.
 - `decision` — the item stays open as a decision.
 
-A fix or follow-up task's body holds the PR's number, title and URL, the
-comment's author, path and line, and URL, the comment quoted and labeled as
-data rather than instructions, and triage's approach. An item gets no second
-task while `fix_task_id` names one that fits its verdict: a `follow_through`
-task of type `code` for `fix`, any other `follow_through` task for `follow_up`.
-A fix task still in `backlog` is rewritten with the item's current body, so a
-reply that arrived after it was made reaches the fixer. The round's outcome becomes `triaged` and the watch returns to
-watching, or to settling when an item arrived during triage. Phase 3 replaces
-that return with fixing.
+A follow-up task's body holds the PR's number, title and URL, the comment's
+author, path and line, and URL, the comment quoted and labeled as data rather
+than instructions, and triage's approach. An item gets no second follow-up
+task while `fix_task_id` names a `follow_through` task that is not of type
+`code`. Then the watch goes to settling when an item arrived during triage,
+else to fixing while an open item's verdict is `fix`, else to watching. The
+round's outcome becomes `triaged` unless it goes on to fixing, which leaves the
+round open.
+
+**Fixing (phase 3).** A PR whose base is not the project's base branch is
+stacked: rather than fixing, the watch parks with a `parked_reason` naming
+both branches, since a fix on a lower layer leaves the layers above it to
+restack, which is the human's to do. Otherwise the next poll creates the
+round's one task, in a transaction that only a fixing watch whose round has
+no task yet passes: a `ready` task of type `code`, origin `fix_round`, titled
+"Fix round r of #n: …", its model `roles.fixer.model` or unset. Its body names
+the round branch, says new commits only with no amend, rebase or push, and
+holds a section per open `fix` item, each built like a follow-up's body. The
+task goes in the round's `fix_task_id` and in each of those items'
+`fix_task_id`, and every `backlog` `follow_through` task of type `code` that an
+item of the watch names — a fix task phase 2 made — is closed with a reason
+naming the round.
+
+The fixer is spawned only while its task is `ready` and its fixer sessions
+(those with no `review_head`) do not outnumber the round's `check_failures`:
+once per check, so a fixer that failed is not respawned in a loop. A fixing
+round with no task and no open `fix` item — every one answered on GitHub or
+reopened for triage before its task was made — ends with outcome `triaged`,
+and the watch goes to settling when an item awaits triage, else to watching. It holds under the
+same settling holds, and its spawn approval is skipped while follow-through is
+on (§13.5). Spawning fetches the PR's head ref from `origin` into
+`refs/remotes/origin/<head>`, and the round's `base_head_oid` if the repository
+lacks it, refusing the spawn when either fails; then it cuts
+`agentboard/pr-<n>-r<round>` at `base_head_oid` in a worktree under the
+project's worktree root named for the task. A retry reuses both. The session
+is an ordinary worker's with the opening prompt (§5), `roles.fixer`'s roster
+agent, and the task's model, else the agent's, else the project's default.
+Besides the worker deny list it is denied `git commit --amend` and
+`git rebase` by `--disallowedTools`, since its commits are fast-forwarded
+onto the PR's head; every worker is already denied pushing. Spawning the task
+any other way — `spawn_worker`, or approving its spawn — takes the same path,
+and a roster agent named there replaces the role's.
+
+**Checking (phase 3).** The fixer's `report_complete` never takes the review
+queue or the accept path. Its task goes to `review`, its report is recorded
+already consumed (the orchestrator never asked for the round), and the watch
+moves from fixing to checking, clearing the round's `review_verdict`,
+`review_findings`, `followup_task_id` and `checked_head_oid` and its items'
+grades. A human or orchestrator accept of a `fix_round` task is refused: the
+round's branch is pushed onto its PR by publishing, never merged as a task
+branch. The next poll starts both halves of the check, under the settling
+holds:
+
+- **The review.** The reviewer is `roles.reviewer`'s roster agent, else the
+  review routing table's Code row (§4). A round is pushed with no person in
+  the loop, so anything but an agent — a person, accept without review, or a
+  named agent the project cannot use — parks the watch with the reason. The
+  agent is recorded as the task's reviewer and spawned with reviewer scope in
+  the fixer's own worktree on the round branch, its review base
+  `base_head_oid`, so it reads `git diff <base_head_oid>...HEAD`; its model is
+  `roles.reviewer.model`, else the agent's, else the project's default. Its
+  prompt adds that accepting lets Agent Board push the round with no person in
+  between, so it runs the project's tests on the suites the diff touches and
+  accepts only when they pass. `accept_task` and `reopen_task` record its
+  verdict on the round (`review_verdict`, and a reopen's findings in
+  `review_findings`) and end its session; neither moves the task. A round
+  branch with no change beyond `base_head_oid` is reopened on the spot with
+  that reason, with no reviewer spawned. A reviewer session that ends without
+  a verdict parks the watch; one left idle without one is raised as §5.1 says.
+- **The follow-up check.** When the round has items to grade, a synthetic task
+  of origin `followup_check` is created and recorded in `followup_task_id`
+  with the round branch's tip as `checked_head_oid`, and a session holding a
+  triager grant (§6) runs in a detached checkout of that tip under the
+  project's worktree root, named for the task. `roles.followupCheck` picks the
+  roster agent, whose plugin directories it is launched with, and the model the
+  same way as the reviewer's; with no agent, the built-in `FollowupCheckPrompt`
+  identity is used. It reads `git diff <base_head_oid>..<checked_head_oid>` and
+  grades each item with `set_followup_grades`, giving evidence for each. Once
+  every item has a grade its task goes to `done` and its checkout is removed,
+  as a finished triage's is. It is never assigned by hand or resumed, and one
+  that ends any other way closes its task and parks the watch; a shutdown order
+  stops it at delivery and clears `followup_task_id`, so a fresh one starts
+  once the order lifts.
+
+Once the review is in and, when the round has items, its follow-up check is
+`done`, the round is decided in one transaction. An acceptance with every
+item graded `fixed` or `moot` passes: the task goes to `done` with an "Agent
+review passed." note and the watch to publishing. Anything else is a failed
+check, counted in `check_failures`. Its findings — the reviewer's, and each
+item short of fixed with its grade and evidence, numbered as in the task body
+— go on the task as an "Agent review failed." note, which the next fixer's
+opening prompt carries (§5.1). The first two failures send the task back to
+`ready` and the watch to fixing, which spawns that fixer in the same worktree
+on the same branch. The third ends the round with outcome `check_failed`,
+closes its fix task, and parks the watch with a `parked_reason` holding the
+last findings. A check that cannot start — a spawn that fails, a worktree
+that is gone — parks the watch the same way, with the error.
+
+**Publishing (phase 3).** The one push Agent Board makes without an approval
+(§13.5). The next poll re-reads the PR with
+`gh pr view <url> --json state,headRefOid,labels`, and does nothing while that
+fails or the PR is not open. Then, in order:
+
+- **The verified freeze.** The verification label on the PR ends the round
+  with outcome `frozen` and moves the watch to verified without pushing; the
+  round's fix items become frozen decisions (below) and its worktree is
+  removed. The round branch is kept, so the work is not lost.
+- **Stale.** A head that is neither the round's `base_head_oid` nor the round
+  branch's tip ends the round with outcome `stale`: its fix items go back to
+  triage with no verdict, its worktree is removed, and the watch goes to
+  settling, which triages them against the new head. Replies still owed are
+  then posted (§13.2).
+- **The push.** A round branch whose tip is not the `checked_head_oid` its
+  follow-up check judged parks the watch unpushed. Otherwise
+  `BranchPublisher.fastForward` pushes `refs/heads/<round branch>` to
+  `refs/heads/<head ref>` on `origin` with `--porcelain` and neither `--force`
+  nor `--set-upstream`, so git itself refuses anything but a fast-forward. The
+  publish guard (§13.5) reads the commits `origin/<head ref>` lacks first.
+  A `[rejected]` ref is a moved head, and goes stale as above; any other
+  refusal, the guard's included, ends the round `publish_failed` and parks the
+  watch with the error. Every park here, like stale, then posts the replies
+  still owed (§13.2). A head already at the round branch's tip, from a
+  push whose recording was interrupted, is not pushed again.
+
+A push ends the round `published` with the tip in `pushed_head_oid`, marks its
+fix items handled in that round, removes its worktree, moves the watch to
+awaitingCI, and then posts the round's replies (§13.2). An awaitingCI watch is
+settled by the poll once GitHub reports the pushed head: green (§13.1
+readyToVerify's rule) goes to watching, and `FAILURE` or `ERROR` to watching
+with a decision item of kind `check`, keyed `checks:<head oid>`, that stays
+while that head's checks still fail. Its options, "Fix the checks myself" and
+"Wait for review feedback", are both `answer` options with no reply. A head still at `base_head_oid` is GitHub
+not having caught up, and waits; any other head was pushed over the round,
+and goes to watching.
+
+**The verified freeze (phase 3).** On every poll, a verified watch's open items
+with no verdict become decisions whose question says the PR is verified and
+asks the human to handle the feedback or remove the label, so feedback on a
+verified PR never starts a round. "Handle it myself" is an `answer` option
+with no reply; "Remove the label and let follow-through fix it" is a `fix`
+option, so once the label is gone the item goes to the next fix round. Once the watch is no longer verified, those
+frozen decisions lose their verdict, and the next poll sends the watch to
+settling to triage them.
 
 A round's triage that never starts, or whose task is closed (§13.2), fails
 the round: its outcome becomes `triage_failed` and the watch returns to
@@ -225,6 +364,33 @@ A reply posts automatically only when the project's `postFactualReplies`
 setting is on, and only for a factual verdict — fix, answer, already_done, or
 follow_up. A decision is never auto-replied, since it is, by definition,
 something argued rather than settled.
+
+**Posting replies (phase 3).** Replies go out after a round's push, when a
+publishing round goes stale or parks, or, for a round with no fix item, once its
+verdicts are applied. Each time, every handled thread or review item whose
+`reply_url` is empty gets one, whatever round handled it, so an answer from a
+round that never pushed is still replied to at the next of those points. Only an
+item whose `handled_at` is at or after `postFactualRepliesSince` qualifies:
+`ProjectStore.updateSettings` stamps that time when `postFactualReplies` turns
+on and clears it when it turns off, so turning replies on never posts the
+backlog triage wrote while they were off, and an item handled before
+`handled_at` existed never posts. A fix item gets "Fixed in `<sha>`." with the
+first seven characters of the head its own round pushed, and only once that
+round pushed it under its fix task, matched with `IS` so a fix task deleted
+after the push still counts; a fix whose round went stale, froze or parked
+claims nothing. Any other factual item
+gets its triage `reply_body`; an item with no `reply_body` gets none. A frozen
+round posts nothing itself; its owed replies wait for the next point. A thread
+item is answered on its thread with `gh api graphql`'s
+`addPullRequestReviewThreadReply`; a review body, which has no thread, gets one
+pull-request comment through `gh api repos/<owner>/<name>/issues/<n>/comments`,
+led by a link to the review. The reply's URL is stored in `reply_url`, so
+nothing is posted twice. A failed post is logged and its error kept in
+`reply_error`; it is tried again at the next point, except when `gh` reports
+the comment gone (`NOT_FOUND` or HTTP 404), which sets `reply_abandoned_at` and
+ends the attempts. An item reopened by a new reply loses `reply_url`,
+`reply_error` and `reply_abandoned_at`, so once it is handled again it gets a
+fresh reply. No thread is ever resolved: resolving is the reviewer's call.
 
 **The triage session (phase 2).** `WorkerSupervisor.spawnTriager(watchId)` is
 the only way one starts; the orchestrator has no tool for it. It is held to
@@ -332,10 +498,11 @@ on at all.
   `Board.answerDecision` stores the answer in `decision_answer` and moves the
   item to the next round (`round` one past the watch's) with the answer as its
   `approach`. An option button applies that option's verdict. A `fix` option
-  leaves the item open with its backlog code task, made exactly as a triaged
-  fix's is (§13.1), whose body quotes the question the answer was given to. An
+  leaves the item open, with no task, for the next round's fixer (§13.1),
+  whose section for it quotes the question the answer was given to. An
   `answer` option handles the item with the option's `reply_body` and makes no
-  task. A typed reply answers it as an `answer`: the item is handled, with the
+  task; the app's own decisions (the verified freeze and failed checks, §13.1)
+  carry `answer` options with no reply, which handle it with nothing to post. A typed reply answers it as an `answer`: the item is handled, with the
   reply as its `reply_body`. Either way it is no longer a decision.
 - The row's badge counts Ready to verify plus open decision items, both only in
   projects with follow-through on and only on watches that are not paused —
@@ -383,7 +550,7 @@ on at all.
   below 0 as 0, a round cap below 1 as 1, and a budget of 0 or less as
   empty.
 
-### 13.5 Guardrails — phase 1 (publish guard) and planned amendments for phase 3
+### 13.5 Guardrails — phase 1 (publish guard) and phase 3 (D8 and §8 amendments)
 
 **The publish guard**, live from phase 1 regardless of whether follow-through
 itself is enabled: `BranchPublisher` refuses any push or pull request that
@@ -413,24 +580,24 @@ name, or the title or body).
 An empty list, or one holding only blank entries, is a no-op. A git command
 the guard cannot run refuses the publish rather than skipping the check.
 
-**Planned amendment to D8 (§1), not made here.** Phase 3 will add: the app,
-never a worker, may fast-forward push a round branch to the head ref of an
-open PR the human authored, without a human approval — but only after the
-reviewer role accepts the round, every item in it is graded fixed or moot,
-and the project's tests pass. Creating a branch, opening a PR, any
-non-fast-forward push, and any push to a verified PR stay human-gated or
-forbidden, unchanged. Until phase 3 lands, publishing's push (§13.1) is not
-reachable: nothing in phases 1–2 writes to a remote.
+**D8 amended (§1).** The app, never a worker, may fast-forward push a round
+branch to the head ref of an open PR the human authored, without a human
+approval — but only after the reviewer role accepts the round, every item in
+it is graded fixed or moot, and the project's tests pass. Creating a branch,
+opening a PR, any non-fast-forward push, and any push to a verified PR stay
+human-gated or forbidden, unchanged. This is publishing's push (§13.1),
+`BranchPublisher.fastForward`, and nothing else calls it.
 
-**Planned amendment to §8, not made here.** Phase 3 will add: in a project
-with the feature on, the follow-through triager and fixer spawns skip spawn
-approval. Every cap in §8 — concurrent workers, the token cap, the daily
-budget above, the session ceiling — still applies unchanged; only the
-approval step is skipped, the same way a rostered agent is exempt from the
-elapsed and idle caps today (§8) without being exempt from spend.
+**§8 amended.** In a project with the feature on, the follow-through triager
+and fixer spawns skip spawn approval: the triager never asks for one, and
+`Board.requestSpawn` answers proceed for a `fix_round` task. With the feature
+off, a `fix_round` task waits for approval like any other task. Every cap in §8 — concurrent workers,
+the token cap, the daily budget above, the session ceiling — still applies
+unchanged; only the approval step is skipped, the same way a rostered agent
+is exempt from the elapsed and idle caps today (§8) without being exempt from
+spend.
 
 No agent in this feature runs with authority this section doesn't name here:
-a worker still never pushes (§1, §8) until phase 3's amendment lands, and
-even after it lands the fast-forward path above is the only new authority
-granted — every other push and pull-request path keeps its existing human
-gate.
+a worker still never pushes (§1, §8), and the fast-forward path above is the
+only new authority either amendment grants — every other push and
+pull-request path keeps its existing human gate.
