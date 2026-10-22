@@ -671,7 +671,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         // SPEC §5: a worktree a reap or teardown has claimed is about to be deleted, so it is not reused.
         await awaitTeardown(of: pending.manager.worktreeRoot.appendingPathComponent(pending.name).path)
         // A reviewer creates its worktree before any session row exists, so a discard cannot cancel it.
-        if discarding.contains(pending.name) || (try? tasks.get(pending.name)) == nil {
+        // `tasks.get` is allowed to throw here — a read failure is reported as itself, not folded
+        // into "discarded" just because both read as "no task came back."
+        guard !discarding.contains(pending.name), try tasks.get(pending.name) != nil else {
             throw SupervisorError.taskBeingDiscarded(taskId: pending.name)
         }
         await beforeCheckoutCreated()
