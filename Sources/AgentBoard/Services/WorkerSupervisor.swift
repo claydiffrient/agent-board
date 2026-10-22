@@ -1345,11 +1345,23 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if let task = try tasks.get(taskId), task.origin == .triage {
                 throw SupervisorError.triageNotResumable(title: task.title)
             }
+            if let holder = try sessions.activeHolder(taskId: taskId), holder.sessionId != sessionId {
+                let title = (try? tasks.get(taskId))??.title ?? taskId
+                throw SupervisorError.taskAlreadyHeld(title: title, sessionId: holder.sessionId)
+            }
+            if let path = session.worktreePath, let holder = try sessions.activeHolder(worktreePath: path),
+               holder.sessionId != sessionId {
+                throw SupervisorError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
+            }
+            // SPEC §5.1: a reviewer's row says `worker`; only its grant records what it was spawned as.
+            let granted = try grants.forSession(sessionId)
+            let live = granted.first { !$0.isRevoked }
+            let scope = (live ?? granted.last)?.scope ?? .worker
             let token: String
-            if let grant = try grants.forSession(sessionId).first(where: { !$0.isRevoked }) {
+            if let grant = live {
                 token = grant.token
             } else {
-                let grant = try grants.issue(projectId: project.id, scope: .worker, taskId: taskId)
+                let grant = try grants.issue(projectId: project.id, scope: scope, taskId: taskId)
                 try grants.bind(token: grant.token, sessionId: sessionId)
                 token = grant.token
             }
@@ -1359,7 +1371,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 port: port,
                 token: token,
                 autoModeJSON: project.settings.autoModeJSON,
-                extraMcpServers: nil
+                extraMcpServers: nil,
+                fileLocks: SharedCheckoutGroup.isMember(session, of: project)
             )
             let resumed = try await runtime.resume(
                 sessionId: sessionId,
@@ -1372,7 +1385,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             try sessions.markResumed(sessionId)
             if let task = try tasks.get(taskId) {
                 if task.failed { try tasks.setFailed(taskId, false, reason: nil) }
-                if task.column != .running { try tasks.move(taskId, to: .running) }
+                if scope != .reviewer, task.column != .running { try tasks.move(taskId, to: .running) }
             }
         } catch {
             lastError = describe(error)
