@@ -57,6 +57,7 @@ extension PRWatchStore {
             + "feedback settling. Resume it to allow \(cap) more."
         watch.updatedAt = now
         try watch.update(db)
+        try report(db, watch: watch, .parked(reason: watch.parkedReason))
         return true
     }
 
@@ -152,6 +153,7 @@ extension PRWatchStore {
             }
             watch.updatedAt = now
             try watch.update(db)
+            if watch.state == .parked { try Self.report(db, watch: watch, .parked(reason: watch.parkedReason)) }
             return watch.state
         }
     }
@@ -213,6 +215,7 @@ extension Board {
             }
             watch.updatedAt = now
             try watch.update(db)
+            if fixes == 0 { try PRWatchStore.report(db, watch: watch, .round(number: watch.round, outcome: .triaged)) }
             return watch.state
         }
     }
@@ -238,13 +241,14 @@ extension Board {
     }
 
     /// Fixing, or parked when the PR is stacked: a fix on a lower layer leaves the layers above it
-    /// to restack (SPEC §13.1). Writes no watch; the caller does.
+    /// to restack (SPEC §13.1). Writes no watch; the caller does, in the same transaction as the report.
     static func fixUnlessStacked(_ db: Database, watch: inout PRWatch) throws {
         let base = try Project.fetchOne(db, key: watch.projectId)?.baseBranch
         if let base, watch.baseRef != base {
             watch.state = .parked
             watch.parkedReason = "#\(watch.number) is stacked on `\(watch.baseRef)`, not `\(base)`, so a fix "
                 + "round would leave the layers above it to restack, which is yours to do."
+            try PRWatchStore.report(db, watch: watch, .parked(reason: watch.parkedReason))
         } else {
             watch.state = .fixing
         }

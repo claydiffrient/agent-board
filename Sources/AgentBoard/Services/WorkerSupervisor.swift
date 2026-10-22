@@ -2088,6 +2088,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         await refreshPRWatches(enabled)
         await advancePRWatches(enabled)
+        for project in enabled { announceReports(projectId: project.id) }
     }
 
     /// Writes each poll through `PRWatchStore` and moves a watch among watching, settling,

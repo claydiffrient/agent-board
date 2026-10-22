@@ -126,6 +126,7 @@ public struct PRWatchStore: Sendable {
                     + "`\(watch.repoOwner)/\(watch.repoName)`, so follow-through does not run on it."
                 watch.updatedAt = now
                 try watch.update(db)
+                try Self.report(db, watch: watch, .parked(reason: watch.parkedReason))
             }
             return watch
         }
@@ -141,19 +142,28 @@ public struct PRWatchStore: Sendable {
         }
     }
 
+    /// Reaching merged or closed reports it to the orchestrator (SPEC §13.6).
     public func setState(_ state: PRWatchState, watchId: String, now: Int64 = .nowMillis) throws {
         try db.writer.write { db in
-            try db.execute(
-                sql: "UPDATE pr_watch SET state = ?, updated_at = ? WHERE id = ?",
-                arguments: [state, now, watchId]
-            )
+            guard var watch = try PRWatch.fetchOne(db, key: watchId) else { return }
+            let before = watch.state
+            watch.state = state
+            watch.updatedAt = now
+            try watch.update(db)
+            guard before != state else { return }
+            switch state {
+            case .merged: try Self.report(db, watch: watch, .merged)
+            case .closed: try Self.report(db, watch: watch, .closed)
+            default: break
+            }
         }
     }
 
     /// Records that `watchId`'s Ready to verify banner fires for its current head, and returns the
     /// watch when this call is the one that recorded it (SPEC §13.4). Nil when the watch is not ready
     /// to verify or this head was already announced, so a PR that stays ready across polls, or
-    /// leaves and re-enters without a push, announces itself once.
+    /// leaves and re-enters without a push, announces itself once. The orchestrator's report shares
+    /// the claim (SPEC §13.6).
     public func claimReadyNotification(watchId: String) throws -> PRWatch? {
         try db.writer.write { db in
             guard var watch = try PRWatch.fetchOne(db, key: watchId),
@@ -161,6 +171,7 @@ public struct PRWatchStore: Sendable {
             else { return nil }
             watch.readyNotifiedOid = watch.headOid
             try watch.update(db)
+            try Self.report(db, watch: watch, .readyToVerify)
             return watch
         }
     }
@@ -378,7 +389,7 @@ public struct PRWatchStore: Sendable {
 
     /// Records that each of `watchId`'s open decisions not yet announced has had its banner, and
     /// returns those, so each decision announces itself once (SPEC §13.4). A new reply on its thread
-    /// clears the record along with the verdict.
+    /// clears the record along with the verdict. The orchestrator's report shares the claim (SPEC §13.6).
     public func claimDecisionNotifications(watchId: String, now: Int64 = .nowMillis) throws -> [PRItem] {
         try db.writer.write { db in
             let unannounced = try PRItem.fetchAll(
@@ -390,9 +401,11 @@ public struct PRWatchStore: Sendable {
                 """,
                 arguments: [watchId]
             )
+            let watch = try PRWatch.fetchOne(db, key: watchId)
             for var item in unannounced {
                 item.decisionNotifiedAt = now
                 try item.update(db)
+                if let watch { try Self.report(db, watch: watch, .decision(question: item.decisionQuestion)) }
             }
             return unannounced
         }

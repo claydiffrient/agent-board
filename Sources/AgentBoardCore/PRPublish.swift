@@ -180,6 +180,9 @@ extension Board {
             watch.state = .awaitingCI
             watch.updatedAt = now
             try watch.update(db)
+            try PRWatchStore.report(
+                db, watch: watch, .round(number: round.number, outcome: .published, pushedHeadOid: pushedHeadOid)
+            )
             return round
         }
     }
@@ -232,6 +235,8 @@ extension Board {
             watch.state = state
             watch.updatedAt = now
             try watch.update(db)
+            if outcome == .stale { try PRWatchStore.report(db, watch: watch, .round(number: round.number, outcome: .stale)) }
+            if state == .parked { try PRWatchStore.report(db, watch: watch, .parked(reason: watch.parkedReason)) }
         }
     }
 }

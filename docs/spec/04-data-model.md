@@ -165,7 +165,7 @@ CREATE TABLE report (
   project_id  TEXT REFERENCES project(id),  -- NULL: the Coordinator's queue (§9.1)
   task_id     TEXT REFERENCES task(id),
   session_id  TEXT REFERENCES agent_session(session_id),
-  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision | message | comment | request | reply
+  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision | message | comment | request | reply | pr_follow_through
   body        TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
   consumed_at INTEGER               -- set when the orchestrator pulls it
