@@ -167,7 +167,8 @@ final class PullRequestsPageTests: XCTestCase {
         XCTAssertNil(answer.fixTaskId)
     }
 
-    func testEveryGroupShowsItsRowInPageOrder() throws {
+    /// SPEC §13.4: each group's header carries its Refresh button, and a row says when it was last polled.
+    func testEveryGroupShowsItsRowInPageOrderUnderAHeaderWithRefresh() throws {
         let db = try AppDatabase.inMemory()
         let project = try project(db, label: label)
         let titles = ["Avocado", "Broccoli", "Carrot", "Daikon", "Eggplant", "Fennel"]
@@ -190,7 +191,10 @@ final class PullRequestsPageTests: XCTestCase {
             .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
             [.boundsIgnoreFraming, .bestResolution]
         ))
-        let lines = try recognizedLines(in: image, words: titles)
+        let lines = try recognizedLines(in: image, words: titles + ["Refresh", "polled"])
+        let text = lines.map(\.text).joined(separator: " | ")
+        XCTAssertEqual(text.lowercased().components(separatedBy: "refresh").count - 1, 6, "one Refresh per header: \(text)")
+        XCTAssertTrue(text.contains("polled"), "no row shows when it was polled: \(text)")
         let heights = try titles.map { title in
             try XCTUnwrap(
                 lines.first { $0.text.localizedCaseInsensitiveContains(title) }?.box.midY,

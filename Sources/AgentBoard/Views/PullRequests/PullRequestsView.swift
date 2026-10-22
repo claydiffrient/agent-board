@@ -16,6 +16,8 @@ struct PullRequestsView: View {
     @State private var marking: Set<String> = []
     @State private var errorMessage: String?
     @State private var routedWatchId: String?
+    @State private var refreshing: Set<PRPageGroup> = []
+    @State private var refreshErrors: [PRPageGroup: String] = [:]
 
     init(projects: [Project], projectFilter: Binding<String?> = .constant(nil)) {
         self.projects = projects
@@ -81,7 +83,12 @@ struct PullRequestsView: View {
             ScrollViewReader { proxy in
                 List {
                     ForEach(Self.sections(page.value), id: \.group) { section in
-                        Section(section.group.title) {
+                        Section {
+                            if let error = refreshErrors[section.group] {
+                                Label(error, systemImage: "exclamationmark.triangle")
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
                             if section.listings.isEmpty {
                                 Text(section.group.emptyText)
                                     .foregroundStyle(.secondary)
@@ -89,11 +96,53 @@ struct PullRequestsView: View {
                             ForEach(section.listings) { listing in
                                 row(listing)
                             }
+                        } header: {
+                            header(section)
                         }
                     }
                 }
                 .onChange(of: routedWatchId) { scrollToRoutedRow(proxy) }
                 .onChange(of: page.value) { scrollToRoutedRow(proxy) }
+            }
+        }
+    }
+
+    private func header(_ section: PRWatchGroup) -> some View {
+        let title = section.group.title
+        let inFlight = refreshing.contains(section.group) || env.supervisor.isPollingPRWatches
+        return HStack {
+            Text(title)
+            Spacer()
+            if inFlight {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Refreshing \(title)")
+            }
+            Button("Refresh", systemImage: "arrow.clockwise") { refresh(section) }
+                .labelStyle(.titleAndIcon)
+                .buttonStyle(.borderless)
+                .disabled(section.listings.isEmpty)
+                .accessibilityLabel("Refresh \(title)")
+                .accessibilityValue(inFlight ? "Refreshing" : "")
+                .help("Poll GitHub now for the pull requests in \(title)")
+        }
+    }
+
+    /// SPEC §13.4: polls this section's watches now; a press during a poll joins it.
+    private func refresh(_ section: PRWatchGroup) {
+        let group = section.group
+        let ids = Set(section.listings.map(\.id))
+        refreshing.insert(group)
+        refreshErrors[group] = nil
+        AccessibilityNotification.Announcement("Refreshing \(group.title)").post()
+        _Concurrency.Task {
+            defer { refreshing.remove(group) }
+            do {
+                try await env.supervisor.pollPRWatches(watchIds: ids)
+                AccessibilityNotification.Announcement("\(group.title) refreshed").post()
+            } catch {
+                refreshErrors[group] = errorText(error)
+                AccessibilityNotification.Announcement("Refreshing \(group.title) failed: \(errorText(error))").post()
             }
         }
     }
@@ -380,6 +429,9 @@ struct PullRequestRow: View {
             parts.append("pushed \(Format.relative(Date(timeIntervalSince1970: TimeInterval(pushed) / 1000)))")
         } else {
             parts.append("updated \(Format.relative(Date(timeIntervalSince1970: TimeInterval(watch.updatedAt) / 1000)))")
+        }
+        if let polled = watch.lastPolledAt {
+            parts.append("polled \(Format.relative(Date(timeIntervalSince1970: TimeInterval(polled) / 1000)))")
         }
         if watch.paused { parts.append("paused") }
         if let projectName { parts.append(projectName) }

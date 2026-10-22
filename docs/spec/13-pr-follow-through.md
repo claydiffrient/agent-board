@@ -178,6 +178,11 @@ cleared once `origin` reads again. Polls never overlap: one requested while
 another runs waits for it to finish and then runs in full, so it reads every
 write made before it was requested. The 60s tick is the exception: it skips its
 poll while one is still running, so a slow `gh` never queues polls behind it.
+A section's **Refresh** (§13.4) is the same poll scoped to that section's watches
+(`pollPRWatches(watchIds:)`): the one search, a snapshot of only those pull
+requests, and the advance step for only those watches. A Refresh requested while
+a poll runs that already covers its watches — the tick's always does — joins it
+and reports that poll's outcome instead of starting another.
 
 **Pause.** A paused watch keeps following its pull request: every poll still
 records its items, head, checks and labels and moves it among watching,
@@ -573,6 +578,17 @@ on at all.
   it up without a fresh triage. Stop watching (`PRWatchStore.stopWatching`)
   dismisses the open items and moves the watch to stopped (§13.1). A stale row
   shows "restarted: head moved" while it waits for the next poll.
+- **Refresh (phase 4).** Each group's header has a **Refresh** button that
+  polls GitHub now for the watches in that group and applies their transitions
+  (§13.1's poll, scoped), so CI settling or new feedback shows without waiting
+  for the tick. While that refresh or any poll runs the header shows a spinner,
+  and a press then joins the running poll. A refresh that cannot read the
+  group's pull requests shows why inline at the top of the group. VoiceOver
+  hears the button as "Refresh <group>" and is told when the refresh starts,
+  finishes or fails.
+- **Last polled.** Each row adds "polled …" from `last_polled_at`, stamped
+  each time a poll reads the PR from GitHub whether or not anything changed,
+  so a row that is current but unchanged can be told from a stale one.
 - Row actions: **Mark verified** (`gh pr edit --add-label <label>`), **Walk
   me through it** (shown only when `verifyCommand` is set), **Send back**
   (phase 4; shown only while the watch is readyToVerify or verified), **Open
