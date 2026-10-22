@@ -505,8 +505,11 @@ A round that went stale, froze or parked asks nothing. The candidates are the
 authors of the thread and review items handled in that round (`pr_item.round`
 is the round's number), not every past reviewer. One `gh api graphql` read of
 the pull request's reviews and pending review requests then keeps only those
-whose latest review, `PENDING` and `DISMISSED` ones aside, is
-`CHANGES_REQUESTED` or `COMMENTED`, which leaves out anyone who approved. It
+whose latest review other than a comment, `PENDING` and `DISMISSED` ones
+aside, is `CHANGES_REQUESTED`, plus those who have only ever commented. A
+thread reply is itself a `COMMENTED` review, so, as in GitHub's own review
+decision, a comment after an approval leaves the approval standing and that
+reviewer is not asked. It
 also drops the viewer, bots (a `Bot` author, or a login ending in `[bot]`,
 which GitHub will not request) and anyone whose request is still pending. The
 rest are asked in one

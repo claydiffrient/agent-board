@@ -659,25 +659,33 @@ final class PRFollowThroughLoopTests: XCTestCase {
         fixture.gh.calls.filter { $0.count > 1 && $0[1].hasSuffix("/requested_reviewers") }
     }
 
-    /// The round handles feedback from a reviewer still requesting changes, an approver and a bot.
+    /// The round handles feedback from a reviewer still requesting changes, an approver who replied after
+    /// approving, two bots and someone who has only commented.
     private func reviewedRound(reRequest: Bool) async throws -> PRRound {
         reviews = [
             ["id": "R_1", "state": "CHANGES_REQUESTED", "body": "", "author": ["login": "reviewer"]],
             ["id": "R_2", "state": "APPROVED", "body": "", "author": ["login": "approver"]],
             ["id": "R_3", "state": "COMMENTED", "body": "", "author": ["__typename": "Bot", "login": "lint-helper"]],
+            ["id": "R_4", "state": "COMMENTED", "body": "", "author": ["login": "approver"]],
+            ["id": "R_5", "state": "COMMENTED", "body": "", "author": ["__typename": "User", "login": "deploy-helper[bot]"]],
+            ["id": "R_6", "state": "COMMENTED", "body": "", "author": ["login": "commenter"]],
         ]
-        _ = try await passedRound(reRequest: reRequest, answeredBy: ["approver", "lint-helper"])
+        _ = try await passedRound(
+            reRequest: reRequest, answeredBy: ["approver", "lint-helper", "deploy-helper[bot]", "commenter"]
+        )
         await poll()
         await poll()
         return try XCTUnwrap(try watches.rounds(watchId: try onlyWatch().id).first)
     }
 
-    func testAPushedRoundReRequestsReviewOnceAndOnlyFromTheBlockingReviewerItAnswered() async throws {
+    func testAPushedRoundReRequestsReviewOnceAndOnlyFromAnsweredReviewersWhoHaveNotApproved() async throws {
         let round = try await reviewedRound(reRequest: true)
 
         XCTAssertEqual(round.outcome, "published")
-        XCTAssertEqual(reviewRequestCalls, [["api", "repos/\(repository)/pulls/12/requested_reviewers", "-f", "reviewers[]=reviewer"]])
-        XCTAssertEqual(round.reviewRequests, ["reviewer"])
+        XCTAssertEqual(reviewRequestCalls, [[
+            "api", "repos/\(repository)/pulls/12/requested_reviewers", "-f", "reviewers[]=reviewer", "-f", "reviewers[]=commenter",
+        ]])
+        XCTAssertEqual(round.reviewRequests, ["reviewer", "commenter"])
         XCTAssertNil(round.reviewRequestError)
     }
 

@@ -30,8 +30,9 @@ public struct PullRequestReviewRequester: Sendable {
         ["api", "repos/\(owner)/\(name)/pulls/\(number)/requested_reviewers"] + reviewers.flatMap { ["-f", "reviewers[]=\($0)"] }
     }
 
-    /// Those of `authors` whose latest review is `CHANGES_REQUESTED` or `COMMENTED`, leaving out the
-    /// viewer, bots, which GitHub will not request, and anyone whose request is still pending.
+    /// Those of `authors` whose latest non-comment review is `CHANGES_REQUESTED`, or who have only commented,
+    /// leaving out the viewer, bots, which GitHub will not request, and anyone whose request is still pending.
+    /// A thread reply is a new `COMMENTED` review, so a comment after an approval leaves the approval standing.
     public func reviewersToRequest(owner: String, name: String, number: Int, authors: [String], cwd: URL) throws -> [String] {
         guard !authors.isEmpty else { return [] }
         let stdout = try run(Self.standingArguments(owner: owner, name: name, number: number), cwd: cwd)
@@ -40,17 +41,17 @@ public struct PullRequestReviewRequester: Sendable {
         else { throw PullRequestCheckFailure("`gh api graphql` printed no pull request: \(stdout)") }
         let viewer = response.data?.viewer?.login.lowercased()
         let pending = Set((pr.reviewRequests?.nodes ?? []).compactMap { $0.requestedReviewer?.login?.lowercased() })
-        var latest: [String: String] = [:]
+        var standing: [String: String] = [:]
         var bots: Set<String> = []
         for review in pr.reviews?.nodes ?? [] where review.state != "PENDING" && review.state != "DISMISSED" {
             guard let login = review.author?.login.lowercased() else { continue }
-            latest[login] = review.state
+            standing[login] = review.state == "COMMENTED" ? standing[login] ?? review.state : review.state
             if review.author?.__typename == "Bot" { bots.insert(login) }
         }
         return authors.filter { author in
             let login = author.lowercased()
             return !login.hasSuffix("[bot]") && !bots.contains(login) && login != viewer && !pending.contains(login)
-                && ["CHANGES_REQUESTED", "COMMENTED"].contains(latest[login])
+                && ["CHANGES_REQUESTED", "COMMENTED"].contains(standing[login])
         }
     }
 
