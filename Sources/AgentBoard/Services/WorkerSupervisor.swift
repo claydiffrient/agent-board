@@ -161,6 +161,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var worktreeSweeps: [String: _Concurrency.Task<Void, Never>] = [:]
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
     @ObservationIgnored private var stallNotified: Set<String> = []
+    /// One per metered session, so a tick reads only what each transcript appended since the last (SPEC §7).
+    @ObservationIgnored private var transcriptTailers: [String: TranscriptTailer] = [:]
     /// `<project-id>\u{01}<branch>` for each shared branch whose pre-ledger `Agent-Board-Task`
     /// trailers have already been read back this run.
     @ObservationIgnored private var trailersBackfilled: Set<String> = []
@@ -3174,6 +3176,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             lastOrphanReap = now
             reapOrphanedWorktreesOnTick(all)
         }
+        var metered: Set<String> = []
         for project in all {
             refreshShutdownProgressIfOrdered(projectId: project.id)
             await recoverStrandedTasks(projectId: project.id)
@@ -3181,13 +3184,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let projectSessions = try? sessions.all(projectId: project.id) else { continue }
             let stallSeconds = project.settings.caps.stallSeconds
             for session in projectSessions where Self.shouldMeter(session, now: now) {
+                metered.insert(session.sessionId)
                 await meter(session, limits: limits, stallSeconds: stallSeconds, awake: awake)
             }
         }
         // Metered like an orchestrator, with no cap: `meter` enforces caps on workers only.
         for session in (try? coordinator.sessions()) ?? [] where Self.shouldMeter(session, now: now) {
+            metered.insert(session.sessionId)
             await meter(session, limits: .default, stallSeconds: 0, awake: awake)
         }
+        transcriptTailers = transcriptTailers.filter { metered.contains($0.key) }
         refreshSleepAssertion(all)
     }
 
@@ -3285,7 +3291,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
         if let path = session.transcriptPath {
             let url = URL(fileURLWithPath: path)
-            if let summary = try? await offMain({ try TranscriptMeter.summarize(transcriptAt: url) }) {
+            let tailer = transcriptTailers[session.sessionId].flatMap { $0.url == url ? $0 : nil }
+                ?? TranscriptTailer(url: url)
+            if let polled = try? await offMain({
+                var next = tailer
+                try next.poll()
+                return next
+            }) {
+                transcriptTailers[session.sessionId] = polled
+                let summary = polled.summary
                 totals = summary.totals
                 context = ContextPressure(
                     usedTokens: summary.contextTokens,
