@@ -10,7 +10,7 @@ public struct PRWatchStore: Sendable {
 
     /// Records one poll (SPEC §4). Idempotent by node id: an unchanged snapshot moves only
     /// `last_polled_at`, and a new head oid stamps `head_changed_at`. An open item that resolved or left the snapshot becomes handled,
-    /// except the failed-checks item of a head whose checks still fail and a verify failure, which GitHub never reports.
+    /// except a verify failure, which GitHub never reports; a check item does once its run is no longer a failed check.
     /// An item whose body changed (a new reply) is open and untriaged again, owing a fresh reply; one that
     /// reopens also drops its task. A fork parks from any state the poll moves (SPEC §13.1), and a stopped
     /// watch records nothing.
@@ -105,10 +105,9 @@ public struct PRWatchStore: Sendable {
                     try item.update(db)
                 }
             }
-            let failingChecks = PRWatchTransition.checksFailed(snapshot.checksState)
-                ? PRItem.checksNodeId(head: snapshot.headOid) : nil
-            for var gone in stored.values
-            where gone.state == .open && gone.githubNodeId != failingChecks && gone.kind != .verifyFailure {
+            let failing = Set(snapshot.failedChecks.map(\.githubNodeId))
+            for var gone in stored.values where gone.state == .open
+            && (gone.kind == .check ? !failing.contains(gone.githubNodeId) : gone.kind != .verifyFailure) {
                 gone.state = .handled
                 gone.handledAt = now
                 gone.updatedAt = now

@@ -2,9 +2,6 @@ import Foundation
 import GRDB
 
 extension PRItem {
-    /// The node id of the item a head's failed checks become: one per head, since a rollup has no id.
-    public static func checksNodeId(head: String) -> String { "checks:\(head)" }
-
     /// The node id of a head's merge conflict with its base, which GitHub gives no id of its own.
     public static func conflictNodeId(head: String) -> String { "conflict:\(head)" }
 
@@ -67,33 +64,33 @@ extension PRWatchStore {
     }
 
     /// SPEC §13.1 awaitingCI, once GitHub reports the pushed head: green goes to watching, and red to
-    /// watching with a failed-checks decision item. A head GitHub has not caught up to yet waits; any
-    /// other head means someone pushed over the round, and the watch goes back to watching.
+    /// settling with an untriaged `check` item for each of `failedChecks` not yet recorded, which triage takes
+    /// up without the settle wait. Red with no new failed check goes to watching. A head GitHub has not
+    /// caught up to yet waits; any other head means someone pushed over the round, and the watch goes back
+    /// to watching.
     @discardableResult
-    public func settleAwaitingCI(watchId: String, now: Int64 = .nowMillis) throws -> PRWatchState? {
+    public func settleAwaitingCI(
+        watchId: String, failedChecks: [PRFailedCheck] = [], now: Int64 = .nowMillis
+    ) throws -> PRWatchState? {
         try db.writer.write { db in
             guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .awaitingCI,
                   let round = try Self.round(db, watchId: watchId, number: watch.round)
             else { return nil }
+            watch.state = .watching
             if watch.headOid == round.pushedHeadOid {
                 if PRWatchTransition.checksFailed(watch.checksState) {
-                    let nodeId = PRItem.checksNodeId(head: watch.headOid)
-                    if try PRItem.filter(Column("watch_id") == watchId && Column("github_node_id") == nodeId).fetchCount(db) == 0 {
+                    let known = Set(try String.fetchAll(
+                        db, sql: "SELECT github_node_id FROM pr_item WHERE watch_id = ?", arguments: [watchId]
+                    ))
+                    for check in failedChecks where !known.contains(check.githubNodeId) {
                         var item = PRItem(
-                            id: nil, watchId: watchId, githubNodeId: nodeId, kind: .check, author: nil,
-                            body: "Checks failed on \(watch.headOid.prefix(7)) after round \(round.number) was pushed: "
-                                + "the status check rollup is \(watch.checksState ?? "unknown").",
-                            path: nil, line: nil, url: watch.url, state: .open, verdict: .decision,
-                            approach: "Follow-through does not triage failed checks yet.",
-                            decisionQuestion: "Checks failed after round \(round.number) was pushed. Fix them on the "
-                                + "pull request yourself, or push nothing and let new review feedback start the next round.",
-                            decisionOptionsJSON: Self.encodeOptions([
-                                PRDecisionOption(label: "Fix the checks myself", verdict: .answer),
-                                PRDecisionOption(label: "Wait for review feedback", verdict: .answer),
-                            ]),
-                            round: round.number, createdAt: now, updatedAt: now
+                            id: nil, watchId: watchId, githubNodeId: check.githubNodeId, kind: .check, author: nil,
+                            body: check.itemBody(head: watch.headOid), path: nil, line: nil, url: check.url,
+                            state: .open, round: watch.round, createdAt: now, updatedAt: now
                         )
                         try item.insert(db)
+                        watch.state = .settling
+                        watch.lastFeedbackAt = now
                     }
                 } else if !PRWatchTransition.checksGreen(
                     watch.checksState, headSeenAt: watch.headChangedAt ?? watch.createdAt, now: now
@@ -103,7 +100,6 @@ extension PRWatchStore {
             } else if watch.headOid == round.baseHeadOid {
                 return nil
             }
-            watch.state = .watching
             watch.updatedAt = now
             try watch.update(db)
             return watch.state

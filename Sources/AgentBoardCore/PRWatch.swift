@@ -312,12 +312,14 @@ public struct PRSnapshot: Sendable, Equatable {
     public var isCrossRepository: Bool
     /// The head repository's `owner/name`, nil when GitHub no longer has it.
     public var headRepository: String?
+    /// The counted checks whose latest run on the head failed (SPEC §13.1 awaitingCI).
+    public var failedChecks: [PRFailedCheck]
 
     public init(
         repoOwner: String, repoName: String, number: Int, url: String, title: String, isDraft: Bool = false,
         headRef: String, headOid: String, baseRef: String, reviewDecision: String? = nil,
         checksState: String? = nil, mergeable: String? = nil, labels: [String] = [], items: [PRSnapshotItem] = [],
-        isCrossRepository: Bool = false, headRepository: String? = nil
+        isCrossRepository: Bool = false, headRepository: String? = nil, failedChecks: [PRFailedCheck] = []
     ) {
         self.repoOwner = repoOwner
         self.repoName = repoName
@@ -335,6 +337,37 @@ public struct PRSnapshot: Sendable, Equatable {
         self.items = items
         self.isCrossRepository = isCrossRepository
         self.headRepository = headRepository
+        self.failedChecks = failedChecks
+    }
+}
+
+/// One failed check run or commit status, keyed by its GitHub node id, so each run becomes at most one item.
+public struct PRFailedCheck: Sendable, Equatable {
+    public var githubNodeId: String
+    public var name: String
+    public var url: String?
+    public var summary: String
+    /// Set only for a GitHub Actions run, whose check run id is the job id `gh run view --job` reads.
+    public var jobId: Int64?
+    /// The end of the job's failed-step log, once the poller has read it.
+    public var logTail: String?
+
+    public init(
+        githubNodeId: String, name: String, url: String? = nil, summary: String, jobId: Int64? = nil,
+        logTail: String? = nil
+    ) {
+        self.githubNodeId = githubNodeId
+        self.name = name
+        self.url = url
+        self.summary = summary
+        self.jobId = jobId
+        self.logTail = logTail
+    }
+
+    func itemBody(head: String) -> String {
+        let lead = "`\(name)` failed on \(head.prefix(7))" + (url.map { ": \($0)" } ?? ".")
+        guard let logTail else { return "\(lead)\n\n\(summary)" }
+        return "\(lead)\n\nThe end of its failed steps' log:\n\(logTail)"
     }
 }
 

@@ -2000,7 +2000,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try reader.snapshots(owner: parts[0], name: parts[1], numbers: numbers, cwd: cwd)
             }) else { continue }
             for snapshot in snapshots {
-                applyPRSnapshot(snapshot, project: project)
+                await applyPRSnapshot(snapshot, project: project)
             }
         }
 
@@ -2025,6 +2025,29 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         setPRPollProblems(problems, enabled: enabled)
     }
 
+    /// The failed checks on an awaitingCI watch's pushed head that have no item yet, each GitHub Actions
+    /// run with the end of its failed-step log (SPEC §13.1). Empty in any other state, so a log is read
+    /// once per run.
+    private func newFailedChecks(_ snapshot: PRSnapshot, watch: PRWatch, project: Project) async throws -> [PRFailedCheck] {
+        guard watch.state == .awaitingCI, !snapshot.failedChecks.isEmpty,
+              try prWatches.currentRound(watchId: watch.id)?.pushedHeadOid == watch.headOid
+        else { return [] }
+        let known = Set(try prWatches.items(watchId: watch.id).map(\.githubNodeId))
+        let reader = pullRequestWatch
+        let cwd = URL(fileURLWithPath: project.repoPath)
+        var checks: [PRFailedCheck] = []
+        for var check in snapshot.failedChecks where !known.contains(check.githubNodeId) {
+            if let jobId = check.jobId {
+                let owner = snapshot.repoOwner, name = snapshot.repoName
+                check.logTail = await offMainResult {
+                    reader.failedLogTail(owner: owner, name: name, jobId: jobId, cwd: cwd)
+                }
+            }
+            checks.append(check)
+        }
+        return checks
+    }
+
     /// `problems` plus each live watch's unreadable pull request from posting replies.
     private func setPRPollProblems(_ problems: [String: String], enabled: [Project]) {
         if !prReplyReadFailures.isEmpty {
@@ -2035,11 +2058,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try? prWatches.setPollProblems(all)
     }
 
-    private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) {
+    private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) async {
         do {
             var watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
             prReplyReadFailures[watch.id] = nil
-            if let settled = try prWatches.settleAwaitingCI(watchId: watch.id) { watch.state = settled }
+            let failed = try await newFailedChecks(snapshot, watch: watch, project: project)
+            if let settled = try prWatches.settleAwaitingCI(watchId: watch.id, failedChecks: failed) {
+                watch.state = settled
+            }
             let open = try prWatches.openItems(watchId: watch.id)
             if let next = PRWatchTransition.next(
                 from: watch, snapshot: snapshot, openItems: open.count,
@@ -2099,9 +2125,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func startTriageIfSettled(_ watch: PRWatch, project: Project) async {
         let settleMillis = Int64(max(project.settings.prFollowThrough.settleMinutes, 0)) * 60_000
-        guard !watch.paused, Int64.nowMillis - (watch.lastFeedbackAt ?? watch.updatedAt) >= settleMillis,
-              !isFollowThroughHeld(project: project)
-        else { return }
+        let settled = Int64.nowMillis - (watch.lastFeedbackAt ?? watch.updatedAt) >= settleMillis
+            || (try? prWatches.hasUntriagedCheck(watchId: watch.id)) == true
+        guard !watch.paused, settled, !isFollowThroughHeld(project: project) else { return }
         guard ((try? prWatches.untriagedItemCount(watchId: watch.id)) ?? 0) > 0 else {
             if (try? board.beginAnsweredFixRound(watchId: watch.id)) == .fixing {
                 await startFixRound(watch, project: project)

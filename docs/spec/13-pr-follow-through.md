@@ -57,9 +57,8 @@ triage.
   ref, then posts factual replies when `postFactualReplies` is on. It never
   resolves threads.
 - **awaitingCI** *(phase 3 reads green/red; phase 4 adds the log-tail items on
-  red)* — green goes to watching; red goes to watching with a failed-checks
-  decision item, which phase 4 replaces with going straight to triaging, the
-  failed checks and their log tails as items.
+  red)* — green goes to watching; red goes straight to triaging, with each
+  failed check and its log tail as an item (below).
 - **readyToVerify** *(phase 1)* — `reviewDecision == APPROVED` (when
   `requireApproval`), checks green, no open item or decision, and the
   verification label absent. The checks on the head commit reduce to one
@@ -168,7 +167,8 @@ verdict or is a `fix` answer to a decision whose `round` is past the watch's
 (§13.4), so any other open decision or fix item keeps a PR from being ready
 without sending it back to triage. A settling watch leaves for triaging only when it is
 not paused, at least `settleMinutes` have passed since `last_feedback_at` (so an
-item arriving during settling restarts the wait), and nothing holds it: a
+item arriving during settling restarts the wait) or a `check` item awaits
+triage (phase 4, below), and nothing holds it: a
 shutdown order on the project, a Mac whose providing power source IOKit reports
 as anything but AC (an unreadable source counts as AC), the triage and fixer
 sessions started since local midnight having cost `dailyBudgetUSD` or more, or a §8
@@ -330,12 +330,30 @@ A push ends the round `published` with the tip in `pushed_head_oid`, marks its
 fix items handled in that round, removes its worktree, moves the watch to
 awaitingCI, and then posts the round's replies (§13.2). An awaitingCI watch is
 settled by the poll once GitHub reports the pushed head: green (§13.1
-readyToVerify's rule) goes to watching, and `FAILURE` or `ERROR` to watching
-with a decision item of kind `check`, keyed `checks:<head oid>`, that stays
-while that head's checks still fail. Its options, "Fix the checks myself" and
-"Wait for review feedback", are both `answer` options with no reply. A head still at `base_head_oid` is GitHub
-not having caught up, and waits; any other head was pushed over the round,
-and goes to watching.
+readyToVerify's rule) goes to watching, and `FAILURE` or `ERROR` as below. A
+head still at `base_head_oid` is GitHub not having caught up, and waits; any
+other head was pushed over the round, and goes to watching.
+
+**Failed checks (phase 4).** On red, each counted check (readyToVerify's rule:
+the required ones, else every reported one, latest run only, so a passing
+rerun leaves nothing) whose latest run failed becomes one untriaged item of
+kind `check`, keyed by the check run's or commit status's node id, so a run
+already recorded adds nothing on a later poll. Its body names the check and
+the head and links the run (`url`). For a GitHub Actions run (its check suite's
+app is `github-actions`) the body holds the last 200 lines of
+`gh run view --job <check run id> --log-failed`, read once, when the item is
+first recorded; the job, not the whole workflow run, so two failed jobs of one
+run each carry only their own log. Any other check, or a log `gh` cannot read,
+carries the check's summary instead. The watch goes to settling, stamping
+`last_feedback_at`, and leaves for triaging on the same poll without the settle
+wait, under the same holds and the same round cap, so a red, fix, push, red
+loop parks once `roundCap` rounds have run. Red with no new failed check to
+record goes to watching. A check item becomes handled once its run is no longer
+a failed check on the head the poll reads (a rerun, or a new head); the
+triager is told it is usually `fix`, or `decision` when the failure looks
+unrelated to the change. Phase 3's single decision item per red head, keyed
+`checks:<head oid>`, is gone: migration `pr_item_failed_checks` dismisses any
+still open.
 
 **The verified freeze (phase 3).** On every poll, a verified watch's open items
 with no verdict become decisions whose question says the PR is verified and
@@ -557,7 +575,7 @@ on at all.
   leaves the item open, with no task, for the next round's fixer (§13.1),
   whose section for it quotes the question the answer was given to. An
   `answer` option handles the item with the option's `reply_body` and makes no
-  task; the app's own decisions (the verified freeze and failed checks, §13.1)
+  task; the app's own decisions (the verified freeze, §13.1)
   carry `answer` options with no reply, which handle it with nothing to post. A typed reply answers it as an `answer`: the item is handled, with the
   reply as its `reply_body`. Either way it is no longer a decision.
 - The row's badge counts Ready to verify plus open decision items, both only in
