@@ -25,6 +25,7 @@ enum SupervisorError: LocalizedError {
     case spawnFailed(worktree: String, underlying: String)
     case setupInterrupted
     case setupStillRunning(title: String, path: String)
+    case taskBeingDiscarded(taskId: String)
     case worktreeBeingRemoved(path: String)
     case approvalNotFound(String)
     case rosterAgentNotUsable(id: String, projectName: String)
@@ -87,6 +88,7 @@ enum SupervisorError: LocalizedError {
                 + "post-checkout hook or removing what a failed one left; spawn again once a report says that "
                 + "setup has ended: the attempt's failed report, or, for an attempt that was stopped, a report "
                 + "saying its setup ended. If its worker starts instead, the task is held and needs no retry"
+        case .taskBeingDiscarded(let id): return "task \(id) is being discarded, so no agent is started for it"
         case .worktreeBeingRemoved(let path):
             return "\(path) is being removed by a cleanup that claimed it first, so a session resumed there would "
                 + "lose its checkout; spawn the task again instead, which waits for the removal and creates a fresh worktree"
@@ -523,6 +525,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 projectId: project.id, taskId: taskId, site: site, attempt: attempt,
                 rosterAgentId: agent?.id, reviewHead: reviewHead, reviewBase: scope == .reviewer ? reviewBase : nil
             )
+            // SPEC §5: a discard that began during this spawn's awaits saw no session to stop, and
+            // would delete the task under a worktree this setup goes on to create.
+            guard !discarding.contains(taskId) else { throw SupervisorError.taskBeingDiscarded(taskId: taskId) }
             // A reviewer holds a task that is already in `review`; `assign` would move it to
             // `running` and take it out of the queue its own accept_task reads.
             let placeholder = scope == .reviewer
@@ -577,6 +582,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 setupSessionId: placeholder.sessionId, worktreePath: site.cwd.path, branch: branch,
                 sharesCheckout: site.placement.sharedBranch != nil, warnings: site.warnings
             )
+        } catch SupervisorError.taskBeingDiscarded(let id) {
+            throw SupervisorError.taskBeingDiscarded(taskId: id)
         } catch {
             throw SupervisorError.spawnFailed(worktree: site.cwd.path, underlying: describe(error))
         }
@@ -651,6 +658,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// many times over (SPEC §3.1).
     private struct PendingCheckout: Sendable {
         var manager: WorktreeManager
+        var taskId: String
         var name: String
         var branch: String
         /// Nil checks out `branch` as it stands, as the epic integrator's worktree does.
@@ -689,13 +697,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return CheckoutSite(
             placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch,
             warnings: fallbackWarnings + [start.warning].compactMap { $0 },
-            pending: PendingCheckout(manager: manager, name: taskId, branch: branch, base: start.ref)
+            pending: PendingCheckout(manager: manager, taskId: taskId, name: taskId, branch: branch, base: start.ref)
         )
     }
 
     private func createWorktree(_ pending: PendingCheckout) async throws {
         // SPEC §5: a worktree a reap or teardown has claimed is about to be deleted, so it is not reused.
         await awaitTeardown(of: pending.manager.worktreeRoot.appendingPathComponent(pending.name).path)
+        // A reviewer creates its worktree before any session row exists, so a discard cannot cancel it.
+        if discarding.contains(pending.taskId) || (try? tasks.get(pending.taskId)) == nil {
+            throw SupervisorError.taskBeingDiscarded(taskId: pending.taskId)
+        }
         await beforeCheckoutCreated()
         try _Concurrency.Task.checkCancellation()
         try await offMain {
@@ -1365,7 +1377,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 ),
                 placeholder: placeholder,
                 port: port,
-                checkout: PendingCheckout(manager: manager, name: worktreeName, branch: epicBranch, base: nil),
+                checkout: PendingCheckout(
+                    manager: manager, taskId: task.id, name: worktreeName, branch: epicBranch, base: nil
+                ),
                 placingMark: worktree.path
             )
             setupHoldsMark = true
@@ -2706,7 +2720,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     setup.cancel()
                     setups.append(setup)
                 }
-                try sessions.setState(session.sessionId, .stopped, endedAt: .nowMillis)
+                try board.endSession(session.sessionId, .stopped, endedAt: .nowMillis)
             }
             for session in taskSessions {
                 try grants.revokeAll(sessionId: session.sessionId)

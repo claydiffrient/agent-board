@@ -370,7 +370,7 @@ public final class WorkerToolHandler: ToolHandler {
             }
         case "failed":
             try tasks.setFailed(task.id, true, reason: detail)
-            if let sessionId { try sessions.setState(sessionId, .failed) }
+            if let sessionId { try board.endSession(sessionId, .failed) }
         default:
             throw ToolError("Unknown state '\(state)'. Use working, blocked, failed, or unblocked.")
         }

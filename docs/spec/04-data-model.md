@@ -693,8 +693,13 @@ migration runs once and cannot shell out to git.
 
 `file_lock` exists only for that group: a worktree worker cannot collide with
 anyone, so it never takes one. A lock is claimed by a session's first write to
-a path and held until the session ends; `agent_session.blocked_on_path` records
-what a session is waiting on while it holds (§8.4). `task_commit` is the
+a path and held until the session ends. Every write that moves a session to an
+inactive state deletes its locks in the same transaction — a report, a
+termination, a hand-off, an acceptance, `update_status(failed)`, a discard —
+rather than leaving them to `SessionEnd`, and deleting a project deletes its
+`file_lock` rows, which reference `project(id)` with no cascade.
+`agent_session.blocked_on_path` records what a session is waiting on while it
+holds (§8.4). `task_commit` is the
 companion ledger for a branch several tasks commit to — the only way, once
 commits from different tasks interleave on one ref, to say afterwards which
 task made which commit, since the branch name can no longer carry that the way
