@@ -30,6 +30,63 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertEqual(result.status, 0)
     }
 
+    /// A grandchild flooding a pipe holds the drain open only while it wins every refill race, which no
+    /// real pipe does reliably. A datagram socket yields one byte per read, so a topped-up queue always does.
+    func testADrainPastTheDeadlineReturnsWhatItHasOnceTheChildHasExited() throws {
+        var sockets: [Int32] = [-1, -1]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_DGRAM, 0, &sockets), 0)
+        let flooder = sockets[1]
+        defer { close(flooder) }
+        var queueBytes: Int32 = 1 << 20
+        setsockopt(sockets[0], SOL_SOCKET, SO_RCVBUF, &queueBytes, socklen_t(MemoryLayout<Int32>.size))
+        var noSigpipe: Int32 = 1
+        setsockopt(flooder, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size))
+        _ = fcntl(flooder, F_SETFL, fcntl(flooder, F_GETFL) | O_NONBLOCK)
+        while send(flooder, "y", 1, 0) == 1 {}
+        let full = errno
+        XCTAssert(full == ENOBUFS || full == EAGAIN, "filling the queue failed with errno \(full)")
+
+        let flooding = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            while send(flooder, "y", 1, 0) == 1 || errno == ENOBUFS || errno == EAGAIN {}
+            flooding.signal()
+        }
+        let drained = DispatchSemaphore(value: 0)
+        let deadline = DispatchTime.now() + 0.5
+        DispatchQueue.global().async {
+            _ = drained.wait(timeout: deadline + 5)
+            shutdown(flooder, SHUT_WR)
+        }
+
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try child.run()
+        child.waitUntilExit()
+        let stderr = Pipe()
+        try stderr.fileHandleForWriting.close()
+
+        let output = ProcessRunner.exchange(
+            stdout: DatagramPipe(reading: FileHandle(fileDescriptor: sockets[0], closeOnDealloc: true)),
+            stderr: stderr, stdin: nil, exitWatch: try ExitWatch(child), deadline: deadline
+        )
+        let returned = DispatchTime.now()
+        drained.signal()
+        flooding.wait()
+
+        XCTAssertLessThan(returned, deadline + 1)
+        XCTAssertFalse(try XCTUnwrap(output).stdout.isEmpty)
+    }
+
+    private final class DatagramPipe: Pipe, @unchecked Sendable {
+        private let reading: FileHandle
+
+        init(reading: FileHandle) {
+            self.reading = reading
+        }
+
+        override var fileHandleForReading: FileHandle { reading }
+    }
+
     private func assertBurstReturnsBothStreams(_ run: @escaping @Sendable () throws -> CommandResult) async throws {
         let results = try await withThrowingTaskGroup(of: CommandResult.self) { group in
             for _ in 0..<ProcessInfo.processInfo.activeProcessorCount {
