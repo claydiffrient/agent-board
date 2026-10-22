@@ -350,7 +350,7 @@ CREATE TABLE pr_item (
   id                    INTEGER PRIMARY KEY,
   watch_id              TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
   github_node_id        TEXT NOT NULL,
-  kind                  TEXT NOT NULL,   -- thread | review | check | conflict | verify_failure
+  kind                  TEXT NOT NULL,   -- thread | review | comment | check | conflict | verify_failure
   author                TEXT,
   body                  TEXT NOT NULL,
   path                  TEXT,

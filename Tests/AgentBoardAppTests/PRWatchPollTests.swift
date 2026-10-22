@@ -68,6 +68,7 @@ final class PRWatchPollTests: XCTestCase {
         labels: [String] = [],
         checks: String? = "SUCCESS", required: [String] = [], reported: [[String: Any]] = [],
         threads: [[String: Any]] = [], reviews: [[String: Any]]? = nil, requests: [[String: Any]] = [],
+        comments: [[String: Any]] = [], committedAt: String = "2026-10-20T08:00:00Z",
         mergeable: String = "MERGEABLE", fork: String? = nil
     ) -> [String: Any] {
         let repo = repository ?? self.repository
@@ -81,11 +82,16 @@ final class PRWatchPollTests: XCTestCase {
             "isCrossRepository": fork != nil,
             "headRepository": ["nameWithOwner": fork ?? repo],
             "labels": ["nodes": labels.map { ["name": $0] }],
-            "commits": ["nodes": [["commit": ["statusCheckRollup": rollup]]]],
+            "commits": ["nodes": [["commit": ["committedDate": committedAt, "statusCheckRollup": rollup]]]],
             "reviewThreads": ["nodes": threads],
             "reviews": ["nodes": reviews ?? [review("R_ok", by: "approver", state: "APPROVED", at: "2026-10-20T09:00:00Z")]],
             "timelineItems": ["nodes": requests],
+            "comments": ["nodes": comments],
         ]
+    }
+
+    private func comment(_ id: String, by author: String, body: String = "Make this the default.", at created: String) -> [String: Any] {
+        ["id": id, "author": ["login": author], "body": body, "url": "\(url)#\(id)", "createdAt": created]
     }
 
     private func review(_ id: String, by author: String, state: String, at submitted: String) -> [String: Any] {
@@ -136,6 +142,14 @@ final class PRWatchPollTests: XCTestCase {
     private func answer(_ pr: [String: Any]) {
         fixture.gh.answerSearch([AuthoredPullRequest(repository: repository, number: 12, url: url, title: "Add widgets")])
         fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: [pr])
+    }
+
+    /// A blank CHANGES_REQUESTED review is an item; this stands in for the triage that handled it.
+    private func handleEveryItemAndPoll() async throws {
+        try await fixture.db.writer.write {
+            try $0.execute(sql: "UPDATE pr_item SET state = 'handled', verdict = 'answer', handled_at = ?", arguments: [Int64.nowMillis])
+        }
+        await fixture.supervisor.pollPRWatches()
     }
 
     private func onlyWatch() throws -> PRWatch {
@@ -209,6 +223,7 @@ final class PRWatchPollTests: XCTestCase {
             requests: [reviewRequest(of: "reviewer", at: "2026-10-20T11:00:00Z")]
         ))
         await fixture.supervisor.pollPRWatches()
+        try await handleEveryItemAndPoll()
 
         XCTAssertEqual(try onlyWatch().state, .watching)
         XCTAssertEqual(try watches.page(projectId: fixture.project.id).map(\.group), [.waitingOnReviewers])
@@ -228,6 +243,7 @@ final class PRWatchPollTests: XCTestCase {
             requests: [reviewRequest(of: "reviewer", at: "2026-10-20T08:00:00Z")]
         ))
         await fixture.supervisor.pollPRWatches()
+        try await handleEveryItemAndPoll()
         XCTAssertEqual(try onlyWatch().state, .watching, "a request older than the CHANGES_REQUESTED does not clear it")
     }
 
@@ -240,6 +256,7 @@ final class PRWatchPollTests: XCTestCase {
         let request = reviewRequest(of: "reviewer", at: "2026-10-20T11:00:00Z")
         answer(pullRequest(decision: nil, reviews: reviews, requests: [request]))
         await fixture.supervisor.pollPRWatches()
+        try await handleEveryItemAndPoll()
         XCTAssertEqual(try onlyWatch().state, .readyToVerify)
 
         answer(pullRequest(
@@ -248,6 +265,44 @@ final class PRWatchPollTests: XCTestCase {
         ))
         await fixture.supervisor.pollPRWatches()
         XCTAssertEqual(try onlyWatch().state, .watching)
+    }
+
+    /// SPEC §13.1: conversation comments newer than the head commit, and blank change requests, are feedback.
+    func testConversationCommentsAfterTheHeadCommitAndBlankChangeRequestsBecomeItems() async throws {
+        try enable()
+        let comments = [
+            comment("C_after", by: "reviewer", at: "2026-10-22T21:51:59Z"),
+            comment("C_before", by: "reviewer", at: "2026-10-22T19:00:00Z"),
+            comment("C_mine", by: "me", at: "2026-10-22T21:55:00Z"),
+            comment("C_hidden", by: "reviewer", body: "<!-- bot state -->\n", at: "2026-10-22T21:56:00Z"),
+        ]
+        let reviews = [
+            review("R_changes", by: "reviewer", state: "CHANGES_REQUESTED", at: "2026-10-22T22:03:05Z"),
+            review("R_comment", by: "commenter", state: "COMMENTED", at: "2026-10-22T22:04:00Z"),
+        ]
+        answer(pullRequest(
+            decision: "CHANGES_REQUESTED", reviews: reviews, comments: comments, committedAt: "2026-10-22T20:00:00Z"
+        ))
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+        let items = try watches.items(watchId: watch.id)
+
+        XCTAssertEqual(items.map(\.githubNodeId).sorted(), ["C_after", "R_changes"])
+        XCTAssertEqual(items.first { $0.githubNodeId == "C_after" }?.kind, .comment)
+        XCTAssertEqual(
+            items.first { $0.githubNodeId == "R_changes" }?.body,
+            PRSnapshotItem.emptyChangeRequestBody(author: "reviewer")
+        )
+
+        answer(pullRequest(
+            head: "decaf0", decision: "CHANGES_REQUESTED", reviews: reviews, comments: comments,
+            committedAt: "2026-10-22T23:00:00Z"
+        ))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(
+            try watches.items(watchId: watch.id).first { $0.githubNodeId == "C_after" }?.state, .open,
+            "a push past the comment does not handle it untriaged"
+        )
     }
 
     private func decideEveryOpenItem(_ watch: PRWatch) throws {

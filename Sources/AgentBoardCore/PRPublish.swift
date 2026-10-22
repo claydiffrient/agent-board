@@ -106,7 +106,7 @@ extension PRWatchStore {
         }
     }
 
-    /// Every handled thread and review item, from any round, with a factual reply not yet posted (SPEC
+    /// Every handled thread, review and comment item, from any round, with a factual reply not yet posted (SPEC
     /// §13.2), handled since `postFactualReplies` was last turned on and not given up on. A `fix` item
     /// qualifies only once its own round pushed it, so a stale or parked round's fixes never claim
     /// "Fixed in"; `IS` keeps that match when the round's fix task was deleted and both sides are null.
@@ -119,7 +119,7 @@ extension PRWatchStore {
                 JOIN pr_watch w ON w.id = i.watch_id
                 JOIN project p ON p.id = w.project_id
                 WHERE i.watch_id = ? AND i.state = 'handled' AND i.reply_url IS NULL AND i.reply_abandoned_at IS NULL
-                AND i.kind IN ('thread', 'review')
+                AND i.kind IN ('thread', 'review', 'comment')
                 AND i.handled_at >= json_extract(p.settings_json, '$.prFollowThrough.postFactualRepliesSince')
                 AND (
                   (i.verdict IN ('answer', 'already_done', 'follow_up') AND i.reply_body IS NOT NULL)
@@ -155,8 +155,8 @@ extension PRWatchStore {
         }
     }
 
-    /// Claims a pushed round's review re-request (SPEC §13.2) and returns the authors of the thread and
-    /// review items it handled. Nil when the round never pushed or was already claimed, so it runs once.
+    /// Claims a pushed round's review re-request (SPEC §13.2) and returns the authors of the thread,
+    /// review and comment items it handled. Nil when the round never pushed or was already claimed, so it runs once.
     public func claimReviewRequests(watchId: String, round number: Int, now: Int64 = .nowMillis) throws -> [String]? {
         try db.writer.write { db in
             try db.execute(
@@ -171,7 +171,7 @@ extension PRWatchStore {
                 db,
                 sql: """
                 SELECT author FROM pr_item
-                WHERE watch_id = ? AND round = ? AND state = 'handled' AND kind IN ('thread', 'review')
+                WHERE watch_id = ? AND round = ? AND state = 'handled' AND kind IN ('thread', 'review', 'comment')
                 AND author IS NOT NULL
                 GROUP BY lower(author) ORDER BY min(id)
                 """,

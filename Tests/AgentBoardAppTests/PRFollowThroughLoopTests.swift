@@ -439,6 +439,9 @@ final class PRFollowThroughLoopTests: XCTestCase {
                 "item_id": .number(ids["T_\(author)"]!), "verdict": .string("answer"), "approach": .string("Nothing to do."),
             ]))
         }
+        for (node, id) in ids where node.hasPrefix("R_") {
+            verdicts.append(.object(["item_id": .number(id), "verdict": .string("answer"), "approach": .string("Nothing to do.")]))
+        }
         if question {
             verdicts.append(.object([
                 "item_id": .number(ids["T_question"]!), "verdict": .string("answer"),

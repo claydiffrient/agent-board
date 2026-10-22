@@ -2604,7 +2604,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var readable: Bool?
         for item in items {
             guard let id = item.id, let text = item.factualReply(pushedHeadOid: pushed[item.round] ?? nil) else { continue }
-            let body = item.kind == .review ? item.url.map { "In reply to \($0):\n\n\(text)" } ?? text : text
+            let body = item.kind == .thread ? text : item.url.map { "In reply to \($0):\n\n\(text)" } ?? text
             do {
                 let url: String
                 if item.kind == .thread {

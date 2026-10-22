@@ -75,6 +75,10 @@ public enum TriagePrompt {
     such as a flaky test or a CI outage.
     An item that asks for nothing, such as a status banner, a verdict line, a pointer to feedback posted \
     elsewhere, or a plain approval note, is `answer` with no `reply_body`, and nothing is posted for it.
+    A `review` item saying its author requested changes without a comment carries no requests itself; look \
+    for them in that author's other items, usually a `comment` item. When another item carries them, it is \
+    `answer` with no `reply_body`, or `already_done` when a commit already addresses them. When no item \
+    carries them, it is `decision`.
     Reserve `decision` for a choice a reasonable engineer could make either way. A change that is clearly \
     right and in scope is `fix`, however large; do not pass a judgment up because it is hard.
     """
