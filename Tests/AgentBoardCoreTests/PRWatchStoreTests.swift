@@ -117,6 +117,43 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertTrue(closed.closedReason?.contains("round 1") == true, closed.closedReason ?? "")
     }
 
+    /// SPEC §13.1 parked: three fixer sessions ending without a report park the watch `fixer_failed`,
+    /// naming the last stop reason. A shutdown wind-down sandwiched between them is not a failure and
+    /// does not count toward the three. Also covers Board.terminate: a stranded fix_round task always
+    /// returns to `ready`, even when its branch carries commits that would otherwise land in `review`.
+    func testThreeFailedFixerSessionsParkTheWatchAndIgnoreAShutdownWindDown() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try triage(f, watchId: watch.id, as: .fix)
+        let task = try XCTUnwrap(f.board.createFixRoundTask(watchId: watch.id, model: nil))
+
+        func failFixerSession(_ id: String, cause: SessionTermination, commitsAheadOfBase: Int) throws {
+            try f.board.assign(taskId: task.id, session: f.session(id))
+            try f.sessions.setState(id, .running)
+            let salvage = BranchSalvage(branch: "agentboard/\(task.id)", commitsAheadOfBase: commitsAheadOfBase)
+            _ = try f.board.terminate(sessionId: id, cause: cause, salvage: salvage)
+            XCTAssertEqual(
+                try f.tasks.get(task.id)?.column, .ready,
+                "a stranded fix_round task must go back to ready, never review"
+            )
+        }
+
+        try failFixerSession("fixer-1", cause: .vanished, commitsAheadOfBase: 0)
+        try failFixerSession(
+            "fixer-2", cause: .shutdownAcknowledged(note: "wound down mid-fix"), commitsAheadOfBase: 2
+        )
+        try failFixerSession("fixer-3", cause: .vanished, commitsAheadOfBase: 0)
+        try failFixerSession("fixer-4", cause: .capBreach("idle cap reached"), commitsAheadOfBase: 4)
+
+        XCTAssertTrue(try f.board.parkIfFixersFailing(watchId: watch.id))
+        let parked = try XCTUnwrap(store.get(watch.id))
+        XCTAssertEqual(parked.state, .parked)
+        XCTAssertTrue(parked.parkedReason?.contains("ended without a report 3 times in a row") == true, parked.parkedReason ?? "")
+        XCTAssertTrue(parked.parkedReason?.contains("idle cap reached") == true, parked.parkedReason ?? "")
+        XCTAssertEqual(try store.rounds(watchId: watch.id).first?.outcome, PRRoundOutcome.fixerFailed.rawValue)
+    }
+
     func testAFixRoundSkipsSpawnApprovalOnlyWhereFollowThroughIsOn() throws {
         let f = try Fixture.make()
         let store = PRWatchStore(f.db)
