@@ -278,7 +278,28 @@ final class WorktreeCleanupTests: XCTestCase {
         await fixture.supervisor.waitForSetup()
     }
 
+    func testARespawnIntoAWorktreeAReapHasClaimedEndsWithACheckout() async throws {
+        await fixture.supervisor.start()
+        try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
+        try setTeardown("sleep 1")
+        let task = try makeTask()
+        let worktree = try XCTUnwrap(try fixture.worktreeWorker(task: task, state: .failed).worktreePath)
+        await fixture.supervisor.reconcile(projectId: fixture.project.id)
+
+        _ = try await fixture.supervisor.spawnWorker(taskId: task.id)
+        await fixture.supervisor.waitForTeardowns()
+        await fixture.supervisor.waitForSetup()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree), "the reap removed the respawned worker's checkout")
+    }
+
     // MARK: - Helpers
+
+    private func setTeardown(_ command: String) throws {
+        var settings = try XCTUnwrap(try ProjectStore(fixture.db).get(fixture.project.id)).settings
+        settings.worktreeTeardownCommand = command
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+    }
 
     private func makeTask(epicId: String? = nil) throws -> BoardTask {
         try fixture.tasks.create(

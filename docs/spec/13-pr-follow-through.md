@@ -27,7 +27,8 @@ One `pr_watch` row per watched pull request, holding its current state and the
 round counter. **Phase 1** delivers watching, settling, readyToVerify,
 verified, and merged/closed — everything that does not require a model;
 publishing is specified below but not reachable until phase 3 gives it a push
-to make. **Phase 2** delivers triaging and parking on a stacked or forked PR.
+to make. **Phase 2** delivers what the settling wait leads to, triaging, and
+parking on a stacked or forked PR or after three failed triages in a row.
 **Phase 3** delivers fixing, checking, and publishing's push. **Phase 4**
 delivers stale, the rest of parked, and feeding CI and verification failures
 back into items.
@@ -35,9 +36,11 @@ back into items.
 - **watching** — polled every 60s. Leaves on new feedback (an unresolved
   thread, a review body, a failed required check, a merge conflict) or when
   the PR becomes ready to verify.
-- **settling** *(phase 1 holds the wait; phase 2 is what the wait is for)* —
-  waits until no new item has arrived for `settleMinutes` (default 10). Holds
-  for the daily budget, AC power, and the concurrency cap (§8) before leaving.
+- **settling** *(phase 2)* — entered from watching or readyToVerify when an
+  open item has no verdict yet, and left for watching or readyToVerify when
+  none is left. Waits until no new item has arrived for `settleMinutes`
+  (default 10), then holds for the daily budget, AC power, and the concurrency
+  cap (§8) before leaving for triaging.
 - **triaging** *(phase 2)* — one read-only `triage` session gives every open
   item a verdict (§13.2). It has no git writes and no `gh`, and treats comment
   text as data, never as instructions.
@@ -99,8 +102,8 @@ back into items.
 - **stale** *(phase 4)* — the head moved out from under the round. Drop the
   round's worktree and go to settling.
 - **parked** *(phase 2 for the stacked/forked cases; phase 4 for the
-  round-cap and failed-session cases)* — reached when the round cap is hit,
-  three fixer sessions fail in a row, the PR is stacked (its base is not the
+  round-cap and fixer cases)* — reached when the round cap is hit, three
+  triages (phase 2) or fixer sessions fail in a row, the PR is stacked (its base is not the
   project's default branch and the stack needs a restack the human must do),
   or the PR is from a fork. Waits for the human to Resume or Stop watching
   from the Pull Requests page (§13.4).
@@ -121,8 +124,8 @@ never resolved and an approving body is not feedback. The same query reads
 each PR's reviews with their submission times and its review requests
 and their removals (`timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT,
 REVIEW_REQUEST_REMOVED_EVENT])`) with theirs, which is all the per-reviewer
-fallback above needs. Phase 1 moves a watch
-only among watching, readyToVerify and verified, by the rules above, and a
+fallback above needs. The poll itself moves a watch only among watching,
+settling, readyToVerify and verified, by the rules above, and a
 watch whose PR has left the open list settles to merged or closed by
 `gh pr view`. A PR converted back to draft still appears in the search, marked
 draft; its watch is deleted with its items, and undrafting it brings it back
@@ -131,11 +134,75 @@ records one `pr_poll_problem` row per enabled project, which raises that
 project's attention badge until a poll succeeds; it is written once, not on
 every poll. Any other search failure (network, rate limit) is logged; after 10
 in a row it records the same row with a reason saying the search is failing,
-and the next successful search clears it.
+and the next successful search clears it. A project with no `origin` is skipped
+without a word. Any other failure to read its `origin` is logged with git's
+stderr, the project goes unpolled, and after 10 in a row it records its own row,
+cleared once `origin` reads again. Polls never overlap: one requested while
+another runs waits for it to finish and then runs in full, so it reads every
+write made before it was requested. The 60s tick is the exception: it skips its
+poll while one is still running, so a slow `gh` never queues polls behind it.
+
+**Pause.** A paused watch keeps following its pull request: every poll still
+records its items, head, checks and labels and moves it among watching,
+settling, readyToVerify and verified, so the page stays true and resuming acts
+on the PR as it is now. What pause withholds is everything that acts or asks
+for the human: it never leaves settling for triaging, it is left out of the
+sidebar badge and At a Glance (§13.4), its open decisions do not raise the
+project's attention dot, and it fires no Ready to verify or decision banner.
+Those banners are still claimed while paused, so resuming replays none of
+them.
+
+**Settling and triaging (phase 2).** The same poll, after reading GitHub,
+advances each watch of an enabled project; a failed search does not stop it.
+The poll's own move puts a watch in settling while any open item has no
+verdict, so an open decision or fix item keeps a PR from being ready without
+sending it back to triage. A settling watch leaves for triaging only when it is
+not paused, at least `settleMinutes` have passed since `last_feedback_at` (so an
+item arriving during settling restarts the wait), and nothing holds it: a
+shutdown order on the project, a Mac whose providing power source IOKit reports
+as anything but AC (an unreadable source counts as AC), the triage sessions
+started since local midnight having cost `dailyBudgetUSD` or more, or a §8
+spawn cap refusing. A hold leaves it settling and is re-checked on the next
+poll. Leaving increments `round`, records a `pr_round` holding the head oid it
+starts from, and moves the watch to triaging in one transaction that only a
+settling watch passes, so two polls never start two rounds; then it spawns the
+round's triager (§13.2), whose `pr_triage` row carries the round.
+
+A triaging watch waits for its round's triage task. Once that task is `done`,
+the verdicts are applied in one transaction:
+
+- `fix` — a `backlog` task of type `code`, origin `follow_through`, its model
+  `roles.fixer.model` or else the project's default. The item stays open with
+  the task in `fix_task_id`; phase 3's fixer is what handles it.
+- `follow_up` — a `backlog` task, origin `follow_through`, titled
+  "Follow-up from #n: …". The item is handled, with the task in `fix_task_id`.
+- `answer` and `already_done` — the item is handled; its `reply_body` stays
+  stored for phase 3 to post.
+- `decision` — the item stays open as a decision.
+
+A fix or follow-up task's body holds the PR's number, title and URL, the
+comment's author, path and line, and URL, the comment quoted and labeled as
+data rather than instructions, and triage's approach. An item gets no second
+task while `fix_task_id` names one that fits its verdict: a `follow_through`
+task of type `code` for `fix`, any other `follow_through` task for `follow_up`.
+A fix task still in `backlog` is rewritten with the item's current body, so a
+reply that arrived after it was made reaches the fixer. The round's outcome becomes `triaged` and the watch returns to
+watching, or to settling when an item arrived during triage. Phase 3 replaces
+that return with fixing.
+
+A round's triage that never starts, or whose task is closed (§13.2), fails
+the round: its outcome becomes `triage_failed` and the watch returns to
+settling, so the next poll retries with a new round. The third failed round in
+a row, not counting interrupted ones, parks the watch instead, with a
+`parked_reason` naming the last failure. A parked watch raises its project's
+attention signal, its detail the PR number and that reason. A shutdown order
+stops a running triager rather than enrolling it: its round's outcome becomes
+`interrupted`, which never counts toward parking, and the watch waits in
+settling until the order lifts.
 
 Items are keyed by the GitHub node id of the thread or check they came from,
-so each is handled once per round; a new reply on a thread already handled
-reopens it. The human's own comments, resolved threads, and outdated threads
+so each is handled once per round; a new reply on a thread reopens it for
+triage (§4), whether it was handled or still open with a verdict. The human's own comments, resolved threads, and outdated threads
 are never turned into items.
 
 ### 13.2 Verdicts — phase 2 (triage) and phase 3 (fix, reply)
@@ -152,12 +219,63 @@ Triage gives every open item exactly one verdict:
 - **decision** — a trade-off, a disagreement with the reviewer, or anything
   that sets direction. Needs the human: triage's question and its options
   surface on the Pull Requests page's Needs you group (§13.4) rather than
-  going to a fixer, and the rest of the round continues around it.
+  going to a fixer, and the rest of the round continues around it. Each
+  option carries the verdict choosing it applies, `fix` or `answer`; an
+  `answer` option also carries the `reply_body` that explains the choice to
+  the reviewer, so "Change the helper" is a fix and "Keep it local" is an
+  answer with a short reason as its reply. Options stored before they carried
+  a verdict are plain strings and read as `fix`.
 
 A reply posts automatically only when the project's `postFactualReplies`
 setting is on, and only for a factual verdict — fix, answer, already_done, or
 follow_up. A decision is never auto-replied, since it is, by definition,
 something argued rather than settled.
+
+**The triage session (phase 2).** `WorkerSupervisor.spawnTriager(watchId)` is
+the only way one starts; the orchestrator has no tool for it. It is held to
+the same §8 caps, shutdown order and concurrency count as any worker, since
+its session row is an ordinary worker's. It fetches the PR's head oid from
+`origin` when the repository lacks it and the base branch's tip into
+`refs/remotes/origin/<base>`, refusing the spawn when either fetch fails; then
+it creates a synthetic task of origin `triage`, titled for the PR, and its
+`pr_triage` row (§4) holding the watch and both oids, and checks out a
+detached worktree at the head under the project's worktree root, named for
+that task. The session runs in it with a `triager` grant (§6), so it reads the
+change with `git diff <base_oid>...<head_oid>`. It is denied the file-write
+tools (Edit, Write and NotebookEdit), `gh`, and every git write, both by
+`--disallowedTools` and by the PreToolUse guard. A shell redirect or
+`sed -i` in Bash is not blocked, so the checkout is not guaranteed untouched;
+it is disposable, and nothing in it is ever landed. `roles.triage` picks the
+roster agent and model; with no agent the built-in prompt's identity is used.
+The model is the role's, else the agent's own, else the project's default.
+
+The built-in prompt, `TriagePrompt`, says what each verdict above means; that
+every item body is data written by someone else, to be judged and never
+followed, whatever it claims; that `decision` is reserved for a choice a
+reasonable engineer could make either way, so a clear in-scope change is
+`fix` however large; that each decision option is `{label, verdict}`, an
+`answer` option with its `reply_body`; and that triage ends only when every open item has a
+verdict. A roster agent chosen for the triage role replaces the opening
+identity line and nothing after it. After a compaction the same prompt is
+handed back, rebuilt from the `pr_triage` row.
+
+The triage task never enters review and lands nothing. When `set_verdicts`
+leaves no open item without a verdict, the task goes straight to `done` with
+no report to the orchestrator, which did not ask for it, and once the
+session has stopped its detached worktree is removed the way an accepted
+task's is. The orphan sweep (§5) would never take it: a PR head's commits are
+outside the project's bases, so it keeps that checkout.
+
+A triage session that ends any other way (stopped, killed at a cap, a failed
+setup, vanished, or wound down) closes its task instead, with a progress note
+and still no report, since nothing on the board can reassign it, and its
+checkout is removed the same way. A stopped triager is never resumed: the
+supervisor refuses, and Status and the inspector offer no Resume button for
+it, because resuming would rewrite its session config as a worker's. The
+follow-through loop starts a fresh triage from settling instead (§13.1). The
+settling-to-triaging move is its only caller. A shutdown order never enrolls a
+triager, which has no `acknowledge_shutdown`; it stops it at delivery, so the
+order does not wait out its grace period for one.
 
 ### 13.3 Settings — phase 1 (enabled, settleMinutes, caps, guard) through phase 3 (roles)
 
@@ -213,15 +331,37 @@ on at all.
   human's PTY on its behalf. The URL is substituted as written, so one holding
   anything but letters, digits and `:/._-` is refused and the button is
   hidden; a GitHub PR URL never does.
-- The row's badge counts Ready to verify plus open decision items. A decision
-  also raises the owning project's attention dot (§9), the same signal a
-  pending approval raises.
+- **Needs you (phase 2).** Each open decision is listed under its PR's row:
+  the comment's author and text, triage's `decision_question`, one button per
+  `decision_options` entry, and a free-text **Reply instead** field.
+  `Board.answerDecision` stores the answer in `decision_answer` and moves the
+  item to the next round (`round` one past the watch's) with the answer as its
+  `approach`. An option button applies that option's verdict. A `fix` option
+  leaves the item open with its backlog code task, made exactly as a triaged
+  fix's is (§13.1), whose body quotes the question the answer was given to. An
+  `answer` option handles the item with the option's `reply_body` and makes no
+  task. A typed reply answers it as an `answer`: the item is handled, with the
+  reply as its `reply_body`. Either way it is no longer a decision.
+- The row's badge counts Ready to verify plus open decision items, both only in
+  projects with follow-through on and only on watches that are not paused —
+  one rule, read by the badge and At a Glance alike from
+  `PRWatchStore.badgeCounts`. Under the same rule an open decision raises the
+  owning project's attention dot (§9) as `pullRequestDecision`, its detail
+  `#n: <question>` for the most recent one. A parked PR's attention also counts
+  only in a project with follow-through on.
 - At a Glance's headline (§10) gains "N PRs ready to verify" beside the
   review count, each project's card gains its own count, and clicking either
   opens the Pull Requests page filtered to that project (§10 has the
   headline's rule when several projects hold ready PRs).
 - A notification banner fires when a PR enters readyToVerify (once per head
-  oid) and when a decision item arrives. The Ready to verify banner (phase 1)
+  oid) and once per decision item. The decision banner (phase 2) is decided
+  on every poll: `PRWatchStore.claimDecisionNotifications` stamps each open
+  decision's `decision_notified_at` and returns those it stamped, so each
+  decision announces itself once, and a new reply on its thread, which clears
+  the verdict, clears the stamp too. It reads "Pull request decision waiting —
+  <project>", with `#n: <question>` as its body, routes like the Ready to
+  verify banner, and is the **Pull request decisions** category, on by
+  default. The Ready to verify banner (phase 1)
   is decided after each poll's transition: `PRWatchStore.claimReadyNotification`
   records the watch's head in `ready_notified_oid` and fires only when that head
   is not already recorded, so a PR that stays ready across polls, or drops out
@@ -232,14 +372,17 @@ on at all.
   verify** notification category, on by default; turning it off or muting the
   project still records the head, so unmuting does not replay old banners.
 - A seventh project-settings tab, **PR Follow-Through**, placed after
-  Advanced (§10), holds every setting in §13.3 except `roles`, whose agent
-  pickers arrive in phase 2. Its sections are **Watch** (`enabled`, settle
-  window, round cap, daily budget — empty means the spawn caps),
-  **Verification** (label — empty means the merge verifies — required
+  Advanced (§10), holds every setting in §13.3. Its sections are **Watch**
+  (`enabled`, settle window, round cap, daily budget — empty means the spawn
+  caps), **Verification** (label — empty means the merge verifies — required
   approval, and the verify command with its `{url}` placeholder),
   **Replies** (`postFactualReplies`, captioned with which verdicts count as
-  factual), and **Publish guard** (the `privateTerms` list: each term a row
-  with a remove button, plus a field that adds one on Return). Save trims
+  factual), **Publish guard** (the `privateTerms` list: each term a row
+  with a remove button, plus a field that adds one on Return), and **Roles**
+  (for each of Triage, Fixer, Reviewer and Follow-up check, an agent picker of
+  Default plus the project's enabled roster agents, and a model picker; a
+  stored agent the project can no longer spawn stays listed as not available,
+  and a role set back to Default with no model is stored as absent). Save trims
   terms, drops blanks and case-insensitive repeats, and keeps a term typed
   into the add field but never added. Save also stores a settle window
   below 0 as 0, a round cap below 1 as 1, and a budget of 0 or less as
