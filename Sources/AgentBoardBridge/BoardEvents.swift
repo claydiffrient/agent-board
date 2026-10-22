@@ -76,8 +76,8 @@ public struct WorkerSpawn: Sendable, Equatable {
 }
 
 public protocol WorkerControl: Sendable {
-    /// The caller has already passed `Board.requestSpawn`. Returns once the worktree exists and the
-    /// session row is written, with setup still running.
+    /// The caller has already passed `Board.requestSpawn`. Returns once the session row is written,
+    /// with setup, worktree creation included, still running.
     func spawnWorker(taskId: String) async throws -> WorkerSpawn
     /// `spawnWorker` carrying a rostered agent's identity, model and deny-list additions. `scope`
     /// decides what the session may do once it is up: `.worker` claims the task into `running`,

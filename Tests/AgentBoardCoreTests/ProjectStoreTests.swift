@@ -47,6 +47,7 @@ final class ProjectStoreTests: XCTestCase {
         try f.tokens.issue(projectId: f.project.id, scope: .worker, taskId: t.id)
         try f.progress.append(taskId: t.id, sessionId: s.sessionId, kind: .note, text: "hi")
         try f.reports.insert(projectId: f.project.id, taskId: t.id, sessionId: s.sessionId, kind: .complete, body: "done")
+        try FileLockStore(f.db).acquire(projectId: f.project.id, path: "a.swift", sessionId: s.sessionId, taskId: t.id)
 
         try f.projects.delete(f.project.id)
 

@@ -59,7 +59,7 @@ extension SessionState {
 
     var help: String? {
         switch self {
-        case .setup: "The worktree is ready; the repository is still being prepared and the worker cannot work yet."
+        case .setup: "The worktree is still being created and prepared; the worker cannot work yet."
         case .waitingOnLock: "Another agent in this shared checkout holds a file this worker is about to write."
         default: nil
         }
