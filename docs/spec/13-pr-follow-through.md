@@ -590,6 +590,17 @@ on at all.
 - **Last polled.** Each row adds "polled …" from `last_polled_at`, stamped
   each time a poll reads the PR from GitHub whether or not anything changed,
   so a row that is current but unchanged can be told from a stale one.
+- **Attach to its agents.** Before its other actions, a row shows one attach
+  button per active session (`SessionState.isActive`) on the watch's triage
+  tasks (`pr_triage.task_id`) and fix-round tasks (`pr_round.fix_task_id`),
+  oldest first, titled **Triage**, **Fixer** or **Reviewer** with the Status
+  page's attach symbol. A session on a fix task is its reviewer when it has a
+  review baseline (`review_head`, §5.1), and its fixer otherwise; a round's
+  follow-up check runs on its own task and gets no button. Clicking one opens
+  that session's terminal window, as the Status page's attach does. There is no
+  worktree-shell button. `PRWatchStore.observePage` reads the sessions in the
+  same fetch as the rows, so buttons appear and disappear as sessions start
+  and end; a row with no active session shows none.
 - Row actions: **Mark verified** (`gh pr edit --add-label <label>`), **Walk
   me through it** (shown only when `verifyCommand` is set), **Send back**
   (phase 4; shown only while the watch is readyToVerify or verified), **Open

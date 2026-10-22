@@ -301,8 +301,11 @@ public struct PRWatchStore: Sendable {
         try db.reader.read { try Self.page($0, projectId: projectId) }
     }
 
-    public func observePage(projectId: String? = nil) -> ValueObservation<ValueReducers.Fetch<[PRWatchGroup]>> {
-        ValueObservation.tracking { try Self.page($0, projectId: projectId) }
+    /// Drops repeats because the page reads `agent_session`, which every hook event writes.
+    public func observePage(
+        projectId: String? = nil
+    ) -> ValueObservation<ValueReducers.RemoveDuplicates<ValueReducers.Fetch<[PRWatchGroup]>>> {
+        ValueObservation.tracking { try Self.page($0, projectId: projectId) }.removeDuplicates()
     }
 
     static func page(_ db: Database, projectId: String?) throws -> [PRWatchGroup] {
@@ -330,15 +333,46 @@ public struct PRWatchStore: Sendable {
             ),
             by: \.watchId
         )
+        let sessions = try activeSessions(db)
         let listings = try rows.map { row in
             let watch = try PRWatch(row: row)
-            return PRWatchListing(watch: watch, openItems: row["open_items"], decisions: decisions[watch.id] ?? [])
+            return PRWatchListing(
+                watch: watch, openItems: row["open_items"], decisions: decisions[watch.id] ?? [],
+                sessions: sessions[watch.id] ?? []
+            )
         }
         let grouped = Dictionary(grouping: listings) {
             PRPageGroup.of($0.watch.state, openDecisions: $0.openDecisions)
         }
         return PRPageGroup.allCases.compactMap { group in
             grouped[group].map { PRWatchGroup(group: group, listings: $0) }
+        }
+    }
+
+    /// SPEC §13.4: active sessions on each watch's triage and fix-round tasks. A fix task's reviewer is
+    /// the session with a review baseline (SPEC §5.1), the same test the supervisor counts reviewers by.
+    private static func activeSessions(_ db: Database) throws -> [String: [PRListingSession]] {
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+            SELECT t.watch_id, t.kind, s.session_id, s.review_head IS NOT NULL AS reviews
+            FROM agent_session s
+            JOIN (
+              SELECT task_id, watch_id, 'triage' AS kind FROM pr_triage
+              UNION ALL
+              SELECT fix_task_id, watch_id, 'fix' FROM pr_round WHERE fix_task_id IS NOT NULL
+            ) t ON t.task_id = s.task_id
+            WHERE s.state IN (\(SessionStore.activeStatesSQL))
+            ORDER BY s.started_at, s.session_id
+            """
+        )
+        return Dictionary(grouping: rows, by: { $0["watch_id"] as String }).mapValues { rows in
+            rows.map { row in
+                let kind: String = row["kind"]
+                let reviews: Bool = row["reviews"]
+                let role: PRSessionRole = kind == "triage" ? .triage : reviews ? .reviewer : .fixer
+                return PRListingSession(sessionId: row["session_id"], role: role)
+            }
         }
     }
 
