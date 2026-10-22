@@ -1597,7 +1597,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
             // SPEC §13.1: a round's branch is pushed onto its pull request, never merged as a task branch.
             if task.origin == .fixRound { throw SupervisorError.fixRoundNotAcceptable(title: task.title) }
-            try await stopLiveSessions(onTask: taskId, sparing: acceptedBy.acceptingSessionId, by: acceptedBy.actor)
+            let sparing = acceptedBy.acceptingSessionId
+            if !landsAfterReturning {
+                try await stopLiveSessions(onTask: taskId, sparing: sparing, by: acceptedBy.actor)
+            }
             try board.accept(taskId: taskId, acceptedBy: acceptedBy)
             let acceptanceReport = try? ReportStore(db).latest(taskId: taskId)?.id
             let taskSessions = try sessions.forTask(taskId)
@@ -1607,13 +1610,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
             // Claimed now, so no reap takes the worktree for an orphan while the landing runs (SPEC §5).
             let claim = claimTeardown(of: taskSessions)
-            let settle: @MainActor (WorkerSupervisor) async -> Void = { supervisor in
-                await supervisor.landAndTearDown(task: task, project: project, claim: claim, report: acceptanceReport)
+            guard landsAfterReturning else {
+                await landAndTearDown(task: task, project: project, claim: claim, report: acceptanceReport)
+                return
             }
-            if landsAfterReturning {
-                inBackground(settle)
-            } else {
-                await settle(self)
+            // SPEC §6: `claude stop` is bounded at 15s per step, which a few live sessions add past 60s.
+            inBackground { supervisor in
+                do {
+                    try await supervisor.stopLiveSessions(onTask: taskId, sparing: sparing, by: acceptedBy.actor)
+                } catch {
+                    supervisor.keepUnlanded(task: task, claim: claim, stopFailure: error)
+                    return
+                }
+                await supervisor.landAndTearDown(task: task, project: project, claim: claim, report: acceptanceReport)
             }
         }
     }
@@ -1631,6 +1640,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let landingNotice = lastError == before ? nil : lastError
             await startTeardown(claim, task: task, project: project, report: report, landingNotice: landingNotice)
         }
+        announceReports(projectId: task.projectId)
+    }
+
+    /// A session that could not be stopped may still be working in the checkout, so nothing lands or is removed under it.
+    private func keepUnlanded(task: BoardTask, claim: TeardownClaim, stopFailure: Error) {
+        releaseTeardown(claim)
+        let branch = sharedBranch(of: task) ?? Self.taskBranchPrefix + task.id
+        recordLanding(
+            task: task, epic: task.epicId.flatMap { try? epics.get($0) }, landing: .unlanded,
+            detail: "`\(branch)` was not landed and its worktree was kept: a session on the task could not be "
+                + "stopped (\(describe(stopFailure))).",
+            advice: "Stop that session, then merge `\(branch)` by hand."
+        )
         announceReports(projectId: task.projectId)
     }
 

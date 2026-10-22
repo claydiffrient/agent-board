@@ -14,8 +14,12 @@ public final class ReviewerToolHandler: ToolHandler {
     private let comments: CommentTools
     private let control: any WorkerControl
     private let events: any BoardEventSink
+    private let commitsInFlight: CommitsInFlight
 
-    public init(db: AppDatabase, control: any WorkerControl, events: any BoardEventSink) {
+    public init(
+        db: AppDatabase, control: any WorkerControl, events: any BoardEventSink,
+        commitsInFlight: CommitsInFlight = CommitsInFlight()
+    ) {
         tasks = TaskStore(db)
         progress = ProgressStore(db)
         roster = RosterStore(db)
@@ -24,6 +28,7 @@ public final class ReviewerToolHandler: ToolHandler {
         comments = CommentTools(db: db)
         self.control = control
         self.events = events
+        self.commitsInFlight = commitsInFlight
     }
 
     public static let descriptors: [ToolDescriptor] = [
@@ -98,6 +103,13 @@ public final class ReviewerToolHandler: ToolHandler {
         case "accept_task":
             let verdict = try ToolArguments.requiredString("verdict", in: arguments)
             try requireUnderReview(task)
+            guard await !commitsInFlight.isCommitting(taskId: task.id) else {
+                throw ToolError(
+                    "A commit_my_work on this task is still running, and accepting now could land its branch while "
+                        + "that commit holds the checkout. Nothing was recorded; call accept_task again "
+                        + "in a minute."
+                )
+            }
             try await requireUntouchedCheckout(task, identity: identity, then: "Stop here; do not start further work.")
             let name = try reviewerName(task, identity: identity)
             // SPEC §13.1: a round's acceptance is half of its check, never the ordinary accept path.
