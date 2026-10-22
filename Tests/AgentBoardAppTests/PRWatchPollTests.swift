@@ -80,9 +80,16 @@ final class PRWatchPollTests: XCTestCase {
     }
 
     private func checkRun(
-        _ name: String, status: String = "COMPLETED", conclusion: String?, startedAt: String? = nil
+        _ name: String, status: String = "COMPLETED", conclusion: String?, startedAt: String? = nil, required: Bool = false
     ) -> [String: Any] {
-        ["name": name, "status": status, "conclusion": conclusion ?? NSNull(), "startedAt": startedAt ?? NSNull()]
+        [
+            "name": name, "status": status, "conclusion": conclusion ?? NSNull(), "startedAt": startedAt ?? NSNull(),
+            "isRequired": required,
+        ]
+    }
+
+    private func statusContext(_ context: String, state: String, required: Bool = false) -> [String: Any] {
+        ["context": context, "state": state, "isRequired": required]
     }
 
     private func backdateHeadPastTheChecksGracePeriod() throws {
@@ -301,6 +308,38 @@ final class PRWatchPollTests: XCTestCase {
         ]))
         await fixture.supervisor.pollPRWatches()
         XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+    }
+
+    func testThePullRequestsOwnRequiredFlagsGateReadinessWhenProtectionReadsNothing() async throws {
+        try enable()
+        let unflagged = [
+            checkRun("build", conclusion: "SUCCESS"), checkRun("lint", conclusion: "SUCCESS"),
+            statusContext("manual-check", state: "PENDING"),
+        ]
+        answer(pullRequest(checks: "PENDING", reported: unflagged))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try onlyWatch().checksState, "PENDING", "with nothing required, every check and the rollup count")
+
+        answer(pullRequest(checks: "PENDING", reported: [
+            checkRun("build", conclusion: "SUCCESS", required: true),
+            checkRun("lint", conclusion: "SUCCESS", required: true),
+            statusContext("manual-check", state: "PENDING"),
+        ]))
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.checksState, "SUCCESS")
+        XCTAssertEqual(watch.state, .readyToVerify)
+    }
+
+    func testARequiredCheckOnlyProtectionNamesIsPendingUntilItReports() async throws {
+        try enable()
+        answer(pullRequest(checks: "SUCCESS", required: ["deploy"], reported: [
+            checkRun("build", conclusion: "SUCCESS", required: true),
+        ]))
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.checksState, "PENDING")
+        XCTAssertEqual(watch.state, .watching)
     }
 
     func testAPassingRerunClearsTheFailedRunOfTheSameRequiredCheck() async throws {

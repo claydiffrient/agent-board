@@ -75,11 +75,16 @@ triage.
   neither approving nor blocking — until a later removal of that request
   restores the block. The checks on the head commit reduce to one
   of success, pending or failure, and only success is green:
-  - When the base branch requires checks — the contexts its branch
-    protection (`refUpdateRule.requiredStatusCheckContexts`) or a ruleset's
-    required status checks name — only those count. A required check that
-    has not reported yet is pending, so a PR is never ready in the moment
-    after a push before CI has registered anything.
+  - When the PR requires checks, only those count. The required set is the
+    union of the reported contexts whose own
+    `isRequired(pullRequestNumber:)` is true — the source of truth, since it
+    needs only read access — and the contexts the base branch's protection
+    (`refUpdateRule.requiredStatusCheckContexts`) or a ruleset's required
+    status checks name. Those two reads can come back empty for a token
+    without admin access or a rule set at the organization, but they are the
+    only source for a required check that has not reported yet. A required
+    check that has not reported is pending, so a PR is never ready in the
+    moment after a push before CI has registered anything.
   - Otherwise every reported check counts, along with the
     `statusCheckRollup` state.
   - Failure outweighs pending, and pending outweighs success. A commit
@@ -102,6 +107,15 @@ triage.
     the head changed (`head_changed_at`, or the watch's `created_at` for the
     head watching began on). A repository with no CI at all becomes ready
     once the grace period has passed.
+  - The checks named in `checksAwaitingVerification` (§13.3), by exact
+    check-run name or status context, are dropped from both the required
+    and the reported set before any of the above, for awaitingCI as for
+    readyToVerify: such a check goes green only once a human has verified
+    the PR, so counting it would hold the PR out of ready forever. Once one
+    of them has reported, the rollup state no longer counts either, since
+    GitHub computed it over that check too; a head where nothing else has
+    reported then has no state, and waits out the grace period like a head
+    with no rollup. An unlisted pending check still holds the PR.
   The required checks and each check's result come from the same per-repo
   `gh api graphql` query as the rest of the poll, so no `gh` call is added
   per PR. New feedback arriving here first sends the PR back to settling.
@@ -351,7 +365,7 @@ other head was pushed over the round, and goes to watching.
 
 **Failed checks (phase 4).** On red, each counted check (readyToVerify's rule:
 the required ones, else every reported one, latest run only, so a passing
-rerun leaves nothing) whose latest run failed becomes one untriaged item of
+rerun leaves nothing, and never one in `checksAwaitingVerification`) whose latest run failed becomes one untriaged item of
 kind `check`, keyed by the check run's or commit status's node id, so a run
 already recorded adds nothing on a later poll. Its body names the check and
 the head and links the run (`url`). For a GitHub Actions run (its check suite's
@@ -531,6 +545,7 @@ project that never opts in pays nothing:
 | `postFactualReplies` | `false` | 3 (no replies exist before phase 3) |
 | `roles.triage` / `roles.fixer` / `roles.reviewer` / `roles.followupCheck` | each `{rosterAgentId?, model?}`, unset | 2 (`triage`), 3 (the rest) |
 | `privateTerms` | `[]` | 1 |
+| `checksAwaitingVerification` | `[]` — check-run names or status contexts, matched exactly, ignored when deciding whether CI has passed (§13.1) | 4 |
 
 `roles` names a roster agent (§4) for each of the four model-driven jobs; a
 work-specific lens for a role — a follow-up grading rubric, a house style for
@@ -638,7 +653,9 @@ on at all.
   Advanced (§10), holds every setting in §13.3. Its sections are **Watch**
   (`enabled`, settle window, round cap, daily budget — empty means the spawn
   caps), **Verification** (label — empty means the merge verifies — required
-  approval, and the verify command with its `{url}` placeholder),
+  approval, the verify command with its `{url}` placeholder, and **Checks
+  that wait on verification**, a comma-separated `checksAwaitingVerification`
+  field whose save trims names and drops blanks and repeats),
   **Replies** (`postFactualReplies`, captioned with which verdicts count as
   factual), **Publish guard** (the `privateTerms` list: each term a row
   with a remove button, plus a field that adds one on Return), and **Roles**

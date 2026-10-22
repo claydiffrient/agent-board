@@ -80,6 +80,7 @@ struct ProjectSettingsSheet: View {
     @State private var worktreeRoot: String
     @State private var autoModeJSON: String
     @State private var extraServers: String
+    @State private var checksAwaitingVerification: String
     @State private var archiveMode: ArchivePolicyMode
     @State private var archiveDays: Int
     @State private var workspaceId: String?
@@ -110,6 +111,9 @@ struct ProjectSettingsSheet: View {
         _worktreeRoot = State(initialValue: project.worktreeRoot)
         _autoModeJSON = State(initialValue: settings.autoModeJSON ?? "")
         _extraServers = State(initialValue: settings.extraMcpServers.joined(separator: ", "))
+        _checksAwaitingVerification = State(
+            initialValue: settings.prFollowThrough.checksAwaitingVerification.joined(separator: ", ")
+        )
         _archiveMode = State(initialValue: settings.archivePolicy.mode)
         _archiveDays = State(initialValue: settings.archivePolicy.days ?? ArchivePolicy.defaultDays)
         _muteChoice = State(initialValue: NotificationMuteChoice(settings.notifications.mute))
@@ -387,6 +391,10 @@ struct ProjectSettingsSheet: View {
             Text("Mark verified adds the label to the pull request. Left empty, your own merge is the verification. Walk me through it runs the verify command as a shell command in a terminal, the way your own terminal would, with {url} replaced by the pull request's URL; left empty, that button is hidden. A Claude command goes through claude, e.g. claude \"/review:verify {url}\".")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            TextField("Checks that wait on verification", text: $checksAwaitingVerification, prompt: Text("Comma-separated check names"))
+            Text("Checks or statuses that only pass once you have verified the pull request. They are ignored when deciding whether CI has passed, both after a pushed round and for Ready to verify, and a failing one never becomes a failed-check item. Names match exactly.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .prReplies:
             Toggle("Post factual replies", isOn: $settings.prFollowThrough.postFactualReplies)
             Text("Factual replies are \"Fixed in <sha>\", an answer to a factual question, a pointer to the commit that already did it, and a note that out-of-scope work is tracked separately. Anything argued waits for you as a decision.")
@@ -454,6 +462,15 @@ struct ProjectSettingsSheet: View {
         if saved.verifyCommand?.isEmpty == true { saved.verifyCommand = nil }
         saved.privateTerms = privateTerms(draft.privateTerms, adding: pendingTerm)
         return saved
+    }
+
+    static func checkNames(_ text: String) -> [String] {
+        var names: [String] = []
+        for name in text.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) })
+        where !name.isEmpty && !names.contains(name) {
+            names.append(name)
+        }
+        return names
     }
 
     private func roleRows(_ role: FollowThroughRole) -> some View {
@@ -576,6 +593,7 @@ struct ProjectSettingsSheet: View {
         updated.archivePolicy = ArchivePolicy.make(mode: archiveMode, days: archiveDays)
         updated.notifications.mute = muteChoice.mute(existing: settings.notifications.mute)
         updated.prFollowThrough = Self.savedFollowThrough(settings.prFollowThrough, pendingTerm: newPrivateTerm)
+        updated.prFollowThrough.checksAwaitingVerification = Self.checkNames(checksAwaitingVerification)
         let trimmedJSON = autoModeJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.autoModeJSON = trimmedJSON.isEmpty ? nil : trimmedJSON
         updated.extraMcpServers = extraServers
