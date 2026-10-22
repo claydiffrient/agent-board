@@ -135,6 +135,60 @@ final class PRFollowThroughLoopTests: XCTestCase {
         get async { await fixture.runtime.spawns.count }
     }
 
+    /// The `state: reason` line of each follow-through report queued for the orchestrator (SPEC §13.6).
+    private func milestones() throws -> [String] {
+        try ReportStore(fixture.db).unconsumed(projectId: fixture.project.id)
+            .filter { $0.kind == .prFollowThrough }
+            .map { String($0.body.split(separator: "\n").last ?? "") }
+    }
+
+    private func merge() async {
+        fixture.gh.answerSearch([])
+        fixture.gh.answer(url, state: "MERGED")
+        await poll()
+    }
+
+    func testAPRThatBecomesReadyToVerifyReportsItOncePerHead() async throws {
+        try enable()
+        answer(threads: [])
+        await poll()
+        await poll()
+
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+        let bodies = try ReportStore(fixture.db).unconsumed(projectId: fixture.project.id)
+            .filter { $0.kind == .prFollowThrough }.map(\.body)
+        XCTAssertEqual(bodies, [
+            "#12 Add widgets — \(url)\nready_to_verify: approved, checks green and nothing open at \(head.prefix(7))",
+        ])
+    }
+
+    func testAMergedPRReportsItsEnd() async throws {
+        try enable(settleMinutes: 60)
+        answer(threads: [thread("T_1")])
+        await poll()
+        let watch = try onlyWatch()
+        await merge()
+
+        XCTAssertEqual(try watches.get(watch.id)?.state, .merged)
+        XCTAssertEqual(try milestones(), ["merged: merged"])
+    }
+
+    /// The banners' gate (SPEC §13.4): a paused watch is still followed to ready and merged, silently.
+    func testAPausedWatchReportsNothing() async throws {
+        try enable(settleMinutes: 60)
+        answer(threads: [thread("T_1")])
+        await poll()
+        let watch = try onlyWatch()
+        try watches.setPaused(true, watchId: watch.id)
+        answer(threads: [])
+        await poll()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+        await merge()
+
+        XCTAssertEqual(try watches.get(watch.id)?.state, .merged)
+        XCTAssertEqual(try milestones(), [])
+    }
+
     private func triageTasks() throws -> [BoardTask] {
         try fixture.tasks.list(projectId: fixture.project.id, includeArchived: true).filter { $0.origin == .triage }
     }
@@ -268,6 +322,9 @@ final class PRFollowThroughLoopTests: XCTestCase {
         let cause = try XCTUnwrap(try ProjectAttentionStore(fixture.db).attention(projectId: fixture.project.id)?
             .cause(.parkedPullRequest))
         XCTAssertTrue(cause.text.contains("#12") && cause.text.contains("3 times"), cause.text)
+        let reports = try milestones()
+        XCTAssertEqual(reports.count, 1, "\(reports)")
+        XCTAssertTrue(reports.first?.hasPrefix("parked: Triage failed 3 times in a row.") == true, "\(reports)")
         await poll()
         let spawned = await spawnCount
         XCTAssertEqual(spawned, PRWatchStore.failedSessionsBeforePark)
@@ -544,6 +601,8 @@ final class PRFollowThroughLoopTests: XCTestCase {
         await result.afterResponse?()
         await poll()
         XCTAssertEqual(try onlyWatch().state, .watching)
+        let reported = ["round_triaged: round 1 triaged with nothing to fix", "decision: Make it async?"]
+        XCTAssertEqual(try milestones(), reported)
 
         try fixture.board.answerDecision(itemId: try XCTUnwrap(item.id), choice: .option("Yes"))
         await poll()
@@ -557,6 +616,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try watches.items(watchId: watch.id).first?.fixTaskId, fixer.id)
         XCTAssertFalse(try fixture.tasks.list(projectId: fixture.project.id).contains { $0.origin == .followThrough })
         XCTAssertTrue(try fixture.sessions.forTask(fixer.id).contains { $0.state.isActive })
+        XCTAssertEqual(try milestones(), reported, "an answered decision and its fix round report nothing new")
     }
 
     // MARK: - Publishing
@@ -596,6 +656,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try watches.rounds(watchId: watch.id).first?.pushedHeadOid, tip)
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
         XCTAssertFalse(fixture.gh.calls.contains { $0.contains { $0.hasPrefix("body=") } }, "\(fixture.gh.calls)")
+        XCTAssertEqual(try milestones(), ["round_published: round 1 pushed \(tip.prefix(7))"])
 
         head = tip
         answer(threads: [])
@@ -724,6 +785,9 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["stale"])
         XCTAssertNil(try watches.items(watchId: watch.id).first?.verdict, "the item goes back to triage")
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+        XCTAssertEqual(try milestones(), [
+            "round_stale: round 1 was not pushed: the head moved under it, so its fixes go back to triage",
+        ])
     }
 
     private var replyCalls: [[String]] { fixture.gh.calls.filter { $0.contains { $0.hasPrefix("query=mutation") } } }

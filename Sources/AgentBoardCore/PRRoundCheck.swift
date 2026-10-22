@@ -288,6 +288,7 @@ extension Board {
             ).filter { $0.stopReason != windDown }
             let failed = fixers.prefix { !$0.state.isActive && $0.state != .completed }
             guard failed.count >= PRWatchStore.failedSessionsBeforePark else { return false }
+            try PRWatchStore.report(db, watch: watch, .round(number: round.number, outcome: .fixerFailed))
             try Self.parkRound(
                 db, watch: &watch, round: round, outcome: .fixerFailed,
                 reason: "Round \(round.number)'s fixer ended without a report \(failed.count) times in a row. The last: "
@@ -313,6 +314,7 @@ extension Board {
         watch.parkedReason = reason
         watch.updatedAt = now
         try watch.update(db)
+        try PRWatchStore.report(db, watch: watch, .parked(reason: reason))
     }
 
     /// A fixing round left with no task and no open fix item, every one answered or reopened for triage
@@ -331,6 +333,7 @@ extension Board {
             watch.state = try PRWatchStore.untriagedItemCount(db, watchId: watchId) > 0 ? .settling : .watching
             watch.updatedAt = now
             try watch.update(db)
+            try PRWatchStore.report(db, watch: watch, .round(number: round.number, outcome: .triaged))
             return watch.state
         }
     }

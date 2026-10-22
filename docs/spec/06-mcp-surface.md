@@ -213,7 +213,7 @@ Everything in worker scope over any task in the project, plus:
 | `assign_to_agent(task_id, roster_agent_id)` | `spawn_worker` instantiating an archetype: the same caps, shutdown and autonomy gates, worker scope, and the agent's own deny list layered on. An agent outside the project's usable set is refused |
 | `stop_worker(session_id)` | `claude stop`, then the session's process tree is reaped (§8.5) |
 | `list_agents(include_ended)` | Roster with state and spend; ended sessions drop off after a grace window |
-| `list_reports()`, `get_report(id)` | The Q9 pull channel |
+| `list_reports()`, `get_report(id)` | The Q9 pull channel. PR follow-through's milestones arrive here as `pr_follow_through` reports (§13.6) |
 | `list_projects()` | Every project Agent Board knows about, as id, name, and whether the entry is the caller's own project. Nothing else about another project is exposed — no repository path, no settings, no board contents, no agent state |
 | `send_message(project_id, body)` | Queues a §9.2 message into that project's report queue. Confirms queueing, never delivery. Refused for the caller's own project, for an unknown id, for a blank body, and for a body over 4000 characters |
 | `delete_message(message_id)` | Deletes a §9.3 message this project received, and its report, for both projects. Refused for a message this project did not receive |

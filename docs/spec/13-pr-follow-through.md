@@ -517,7 +517,8 @@ handed back, rebuilt from the `pr_triage` row.
 
 The triage task never enters review and lands nothing. When `set_verdicts`
 leaves no open item without a verdict, the task goes straight to `done` with
-no report to the orchestrator, which did not ask for it, and once the
+no `complete` report to the orchestrator, which did not ask for it (the round's
+outcome reaches it as a §13.6 milestone instead), and once the
 session has stopped its detached worktree is removed the way an accepted
 task's is. The orphan sweep (§5) would never take it: a PR head's commits are
 outside the project's bases, so it keeps that checkout.
@@ -665,6 +666,8 @@ on at all.
   to the project, scrolled to the row. It is the **Pull requests ready to
   verify** notification category, on by default; turning it off or muting the
   project still records the head, so unmuting does not replay old banners.
+  Both claims also queue the orchestrator's report (§13.6), so it hears of
+  each once too.
 - A seventh project-settings tab, **PR Follow-Through**, placed after
   Advanced (§10), holds every setting in §13.3. Its sections are **Watch**
   (`enabled`, settle window, round cap, daily budget — empty means the spawn
@@ -735,3 +738,34 @@ No agent in this feature runs with authority this section doesn't name here:
 a worker still never pushes (§1, §8), and the fast-forward path above is the
 only new authority either amendment grants — every other push and
 pull-request path keeps its existing human gate.
+
+### 13.6 Reports to the orchestrator
+
+Follow-through runs inside the app, but the owning project's orchestrator
+hears what it did: each milestone below queues one `pr_follow_through` report
+in that project's queue, the one `list_reports` drains (§6), and the poll ends
+by announcing it (§9.1). The report is written in the same transaction as the
+transition it reports, so a milestone is never reported without happening or
+twice for one transition.
+
+| Milestone | `state` | When |
+|---|---|---|
+| Ready to verify | `ready_to_verify` | The Ready to verify banner's claim (§13.4): once per head oid |
+| Parked | `parked` | Every park, with the first line of `parked_reason` |
+| New decision | `decision` | The decision banner's claim (§13.4): once per item, with the first line of triage's question |
+| Round outcome | `round_published` / `round_stale` / `round_fixer_failed` / `round_triaged` | A round pushed (with the pushed sha), went stale, ended `fixer_failed`, or ended `triaged` with no fix item open |
+| Merged or closed | `merged` / `closed` | The poll settles the watch to either |
+
+The body is two lines: `#<n> <title> — <url>`, then `<state>: <reason>`, the
+reason one line of at most 200 characters. It never carries a comment body, a
+CI log or a reply, which are untrusted and long; a decision's question is
+triage's own wording. A round that ends `check_failed` or `publish_failed`
+parks, and that park is its report; `triage_failed`, `interrupted` and
+`frozen` rounds report nothing of their own.
+
+The banners' gate applies: a paused watch, or one in a project with
+follow-through off, queues nothing, and since the claims are still made while
+paused, resuming replays none. The orchestrator's briefing (§9) describes these
+reports as information, not requests to act: Agent Board runs the loop itself,
+and a decision or a parked PR is the human's to handle on the Pull Requests
+page.

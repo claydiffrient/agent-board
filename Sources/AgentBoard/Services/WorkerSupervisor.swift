@@ -2136,6 +2136,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         let failures = await refreshPRWatches(enabled, scope: scope)
         await advancePRWatches(enabled, scope: scope)
+        for project in enabled { announceReports(projectId: project.id) }
         return failures
     }
 

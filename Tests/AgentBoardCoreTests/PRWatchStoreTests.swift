@@ -123,6 +123,7 @@ final class PRWatchStoreTests: XCTestCase {
     /// returns to `ready`, even when its branch carries commits that would otherwise land in `review`.
     func testThreeFailedFixerSessionsParkTheWatchAndIgnoreAShutdownWindDown() throws {
         let f = try Fixture.make()
+        try enableFollowThrough(f, true)
         let store = PRWatchStore(f.db)
         let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
         try triage(f, watchId: watch.id, as: .fix)
@@ -152,6 +153,11 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertTrue(parked.parkedReason?.contains("ended without a report 3 times in a row") == true, parked.parkedReason ?? "")
         XCTAssertTrue(parked.parkedReason?.contains("idle cap reached") == true, parked.parkedReason ?? "")
         XCTAssertEqual(try store.rounds(watchId: watch.id).first?.outcome, PRRoundOutcome.fixerFailed.rawValue)
+        let reports = try ReportStore(f.db).unconsumed(projectId: f.project.id).filter { $0.kind == .prFollowThrough }
+        XCTAssertEqual(reports.map { $0.body.split(separator: "\n").last.map(String.init) }, [
+            "round_fixer_failed: round 1 ended without a fix: its fixer kept stopping without a report",
+            "parked: \(parked.parkedReason ?? "")",
+        ])
     }
 
     func testAFixRoundSkipsSpawnApprovalOnlyWhereFollowThroughIsOn() throws {
