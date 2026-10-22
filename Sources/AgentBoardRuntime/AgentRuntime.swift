@@ -29,6 +29,10 @@ public struct SpawnRequest: Sendable {
         "ScheduleWakeup", "Monitor", "CronCreate",
     ]
 
+    /// Layered onto the default for a PR round's fixer, whose commits are fast-forward pushed onto the
+    /// pull request's head, so history it already has must stay as it is (SPEC §13.1).
+    public static let fixerDisallowedTools = ["Bash(git commit*--amend*)", "Bash(git rebase*)"]
+
     /// A triager's whole deny list besides the board deny (SPEC §6): a reviewer's, plus `gh` and the
     /// git commands that write refs or config, since it reads a pull request and changes nothing.
     public static let triagerDisallowedTools = defaultDisallowedTools + reviewerDisallowedTools + [
@@ -112,9 +116,18 @@ public protocol AgentRuntime: Sendable {
 
 public struct BackgroundSessionRuntime: AgentRuntime {
     public var registrationTimeout: TimeInterval
+    /// Bounds `claude stop` and `claude agents`, which `stop_worker` and an accept wait on inside
+    /// Claude Code's 60s wait for an MCP answer (SPEC §6).
+    public var queryTimeout: TimeInterval
+    public var claudeCandidates: [String]
 
-    public init(registrationTimeout: TimeInterval = 10) {
+    public init(
+        registrationTimeout: TimeInterval = 10, queryTimeout: TimeInterval = 15,
+        claudeCandidates: [String] = ClaudeCLI.candidatePaths()
+    ) {
         self.registrationTimeout = registrationTimeout
+        self.queryTimeout = queryTimeout
+        self.claudeCandidates = claudeCandidates
     }
 
     /// The prompt is positional and must come first: `--disallowedTools` is variadic and would swallow it.
@@ -170,7 +183,8 @@ public struct BackgroundSessionRuntime: AgentRuntime {
     }
 
     public func stop(shortId: String) async throws {
-        try await offMain { try ClaudeCLI.stop(shortId: shortId) }
+        let (timeout, candidates) = (queryTimeout, claudeCandidates)
+        try await offMain { try ClaudeCLI.stop(shortId: shortId, timeout: timeout, candidates: candidates) }
     }
 
     public func remove(shortId: String) async throws {
@@ -178,7 +192,8 @@ public struct BackgroundSessionRuntime: AgentRuntime {
     }
 
     public func listSessions() async throws -> [AgentInfo] {
-        try await offMain { try ClaudeCLI.listAgents() }
+        let (timeout, candidates) = (queryTimeout, claudeCandidates)
+        return try await offMain { try ClaudeCLI.listAgents(timeout: timeout, candidates: candidates) }
     }
 
     public func attachCommand(shortId: String) -> (executable: String, arguments: [String]) {

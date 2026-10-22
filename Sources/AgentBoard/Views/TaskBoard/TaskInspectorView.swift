@@ -252,7 +252,7 @@ struct TaskInspectorView: View {
                     Spacer()
                     if session.state.isActive {
                         Button("Stop") { run { try await env.supervisor.stop(sessionId: session.sessionId) } }
-                    } else if task.origin != .triage {
+                    } else if !task.origin.isPullRequestReader {
                         Button("Resume") { run { try await env.supervisor.resume(sessionId: session.sessionId) } }
                     }
                     SessionActionButtons(session: session, showsTitle: true)

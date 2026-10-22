@@ -56,26 +56,29 @@ public enum ClaudeCLI {
         return ("/usr/bin/env", ["claude"])
     }
 
-    public static func run(_ args: [String], cwd: URL?) throws -> CommandResult {
-        let invocation = invocation()
+    public static func run(
+        _ args: [String], cwd: URL?, timeout: TimeInterval? = nil, candidates: [String] = candidatePaths()
+    ) throws -> CommandResult {
+        let invocation = invocation(candidates: candidates)
         return try ProcessRunner.runChecked(
             executable: URL(fileURLWithPath: invocation.executable),
             arguments: invocation.prefix + args,
             cwd: cwd,
+            timeout: timeout,
             label: "claude"
         )
     }
 
-    public static func listAgents() throws -> [AgentInfo] {
-        let result = try run(["agents", "--json", "--all"], cwd: nil)
+    public static func listAgents(timeout: TimeInterval? = nil, candidates: [String] = candidatePaths()) throws -> [AgentInfo] {
+        let result = try run(["agents", "--json", "--all"], cwd: nil, timeout: timeout, candidates: candidates)
         guard let data = result.stdout.data(using: .utf8) else {
             throw AgentRuntimeError("claude agents produced non-UTF8 output")
         }
         return try JSONDecoder().decode([AgentInfo].self, from: data)
     }
 
-    public static func stop(shortId: String) throws {
-        _ = try run(["stop", shortId], cwd: nil)
+    public static func stop(shortId: String, timeout: TimeInterval? = nil, candidates: [String] = candidatePaths()) throws {
+        _ = try run(["stop", shortId], cwd: nil, timeout: timeout, candidates: candidates)
     }
 
     public static func remove(shortId: String) throws {

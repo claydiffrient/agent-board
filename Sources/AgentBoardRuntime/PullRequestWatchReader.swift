@@ -106,7 +106,7 @@ public struct PullRequestWatchReader: Sendable {
               }
               commits(last: 1) {
                 nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
-                  ... on CheckRun { name status conclusion }
+                  ... on CheckRun { name status conclusion startedAt completedAt }
                   ... on StatusContext { context state }
                 } } } } }
               }
@@ -193,11 +193,12 @@ public struct PullRequestWatchReader: Sendable {
     }
 
     /// SPEC §13.1: when the base branch requires checks only those count, and one that has not
-    /// reported is pending; otherwise every reported check and the rollup count. Failure, NEUTRAL
-    /// included, outweighs pending. Nil means nothing is required and nothing has reported.
+    /// reported is pending; otherwise every reported check and the rollup count. Only each check's
+    /// latest run counts. Failure, NEUTRAL included, outweighs pending. Nil means nothing is
+    /// required and nothing has reported.
     private static func checksState(of pr: GraphQLResponse.PullRequest) -> String? {
         let rollup = pr.commits?.nodes.last?.commit.statusCheckRollup
-        let reported = rollup?.contexts?.nodes.compactMap(\.check) ?? []
+        let reported = latestRuns(rollup?.contexts?.nodes.compactMap(\.check) ?? [])
         let required = Set(
             (pr.baseRef?.refUpdateRule?.requiredStatusCheckContexts ?? [])
                 + (pr.baseRef?.rules?.nodes ?? []).flatMap { $0.parameters?.requiredStatusChecks ?? [] }.map(\.context)
@@ -205,12 +206,21 @@ public struct PullRequestWatchReader: Sendable {
         let outcomes: [CheckOutcome]
         if required.isEmpty {
             guard let rollup else { return nil }
-            outcomes = reported.map(\.outcome) + [CheckOutcome(state: rollup.state)]
+            outcomes = Array(reported.values) + [CheckOutcome(state: rollup.state)]
         } else {
-            let byName = Dictionary(grouping: reported, by: \.name)
-            outcomes = required.map { byName[$0]?.map(\.outcome).max() ?? .pending }
+            outcomes = required.map { reported[$0] ?? .pending }
         }
         return (outcomes.max() ?? .success).rawValue
+    }
+
+    /// Ordered by start time, then completion time, then list order, so a rerun replaces the run it reran.
+    private static func latestRuns(_ checks: [GraphQLResponse.Check]) -> [String: CheckOutcome] {
+        var latest: [String: GraphQLResponse.Check] = [:]
+        for check in checks {
+            if let held = latest[check.name]?.ranAt, let ranAt = check.ranAt, ranAt < held { continue }
+            latest[check.name] = check
+        }
+        return latest.mapValues(\.outcome)
     }
 }
 
@@ -261,17 +271,22 @@ private struct GraphQLResponse: Decodable {
         let contexts: Nodes<CheckContext>?
     }
 
-    /// A CheckRun carries name, status and conclusion; a StatusContext carries context and state.
+    /// GitHub's ISO 8601 timestamps all end in `Z`, so they order correctly as strings.
+    typealias Check = (name: String, outcome: CheckOutcome, ranAt: String?)
+
+    /// A CheckRun carries name, status, conclusion and its run times; a StatusContext carries context and state.
     struct CheckContext: Decodable {
         let name: String?
         let status: String?
         let conclusion: String?
+        let startedAt: String?
+        let completedAt: String?
         let context: String?
         let state: String?
 
-        var check: (name: String, outcome: CheckOutcome)? {
-            if let name { return (name, CheckOutcome(status: status, conclusion: conclusion)) }
-            if let context, let state { return (context, CheckOutcome(state: state)) }
+        var check: Check? {
+            if let name { return (name, CheckOutcome(status: status, conclusion: conclusion), startedAt ?? completedAt) }
+            if let context, let state { return (context, CheckOutcome(state: state), nil) }
             return nil
         }
     }

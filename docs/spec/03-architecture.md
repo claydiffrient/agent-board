@@ -196,9 +196,12 @@ large repository they outlast the MCP call — a timeout an orchestrator cannot
 tell from a failure turns every dispatch into a guess. The `post-checkout` hook
 is the worst of it: a hook that builds a fresh toolchain output base has run
 for over ten minutes under load, while Claude Code abandons a tool call whose
-answer has not started after 60 seconds. A rostered reviewer is the exception:
-it judges the checkout before its session exists, so its spawn creates or
-reuses the worktree before answering.
+answer has not started after 60 seconds (§6). The epic integrator's worktree
+on `agentboard/epic-<id>` is created the same way, under the same mark (§5.2
+step 3). A rostered reviewer is the exception: it judges the checkout before
+its session exists, so its spawn creates or reuses the worktree before
+answering. Its only tool-call route is `report_complete`, from the worker
+still running in that worktree, so it reuses one and runs no hook.
 
 One attempt sets up a task at a time. The spawn marks the task's worktree path
 before it runs any git command and clears the mark only when setup ends —

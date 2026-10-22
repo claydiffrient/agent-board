@@ -117,7 +117,7 @@ public struct BriefingResourceHandler: ResourceHandler {
         }
         guard let mine else {
             return identity.scope == .triager
-                ? "Not a briefing you can read. A triager has none; get_pr_items has everything you need."
+                ? "Not a briefing you can read. A triager or follow-up checker has none; its get_ tool has everything you need."
                 : "Not a briefing you can read. None is addressed to the Coordinator."
         }
         return "Not a briefing you can read. The one addressed to you is \(mine)."

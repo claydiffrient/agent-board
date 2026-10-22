@@ -24,14 +24,16 @@ final class ReviewerVerdictEndsTheReviewTests: XCTestCase {
         fixture = nil
     }
 
-    private func taskUnderReview() async throws -> (task: BoardTask, reviewer: AgentSession, rita: RosterAgent, token: String) {
+    private func taskUnderReview(
+        epicId: String? = nil
+    ) async throws -> (task: BoardTask, reviewer: AgentSession, rita: RosterAgent, token: String) {
         let rita = try RosterStore(fixture.db).create(
             name: "Rita", role: "reviewer", systemPrompt: "You review for correctness."
         )
         try RosterStore(fixture.db).enable(agentId: rita.id, forProject: fixture.project.id)
         let task = try fixture.tasks.create(
             projectId: fixture.project.id, title: "Add the parser", body: "Parse it.", acceptance: "Tests pass.",
-            priority: nil, column: .ready, origin: .human, epicId: nil
+            priority: nil, column: .ready, origin: .human, epicId: epicId
         )
         try await fixture.supervisor.assign(taskId: task.id)
         await fixture.supervisor.waitForSetup()
@@ -71,6 +73,32 @@ final class ReviewerVerdictEndsTheReviewTests: XCTestCase {
         XCTAssertEqual(try fixture.sessions.get(reviewer.sessionId)?.state, .completed)
         XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .done)
         XCTAssertEqual(try failedReports().map(\.body), [])
+    }
+
+    /// SPEC §6: landing can run repository hooks, so the verdict's answer cannot wait for it.
+    func testAcceptTaskAnswersWhileTheLandingIsStillInARefHook() async throws {
+        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Ship search", goal: nil)
+        let (task, _, _, token) = try await taskUnderReview(epicId: epic.id)
+        let gate = try fixture.installGatedHook(
+            "reference-transaction", when: "[ \"$1\" = prepared ] && grep -q ' refs/heads/\(epic.branch)$'"
+        )
+        let tip = try fixture.git(["rev-parse", "agentboard/\(task.id)"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let sink = LateBoundSink()
+        sink.target = fixture.supervisor
+
+        _ = try await ReviewerToolHandler(db: fixture.db, control: sink, events: sink).call(
+            "accept_task", arguments: .object(["verdict": .string("Ran the parser tests; they pass.")]),
+            identity: try await fixture.identity(token: token)
+        )
+
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .done)
+        XCTAssertFalse(
+            try fixture.manager.isMerged(commit: tip, into: "refs/heads/\(epic.branch)"),
+            "accept_task waited for the accepted branch to land before answering"
+        )
+        FileManager.default.createFile(atPath: gate.path, contents: nil)
+        await fixture.supervisor.waitForTeardowns()
+        XCTAssertTrue(try fixture.manager.isMerged(commit: tip, into: "refs/heads/\(epic.branch)"))
     }
 
     func testAReviewerWhoseTurnEndsWithoutAVerdictIsRemindedOnceThenRaisesOneReport() async throws {

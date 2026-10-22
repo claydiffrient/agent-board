@@ -128,6 +128,7 @@ struct BridgeFixture {
     static func make(
         lockWait: FileLockWaitPolicy = .default,
         scopedCommits: RecordingScopedCommits? = nil,
+        commitAnswerWithin: Duration = .seconds(30),
         repoPath: String? = nil
     ) throws -> BridgeFixture {
         let db = try AppDatabase.inMemory()
@@ -141,7 +142,10 @@ struct BridgeFixture {
         let events = RecordingEventSink()
         let control = FakeWorkerControl(board: Board(db))
         let orchestrator = OrchestratorToolHandler(db: db, control: control, events: events)
-        let worker = WorkerToolHandler(db: db, control: control, events: events, scopedCommits: scopedCommits)
+        let worker = WorkerToolHandler(
+            db: db, control: control, events: events, scopedCommits: scopedCommits,
+            commitAnswerWithin: commitAnswerWithin
+        )
         let reviewer = ReviewerToolHandler(db: db, control: control, events: events)
         return BridgeFixture(
             db: db,
@@ -335,6 +339,8 @@ final class RecordingScopedCommits: ScopedCommitting, @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [ScopedCommitRequest] = []
     var outcome: ScopedCommitOutcome?
+    /// A commit waits for this file to exist, or for 30 seconds, the way a slow pre-commit hook holds one.
+    var gate: URL?
 
     var requests: [ScopedCommitRequest] {
         lock.lock(); defer { lock.unlock() }
@@ -345,6 +351,11 @@ final class RecordingScopedCommits: ScopedCommitting, @unchecked Sendable {
         lock.lock()
         recorded.append(request)
         lock.unlock()
+        if let gate {
+            for _ in 0..<300 where !FileManager.default.fileExists(atPath: gate.path) {
+                try await _Concurrency.Task.sleep(for: .milliseconds(100))
+            }
+        }
         return outcome ?? .committed(sha: String(repeating: "a", count: 40), paths: request.paths)
     }
 }
