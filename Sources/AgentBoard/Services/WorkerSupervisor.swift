@@ -27,6 +27,7 @@ enum SupervisorError: LocalizedError {
     case setupStillRunning(title: String, path: String)
     case taskBeingDiscarded(taskId: String)
     case worktreeBeingRemoved(path: String)
+    case reviewTaskNotInReview(title: String, column: TaskColumn)
     case approvalNotFound(String)
     case rosterAgentNotUsable(id: String, projectName: String)
     case epicCloseRefused(String)
@@ -92,6 +93,9 @@ enum SupervisorError: LocalizedError {
         case .worktreeBeingRemoved(let path):
             return "\(path) is being removed by a cleanup that claimed it first, so a session resumed there would "
                 + "lose its checkout; spawn the task again instead, which waits for the removal and creates a fresh worktree"
+        case .reviewTaskNotInReview(let title, let column):
+            return "\"\(title)\" is in \(column.rawValue), no longer in review, so its reviewer is not resumed: "
+                + "a verdict from it would land on a task nobody asked it to judge"
         case .globalShutdownIncomplete(let failures):
             return "some projects could not be wound down:\n" + failures.joined(separator: "\n")
         case .dependencyNotOnBranch(let id, let title, let commit, let branch, let landing):
@@ -1497,15 +1501,30 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(session.projectId) else {
                 throw SupervisorError.projectNotFound(session.projectId)
             }
+            if let holder = try sessions.activeHolder(taskId: taskId), holder.sessionId != sessionId {
+                let title = (try? tasks.get(taskId))??.title ?? taskId
+                throw SupervisorError.taskAlreadyHeld(title: title, sessionId: holder.sessionId)
+            }
+            if let path = session.worktreePath, let holder = try sessions.activeHolder(worktreePath: path),
+               holder.sessionId != sessionId {
+                throw SupervisorError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
+            }
+            // SPEC §5.1: a reviewer's row says `worker`; only its grant records what it was spawned as.
+            let granted = try grants.forSession(sessionId)
+            let live = granted.first { !$0.isRevoked }
+            let scope = (live ?? granted.last)?.scope ?? .worker
+            if scope == .reviewer, let task = try tasks.get(taskId), task.column != .review {
+                throw SupervisorError.reviewTaskNotInReview(title: task.title, column: task.column)
+            }
             // SPEC §13.2: the grant and config below are a worker's, and a triage is cheap to start over.
             if let task = try tasks.get(taskId), task.origin.isPullRequestReader {
                 throw SupervisorError.triageNotResumable(title: task.title)
             }
             let token: String
-            if let grant = try grants.forSession(sessionId).first(where: { !$0.isRevoked }) {
+            if let grant = live {
                 token = grant.token
             } else {
-                let grant = try grants.issue(projectId: project.id, scope: .worker, taskId: taskId)
+                let grant = try grants.issue(projectId: project.id, scope: scope, taskId: taskId)
                 try grants.bind(token: grant.token, sessionId: sessionId)
                 token = grant.token
             }
@@ -1515,7 +1534,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 port: port,
                 token: token,
                 autoModeJSON: project.settings.autoModeJSON,
-                extraMcpServers: nil
+                extraMcpServers: nil,
+                fileLocks: SharedCheckoutGroup.isMember(session, of: project)
             )
             let resumed = try await runtime.resume(
                 sessionId: sessionId,
@@ -1528,7 +1548,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             try sessions.markResumed(sessionId)
             if let task = try tasks.get(taskId) {
                 if task.failed { try tasks.setFailed(taskId, false, reason: nil) }
-                if task.column != .running { try tasks.move(taskId, to: .running) }
+                if scope != .reviewer, task.column != .running { try tasks.move(taskId, to: .running) }
             }
         } catch {
             lastError = describe(error)

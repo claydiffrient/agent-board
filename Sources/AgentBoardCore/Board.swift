@@ -401,6 +401,10 @@ public struct Board: Sendable {
             if let session = try AgentSession.fetchOne(db, key: sessionId), !session.state.isActive {
                 return try Self.lateCompletion(db, task: task, session: session, summary: summary)
             }
+            // SPEC §5.1: a live session another one has taken the task from must not move it.
+            if let holder = try SessionStore.activeHolder(db, taskId: taskId), holder.sessionId != sessionId {
+                throw BoardError.sessionNotOnTask(sessionId: sessionId, taskId: taskId)
+            }
             if task.origin == .fixRound {
                 return try Self.completeFixRound(db, task: task, sessionId: sessionId, summary: summary)
             }

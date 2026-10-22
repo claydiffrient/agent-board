@@ -481,9 +481,15 @@ public final class WorkerToolHandler: ToolHandler {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(body)
-        return try board.complete(
-            taskId: task.id, sessionId: try requiredSession(identity), summary: String(decoding: data, as: UTF8.self)
-        )
+        let sessionId = try requiredSession(identity)
+        do {
+            return try board.complete(taskId: task.id, sessionId: sessionId, summary: String(decoding: data, as: UTF8.self))
+        } catch BoardError.sessionNotOnTask {
+            throw ToolError(
+                "Session \(sessionId) is not the agent currently working task \(task.id); another session holds it. "
+                    + "Nothing was recorded. Stop here."
+            )
+        }
     }
 
     /// Reached only by a first `report_complete`. A resend is answered before it gets here, because
