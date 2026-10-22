@@ -5,10 +5,12 @@ import XCTest
 @testable import AgentBoard
 @testable import AgentBoardCore
 
-/// Which notes the Notes list shows for a query. The row count comes from the `List`'s cells; which
-/// rows they are is proved by pixels, since SwiftUI `Text` leaves no string in the view tree: the
-/// searched screen, below its search bar, must draw exactly what a screen holding only the expected
-/// notes draws. Each zero is paired with a comparison that must differ.
+/// The view wiring under test: query -> `runSearch()` -> `matchIds` -> `visible`
+/// (`NotesView.swift:20-23,41-42,122-133`). Identity and order of a match are Core's
+/// `NoteStore.search`/`Array.filter` contract, owned by `NoteSearchTests`; this suite only proves the
+/// list narrows to the right count for each query, and restores on clear. Row counts come from the
+/// AppKit tree (`OffscreenMount.viewCount(ofClassNamed:)`), never the window server, so unlike a pixel
+/// diff they can't be thrown off by a first-use rendering cost or an animation tail.
 @MainActor
 final class NotesSearchRenderTests: XCTestCase {
     private struct Fixture {
@@ -21,83 +23,46 @@ final class NotesSearchRenderTests: XCTestCase {
     private static let timeout = Fixture(title: "Release checklist", sections: [("Gotchas", "the idle timeout counts sleep")])
     private static let all = [watchdog, sweep, timeout]
 
-    private var mounts: [OffscreenMount] = []
+    private var mount: OffscreenMount?
 
     override func tearDown() {
-        mounts.forEach { $0.close() }
-        mounts = []
+        mount?.close()
+        mount = nil
         super.tearDown()
     }
 
-    func testTwoMountsOfTheSameSearchedListAreIdentical() throws {
-        let first = try mount(Self.all, query: "idle", rows: 2)
-        let second = try mount(Self.all, query: "idle", rows: 2)
-        XCTAssertEqual(first.capture.diff(second.capture, columns: 0..<first.capture.width).count, 0)
-    }
-
-    /// "Release checklist" matches only through its section text.
+    /// Types every case into one mount in turn, each assertion checked before moving to the next:
+    /// "idle" narrows to 2 (a title-only match would give 1, so 2 proves the section-text match too),
+    /// "sweep" to 1, clearing restores all 3, the four FTS5-invalid forms still narrow to 2 and raise
+    /// no sheet, "cap:" to 1, and the three nothing-searchable forms leave all 3 listed.
     func testAQueryNarrowsTheListToTheMatchingNotes() throws {
-        let searched = try mount(Self.all, query: "idle", rows: 2)
-        let onlyTheMatches = try mount([Self.watchdog, Self.timeout], rows: 2)
-        XCTAssertEqual(belowSearchBar(searched, onlyTheMatches).count, 0,
-                       "the searched list draws something besides the two idle notes, or not in list order")
+        let mount = try makeMount()
 
-        let withoutTheSectionMatch = try mount([Self.watchdog], rows: 1)
-        XCTAssertGreaterThan(belowSearchBar(searched, withoutTheSectionMatch).count, 0,
-                             "a list missing the section match must differ, or the zero above proves nothing")
-        XCTAssertGreaterThan(belowSearchBar(try mount(Self.all, rows: 3), onlyTheMatches).count, 0,
-                             "without a query Port sweep must be listed, or the zero above proves nothing")
-    }
+        try type("idle", into: mount, expectingRows: 2)
+        try type("sweep", into: mount, expectingRows: 1)
+        try type("", into: mount, expectingRows: 3)
 
-    func testClearingTheQueryRestoresTheWholeList() throws {
-        let mounted = try mount(Self.all, rows: 3)
-        let unsearched = mounted.capture
-        type("sweep", into: mounted.mount)
-        let searched = try settledCapture(mounted.mount, rows: 1)
-        type("", into: mounted.mount)
-        let cleared = try settledCapture(mounted.mount, rows: 3)
-
-        let typed = Mounted(mount: mounted.mount, capture: searched, searchBarBottom: mounted.searchBarBottom)
-        XCTAssertEqual(belowSearchBar(typed, try mount([Self.sweep], rows: 1)).count, 0)
-        XCTAssertEqual(unsearched.diff(cleared, columns: 0..<unsearched.width).count, 0,
-                       "clearing the query left the list different from before it was typed")
-    }
-
-    /// Each of these is an FTS5 syntax error typed as-is. None may throw, raise an alert, or leave
-    /// the list empty when a note matches the words in it.
-    func testHalfTypedAndInvalidQueriesStillListTheMatchingNotes() throws {
-        let onlyTheMatches = try mount([Self.watchdog, Self.timeout], rows: 2)
-        for typed in ["\"idle", "idle -", "(idle", "idl"] {
-            let searched = try mount(Self.all, query: typed, rows: 2)
-            XCTAssertEqual(belowSearchBar(searched, onlyTheMatches).count, 0, typed)
-            XCTAssertNil(searched.mount.window.attachedSheet, "\(typed) raised a sheet")
+        for invalid in ["\"idle", "idle -", "(idle", "idl"] {
+            try type(invalid, into: mount, expectingRows: 2)
+            XCTAssertNil(mount.window.attachedSheet, "\(invalid) raised a sheet")
         }
-        let cap = try mount(Self.all, query: "cap:", rows: 1)
-        XCTAssertEqual(belowSearchBar(cap, try mount([Self.watchdog], rows: 1)).count, 0)
-    }
 
-    func testAQueryWithNothingSearchableLeavesTheListAlone() throws {
-        let whole = try mount(Self.all, rows: 3)
-        for typed in ["\"", "-", "*"] {
-            XCTAssertEqual(belowSearchBar(try mount(Self.all, query: typed, rows: 3), whole).count, 0, typed)
+        try type("cap:", into: mount, expectingRows: 1)
+
+        for nothingSearchable in ["\"", "-", "*"] {
+            try type(nothingSearchable, into: mount, expectingRows: 3)
         }
     }
 
     // MARK: fixtures
 
-    private struct Mounted {
-        let mount: OffscreenMount
-        let capture: Capture
-        let searchBarBottom: CGFloat
-    }
-
-    private func mount(_ notes: [Fixture], query: String = "", rows: Int) throws -> Mounted {
+    private func makeMount() throws -> OffscreenMount {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
             name: "notes", repoPath: "/tmp/notes-search-\(UUID().uuidString)", baseBranch: "main",
             worktreeRoot: "/tmp/notes-search-worktrees", memoryDir: nil
         )
-        for (offset, fixture) in Self.all.enumerated() where notes.contains(where: { $0.title == fixture.title }) {
+        for (offset, fixture) in Self.all.enumerated() {
             let note = try NoteStore(db).create(projectId: project.id, title: fixture.title, sections: fixture.sections)
             try db.writer.write { db in
                 try db.execute(
@@ -107,58 +72,44 @@ final class NotesSearchRenderTests: XCTestCase {
             }
         }
         let mount = OffscreenMount(NotesView(project: project).environment(renderEnvironment(db: db)))
-        mounts.append(mount)
+        self.mount = mount
         mount.window.layoutIfNeeded()
-        // Typed before the notes ever arrive, so the List's first real content is already the
-        // filtered set: `runSearch` queries the database directly, not `notes.value`, so it finds
-        // the right matches even while the list is still empty. Typing only after the unfiltered
-        // rows had already settled (the previous order here) made the List remove a row live —
-        // an animated transition whose tail a capture can settle on early, mismatching a mount that
-        // was never animated at all. Filtering from the first paint means every mount in this file
-        // only ever inserts rows, never removes one, so there is no transition left to race.
-        if !query.isEmpty { type(query, into: mount) }
-        try waitForRows(rows, in: mount)
+        try waitForRows(Self.all.count, in: mount)
+        return mount
+    }
+
+    private func type(
+        _ text: String, into mount: OffscreenMount, expectingRows rows: Int,
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws {
         let field = try searchField(in: mount)
-        let frame = field.convert(field.bounds, to: nil)
-        return Mounted(
-            mount: mount, capture: try settledCapture(mount, rows: rows),
-            searchBarBottom: mount.window.frame.height - frame.minY + 12
-        )
-    }
-
-    /// `OffscreenMount.capture` forces exactly one fresh window-server surface (`demandAFreshSurface`,
-    /// a resize) before polling for pixel stability, then trusts whatever it settles on. That one
-    /// refresh is measured elsewhere in this suite to reliably show the window's state at the moment
-    /// it fires — but nothing calls it again afterward, so a capture that locks onto a stale-but-
-    /// self-consistent surface (the window server simply never recomposited again) reads as settled
-    /// pixel-for-pixel while never matching what `rowCount` already confirms the real AppKit tree
-    /// shows. A second, independent `capture()` call forces its own fresh resize at a strictly later
-    /// moment; requiring it to agree with the first catches that gap without touching the shared
-    /// helper every other render-test file also depends on.
-    private func settledCapture(_ mount: OffscreenMount, rows: Int) throws -> Capture {
-        var last = try mount.capture { _ in mount.rowCount == rows }
-        for _ in 0..<3 {
-            let next = try mount.capture { _ in mount.rowCount == rows }
-            if last.diff(next, columns: 0..<last.width).count == 0 { return next }
-            last = next
-        }
-        XCTFail("two independent captures of the same settled list never agreed")
-        return last
-    }
-
-    private func waitForRows(_ count: Int, in mount: OffscreenMount) throws {
-        let clock = SuspendingClock()
-        let deadline = clock.now.advanced(by: .seconds(10))
-        while clock.now < deadline, mount.rowCount != count {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        }
-        XCTAssertEqual(mount.rowCount, count, "the list never drew its notes")
-    }
-
-    private func type(_ text: String, into mount: OffscreenMount) {
-        guard let field = try? searchField(in: mount) else { return XCTFail("no search field mounted") }
         field.stringValue = text
         field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
+        try waitForRows(rows, in: mount, "\(text.isEmpty ? "(cleared)" : text)", file: file, line: line)
+    }
+
+    /// Waits for the row count to settle on `count` and hold for several consecutive polls, so a
+    /// transient mid-animation count equal to the target (while the list is still adding or removing
+    /// other rows on the way to its real state) can't be mistaken for having arrived.
+    private func waitForRows(
+        _ count: Int, in mount: OffscreenMount, _ message: String = "",
+        agreeing: Int = 5, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let clock = SuspendingClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        var consecutive = 0
+        while clock.now < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            mount.window.layoutIfNeeded()
+            mount.window.displayIfNeeded()
+            if mount.rowCount == count {
+                consecutive += 1
+                if consecutive >= agreeing { return }
+            } else {
+                consecutive = 0
+            }
+        }
+        XCTFail("the list never settled on \(count) row(s) for query \(message): has \(mount.rowCount)", file: file, line: line)
     }
 
     private func searchField(in mount: OffscreenMount) throws -> NSTextField {
@@ -170,11 +121,6 @@ final class NotesSearchRenderTests: XCTestCase {
         }
         XCTAssertEqual(fields.count, 1, "the screen should hold exactly one editable field, its search")
         return try XCTUnwrap(fields.first)
-    }
-
-    private func belowSearchBar(_ left: Mounted, _ right: Mounted) -> PixelDiff {
-        let top = max(left.searchBarBottom, right.searchBarBottom)
-        return left.capture.diff(right.capture, columns: 0..<left.capture.width, rows: left.capture.rows(below: top))
     }
 }
 
