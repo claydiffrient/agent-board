@@ -1031,7 +1031,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §13.1 fixing: an ordinary worker on the round's branch, cut at the head its triage read
     /// once the PR's head ref is fetched from origin, in a worktree named for the task. A retry reuses
-    /// both. The role's roster agent and model apply unless the caller names an agent.
+    /// both. A round holding a conflict also fetches the base, which its fixer merges. The role's roster
+    /// agent and model apply unless the caller names an agent.
     private func spawnFixer(
         task: BoardTask, rosterAgentId: String?, project: Project, port: Int
     ) async throws -> WorkerSpawn {
@@ -1052,12 +1053,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let manager = worktreeManager(for: project)
         let headRef = watch.headRef
         let baseHeadOid = round.baseHeadOid
+        let mergeBase = try prWatches.items(watchId: watch.id)
+            .contains { $0.fixTaskId == task.id && $0.kind == .conflict && $0.state == .open } ? watch.baseRef : nil
         do {
             try await offMain {
                 _ = try manager.fetchRemoteTip(headRef)
                 guard try manager.fetchCommitIfMissing(baseHeadOid, from: "origin") else {
                     throw AgentRuntimeError("origin has no commit \(baseHeadOid)")
                 }
+                if let mergeBase { _ = try manager.fetchRemoteTip(mergeBase) }
             }
         } catch {
             throw SupervisorError.pullRequestNotFetched(describe(error))
@@ -2070,6 +2074,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 case .fixing: await startFixRound(watch, project: project)
                 case .checking: await advanceCheck(watch, project: project)
                 case .publishing: await publishRound(watch, project: project)
+                case .stale:
+                    if let restarted = try? prWatches.restartStale(watchId: watch.id) {
+                        await startTriageIfSettled(restarted, project: project)
+                    }
                 default: break
                 }
                 announceDecisions(watchId: watch.id, project: project)
@@ -2147,9 +2155,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// SPEC §13.1 fixing and §13.5's §8 amendment: the round's one fixer task, spawned with no
-    /// approval while follow-through is on, under the settling holds and every §8 cap. A fixer starts
-    /// here once per check, only while the task's fixer sessions do not outnumber its failed checks, so
-    /// a failed fixer is not retried in a loop. A round left with nothing to fix ends.
+    /// approval while follow-through is on, under the settling holds and every §8 cap. A fixer that
+    /// reported starts again only after a failed check; one that ended without a report is retried
+    /// until `failedSessionsBeforePark` in a row park the watch. A round left with nothing to fix ends.
     private func startFixRound(_ watch: PRWatch, project: Project) async {
         do {
             guard let round = try prWatches.currentRound(watchId: watch.id) else { return }
@@ -2158,8 +2166,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try board.endFixRoundWithoutFixes(watchId: watch.id)
                 return
             }
+            if try board.parkIfFixersFailing(watchId: watch.id) { return }
             guard try tasks.get(taskId)?.column == .ready,
-                  try sessions.forTask(taskId).filter({ $0.reviewHead == nil }).count <= round.checkFailures,
+                  try sessions.forTask(taskId).filter({ $0.reviewHead == nil && $0.state == .completed }).count
+                      <= round.checkFailures,
                   !isFollowThroughHeld(project: project),
                   case .proceed = try board.requestSpawn(taskId: taskId, requestedBy: "follow-through")
             else { return }

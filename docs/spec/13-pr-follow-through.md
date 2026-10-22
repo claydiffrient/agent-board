@@ -100,7 +100,8 @@ triage.
   decision item rather than restarting the round. Removing the label
   re-evaluates it: readyToVerify if it still qualifies, otherwise watching.
 - **stale** *(phase 3 for a publish; phase 4 for the rest)* — the head moved
-  out from under the round. Drop the round's worktree and go to settling.
+  out from under the round. Drop the round's worktree; the next poll goes on to
+  settling, so the page shows the restart under In progress until then.
 - **parked** *(phase 2 for the forked case and failed triages; phase 3 for a
   stacked PR, a round's third failed check, and a refused publish; phase 4 for the round-cap and fixer cases)* — reached
   when the round cap is hit, a round fails its check three times, three
@@ -108,6 +109,10 @@ triage.
   project's default branch and the stack needs a restack the human must do),
   or the PR is from a fork. Waits for the human to Resume or Stop watching
   from the Pull Requests page (§13.4).
+- **stopped** *(phase 4)* — the human chose Stop watching on a parked PR. Its
+  open items are dismissed, the poll records nothing more on it, and the page
+  lists it nowhere; the row stays so the next poll's search does not start a new
+  watch. A PR that merges or closes still settles to merged or closed.
 - **merged** / **closed** *(phase 1)* — terminal states. The round tasks are
   archived.
 
@@ -125,7 +130,13 @@ never resolved and an approving body is not feedback. The poll itself moves a
 watch only among watching, settling, readyToVerify and verified, by the rules
 above, and a
 watch whose PR has left the open list settles to merged or closed by
-`gh pr view`. A PR converted back to draft still appears in the search, marked
+`gh pr view`. A PR whose GitHub `mergeable` is `CONFLICTING` gets one item of
+kind `conflict`, keyed `conflict:<head oid>`, which is handled once GitHub can
+merge that head or the head moves. A PR whose head branch lives in another
+repository (`isCrossRepository`) is a fork: the poll parks its watch from
+watching, settling, readyToVerify or verified, with a `parked_reason` naming
+the fork, since publishing pushes only to the project's `origin`. Resuming a
+fork parks it again at the next poll. A PR converted back to draft still appears in the search, marked
 draft; its watch is deleted with its items, and undrafting it brings it back
 through the search as a new watch. A `gh` that is missing or not logged in
 records one `pr_poll_problem` row per enabled project, which raises that
@@ -162,7 +173,10 @@ shutdown order on the project, a Mac whose providing power source IOKit reports
 as anything but AC (an unreadable source counts as AC), the triage and fixer
 sessions started since local midnight having cost `dailyBudgetUSD` or more, or a §8
 spawn cap refusing. A hold leaves it settling and is re-checked on the next
-poll. Leaving increments `round`, records a `pr_round` holding the head oid it
+poll. Once `roundCap` rounds have started since the watch was last resumed
+(`resumed_at`, or ever), interrupted and failed triages aside, leaving parks it
+instead, with a `parked_reason` naming the cap; this applies to the answered-fix
+round below as well. Leaving increments `round`, records a `pr_round` holding the head oid it
 starts from, and moves the watch to triaging in one transaction that only a
 settling watch passes, so two polls never start two rounds; then it spawns the
 round's triager (§13.2), whose `pr_triage` row carries the round. A watch
@@ -197,15 +211,23 @@ round's one task, in a transaction that only a fixing watch whose round has
 no task yet passes: a `ready` task of type `code`, origin `fix_round`, titled
 "Fix round r of #n: …", its model `roles.fixer.model` or unset. Its body names
 the round branch, says new commits only with no amend, rebase or push, and
-holds a section per open `fix` item, each built like a follow-up's body. The
+holds a section per open `fix` item, each built like a follow-up's body; a
+`conflict` item's section says to resolve it by merging `origin/<base>` into
+the round branch and committing the merge, never by rebasing, and its fixer's
+spawn also fetches the base into `refs/remotes/origin/<base>`. The
 task goes in the round's `fix_task_id` and in each of those items'
 `fix_task_id`, and every `backlog` `follow_through` task of type `code` that an
 item of the watch names — a fix task phase 2 made — is closed with a reason
 naming the round.
 
 The fixer is spawned only while its task is `ready` and its fixer sessions
-(those with no `review_head`) do not outnumber the round's `check_failures`:
-once per check, so a fixer that failed is not respawned in a loop. A fixing
+(those with no `review_head`) that reported do not outnumber the round's
+`check_failures`: one that reported starts again only after a failed check. A
+fixer that ends without a report puts its task back in `ready` (never `review`,
+since the next fixer reuses the worktree and branch) and is retried; the third
+in a row, not counting one wound down for a shutdown order, ends the round
+`fixer_failed`, closes its task, and parks the watch with the last session's
+stop reason. A fixing
 round with no task and no open `fix` item — every one answered on GitHub or
 reopened for triage before its task was made — ends with outcome `triaged`,
 and the watch goes to settling when an item awaits triage, else to watching. It holds under the
@@ -340,8 +362,8 @@ next round. No reply is ever posted for it (§13.2).
 A round's triage that never starts, or whose task is closed (§13.2), fails
 the round: its outcome becomes `triage_failed` and the watch returns to
 settling, so the next poll retries with a new round. The third failed round in
-a row, not counting interrupted ones, parks the watch instead, with a
-`parked_reason` naming the last failure. A parked watch raises its project's
+a row since the watch was last resumed, not counting interrupted ones, parks
+the watch instead, with a `parked_reason` naming the last failure. A parked watch raises its project's
 attention signal, its detail the PR number and that reason. A shutdown order
 stops a running triager rather than enrolling it: its round's outcome becomes
 `interrupted`, which never counts toward parking, and the watch waits in
@@ -363,6 +385,9 @@ Triage gives every open item exactly one verdict:
   that commit.
 - **follow_up** — out of scope for this PR (a refactor belongs in its own).
   Creates a backlog task; the reply says the work is tracked separately.
+A `conflict` item is always `fix`: the built-in prompt says the fixer merges
+the base into the branch.
+
 - **decision** — a trade-off, a disagreement with the reviewer, or anything
   that sets direction. Needs the human: triage's question and its options
   surface on the Pull Requests page's Needs you group (§13.4) rather than
@@ -491,6 +516,15 @@ on at all.
   **In progress**, **Waiting on reviewers**, **Verified**, and **Parked**,
   with a project filter. Needs you and the decision items inside it ship in
   phase 2; the other groups read directly off `pr_watch.state` from phase 1.
+- **Parked (phase 4).** A parked row shows its `parked_reason`, and offers
+  **Resume** and **Stop watching** in place of Pause. Resume
+  (`PRWatchStore.resume`) returns the watch to settling, clears the reason, and
+  stamps `resumed_at`, which restarts both the round cap and the failed-session
+  streak, so a resumed watch's next single failure does not park it again. Each
+  open `fix` item moves to the round after the watch's, so the next round takes
+  it up without a fresh triage. Stop watching (`PRWatchStore.stopWatching`)
+  dismisses the open items and moves the watch to stopped (§13.1). A stale row
+  shows "restarted: head moved" while it waits for the next poll.
 - Row actions: **Mark verified** (`gh pr edit --add-label <label>`), **Walk
   me through it** (shown only when `verifyCommand` is set), **Send back**
   (phase 4; shown only while the watch is readyToVerify or verified), **Open
