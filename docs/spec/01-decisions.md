@@ -71,6 +71,17 @@ branch, and there is no tool that merges a pull request.
 They never push, never open a pull request, and the two controls in §8 that
 enforce it are unchanged for them.
 
+**D8 amended again, for PR follow-through (§13).** The app, never a worker,
+may fast-forward push a round branch to the head ref of an open pull request
+the human authored, without a human approval. This is allowed only after the
+reviewer role has accepted the round, every item in the round is graded fixed
+or moot, and the project's tests pass (§13.1 publishing, §13.2 verdicts).
+Everything else about pushing is unchanged: creating a branch, opening a
+pull request, any non-fast-forward push, and any push to a pull request
+already verified all stay human-gated or forbidden, exactly as before this
+amendment. `push_branch` and `open_pull_request` (§6) are unaffected and still
+create an approval row per the amendment above.
+
 Pivots named at decision time, to be designed for but not built:
 
 - **D16 → owned PTYs.** All process interaction goes through an `AgentRuntime`

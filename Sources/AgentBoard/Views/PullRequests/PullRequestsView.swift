@@ -123,15 +123,15 @@ struct PullRequestsView: View {
             )
             ForEach(listing.decisions) { decision in
                 PRDecisionRow(decision: decision) { choice in
-                    answer(decision, choice: choice, project: project)
+                    answer(decision, choice: choice)
                 }
             }
         }
     }
 
-    private func answer(_ decision: PRItem, choice: PRDecisionChoice, project: Project?) -> Bool {
+    private func answer(_ decision: PRItem, choice: PRDecisionChoice) -> Bool {
         do {
-            try actions.answer(decision, choice: choice, project: project)
+            try actions.answer(decision, choice: choice)
             return true
         } catch {
             errorMessage = errorText(error)
@@ -184,12 +184,9 @@ struct PullRequestActions {
         try PRWatchStore(db).setPaused(paused, watchId: watch.id)
     }
 
-    func answer(_ decision: PRItem, choice: PRDecisionChoice, project: Project?) throws {
+    func answer(_ decision: PRItem, choice: PRDecisionChoice) throws {
         guard let id = decision.id else { return }
-        let fixer = project?.settings.prFollowThrough.roles.fixer
-        try Board(db).answerDecision(
-            itemId: id, choice: choice, fixerModel: fixer?.model ?? project?.settings.defaultModel
-        )
+        try Board(db).answerDecision(itemId: id, choice: choice)
     }
 }
 

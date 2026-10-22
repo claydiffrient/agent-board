@@ -64,6 +64,14 @@ Per project, overridable:
   start, so a short call returning cannot end a long one's grace.
 - **Autonomy is off on first run.** Every `spawn_worker` creates a pending
   approval until you turn it on. This is a setting, not a rebuild.
+- **PR follow-through spawns skip approval (§13).** In a project with the
+  feature turned on, the follow-through `triage` (§13.2) and `fixer` (§13.1)
+  spawns create no pending approval, autonomy setting regardless — the one
+  exception to the bullet above. Every cap in this section still applies
+  unchanged: concurrent workers, the token cap, the daily budget (§13.3), and
+  the session ceiling. Only the approval step is skipped, the same way a
+  rostered agent is exempt from the elapsed and idle caps today without being
+  exempt from spend.
 - **Stopping is not destructive.** Every session has a pinned `--session-id`, so
   a capped agent resumes exactly where it stopped.
 - **Pause All** stops every managed session in the project via `claude stop`.

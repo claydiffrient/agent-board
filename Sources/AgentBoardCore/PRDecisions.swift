@@ -10,13 +10,11 @@ public enum PRDecisionChoice: Sendable, Equatable {
 extension Board {
     /// Answers an open decision from the Pull Requests page's Needs you group (SPEC §13.4). The
     /// answer is kept in `decision_answer`, and the item moves to the next round with the answer as
-    /// its approach and the chosen option's verdict: a `fix` gets its backlog code task the way a
-    /// triaged fix does, and an `answer` is handled with the option's `reply_body`. A typed reply is
-    /// an `answer` whose reply is the text.
+    /// its approach and the chosen option's verdict: a `fix` stays open for that round's fixer, and an
+    /// `answer` is handled with the option's `reply_body`, if any. A typed reply is an `answer` whose
+    /// reply is the text.
     @discardableResult
-    public func answerDecision(
-        itemId: Int64, choice: PRDecisionChoice, fixerModel: String?, now: Int64 = .nowMillis
-    ) throws -> PRItem {
+    public func answerDecision(itemId: Int64, choice: PRDecisionChoice, now: Int64 = .nowMillis) throws -> PRItem {
         try db.writer.write { db in
             guard var item = try PRItem.fetchOne(db, key: itemId), item.isOpenDecision,
                   let watch = try PRWatch.fetchOne(db, key: item.watchId)
@@ -36,13 +34,13 @@ extension Board {
                 item.replyBody = answer
             }
             guard !answer.isEmpty else { throw PRVerdictRejection("The answer is empty.") }
-            guard item.verdict == .fix || (item.verdict == .answer && item.replyBody?.isEmpty == false) else {
-                throw PRVerdictRejection("Item \(itemId)'s option \"\(answer)\" is neither a fix nor a reply.")
+            guard item.verdict == .fix || item.verdict == .answer else {
+                throw PRVerdictRejection("Item \(itemId)'s option \"\(answer)\" is neither a fix nor an answer.")
             }
             item.decisionAnswer = answer
             item.approach = answer
             item.round = watch.round + 1
-            _ = try Self.applyVerdict(db, to: &item, watch: watch, fixerModel: fixerModel, now: now)
+            _ = try Self.applyVerdict(db, to: &item, watch: watch, now: now)
             item.updatedAt = now
             try item.update(db)
             return item
