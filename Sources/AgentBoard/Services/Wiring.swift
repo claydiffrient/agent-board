@@ -42,10 +42,13 @@ enum Wiring {
 
     static func tools(db: AppDatabase, sink: LateBoundSink, scopedCommits: (any ScopedCommitting)?) -> ScopedToolHandler {
         let orchestrator = OrchestratorToolHandler(db: db, control: sink, events: sink)
+        let commitsInFlight = CommitsInFlight()
         return ScopedToolHandler(
-            worker: WorkerToolHandler(db: db, control: sink, events: sink, scopedCommits: scopedCommits),
+            worker: WorkerToolHandler(
+                db: db, control: sink, events: sink, scopedCommits: scopedCommits, commitsInFlight: commitsInFlight
+            ),
             orchestrator: orchestrator,
-            reviewer: ReviewerToolHandler(db: db, control: sink, events: sink),
+            reviewer: ReviewerToolHandler(db: db, control: sink, events: sink, commitsInFlight: commitsInFlight),
             coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: sink)
         )
     }

@@ -1,4 +1,4 @@
-import AgentBoardBridge
+@testable import AgentBoardBridge
 import AgentBoardCore
 import AgentBoardServer
 import Foundation
@@ -134,6 +134,48 @@ final class SlowSharedCommitTests: XCTestCase {
 
         XCTAssertNotNil(collected["commit"]?.stringValue, "\(collected)")
         XCTAssertEqual(commits.requests.map(\.message), ["Add my work"], "the collecting call started a second commit")
+    }
+
+    func testNoAcceptLandsTheTaskWhileItsCommitIsStillRunning() async throws {
+        let commits = RecordingScopedCommits()
+        let gate = FileManager.default.temporaryDirectory.appendingPathComponent("commit-gate-\(UUID().uuidString)")
+        commits.gate = gate
+        defer { try? FileManager.default.removeItem(at: gate) }
+        let f = try BridgeFixture.make(scopedCommits: commits, commitAnswerWithin: .seconds(1))
+        try f.setReviewLevel(.none)
+        let mine = try f.task("Mine", column: .running)
+        try f.sharedSession("mine", taskId: mine.id)
+        let me = f.workerIdentity(sessionId: "mine", taskId: mine.id)
+        _ = await f.preToolUseWrite(f.repoFile("Sources/Mine.swift"), sessionId: "mine", identity: me)
+        let pending = try await f.call("commit_my_work", ["message": .string("Add my work")], as: me)
+        XCTAssertTrue(pending.text.contains("still running"), pending.text)
+
+        await XCTAssertThrowsErrorAsync(
+            try await f.call("report_complete", ["summary": .string("Done.")], as: me),
+            "report_complete accepted the task while its commit was still running"
+        )
+        try f.tasks.move(mine.id, to: .review)
+        await XCTAssertThrowsErrorAsync(
+            try await f.call("accept_task", ["verdict": .string("Fine.")], as: f.reviewerIdentity(sessionId: "rita", taskId: mine.id)),
+            "accept_task accepted the task while its worker's commit was still running"
+        )
+
+        let accepted = await f.control.accepted
+        XCTAssertEqual(accepted.map(\.taskId), [])
+        XCTAssertEqual(try f.tasks.get(mine.id)?.column, .review)
+    }
+
+    func testALateDeliveryLeavesTheSessionsNewerCommitInFlight() async throws {
+        let inFlight = CommitsInFlight()
+        let first = await inFlight.commit(sessionId: "mine", taskId: "task") { .nothingToCommit(paths: []) }
+        _ = await first.commit.result
+        await inFlight.delivered(sessionId: "mine", id: first.id)
+        _ = await inFlight.commit(sessionId: "mine", taskId: "task") { .nothingToCommit(paths: []) }
+
+        await inFlight.delivered(sessionId: "mine", id: first.id)
+
+        let third = await inFlight.commit(sessionId: "mine", taskId: "task") { .nothingToCommit(paths: []) }
+        XCTAssertFalse(third.started, "a late delivery of the first commit cleared the second, so a third ran beside it")
     }
 }
 

@@ -103,8 +103,13 @@ nobody reviewed.
   whose process is already gone — absent from `claude agents`, or `starting`
   with no short id and nothing listed under its id — is ended as vanished and
   does not block the decision; only an agent still listed as live that refuses
-  to stop aborts the accept or reopen before anything is written. The accept
-  then lands the task's branch, below, and only after that is every attempt's
+  to stop aborts the accept or reopen before anything is written. An accept a
+  tool call makes (`report_complete` under no review, `accept_task`) is the
+  exception to that order: it moves the task to `done` and revokes every
+  session's grant before answering, and stops the live sessions after the
+  answer (§6). There a session that refuses to stop leaves the task in `done`
+  with `landing` `unlanded` and its worktree kept, reported as a `decision`.
+  The accept then lands the task's branch, below, and only after that is every attempt's
   worktree removed, running the project's teardown hook first (§3.1, "Removing
   a worktree") and then any `WorktreeRemove` hook in `~/.claude/settings.json`,
   with `agentboard/<task-id>` deleted once it is merged into the
