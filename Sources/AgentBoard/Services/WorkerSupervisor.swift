@@ -2426,7 +2426,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func dropRoundWorktree(_ task: BoardTask, project: Project) async {
         guard let taskSessions = try? sessions.forTask(task.id), !taskSessions.contains(where: \.state.isActive) else { return }
-        await startTeardown(claimTeardown(of: taskSessions), task: task, project: project, report: nil, landingNotice: nil)
+        await startTeardown(
+            claimTeardown(of: ownWorktreePaths(task.id, sessions: taskSessions, project: project)),
+            task: task, project: project, report: nil, landingNotice: nil
+        )
     }
 
     /// SPEC §13.2: with `postFactualReplies` on, each handled thread item still owed a reply gets one and
