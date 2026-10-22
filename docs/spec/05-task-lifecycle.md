@@ -124,14 +124,21 @@ nobody reviewed.
   report says so under **Worktree cleanup:**, naming the worktree and, for a
   dirty one, its uncommitted paths (the first 20, then a count), so the
   orchestrator can act on a leftover like a `yarn.lock` its setup wrote. The
-  same lines go on the task's progress. With a teardown hook set, the removal
-  runs after the accept returns rather than inside it, on a shared branch too —
-  the hook may run for minutes and the accept may be answering an MCP call
+  same lines go on the task's progress. An accept that answers an MCP call
   (`report_complete` under a no-review level, a rostered reviewer's
-  `accept_task`), which Claude Code abandons after 60 seconds. Its findings are appended to the acceptance
+  `accept_task`) returns once the task is in `done` and its grants are
+  revoked; the landing and the removal run after it (§6). Landing a shared
+  branch moves the project's checkout off it with `git checkout`, which runs
+  the repository's `post-checkout` hook, and removal runs `WorktreeRemove`
+  hooks, so neither has a bound the answer could wait out. The worktrees are
+  claimed before the answer, so no reap takes one for an orphan while the
+  landing runs, and a landing that goes wrong still arrives as its `decision`
+  report. A human's Accept lands inline. With a teardown hook set, the
+  removal runs after the accept returns in every case, on a shared branch too,
+  because the hook may run for minutes. Its findings are appended to the acceptance
   report while the orchestrator has not read it, and otherwise queued as a
-  `decision` report of their own. With no hook, the removal runs inside the
-  accept, as it always has. Discarding a task removes its worktrees the same
+  `decision` report of their own. With no hook, a human's Accept removes the
+  worktrees inside the accept. Discarding a task removes its worktrees the same
   way before the task is deleted; the task's progress goes with it, so its
   findings are kept only in the discard's `decision` report.
 
@@ -595,7 +602,10 @@ than one that is finished; they merge nothing and are not part of this sequence.
 2. Orchestrator calls `request_integration(epic_id)`. This creates an approval
    row and a macOS notification. Nothing proceeds until you approve.
 3. On approval, Agent Board creates an integration worktree on
-   `agentboard/epic-<id>` and spawns an integrator worker. The epic moves to
+   `agentboard/epic-<id>` and spawns an integrator worker. As for any task
+   (§3.1), the worktree is created in setup, after the spawn has answered, so
+   `spawn_worker` on an integration task does not wait out the repository's
+   `post-checkout` hook. The epic moves to
    `integrating` in `WorkerSupervisor.spawnIntegrator`, after the integrator's
    session row is written and before its process is launched, so a spawn that
    throws leaves the epic `active` rather than stranded mid-integration. An

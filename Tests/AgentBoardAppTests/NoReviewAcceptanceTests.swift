@@ -93,8 +93,38 @@ final class NoReviewAcceptanceTests: XCTestCase {
         XCTAssertNil(identity, "the worker token still resolves after an automatic accept")
         XCTAssertTrue(try XCTUnwrap(fixture.grants.forSession(worker.session.sessionId).first).isRevoked)
 
-        // 3. worktree removal, and the merged branch with it
+        // 3. worktree removal, and the merged branch with it, which run after the answer
+        await fixture.supervisor.waitForTeardowns()
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
         XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(blocker.id)"))
+    }
+
+    /// SPEC §6: landing can run repository hooks, so the answer cannot wait for it.
+    func testReportCompleteAnswersWhileTheLandingIsStillInARefHook() async throws {
+        try setReviewLevel(.none)
+        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Ship search", goal: nil)
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        let done = try task("build the parser", epicId: epic.id)
+        let session = try fixture.worktreeWorker(task: done, state: .running)
+        try fixture.commitInto(try XCTUnwrap(session.worktreePath))
+        let grant = try fixture.grants.issue(projectId: fixture.project.id, scope: .worker, taskId: done.id)
+        try fixture.grants.bind(token: grant.token, sessionId: session.sessionId)
+        let gate = try fixture.installGatedHook(
+            "reference-transaction", when: "[ \"$1\" = prepared ] && grep -q ' refs/heads/\(epic.branch)$'"
+        )
+        let tip = try fixture.git(["rev-parse", "agentboard/\(done.id)"]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let text = try await reportComplete(task: done, session: session, token: grant.token)
+
+        XCTAssertTrue(text.contains("straight to Done"), text)
+        XCTAssertEqual(try fixture.tasks.get(done.id)?.column, .done)
+        XCTAssertFalse(
+            try fixture.manager.isMerged(commit: tip, into: "refs/heads/\(epic.branch)"),
+            "report_complete waited for the accepted branch to land before answering"
+        )
+        FileManager.default.createFile(atPath: gate.path, contents: nil)
+        await fixture.supervisor.waitForTeardowns()
+        XCTAssertTrue(try fixture.manager.isMerged(commit: tip, into: "refs/heads/\(epic.branch)"))
+        XCTAssertEqual(try fixture.tasks.get(done.id)?.landing, .landed)
     }
 }

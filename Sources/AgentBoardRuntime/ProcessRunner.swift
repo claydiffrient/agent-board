@@ -130,9 +130,14 @@ enum ProcessRunner {
         arguments: [String],
         cwd: URL? = nil,
         stdin: Data? = nil,
+        timeout: TimeInterval? = nil,
         label: String
     ) throws -> CommandResult {
-        let result = try run(executable: executable, arguments: arguments, cwd: cwd, stdin: stdin)
+        let result = if let timeout {
+            try run(executable: executable, arguments: arguments, cwd: cwd, timeout: timeout)
+        } else {
+            try run(executable: executable, arguments: arguments, cwd: cwd, stdin: stdin)
+        }
         guard result.status == 0 else {
             throw AgentRuntimeError(
                 "\(label) \(arguments.joined(separator: " ")) exited \(result.status)\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)"

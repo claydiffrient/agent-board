@@ -146,6 +146,28 @@ final class ClaudeCLITests: XCTestCase {
         XCTAssertEqual(args.last, "/cfg/s.json")
     }
 
+    /// SPEC §6: `stop_worker` waits on `claude stop` inside Claude Code's 60s wait for its answer.
+    func testStopGivesUpOnAClaudeThatDoesNotAnswer() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claude-stop-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let gate = dir.appendingPathComponent("gate")
+        let claude = dir.appendingPathComponent("claude")
+        try """
+        #!/bin/sh
+        i=0; while [ ! -e '\(gate.path)' ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+        """.write(to: claude, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claude.path)
+        let runtime = BackgroundSessionRuntime(queryTimeout: 1, claudeCandidates: [claude.path])
+
+        do {
+            try await runtime.stop(shortId: "abc12345")
+            XCTFail("claude stop was waited on for as long as it took")
+        } catch {
+            XCTAssertTrue("\(error)".contains("did not finish within 1s"), "\(error)")
+        }
+    }
+
     func testAttachCommandTargetsClaude() {
         let command = BackgroundSessionRuntime().attachCommand(shortId: "abc12345")
         XCTAssertEqual(command.arguments.suffix(2), ["attach", "abc12345"])

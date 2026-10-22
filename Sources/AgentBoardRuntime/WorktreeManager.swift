@@ -635,8 +635,8 @@ public struct WorktreeManager: Sendable {
     }
 
     /// Branches absent from the repo are reported as unmerged rather than raising.
-    public func mergeStatus(worktree: URL, branches: [String]) throws -> [String: Bool] {
-        let output = try gitChecked(["branch", "--merged", "HEAD", "--format=%(refname:short)"], cwd: worktree).stdout
+    public func mergeStatus(into ref: String, branches: [String]) throws -> [String: Bool] {
+        let output = try git(["branch", "--merged", ref, "--format=%(refname:short)"]).stdout
         let merged = Set(
             output.split(separator: "\n")
                 .map { $0.trimmingCharacters(in: .whitespaces) }
