@@ -603,7 +603,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
                     triage: .init(model: "example-triage"), fixer: .init(model: "example-fixer"),
                     reviewer: .init(model: "example-reviewer"), followupCheck: .init(model: "example-check")
                 ),
-                privateTerms: ["Globex"]
+                privateTerms: ["Globex"], checksAwaitingVerification: ["example-verification", "example-sign-off"]
             )
         }
         let mounted = try mount(tab: .prFollowThrough, configure: configure)
@@ -611,11 +611,12 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let roleModels = ["example-triage", "example-fixer", "example-reviewer", "example-check"]
         XCTAssertEqual(
             mounted.fields.map(\.stringValue),
-            ["15", "2", "", "verified-example", "example-verify {url}", ""] + roleModels
+            ["15", "2", "", "verified-example", "example-verify {url}", "example-verification, example-sign-off", ""]
+                + roleModels
         )
         XCTAssertEqual(
             mounted.fields.map(\.placeholderString),
-            [nil, nil, "Spawn caps", "e.g. verified", "e.g. open {url}", "Press Return to add"]
+            [nil, nil, "Spawn caps", "e.g. verified", "e.g. open {url}", "Comma-separated check names", "Press Return to add"]
                 + Array(repeating: "Model id", count: roleModels.count)
         )
         XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off, .on])
@@ -659,6 +660,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         XCTAssertEqual(saved.verifyCommand, "example-verify {url}")
         XCTAssertEqual(saved.settleMinutes, 0)
         XCTAssertEqual(saved.roundCap, 1)
+        XCTAssertEqual(ProjectSettingsSheet.checkNames(" a / b, ,c,a / b "), ["a / b", "c"])
 
         let (_, project) = try storedProject { $0.prFollowThrough = saved }
         let sheet = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})

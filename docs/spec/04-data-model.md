@@ -599,7 +599,9 @@ holds every work-specific value — `enabled`, `verificationLabel`,
 `requireApproval`, `settleMinutes`, `roundCap`, `dailyBudgetUSD`,
 `verifyCommand`, `postFactualReplies`, `postFactualRepliesSince` (when
 replies were last turned on, §13.2), `roles` (`triage`, `fixer`, `reviewer`,
-`followupCheck`, each `{rosterAgentId, model}`) and `privateTerms` — and an
+`followupCheck`, each `{rosterAgentId, model}`), `privateTerms` and
+`checksAwaitingVerification` (check names left out of whether CI passed,
+§13.1) — and an
 absent key, or an absent field inside it, decodes to off or empty:
 `enabled` false, `requireApproval` true, `settleMinutes` 10, `roundCap` 3, the
 rest nil or `[]`.
