@@ -55,9 +55,8 @@ public enum EpicState: String, Codable, Sendable, CaseIterable, Equatable, Datab
 }
 
 public enum SessionState: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
-    /// The worktree exists and the row is written, but no agent process has been launched yet:
-    /// the repository is still being prepared. A session here holds a concurrency slot and can do
-    /// no work.
+    /// The row is written, but no agent process has been launched yet: the worktree is still being
+    /// created and prepared. A session here holds a concurrency slot and can do no work.
     case setup
     case starting
     case running
