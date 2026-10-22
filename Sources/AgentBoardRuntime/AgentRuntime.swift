@@ -29,6 +29,13 @@ public struct SpawnRequest: Sendable {
         "ScheduleWakeup", "Monitor", "CronCreate",
     ]
 
+    /// A triager's whole deny list besides the board deny (SPEC §6): a reviewer's, plus `gh` and the
+    /// git commands that write refs or config, since it reads a pull request and changes nothing.
+    public static let triagerDisallowedTools = defaultDisallowedTools + reviewerDisallowedTools + [
+        "Bash(gh *)", "Bash(git fetch*)", "Bash(git branch*)", "Bash(git tag*)", "Bash(git worktree*)",
+        "Bash(git update-ref*)", "Bash(git mv*)", "Bash(git config*)", "Bash(git remote*)", "Bash(git notes*)",
+    ]
+
     /// Layered onto `reviewerDisallowedTools`: a reviewer's inputs are the task and its diff, never the
     /// board database or anything else in Agent Board's support directory (SPEC §5.1). The directory is
     /// denied under its absolute, symlink-resolved and `~` spellings, each with its spaces escaped too.

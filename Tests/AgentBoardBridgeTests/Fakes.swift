@@ -158,7 +158,8 @@ struct BridgeFixture {
             reviewer: reviewer,
             scoped: ScopedToolHandler(
                 worker: worker, orchestrator: orchestrator, reviewer: reviewer,
-                coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: events)
+                coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: events),
+                triager: TriagerToolHandler(db: db, events: events)
             ),
             hooks: StoreHookSink(db: db, events: events, lockWait: lockWait),
             commits: scopedCommits
@@ -237,6 +238,12 @@ struct BridgeFixture {
         TokenIdentity(
             token: "reviewer-\(sessionId)", scope: .reviewer, projectId: project.id,
             sessionId: sessionId, taskId: taskId
+        )
+    }
+
+    func triagerIdentity(sessionId: String, taskId: String) -> TokenIdentity {
+        TokenIdentity(
+            token: "triager-\(sessionId)", scope: .triager, projectId: project.id, sessionId: sessionId, taskId: taskId
         )
     }
 

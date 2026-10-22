@@ -49,7 +49,8 @@ enum Wiring {
             ),
             orchestrator: orchestrator,
             reviewer: ReviewerToolHandler(db: db, control: sink, events: sink, commitsInFlight: commitsInFlight),
-            coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: sink)
+            coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: sink),
+            triager: TriagerToolHandler(db: db, events: sink)
         )
     }
 }

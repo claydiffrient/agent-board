@@ -110,7 +110,8 @@ final class IntegrationGuardTests: XCTestCase {
     }
 
     func testDenyTextNeverClaimsWorkersWhenItReachesAnOrchestrator() {
-        for violation in IntegrationGuard.Violation.allCases {
+        let triagerOnly: Set<IntegrationGuard.Violation> = [.fileWrite, .gh, .gitWrite]
+        for violation in IntegrationGuard.Violation.allCases where !triagerOnly.contains(violation) {
             XCTAssertTrue(violation.reason(for: .worker).contains("workers"), violation.rawValue)
             XCTAssertFalse(violation.reason(for: .orchestrator).contains("worker"), violation.reason(for: .orchestrator))
         }
