@@ -402,6 +402,21 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertEqual(open.map(\.githubNodeId), ["T_open"])
     }
 
+    /// SPEC §13.1: triage never sees what a reviewer hid from humans in an HTML comment.
+    func testHiddenHTMLCommentsAreStrippedAndAReviewWithNothingVisibleIsNoItem() async throws {
+        try enable()
+        var hidden = review("R_hidden", by: "bot", state: "COMMENTED", at: "2026-10-20T10:00:00Z")
+        hidden["body"] = "<!-- bot {\"findings\": [\"rename x\"]} -->\n  \n"
+        var visible = review("R_visible", by: "reviewer", state: "COMMENTED", at: "2026-10-20T10:00:00Z")
+        visible["body"] = "Please add a test.\n<!-- bot\n{\"findings\": []}\n-->"
+        answer(pullRequest(reviews: [hidden, visible]))
+        await fixture.supervisor.pollPRWatches()
+
+        let items = try watches.items(watchId: try onlyWatch().id)
+        XCTAssertEqual(items.map(\.githubNodeId), ["R_visible"])
+        XCTAssertEqual(items.first?.body.contains("<!--"), false)
+    }
+
     /// SPEC §13.1: a conflict is feedback keyed to its head, and it is handled once GitHub can merge the PR.
     func testAConflictingPullRequestGetsAConflictItemUntilItMergesCleanly() async throws {
         try enable()

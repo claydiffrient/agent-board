@@ -199,8 +199,10 @@ public struct PullRequestWatchReader: Sendable {
         var items: [PRSnapshotItem] = []
         for thread in pr.reviewThreads?.nodes ?? [] where !thread.isResolved && !thread.isOutdated {
             guard let latest = thread.comments?.nodes.last, !byViewer(latest.author) else { continue }
+            let body = visibleText(latest.body)
+            guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             items.append(PRSnapshotItem(
-                githubNodeId: thread.id, kind: .thread, author: latest.author?.login, body: latest.body,
+                githubNodeId: thread.id, kind: .thread, author: latest.author?.login, body: body,
                 path: latest.path, line: latest.line, url: latest.url
             ))
         }
@@ -210,10 +212,11 @@ public struct PullRequestWatchReader: Sendable {
             guard let login = review.author?.login, !byViewer(review.author) else { continue }
             latestByAuthor[login.lowercased()] = review
         }
-        for review in latestByAuthor.values.sorted(by: { $0.id < $1.id })
-        where review.state != "APPROVED" && !review.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        for review in latestByAuthor.values.sorted(by: { $0.id < $1.id }) where review.state != "APPROVED" {
+            let body = visibleText(review.body)
+            guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             items.append(PRSnapshotItem(
-                githubNodeId: review.id, kind: .review, author: review.author?.login, body: review.body, url: review.url
+                githubNodeId: review.id, kind: .review, author: review.author?.login, body: body, url: review.url
             ))
         }
         let standing = standings(of: pr, byViewer: byViewer)
@@ -236,6 +239,12 @@ public struct PullRequestWatchReader: Sendable {
             headRepository: pr.headRepository?.nameWithOwner,
             failedChecks: failedChecks(of: pr, ignoring: ignoring)
         )
+    }
+
+    /// SPEC §13.1: a comment body as GitHub renders it, with every `<!-- … -->` removed. An unterminated
+    /// `<!--` hides the rest of the body, as it does on GitHub.
+    static func visibleText(_ body: String) -> String {
+        body.replacing(#/(?s)<!--.*?(?:-->|\z)/#, with: "")
     }
 
     /// SPEC §13.1: when the PR requires checks only those count, and one that has not
