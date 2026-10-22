@@ -12,6 +12,14 @@ struct PRWatchRefreshFailure: LocalizedError, Equatable {
     var errorDescription: String? { failures.joined(separator: "\n") }
 }
 
+/// One read failure from a PR watch poll. `projectId` names the project it is about, for filtering
+/// down to a scoped Refresh's own projects when it joins a wider poll; nil for a failure that affects
+/// every enabled project alike (`gh search prs` itself failing), which no scope filters out.
+struct PRWatchPollFailure: Equatable {
+    let projectId: String?
+    let message: String
+}
+
 enum SupervisorError: LocalizedError {
     case notAGitRepository(String)
     case projectNotFound(String)
@@ -178,7 +186,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Millis of the last PR follow-through poll; 0 means none yet.
     @ObservationIgnored private var lastPRWatchPoll: Int64 = 0
     /// The running poll and the watch ids it is scoped to; nil scope polls every watch.
-    @ObservationIgnored private var prWatchPoll: (scope: Set<String>?, task: _Concurrency.Task<[String], Never>)?
+    @ObservationIgnored private var prWatchPoll: (scope: Set<String>?, task: _Concurrency.Task<[PRWatchPollFailure], Never>)?
     private(set) var isPollingPRWatches = false
     @ObservationIgnored private var prWatchSearchFailures = 0
     /// Consecutive polls on which git could not read a project's `origin`, by project id.
@@ -2084,21 +2092,31 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// SPEC §13.4 Refresh: the same poll and advance, for only these watches. A poll already running
-    /// that covers them is joined rather than overlapped; one that does not is waited out first.
+    /// that covers them is joined rather than overlapped; one that does not is waited out first. A
+    /// joined poll's failures are filtered to these watches' own projects first, so a wider poll's
+    /// failure on another project's watches never surfaces here.
     /// Throws what kept the poll from reading them.
     func pollPRWatches(watchIds: Set<String>) async throws {
         while let inFlight = prWatchPoll {
             let failures = await inFlight.task.value
             if inFlight.scope.map({ watchIds.isSubset(of: $0) }) ?? true {
-                if failures.isEmpty { return }
-                throw PRWatchRefreshFailure(failures: failures)
+                let scoped = scopedToOwnProjects(failures, watchIds: watchIds)
+                if scoped.isEmpty { return }
+                throw PRWatchRefreshFailure(failures: scoped.map(\.message))
             }
         }
         let failures = await startPRWatchPoll(scope: watchIds)
-        if !failures.isEmpty { throw PRWatchRefreshFailure(failures: failures) }
+        if !failures.isEmpty { throw PRWatchRefreshFailure(failures: failures.map(\.message)) }
     }
 
-    private func startPRWatchPoll(scope: Set<String>?) async -> [String] {
+    /// Keeps only the failures that belong to `watchIds`' own projects, plus any failure with no
+    /// project (one that affects every enabled project alike, such as `gh search prs` itself failing).
+    private func scopedToOwnProjects(_ failures: [PRWatchPollFailure], watchIds: Set<String>) -> [PRWatchPollFailure] {
+        let projectIds = Set(watchIds.compactMap { try? prWatches.get($0)?.projectId })
+        return failures.filter { $0.projectId == nil || projectIds.contains($0.projectId!) }
+    }
+
+    private func startPRWatchPoll(scope: Set<String>?) async -> [PRWatchPollFailure] {
         let poll = _Concurrency.Task {
             let failures = await runPRWatchPoll(scope: scope)
             prWatchPoll = nil
@@ -2110,7 +2128,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return await poll.value
     }
 
-    private func runPRWatchPoll(scope: Set<String>?) async -> [String] {
+    private func runPRWatchPoll(scope: Set<String>?) async -> [PRWatchPollFailure] {
         let enabled = ((try? projects.list()) ?? []).filter { $0.settings.prFollowThrough.enabled }
         guard !enabled.isEmpty else {
             setPRPollProblems([:], enabled: [])
@@ -2125,13 +2143,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// readyToVerify and verified, bannering a PR's arrival in readyToVerify once per head oid
     /// (§13.4); a watch whose PR left the open list settles to merged or closed by `gh pr view`,
     /// and one whose PR went back to draft is deleted. A `scope` limits the reads and writes to those
-    /// watches. Returns what could not be read for the watches in scope.
-    private func refreshPRWatches(_ enabled: [Project], scope: Set<String>?) async -> [String] {
+    /// watches. Returns what could not be read for the watches in scope, each keyed to the project
+    /// it is about (SPEC §13.4): a Refresh that joins a wider poll filters this down to its own
+    /// projects, so another project's unreadable `origin` never shows in a section that does not hold it.
+    private func refreshPRWatches(_ enabled: [Project], scope: Set<String>?) async -> [PRWatchPollFailure] {
         func key(_ repository: String, _ number: Int) -> String { "\(repository.lowercased())#\(number)" }
         let scoped = scope.map { ids in ids.compactMap { try? prWatches.get($0) } }
         let scopedKeys = scoped.map { Set($0.map { key("\($0.repoOwner)/\($0.repoName)", $0.number) }) }
         let scopedProjects = scoped.map { Set($0.map(\.projectId)) }
-        var unread: [String] = []
+        var unread: [PRWatchPollFailure] = []
         var projectByRepo: [String: Project] = [:]
         var problems: [String: String] = [:]
         for project in enabled {
@@ -2151,7 +2171,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     problems[project.id] = "Reading `origin` has failed \(failures) times in a row: \(describe(error))"
                 }
                 if scopedProjects?.contains(project.id) ?? true {
-                    unread.append("Could not read \(project.name)'s `origin`: \(describe(error))")
+                    unread.append(PRWatchPollFailure(
+                        projectId: project.id, message: "Could not read \(project.name)'s `origin`: \(describe(error))"
+                    ))
                 }
                 continue
             }
@@ -2174,7 +2196,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch let failure as PullRequestWatchFailure where failure.ghUnavailable {
             for project in enabled { problems[project.id] = failure.description }
             setPRPollProblems(problems, enabled: enabled)
-            return unread + [failure.description]
+            return unread + [PRWatchPollFailure(projectId: nil, message: failure.description)]
         } catch {
             prWatchSearchFailures += 1
             NSLog("PR watch poll failed (%d in a row): %@", prWatchSearchFailures, describe(error))
@@ -2185,7 +2207,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
                 setPRPollProblems(problems, enabled: enabled)
             }
-            return unread + ["`gh search prs` failed: \(describe(error))"]
+            return unread + [PRWatchPollFailure(projectId: nil, message: "`gh search prs` failed: \(describe(error))")]
         }
 
         let drafts = Set(authored.filter(\.isDraft).map { key($0.repository, $0.number) })
@@ -2206,7 +2228,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     try reader.snapshots(owner: parts[0], name: parts[1], numbers: numbers, cwd: cwd)
                 }
             } catch {
-                unread.append("Could not read \(prs[0].repository)'s pull requests: \(describe(error))")
+                unread.append(PRWatchPollFailure(
+                    projectId: project.id, message: "Could not read \(prs[0].repository)'s pull requests: \(describe(error))"
+                ))
                 continue
             }
             for snapshot in snapshots
