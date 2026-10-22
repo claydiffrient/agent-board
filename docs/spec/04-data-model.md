@@ -53,7 +53,7 @@ CREATE TABLE task (
   failed         INTEGER NOT NULL DEFAULT 0,
   failure_reason TEXT,
   ordering       REAL NOT NULL,
-  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration | triage | follow_through
+  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration | triage | follow_through | fix_round | followup_check
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
@@ -362,10 +362,14 @@ CREATE TABLE pr_item (
   decision_answer       TEXT,            -- the human's answer from Needs you (§13.4)
   decision_notified_at  INTEGER,         -- when this decision's banner was claimed; one banner per decision
   fix_task_id           TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the fix or follow-up task triage made of it (§13.1)
-  followup_grade        TEXT,            -- fixed | partly | not_fixed | moot
+  followup_grade        TEXT,            -- fixed | partly | not_fixed | moot; the round's follow-up check (§13.1)
+  followup_note         TEXT,            -- that grade's evidence, which a failed check hands the fixer
   reply_body            TEXT,
-  reply_url             TEXT,
-  round                 INTEGER NOT NULL DEFAULT 0,
+  reply_url             TEXT,            -- the reply publishing posted (§13.2); null until one is
+  reply_error           TEXT,            -- the last failed post's error (§13.2)
+  reply_abandoned_at    INTEGER,         -- when a post found the comment gone; no reply is tried again
+  handled_at            INTEGER,         -- when it last became handled; bounds the replies §13.2 posts
+  round                 INTEGER NOT NULL DEFAULT 0,  -- the round it arrived in, then the round that handled it, whose replies post it
   created_at            INTEGER NOT NULL,
   updated_at            INTEGER NOT NULL,
   UNIQUE (watch_id, github_node_id)
@@ -377,10 +381,16 @@ CREATE TABLE pr_round (
   watch_id        TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
   number          INTEGER NOT NULL,
   base_head_oid   TEXT NOT NULL,     -- the PR head the round's branch was cut from
-  pushed_head_oid TEXT,
-  outcome         TEXT,              -- triaged | triage_failed | interrupted; null while the round runs
+  pushed_head_oid TEXT,              -- the round branch's tip publishing fast-forwarded the PR to
+  outcome         TEXT,              -- triaged | triage_failed | interrupted | check_failed | published | stale | frozen | publish_failed; null while the round runs
   started_at      INTEGER NOT NULL,
   ended_at        INTEGER,
+  fix_task_id     TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the round's `fix_round` task (§13.1)
+  check_failures  INTEGER NOT NULL DEFAULT 0,  -- failed checks this round; the third parks the watch
+  review_verdict  TEXT,              -- accepted | reopened; the reviewer's verdict on the current check
+  review_findings TEXT,              -- a reopening reviewer's findings, for the fixer
+  followup_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the current check's `followup_check` task
+  checked_head_oid TEXT,             -- the round branch's tip the follow-up check judged
   UNIQUE (watch_id, number)
 );
 
@@ -577,14 +587,16 @@ changes nothing but `last_polled_at`. An open item that the snapshot reports
 resolved, or leaves out, becomes `handled`; a resolved item never seen before is
 not stored. An unresolved item whose body changed — a new reply — loses
 everything triage gave it: `verdict`, `approach`, the `decision_*` fields,
-`reply_body` and `followup_grade`, so the next round triages it afresh. A
+`reply_body`, `reply_url`, `reply_error`, `reply_abandoned_at` and
+`followup_grade`, so the next round triages it afresh and replies anew. A
 `handled` or `dismissed` one also reopens to `open` and drops `fix_task_id`; the
 task it named stays on the board as the record of the earlier round, and is
 never treated as the item's current task. An item still open keeps its
 `fix_task_id`. `settings_json.prFollowThrough`
 holds every work-specific value — `enabled`, `verificationLabel`,
 `requireApproval`, `settleMinutes`, `roundCap`, `dailyBudgetUSD`,
-`verifyCommand`, `postFactualReplies`, `roles` (`triage`, `fixer`, `reviewer`,
+`verifyCommand`, `postFactualReplies`, `postFactualRepliesSince` (when
+replies were last turned on, §13.2), `roles` (`triage`, `fixer`, `reviewer`,
 `followupCheck`, each `{rosterAgentId, model}`) and `privateTerms` — and an
 absent key, or an absent field inside it, decodes to off or empty:
 `enabled` false, `requireApproval` true, `settleMinutes` 10, `roundCap` 3, the

@@ -46,8 +46,13 @@ public struct ProjectStore: Sendable {
         }
     }
 
-    public func updateSettings(_ id: String, _ settings: ProjectSettings) throws {
+    public func updateSettings(_ id: String, _ settings: ProjectSettings, now: Int64 = .nowMillis) throws {
         try db.writer.write { db in
+            var settings = settings
+            let stored = try Project.fetchOne(db, key: id)?.settings.prFollowThrough
+            let replies = settings.prFollowThrough.postFactualReplies
+            settings.prFollowThrough.postFactualRepliesSince = !replies ? nil
+                : stored?.postFactualReplies == true ? stored?.postFactualRepliesSince : now
             try db.execute(
                 sql: "UPDATE project SET settings_json = ? WHERE id = ?",
                 arguments: [settings.encoded(), id]

@@ -573,6 +573,30 @@ enum Schema {
     ALTER TABLE pr_item ADD COLUMN decision_notified_at INTEGER;
     """
 
+    /// The fixer task a round's fix items went to.
+    static let prRoundFixTask = """
+    ALTER TABLE pr_round ADD COLUMN fix_task_id TEXT REFERENCES task(id) ON DELETE SET NULL;
+    """
+
+    /// A round's check (SPEC §13.1): the reviewer's verdict, the follow-up check task, the head they
+    /// judged, how many checks have failed, and each item's grade note.
+    static let prRoundCheck = """
+    ALTER TABLE pr_round ADD COLUMN check_failures INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE pr_round ADD COLUMN review_verdict TEXT;
+    ALTER TABLE pr_round ADD COLUMN review_findings TEXT;
+    ALTER TABLE pr_round ADD COLUMN followup_task_id TEXT REFERENCES task(id) ON DELETE SET NULL;
+    ALTER TABLE pr_round ADD COLUMN checked_head_oid TEXT;
+    ALTER TABLE pr_item ADD COLUMN followup_note TEXT;
+    """
+
+    /// When an item became handled, which bounds the replies turning `postFactualReplies` on may post,
+    /// and the last failed post, with when one was given up on (SPEC §13.2).
+    static let prItemReplyBounds = """
+    ALTER TABLE pr_item ADD COLUMN handled_at INTEGER;
+    ALTER TABLE pr_item ADD COLUMN reply_error TEXT;
+    ALTER TABLE pr_item ADD COLUMN reply_abandoned_at INTEGER;
+    """
+
     /// One row per pooled worktree slot that has ever been leased (SPEC §3.1 step 2, §4).
     static let worktreeSlot = """
     CREATE TABLE worktree_slot (

@@ -164,7 +164,8 @@ public struct Board: Sendable {
             guard let project = try Project.fetchOne(db, key: task.projectId) else {
                 throw BoardError.projectNotFound(task.projectId)
             }
-            if project.settings.autonomyEnabled {
+            // SPEC §13.5's §8 amendment: a fix round skips approval where follow-through is on.
+            if project.settings.autonomyEnabled || (task.origin == .fixRound && project.settings.prFollowThrough.enabled) {
                 return .proceed
             }
             if let existing = try ApprovalStore.pendingSpawn(db, taskId: taskId) {
@@ -413,6 +414,9 @@ public struct Board: Sendable {
             // SPEC §5.1: a live session another one has taken the task from must not move it.
             if let holder = try SessionStore.activeHolder(db, taskId: taskId), holder.sessionId != sessionId {
                 throw BoardError.sessionNotOnTask(sessionId: sessionId, taskId: taskId)
+            }
+            if task.origin == .fixRound {
+                return try Self.completeFixRound(db, task: task, sessionId: sessionId, summary: summary)
             }
             let report = try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .complete, body: summary
@@ -926,15 +930,17 @@ public struct Board: Sendable {
             guard let task else { return nil }
             let taskId = task.id
 
-            // SPEC §13.2: the orchestrator never asked for a triage and nothing can reassign one, so an
-            // unfinished triage is closed with no report and the follow-through loop starts a fresh one.
-            if task.origin == .triage {
+            // SPEC §13.1, §13.2: the orchestrator never asked for a triage or follow-up check and nothing can
+            // reassign one, so an unfinished one is closed with no report and the follow-through loop decides.
+            if task.origin.isPullRequestReader {
                 if task.column != .done, task.column != .closed {
                     try TaskStore.setBlocked(db, taskId, false, reason: nil)
                     try TaskStore.close(db, taskId, reason: reason, by: "Agent Board", at: .nowMillis)
                     _ = try ProgressStore.append(
                         db, taskId: taskId, sessionId: sessionId, kind: .note,
-                        text: "Triage ended before every item had a verdict: \(reason)"
+                        text: task.origin == .triage
+                            ? "Triage ended before every item had a verdict: \(reason)"
+                            : "Follow-up check ended before every item had a grade: \(reason)"
                     )
                 }
                 return nil

@@ -126,7 +126,7 @@ struct StatusView: View {
     /// uncapped Role, Task and Last activity.
     private func table(_ layout: Layout) -> some View {
         let roster = layout.roster
-        let triages = Set(tasks.value.filter { $0.origin == .triage }.map(\.id))
+        let triages = Set(tasks.value.filter(\.origin.isPullRequestReader).map(\.id))
         return Table(layout.rows) {
             TableColumn("ID") { session in
                 Text(session.displayShortId)

@@ -37,16 +37,23 @@ enum SupervisorError: LocalizedError {
     case triageTaskNotAssignable(title: String)
     case triageNotResumable(title: String)
     case pullRequestNotFetched(String)
+    case fixRoundNotFound(title: String)
+    case fixRoundNotAcceptable(title: String)
 
     var errorDescription: String? {
         switch self {
         case .approvalNotFound(let id): return "approval \(id) not found"
         case .watchNotFound(let id): return "watched pull request \(id) not found"
         case .triageTaskNotAssignable(let title):
-            return "\"\(title)\" is a pull request triage; only Agent Board's follow-through starts one"
+            return "\"\(title)\" is a pull request triage or follow-up check; only Agent Board's follow-through starts one"
         case .triageNotResumable(let title):
-            return "\"\(title)\" is a pull request triage, which is not resumed; follow-through starts a fresh one"
+            return "\"\(title)\" is a pull request triage or follow-up check, which is not resumed; follow-through "
+                + "starts a fresh one"
         case .pullRequestNotFetched(let reason): return "the pull request could not be fetched: \(reason)"
+        case .fixRoundNotFound(let title): return "\"\(title)\" is not a pull request round's fix task"
+        case .fixRoundNotAcceptable(let title):
+            return "\"\(title)\" is a pull request fix round; its check accepts it, and Agent Board pushes it to the "
+                + "pull request rather than merging it"
         case .rosterAgentNotUsable(let id, let projectName):
             return "roster agent \(id) is not in \(projectName)'s usable set; enable it for this project first"
         case .epicCloseRefused(let reason): return reason
@@ -156,6 +163,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let attention: ProjectAttentionStore
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
     @ObservationIgnored private let pullRequestWatch: PullRequestWatchReader
+    @ObservationIgnored private let pullRequestReplies: PullRequestReplier
     @ObservationIgnored private let prWatches: PRWatchStore
     /// Millis of the last PR follow-through poll; 0 means none yet.
     @ObservationIgnored private var lastPRWatchPoll: Int64 = 0
@@ -282,6 +290,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         attention = ProjectAttentionStore(db)
         pullRequestStates = PullRequestStateReader(gh: gh)
         pullRequestWatch = PullRequestWatchReader(gh: gh)
+        pullRequestReplies = PullRequestReplier(gh: gh)
         prWatches = PRWatchStore(db)
     }
 
@@ -385,9 +394,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         taskId: String, rosterAgentId: String? = nil, scope: AgentBoardCore.TokenScope = .worker
     ) async throws -> WorkerSpawn {
         guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
-        // A worker or reviewer grant on a triage task would hold authority over the PR's checkout that
-        // the triager scope exists to withhold.
-        guard task.origin != .triage else { throw SupervisorError.triageTaskNotAssignable(title: task.title) }
+        // A worker or reviewer grant on a triage or follow-up check task would hold authority over the PR's
+        // checkout that the triager scope exists to withhold.
+        guard !task.origin.isPullRequestReader else { throw SupervisorError.triageTaskNotAssignable(title: task.title) }
         guard task.column != .running, task.column != .done, task.column != .closed else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
         }
@@ -409,6 +418,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try requireNoShutdown(projectId: project.id)
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
+        }
+        if task.origin == .fixRound, scope == .worker {
+            return try await spawnFixer(task: task, rosterAgentId: rosterAgentId, project: project, port: port)
+        }
+        if task.origin == .fixRound, scope == .reviewer, let rosterAgentId {
+            return try await spawnRoundReviewer(task: task, rosterAgentId: rosterAgentId, project: project, port: port)
         }
         let agent = try rosterAgentId.map { id -> RosterAgent in
             guard let agent = try roster.usableAgent(id, forProject: project.id) else {
@@ -963,6 +978,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         /// `--permission-mode auto`, the worker deny list, and at most a worker's token scope.
         var rosterAgent: RosterAgent? = nil
         var scope: AgentBoardCore.TokenScope = .worker
+        var extraDisallowedTools: [String] = []
     }
 
     /// `claude` is spawned without a shell, so nothing else would expand a `~` the user typed.
@@ -1000,7 +1016,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 // A deny-list, layered on: a rostered agent can only ever have less authority than a
                 // plain worker, and an empty list is exactly a plain worker's.
                 disallowedTools: Self.disallowedTools(scope: plan.scope, supportDir: appSupportDir, home: home)
-                    + (plan.rosterAgent?.disallowedTools ?? []),
+                    + plan.extraDisallowedTools + (plan.rosterAgent?.disallowedTools ?? []),
                 tools: plan.rosterAgent?.tools,
                 model: plan.model,
                 pluginDirs: (plan.rosterAgent?.pluginDirs ?? []).map(expandingHome)
@@ -1116,6 +1132,244 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 port: port
             )
             return placeholder
+        } catch {
+            if assigned == nil { try? tasks.delete(task.id) }
+            throw SupervisorError.spawnFailed(
+                worktree: manager.worktreeRoot.appendingPathComponent(task.id).path, underlying: describe(error)
+            )
+        }
+    }
+
+    /// SPEC §13.1 fixing: an ordinary worker on the round's branch, cut at the head its triage read
+    /// once the PR's head ref is fetched from origin, in a worktree named for the task. A retry reuses
+    /// both. The role's roster agent and model apply unless the caller names an agent.
+    private func spawnFixer(
+        task: BoardTask, rosterAgentId: String?, project: Project, port: Int
+    ) async throws -> WorkerSpawn {
+        guard let round = try prWatches.round(fixTaskId: task.id), let watch = try prWatches.get(round.watchId) else {
+            throw SupervisorError.fixRoundNotFound(title: task.title)
+        }
+        let role = project.settings.prFollowThrough.roles.fixer
+        let agent = try (rosterAgentId ?? role?.rosterAgentId).map { id -> RosterAgent in
+            guard let agent = try roster.usableAgent(id, forProject: project.id) else {
+                throw SupervisorError.rosterAgentNotUsable(id: id, projectName: project.name)
+            }
+            return agent
+        }
+        if let holder = try sessions.activeHolder(taskId: task.id) {
+            throw SupervisorError.taskAlreadyHeld(title: task.title, sessionId: holder.sessionId)
+        }
+
+        let manager = worktreeManager(for: project)
+        let headRef = watch.headRef
+        let baseHeadOid = round.baseHeadOid
+        do {
+            try await offMain {
+                _ = try manager.fetchRemoteTip(headRef)
+                guard try manager.fetchCommitIfMissing(baseHeadOid, from: "origin") else {
+                    throw AgentRuntimeError("origin has no commit \(baseHeadOid)")
+                }
+            }
+        } catch {
+            throw SupervisorError.pullRequestNotFetched(describe(error))
+        }
+
+        let name = task.id
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let warnings = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(name))
+        let worktree: URL
+        do {
+            worktree = try await offMain {
+                try Self.existingWorktree(manager, name: name)
+                    ?? manager.create(name: name, branch: branch, base: baseHeadOid)
+            }
+        } catch {
+            throw SupervisorError.spawnFailed(
+                worktree: manager.worktreeRoot.appendingPathComponent(name).path, underlying: describe(error)
+            )
+        }
+        if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
+            throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
+        }
+
+        do {
+            let site = CheckoutSite(
+                placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch, warnings: warnings
+            )
+            let placeholder = try board.assign(
+                taskId: task.id,
+                session: Self.setupRow(
+                    projectId: project.id, taskId: task.id, site: site,
+                    attempt: try sessions.forTask(task.id).count + 1, rosterAgentId: agent?.id
+                )
+            )
+            beginSetup(
+                LaunchPlan(
+                    project: project,
+                    taskId: task.id,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
+                    branch: branch,
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: Self.openingPrompt(
+                        task: task, branch: branch, attempt: placeholder.attempt, epicGoal: nil,
+                        notes: try notes.notesForSpawn(projectId: project.id, taskId: task.id, epicId: nil),
+                        verification: project.settings.verification,
+                        placement: .worktree,
+                        workingDirectory: worktree.path,
+                        agent: agent?.identity,
+                        reviewFindings: try ProgressStore(db).openReviewFindings(taskId: task.id),
+                        comments: try CommentStore(db).list(taskId: task.id)
+                    ),
+                    model: task.model ?? agent?.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    extraDisallowedTools: SpawnRequest.fixerDisallowedTools
+                ),
+                placeholder: placeholder,
+                port: port
+            )
+            return WorkerSpawn(
+                setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch,
+                sharesCheckout: false, warnings: warnings
+            )
+        } catch {
+            throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
+        }
+    }
+
+    /// SPEC §13.1 checking: a round's reviewer reads `base_head_oid...HEAD` on the round branch, in the
+    /// fixer's own worktree, never a task branch against the project's base. A branch with nothing on it
+    /// beyond the pull request's head is a round that fixed nothing.
+    private func spawnRoundReviewer(
+        task: BoardTask, rosterAgentId: String, project: Project, port: Int
+    ) async throws -> WorkerSpawn {
+        guard let round = try prWatches.round(fixTaskId: task.id), let watch = try prWatches.get(round.watchId) else {
+            throw SupervisorError.fixRoundNotFound(title: task.title)
+        }
+        guard let agent = try roster.usableAgent(rosterAgentId, forProject: project.id) else {
+            throw SupervisorError.rosterAgentNotUsable(id: rosterAgentId, projectName: project.name)
+        }
+        if let holder = try sessions.activeHolder(taskId: task.id) {
+            throw SupervisorError.taskAlreadyHeld(title: task.title, sessionId: holder.sessionId)
+        }
+        let manager = worktreeManager(for: project)
+        let name = task.id
+        guard let worktree = try await offMain({ try Self.existingWorktree(manager, name: name) }) else {
+            throw SupervisorError.spawnFailed(
+                worktree: manager.worktreeRoot.appendingPathComponent(name).path,
+                underlying: "the round's worktree is gone, so there is nothing to review"
+            )
+        }
+        if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
+            throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
+        }
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let base = round.baseHeadOid
+        guard try await offMain({ try ReviewCheckout.hasDiff(against: base, in: worktree) }) else {
+            throw NothingToReview(reason: "Branch `\(branch)` has no change beyond the pull request's head `\(base)`, "
+                + "so the round fixed nothing.")
+        }
+
+        do {
+            let reviewHead = try await offMain { try ReviewCheckout.baseline(in: worktree) }
+            let site = CheckoutSite(placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch, warnings: [])
+            let placeholder = try board.assignReviewer(
+                taskId: task.id,
+                session: Self.setupRow(
+                    projectId: project.id, taskId: task.id, site: site, attempt: try sessions.forTask(task.id).count + 1,
+                    rosterAgentId: agent.id, reviewHead: reviewHead, reviewBase: base
+                )
+            )
+            let role = project.settings.prFollowThrough.roles.reviewer
+            beginSetup(
+                LaunchPlan(
+                    project: project,
+                    taskId: task.id,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
+                    branch: branch,
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: ReviewPrompt.compose(
+                        task: task, branch: branch, base: base, verification: project.settings.verification,
+                        workingDirectory: worktree.path, agent: agent.identity,
+                        comments: try CommentStore(db).list(taskId: task.id)
+                    ),
+                    model: role?.model ?? agent.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    scope: .reviewer
+                ),
+                placeholder: placeholder,
+                port: port
+            )
+            return WorkerSpawn(
+                setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch,
+                sharesCheckout: false, warnings: []
+            )
+        } catch {
+            throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
+        }
+    }
+
+    /// SPEC §13.1 checking: the follow-up checker holds a triager grant, so it reads and grades and
+    /// changes nothing, in a detached checkout of the round branch's tip, bound to a synthetic
+    /// `followup_check` task. `roles.followupCheck` picks the roster agent, whose plugin dirs it runs with.
+    private func spawnFollowupCheck(_ watch: PRWatch, round: PRRound, project: Project) async throws {
+        guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        try requireNoShutdown(projectId: project.id)
+        if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
+            throw SupervisorError.capRefused(reason)
+        }
+        let role = project.settings.prFollowThrough.roles.followupCheck
+        let agent = try role?.rosterAgentId.map { id -> RosterAgent in
+            guard let agent = try roster.usableAgent(id, forProject: project.id) else {
+                throw SupervisorError.rosterAgentNotUsable(id: id, projectName: project.name)
+            }
+            return agent
+        }
+        let manager = worktreeManager(for: project)
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        guard let headOid = try await offMain({ try manager.refCommit("refs/heads/\(branch)") }) else {
+            throw AgentRuntimeError("the round branch `\(branch)` does not exist")
+        }
+        guard let task = try board.createFollowupCheckTask(watchId: watch.id, headOid: headOid) else { return }
+        _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(task.id))
+        var assigned: AgentSession?
+        do {
+            let worktree = try await offMain { try manager.createDetached(name: task.id, commit: headOid) }
+            let placeholder = try board.assign(
+                taskId: task.id,
+                session: AgentSession(
+                    sessionId: "setup-\(UUID().uuidString)", projectId: project.id, taskId: task.id, role: .worker,
+                    worktreePath: worktree.path, cwd: worktree.path, state: .setup, attempt: 1,
+                    rosterAgentId: agent?.id
+                )
+            )
+            assigned = placeholder
+            beginSetup(
+                LaunchPlan(
+                    project: project,
+                    taskId: task.id,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
+                    branch: headOid,
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: FollowupCheckPrompt.compose(
+                        watch: watch, round: round, headOid: headOid, workingDirectory: worktree.path,
+                        agent: agent?.identity
+                    ),
+                    model: role?.model ?? agent?.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    scope: .triager
+                ),
+                placeholder: placeholder,
+                port: port
+            )
         } catch {
             if assigned == nil { try? tasks.delete(task.id) }
             throw SupervisorError.spawnFailed(
@@ -1342,7 +1596,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 throw SupervisorError.projectNotFound(session.projectId)
             }
             // SPEC §13.2: the grant and config below are a worker's, and a triage is cheap to start over.
-            if let task = try tasks.get(taskId), task.origin == .triage {
+            if let task = try tasks.get(taskId), task.origin.isPullRequestReader {
                 throw SupervisorError.triageNotResumable(title: task.title)
             }
             if let holder = try sessions.activeHolder(taskId: taskId), holder.sessionId != sessionId {
@@ -1432,6 +1686,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(task.projectId) else {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
+            // SPEC §13.1: a round's branch is pushed onto its pull request, never merged as a task branch.
+            if task.origin == .fixRound { throw SupervisorError.fixRoundNotAcceptable(title: task.title) }
             try await stopLiveSessions(onTask: taskId, sparing: acceptedBy.acceptingSessionId, by: acceptedBy.actor)
             try board.accept(taskId: taskId, acceptedBy: acceptedBy)
             let acceptanceReport = try? ReportStore(db).latest(taskId: taskId)?.id
@@ -1893,15 +2149,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) {
         do {
-            let watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
+            var watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
+            if let settled = try prWatches.settleAwaitingCI(watchId: watch.id) { watch.state = settled }
             let open = try prWatches.openItems(watchId: watch.id)
             if let next = PRWatchTransition.next(
                 from: watch, snapshot: snapshot, openItems: open.count,
-                untriagedItems: open.filter { $0.verdict == nil }.count,
+                itemsAwaitingRound: open.filter { $0.verdict == nil || ($0.verdict == .fix && $0.round > watch.round) }.count,
                 settings: project.settings.prFollowThrough
             ) {
                 try prWatches.setState(next, watchId: watch.id)
             }
+            try prWatches.applyVerifiedFreeze(watchId: watch.id)
             // SPEC §13.4: a paused watch claims its banner without showing it, so resuming replays nothing.
             if let ready = try prWatches.claimReadyNotification(watchId: watch.id), !ready.paused {
                 post(
@@ -1915,14 +2173,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// SPEC §13.1 and §13.2: a settling watch starts one triager per round once no item has arrived
-    /// for `settleMinutes` and nothing holds it, and a triaging one moves on once that triage ends.
-    /// Then each open decision not yet announced banners once (§13.4).
+    /// for `settleMinutes` and nothing holds it, a triaging one moves on once that triage ends, a
+    /// fixing one starts its round's fixer, a checking one its reviewer and follow-up check, and a
+    /// publishing one pushes its round. Then each open decision not yet announced banners once (§13.4).
     private func advancePRWatches(_ enabled: [Project]) async {
         for project in enabled {
             for watch in (try? prWatches.live(projectId: project.id)) ?? [] {
                 switch watch.state {
                 case .settling: await startTriageIfSettled(watch, project: project)
-                case .triaging: settleTriageRound(watch, project: project)
+                case .triaging: await settleTriageRound(watch, project: project)
+                case .fixing: await startFixRound(watch, project: project)
+                case .checking: await advanceCheck(watch, project: project)
+                case .publishing: await publishRound(watch, project: project)
                 default: break
                 }
                 announceDecisions(watchId: watch.id, project: project)
@@ -1945,10 +2207,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func startTriageIfSettled(_ watch: PRWatch, project: Project) async {
         let settleMillis = Int64(max(project.settings.prFollowThrough.settleMinutes, 0)) * 60_000
         guard !watch.paused, Int64.nowMillis - (watch.lastFeedbackAt ?? watch.updatedAt) >= settleMillis,
-              ((try? prWatches.untriagedItemCount(watchId: watch.id)) ?? 0) > 0,
-              !isTriageHeld(project: project),
-              (try? prWatches.beginTriageRound(watchId: watch.id)) != nil
+              !isFollowThroughHeld(project: project)
         else { return }
+        guard ((try? prWatches.untriagedItemCount(watchId: watch.id)) ?? 0) > 0 else {
+            if (try? board.beginAnsweredFixRound(watchId: watch.id)) == .fixing {
+                await startFixRound(watch, project: project)
+            }
+            return
+        }
+        guard (try? prWatches.beginTriageRound(watchId: watch.id)) != nil else { return }
         do {
             try await spawnTriager(watchId: watch.id)
         } catch {
@@ -1958,7 +2225,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §13.1's settling holds: the daily budget, AC power and the §8 spawn caps, plus a
     /// shutdown order, which refuses every spawn.
-    private func isTriageHeld(project: Project) -> Bool {
+    private func isFollowThroughHeld(project: Project) -> Bool {
         if isShuttingDown(projectId: project.id) || !isOnACPower() { return true }
         if let budget = project.settings.prFollowThrough.dailyBudgetUSD {
             let midnight = Int64(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970 * 1000)
@@ -1968,7 +2235,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return false
     }
 
-    private func settleTriageRound(_ watch: PRWatch, project: Project) {
+    private func settleTriageRound(_ watch: PRWatch, project: Project) async {
         guard let triage = try? prWatches.triage(watchId: watch.id, round: watch.round),
               let task = try? tasks.get(triage.taskId)
         else {
@@ -1977,9 +2244,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         switch task.column {
         case .done:
-            let fixer = project.settings.prFollowThrough.roles.fixer
             do {
-                try board.applyVerdicts(watchId: watch.id, fixerModel: fixer?.model ?? project.settings.defaultModel)
+                if let next = try board.applyVerdicts(watchId: watch.id), next != .fixing {
+                    await postFactualReplies(watchId: watch.id, project: project)
+                }
             } catch {
                 report(["could not apply the triage of \(watch.url): \(describe(error))"])
             }
@@ -1990,6 +2258,200 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard ((try? sessions.forTask(task.id)) ?? []).isEmpty else { return }
             try? tasks.delete(task.id)
             failTriageRound(watch, failure: "the triage never got a session")
+        }
+    }
+
+    /// SPEC §13.1 fixing and §13.5's §8 amendment: the round's one fixer task, spawned with no
+    /// approval while follow-through is on, under the settling holds and every §8 cap. A fixer starts
+    /// here once per check, only while the task's fixer sessions do not outnumber its failed checks, so
+    /// a failed fixer is not retried in a loop. A round left with nothing to fix ends.
+    private func startFixRound(_ watch: PRWatch, project: Project) async {
+        do {
+            guard let round = try prWatches.currentRound(watchId: watch.id) else { return }
+            let model = project.settings.prFollowThrough.roles.fixer?.model
+            guard let taskId = try round.fixTaskId ?? board.createFixRoundTask(watchId: watch.id, model: model)?.id else {
+                try board.endFixRoundWithoutFixes(watchId: watch.id)
+                return
+            }
+            guard try tasks.get(taskId)?.column == .ready,
+                  try sessions.forTask(taskId).filter({ $0.reviewHead == nil }).count <= round.checkFailures,
+                  !isFollowThroughHeld(project: project),
+                  case .proceed = try board.requestSpawn(taskId: taskId, requestedBy: "follow-through")
+            else { return }
+            try await spawn(taskId: taskId)
+        } catch {
+            NSLog("PR follow-through: the fix round of %@ did not start: %@", watch.url, describe(error))
+        }
+    }
+
+    /// SPEC §13.1 checking: starts the round's reviewer and follow-up check under the settling holds,
+    /// then settles the round once both are in. A round that cannot be checked parks its watch.
+    private func advanceCheck(_ watch: PRWatch, project: Project) async {
+        guard let round = try? prWatches.currentRound(watchId: watch.id), let taskId = round.fixTaskId,
+              let task = try? tasks.get(taskId), task.column == .review
+        else { return }
+        let held = isFollowThroughHeld(project: project)
+        do {
+            if round.reviewVerdict == nil, try sessions.activeHolder(taskId: taskId) == nil {
+                let reviewers = try sessions.forTask(taskId).filter { $0.reviewHead != nil }.count
+                if reviewers > round.checkFailures {
+                    try board.parkCheck(
+                        watchId: watch.id, reason: "Round \(round.number)'s reviewer ended without a verdict."
+                    )
+                    return
+                }
+                if !held { try await startRoundReview(task, watch: watch) }
+            }
+            guard try prWatches.get(watch.id)?.state == .checking else { return }
+            if let checkId = round.followupTaskId {
+                if let check = try tasks.get(checkId), check.column == .closed {
+                    try board.parkCheck(
+                        watchId: watch.id,
+                        reason: "Round \(round.number)'s follow-up check ended before grading every item: "
+                            + (check.closedReason ?? "no reason recorded")
+                    )
+                    return
+                }
+            } else if !held, !(try prWatches.checkItems(round: round)).isEmpty {
+                try await spawnFollowupCheck(watch, round: round, project: project)
+            }
+            try board.settleCheck(watchId: watch.id)
+        } catch {
+            NSLog("PR follow-through: the check of %@ could not run: %@", watch.url, describe(error))
+            try? board.parkCheck(
+                watchId: watch.id, reason: "Round \(round.number)'s check could not run: \(describe(error))"
+            )
+        }
+    }
+
+    /// An agent reviewer, or a park when the project's routing names none. A round with nothing on its
+    /// branch is reopened on the spot rather than handed to a reviewer.
+    private func startRoundReview(_ task: BoardTask, watch: PRWatch) async throws {
+        switch try board.assignRoundReviewer(taskId: task.id) {
+        case .agentReview(let agentId, _):
+            do {
+                _ = try await spawn(taskId: task.id, rosterAgentId: agentId, scope: .reviewer)
+            } catch let empty as NothingToReview {
+                try board.recordRoundReview(
+                    taskId: task.id, sessionId: nil, reviewerName: "Agent Board", accepted: false, text: empty.reason
+                )
+            }
+        case .humanReview(let reason):
+            try board.parkCheck(watchId: watch.id, reason: reason ?? "This round has no agent reviewer.")
+        case .autoAccept:
+            try board.parkCheck(watchId: watch.id, reason: "This round has no agent reviewer.")
+        }
+    }
+
+    /// SPEC §13.1 publishing and §13.5's D8 exception, the one push made without an approval: re-reads
+    /// the PR, freezes on the verification label, goes stale if the head left the round's base, and
+    /// otherwise fast-forwards the checked round branch onto the PR's head ref through `BranchPublisher`.
+    private func publishRound(_ watch: PRWatch, project: Project) async {
+        guard let round = try? prWatches.currentRound(watchId: watch.id), let taskId = round.fixTaskId,
+              let task = try? tasks.get(taskId)
+        else { return }
+        let settings = project.settings.prFollowThrough
+        let repo = URL(fileURLWithPath: project.repoPath)
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let states = pullRequestStates
+        let url = watch.url
+        let remote: PullRequestHead
+        do {
+            remote = try await offMain { try states.head(of: url, cwd: repo) }
+        } catch {
+            NSLog("PR follow-through: could not re-read %@ before publishing: %@", url, describe(error))
+            return
+        }
+        guard remote.isOpen else { return }
+        do {
+            if let label = settings.markVerifiedLabel,
+               remote.labels.contains(where: { $0.caseInsensitiveCompare(label) == .orderedSame }) {
+                try board.freezeRound(watchId: watch.id)
+                await dropRoundWorktree(task, project: project)
+                return
+            }
+            let manager = worktreeManager(for: project)
+            guard let tip = try await offMain({ try manager.refCommit("refs/heads/\(branch)") }) else {
+                try board.parkPublishing(watchId: watch.id, reason: "Round \(round.number)'s branch `\(branch)` is gone.")
+                await postFactualReplies(watchId: watch.id, project: project)
+                return
+            }
+            if remote.oid != tip {
+                guard remote.oid == round.baseHeadOid else {
+                    try board.markRoundStale(watchId: watch.id)
+                    await dropRoundWorktree(task, project: project)
+                    await postFactualReplies(watchId: watch.id, project: project)
+                    return
+                }
+                if let checked = round.checkedHeadOid, checked != tip {
+                    try board.parkPublishing(
+                        watchId: watch.id,
+                        reason: "Round \(round.number)'s branch moved from \(checked) to \(tip) after its check, so it was not pushed."
+                    )
+                    await postFactualReplies(watchId: watch.id, project: project)
+                    return
+                }
+                let publisher = BranchPublisher(repoPath: repo, privateTerms: settings.privateTerms)
+                let headRef = watch.headRef
+                do {
+                    _ = try await offMain { try publisher.fastForward(branch: branch, onto: headRef) }
+                } catch PublishFailure.notFastForward {
+                    try board.markRoundStale(watchId: watch.id)
+                    await dropRoundWorktree(task, project: project)
+                    await postFactualReplies(watchId: watch.id, project: project)
+                    return
+                } catch {
+                    try board.parkPublishing(
+                        watchId: watch.id, reason: "Round \(round.number) was not pushed: \(describe(error))"
+                    )
+                    await postFactualReplies(watchId: watch.id, project: project)
+                    return
+                }
+            }
+            guard try board.recordRoundPublished(watchId: watch.id, pushedHeadOid: tip) != nil else { return }
+        } catch {
+            NSLog("PR follow-through: publishing %@ could not be recorded: %@", url, describe(error))
+            return
+        }
+        await dropRoundWorktree(task, project: project)
+        await postFactualReplies(watchId: watch.id, project: project)
+    }
+
+    private func dropRoundWorktree(_ task: BoardTask, project: Project) async {
+        guard let taskSessions = try? sessions.forTask(task.id), !taskSessions.contains(where: \.state.isActive) else { return }
+        await startTeardown(claimTeardown(of: taskSessions), task: task, project: project, report: nil, landingNotice: nil)
+    }
+
+    /// SPEC §13.2: with `postFactualReplies` on, each handled thread item still owed a reply gets one and
+    /// each review body a PR comment, its URL recorded. Nothing is resolved. A failed post is recorded on
+    /// the item, and abandoned when GitHub says its comment is gone.
+    private func postFactualReplies(watchId: String, project: Project) async {
+        guard project.settings.prFollowThrough.postFactualReplies, let watch = try? prWatches.get(watchId),
+              let items = try? prWatches.pendingReplies(watchId: watchId), !items.isEmpty
+        else { return }
+        let pushed = Dictionary(
+            ((try? prWatches.rounds(watchId: watchId)) ?? []).map { ($0.number, $0.pushedHeadOid) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let replier = pullRequestReplies
+        let cwd = URL(fileURLWithPath: project.repoPath)
+        for item in items {
+            guard let id = item.id, let text = item.factualReply(pushedHeadOid: pushed[item.round] ?? nil) else { continue }
+            let body = item.kind == .review ? item.url.map { "In reply to \($0):\n\n\(text)" } ?? text : text
+            do {
+                let url: String
+                if item.kind == .thread {
+                    let thread = item.githubNodeId
+                    url = try await offMain { try replier.replyToThread(threadId: thread, body: body, cwd: cwd) }
+                } else {
+                    let (owner, name, pr) = (watch.repoOwner, watch.repoName, watch.number)
+                    url = try await offMain { try replier.comment(owner: owner, name: name, number: pr, body: body, cwd: cwd) }
+                }
+                try prWatches.recordReply(itemId: id, url: url)
+            } catch {
+                NSLog("PR follow-through: the reply to %@ on %@ was not posted: %@", item.githubNodeId, watch.url, describe(error))
+                try? prWatches.recordReplyFailure(itemId: id, error: describe(error), gone: error is PullRequestReplyTargetGone)
+            }
         }
     }
 
@@ -3452,12 +3914,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             // SPEC §13.2: a triager has no acknowledge_shutdown and is never resumed, so it is stopped
             // outright, and its round is retried once the order lifts rather than counted as failed.
             let triagers = Set(active.filter { session in
-                session.taskId.flatMap { try? tasks.get($0) }?.origin == .triage
+                session.taskId.flatMap { try? tasks.get($0) }?.origin.isPullRequestReader == true
             }.map(\.sessionId))
             for triager in active where triagers.contains(triager.sessionId) {
                 if let triage = triager.taskId.flatMap({ try? prWatches.triage(taskId: $0) }) {
                     _ = try? prWatches.abandonTriageRound(watchId: triage.watchId, failure: nil)
                 }
+                if let taskId = triager.taskId { try? prWatches.interruptFollowupCheck(taskId: taskId) }
                 try? await stopSession(triager.sessionId, by: .human)
             }
             let workers = active.filter { $0.state != .setup && !triagers.contains($0.sessionId) }
@@ -3715,16 +4178,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     ) throws -> Report? {
         let report = try board.terminate(sessionId: sessionId, cause: cause, salvage: salvage)
         if let session = try? sessions.get(sessionId), let taskId = session.taskId,
-           (try? tasks.get(taskId))?.origin == .triage {
+           (try? tasks.get(taskId))?.origin.isPullRequestReader == true {
             inBackground { await $0.tearDownFinishedTriage(session) }
         }
         return report
     }
 
-    /// SPEC §13.2: a triage lands nothing, and its detached checkout of the PR head always has commits
-    /// outside the project's bases, so the orphan sweep would keep it forever.
+    /// SPEC §13.1, §13.2: a triage or follow-up check lands nothing, and its detached checkout of the PR
+    /// head always has commits outside the project's bases, so the orphan sweep would keep it forever.
     private func tearDownFinishedTriage(_ session: AgentSession) async {
-        guard let taskId = session.taskId, let task = try? tasks.get(taskId), task.origin == .triage,
+        guard let taskId = session.taskId, let task = try? tasks.get(taskId), task.origin.isPullRequestReader,
               task.column == .done || task.column == .closed, let project = try? projects.get(task.projectId),
               let taskSessions = try? sessions.forTask(taskId), !taskSessions.contains(where: \.state.isActive)
         else { return }
