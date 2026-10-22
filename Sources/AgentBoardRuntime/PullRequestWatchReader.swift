@@ -61,12 +61,15 @@ public struct PullRequestWatchReader: Sendable {
     }
 
     /// One query for every listed pull request in `owner/name`. Drafts and anything GitHub no longer
-    /// returns are left out, and feedback the viewer wrote never becomes an item.
-    public func snapshots(owner: String, name: String, numbers: [Int], cwd: URL) throws -> [PRSnapshot] {
+    /// returns are left out, feedback the viewer wrote never becomes an item, and the checks named in
+    /// `ignoring` count toward neither the checks state nor the failed checks.
+    public func snapshots(
+        owner: String, name: String, numbers: [Int], ignoring: Set<String> = [], cwd: URL
+    ) throws -> [PRSnapshot] {
         guard !numbers.isEmpty else { return [] }
         let arguments = Self.graphQLArguments(owner: owner, name: name, numbers: numbers)
         let stdout = try run(arguments, cwd: cwd, what: "gh api graphql")
-        guard let snapshots = Self.parseSnapshots(stdout, owner: owner, name: name) else {
+        guard let snapshots = Self.parseSnapshots(stdout, owner: owner, name: name, ignoring: ignoring) else {
             throw PullRequestWatchFailure("`gh api graphql` printed no repository: \(stdout)", ghUnavailable: false)
         }
         return snapshots
@@ -171,7 +174,9 @@ public struct PullRequestWatchReader: Sendable {
         }
     }
 
-    public static func parseSnapshots(_ json: String, owner: String, name: String) -> [PRSnapshot]? {
+    public static func parseSnapshots(
+        _ json: String, owner: String, name: String, ignoring: Set<String> = []
+    ) -> [PRSnapshot]? {
         guard let response = try? JSONDecoder().decode(GraphQLResponse.self, from: Data(json.utf8)),
               let repository = response.data?.repository
         else { return nil }
@@ -179,10 +184,12 @@ public struct PullRequestWatchReader: Sendable {
         return repository.values.compactMap { $0 }
             .filter { !$0.isDraft }
             .sorted { $0.number < $1.number }
-            .map { snapshot(of: $0, owner: owner, name: name, viewer: viewer) }
+            .map { snapshot(of: $0, owner: owner, name: name, viewer: viewer, ignoring: ignoring) }
     }
 
-    private static func snapshot(of pr: GraphQLResponse.PullRequest, owner: String, name: String, viewer: String?) -> PRSnapshot {
+    private static func snapshot(
+        of pr: GraphQLResponse.PullRequest, owner: String, name: String, viewer: String?, ignoring: Set<String>
+    ) -> PRSnapshot {
         func byViewer(_ author: GraphQLResponse.Author?) -> Bool {
             guard let viewer, let login = author?.login else { return false }
             return login.caseInsensitiveCompare(viewer) == .orderedSame
@@ -219,28 +226,32 @@ public struct PullRequestWatchReader: Sendable {
             headRef: pr.headRefName, headOid: pr.headRefOid, baseRef: pr.baseRefName,
             reviewDecision: pr.reviewDecision,
             approvedBy: standing.approvedBy, changesRequestedBy: standing.changesRequestedBy,
-            checksState: checksState(of: pr),
+            checksState: checksState(of: pr, ignoring: ignoring),
             mergeable: pr.mergeable,
             labels: pr.labels?.nodes.map(\.name) ?? [],
             items: items,
             isCrossRepository: pr.isCrossRepository ?? false,
             headRepository: pr.headRepository?.nameWithOwner,
-            failedChecks: failedChecks(of: pr)
+            failedChecks: failedChecks(of: pr, ignoring: ignoring)
         )
     }
 
     /// SPEC §13.1: when the base branch requires checks only those count, and one that has not
     /// reported is pending; otherwise every reported check and the rollup count. Only each check's
     /// latest run counts. Failure, NEUTRAL included, outweighs pending. Nil means nothing is
-    /// required and nothing has reported.
-    private static func checksState(of pr: GraphQLResponse.PullRequest) -> String? {
+    /// required and nothing counted has reported. Ignored checks leave both sets, and the rollup too
+    /// once one of them has reported, since its state includes theirs.
+    private static func checksState(of pr: GraphQLResponse.PullRequest, ignoring: Set<String>) -> String? {
         let rollup = pr.commits?.nodes.last?.commit.statusCheckRollup
-        let reported = latestRuns(of: pr)
-        let required = requiredChecks(of: pr)
+        let all = latestRuns(of: pr)
+        let reported = all.filter { !ignoring.contains($0.key) }
+        let required = requiredChecks(of: pr).subtracting(ignoring)
         let outcomes: [CheckOutcome]
         if required.isEmpty {
             guard let rollup else { return nil }
-            outcomes = reported.values.map(\.outcome) + [CheckOutcome(state: rollup.state)]
+            let rollupCounts = reported.count == all.count
+            outcomes = reported.values.map(\.outcome) + (rollupCounts ? [CheckOutcome(state: rollup.state)] : [])
+            guard !outcomes.isEmpty else { return nil }
         } else {
             outcomes = required.map { reported[$0]?.outcome ?? .pending }
         }
@@ -248,9 +259,9 @@ public struct PullRequestWatchReader: Sendable {
     }
 
     /// The counted checks, by the same rule as `checksState`, whose latest run failed, in name order.
-    private static func failedChecks(of pr: GraphQLResponse.PullRequest) -> [PRFailedCheck] {
-        let reported = latestRuns(of: pr)
-        let required = requiredChecks(of: pr)
+    private static func failedChecks(of pr: GraphQLResponse.PullRequest, ignoring: Set<String>) -> [PRFailedCheck] {
+        let reported = latestRuns(of: pr).filter { !ignoring.contains($0.key) }
+        let required = requiredChecks(of: pr).subtracting(ignoring)
         let counted = required.isEmpty ? Array(reported.values) : required.compactMap { reported[$0] }
         return counted.filter { $0.outcome == .failure }.sorted { $0.name < $1.name }.compactMap(\.failed)
     }

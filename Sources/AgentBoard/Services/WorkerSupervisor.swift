@@ -2158,8 +2158,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard parts.count == 2 else { continue }
             let cwd = URL(fileURLWithPath: project.repoPath)
             let numbers = prs.map(\.number)
+            let ignoring = Set(project.settings.prFollowThrough.checksAwaitingVerification)
             guard let snapshots = try? await offMain({
-                try reader.snapshots(owner: parts[0], name: parts[1], numbers: numbers, cwd: cwd)
+                try reader.snapshots(owner: parts[0], name: parts[1], numbers: numbers, ignoring: ignoring, cwd: cwd)
             }) else { continue }
             for snapshot in snapshots {
                 await applyPRSnapshot(snapshot, project: project)
