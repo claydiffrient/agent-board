@@ -72,10 +72,10 @@ enum ProcessRunner {
 
     /// Feeds stdin and drains both pipes on the calling thread; nil past `deadline`, or, without an `exitWatch`,
     /// when stderr outlives stdout by `pipeDrainTimeout`. Once `exitWatch` turns readable it takes only
-    /// what is already buffered, so a grandchild holding a pipe open cannot stall it. Handing a pipe to a
-    /// dispatch queue instead deadlocks once as many callers block here as the machine has cores:
-    /// libdispatch then schedules none of their readers.
-    private static func exchange(
+    /// what is already buffered, and past `deadline` returns what it has, so a grandchild holding or
+    /// flooding a pipe cannot stall it. Handing a pipe to a dispatch queue instead deadlocks once as
+    /// many callers block here as the machine has cores: libdispatch then schedules none of their readers.
+    static func exchange(
         stdout: Pipe, stderr: Pipe, stdin: (Pipe, Data)?, exitWatch: ExitWatch? = nil, deadline: DispatchTime? = nil
     ) -> (stdout: Data, stderr: Data)? {
         let writer = stdin?.0.fileHandleForWriting
@@ -99,13 +99,15 @@ enum ProcessRunner {
 
         while fds[0].fd >= 0 || fds[1].fd >= 0 {
             var wait: Int32 = -1
-            if exited {
-                wait = 0
-            } else if let limit = [stderrDeadline, deadline].compactMap({ $0 }).min() {
+            if let limit = [stderrDeadline, deadline].compactMap({ $0 }).min() {
                 let now = DispatchTime.now()
-                guard now < limit else { return nil }
+                guard now < limit else {
+                    if exited { break }
+                    return nil
+                }
                 wait = Int32(min((limit.uptimeNanoseconds - now.uptimeNanoseconds) / 1_000_000 + 1, 1000))
             }
+            if exited { wait = 0 }
             let ready = poll(&fds, nfds_t(fds.count), wait)
             if ready == 0, exited { break }
             guard ready > 0 else { continue }
@@ -138,7 +140,7 @@ enum ProcessRunner {
         return (collected[0], collected[1])
     }
 
-    /// Bounded from launch: past `timeout` the child is terminated and this throws. Reading stops at the
+    /// Bounded from launch: past `timeout` a child still running is terminated and this throws. Reading stops at the
     /// child's exit, so a grandchild that keeps a pipe open (git's ssh) cannot stall the caller.
     static func run(
         executable: URL,
@@ -160,7 +162,13 @@ enum ProcessRunner {
         process.standardError = stderrPipe
 
         try process.run()
-        let exitWatch = ExitWatch(process)
+        let exitWatch: ExitWatch
+        do {
+            exitWatch = try ExitWatch(process)
+        } catch {
+            process.terminate()
+            throw error
+        }
         guard let output = exchange(stdout: stdoutPipe, stderr: stderrPipe, stdin: nil, exitWatch: exitWatch, deadline: deadline),
               let status = exitWatch.status(by: deadline)
         else {
@@ -201,11 +209,16 @@ enum ProcessRunner {
 
 /// A kqueue that turns readable once the child exits. It never reaps the child, which stays Foundation's
 /// to collect, and it needs no dispatch thread, which a burst of callers would starve.
-private final class ExitWatch {
-    let descriptor = kqueue()
+final class ExitWatch {
+    let descriptor: Int32
     private let process: Process
 
-    init(_ process: Process) {
+    init(_ process: Process) throws {
+        descriptor = kqueue()
+        guard descriptor >= 0 else {
+            let code = errno
+            throw AgentRuntimeError("kqueue() failed with errno \(code) (\(String(cString: strerror(code))))")
+        }
         self.process = process
         var processExit = kevent(
             ident: UInt(process.processIdentifier), filter: Int16(EVFILT_PROC), flags: UInt16(EV_ADD | EV_ONESHOT),
