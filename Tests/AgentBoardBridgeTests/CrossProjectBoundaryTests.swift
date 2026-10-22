@@ -26,7 +26,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "spawn_worker", "stop_worker", "archive_task", "unarchive_task", "get_report",
         "promote_proposal", "get_epic", "request_integration", "close_epic", "open_pull_request",
         "read_note", "append_section", "replace_section", "attach_note", "pin_note",
-        "assign_to_agent", "add_comment", "delete_message", "reply_to_request",
+        "assign_to_agent", "add_comment", "delete_message", "reply_to_request", "add_pr_item",
     ]
 
     /// The whole of the permitted crossing: queue text into another project's channel, and learn
@@ -56,7 +56,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "create_epic", "request_integration", "close_epic", "push_branch", "open_pull_request", "send_message",
         "attach_note", "pin_note",
         "update_status", "propose_task", "report_complete", "hand_off", "report_blocked", "acknowledge_shutdown",
-        "commit_my_work", "accept_task", "reopen_task", "reply_to_request",
+        "commit_my_work", "accept_task", "reopen_task", "reply_to_request", "add_pr_item",
     ]
 
     /// Reads of a caller's own roster or task, which mean nothing to a session with no project.
@@ -93,7 +93,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
             "a tool was added to the orchestrator surface without a cross-project test in this file"
         )
         XCTAssertEqual(classified.subtracting(surface), [], "this audit names tools that no longer exist")
-        XCTAssertEqual(surface.count, 39)
+        XCTAssertEqual(surface.count, 40)
     }
 
     func testOnlySendMessageAcceptsAnotherProjectsId() async {
@@ -415,6 +415,26 @@ final class CrossProjectBoundaryTests: XCTestCase {
         XCTAssertEqual(ours.count, 1)
         XCTAssertNil(ours.first?.taskId, "a branch named for another project's task must not link to it")
         XCTAssertNil(ours.first?.epicId)
+    }
+
+    // MARK: PR follow-through
+
+    func testAddPRItemRefusesAPullRequestAnotherProjectWatches() async throws {
+        let watches = PRWatchStore(f.db)
+        let theirs = try watches.upsert(projectId: other.id, snapshot: PRSnapshot(
+            repoOwner: "example-org", repoName: "app", number: 7,
+            url: "https://github.com/example-org/app/pull/7", title: "Theirs",
+            headRef: "feature-7", headOid: String(repeating: "c", count: 40), baseRef: "main"
+        ))
+        try watches.setState(.readyToVerify, watchId: theirs.id)
+
+        await XCTAssertToolError(
+            try await f.call("add_pr_item", ["pr_url": .string(theirs.url), "body": .string("Broken.")]),
+            containing: "not an open pull request this project watches"
+        )
+
+        XCTAssertEqual(try watches.items(watchId: theirs.id), [])
+        XCTAssertEqual(try watches.get(theirs.id)?.state, .readyToVerify)
     }
 
     // MARK: The permitted crossing, and its edges

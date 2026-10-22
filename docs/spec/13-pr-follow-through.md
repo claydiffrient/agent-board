@@ -324,6 +324,19 @@ option, so once the label is gone the item goes to the next fix round. Once the 
 frozen decisions lose their verdict, and the next poll sends the watch to
 settling to triage them.
 
+**Verify failures (phase 4).** What the human finds while verifying a PR by
+hand re-enters the loop as an item of kind `verify_failure`, recorded either by
+the **Send back** row action (§13.4) or by an agent through the orchestrator's
+`add_pr_item(pr_url, body)` (§6), which a manual-verification skill's agent
+calls. The item has no author, path or URL, and its node id is
+`verify:<uuid>`, so it never collides with a GitHub id; the poll never sees it
+on GitHub and so never marks it handled for leaving the snapshot. On a
+verified watch it becomes a frozen decision at once, as above, and the watch
+stays verified until the human removes the label. From watching, settling or
+readyToVerify the watch goes to settling, with the settle wait restarted; in
+any later state it waits, like any feedback that arrives mid-round, for the
+next round. No reply is ever posted for it (§13.2).
+
 A round's triage that never starts, or whose task is closed (§13.2), fails
 the round: its outcome becomes `triage_failed` and the watch returns to
 settling, so the next poll retries with a new round. The third failed round in
@@ -479,8 +492,12 @@ on at all.
   with a project filter. Needs you and the decision items inside it ship in
   phase 2; the other groups read directly off `pr_watch.state` from phase 1.
 - Row actions: **Mark verified** (`gh pr edit --add-label <label>`), **Walk
-  me through it** (shown only when `verifyCommand` is set), **Open PR**,
-  **Pause**. Opening the PR is the row's title, a link to its URL.
+  me through it** (shown only when `verifyCommand` is set), **Send back**
+  (phase 4; shown only while the watch is readyToVerify or verified), **Open
+  PR**, **Pause**. Opening the PR is the row's title, a link to its URL.
+- **Send back** opens a popover asking what failed and records the text as a
+  `verify_failure` item (§13.1): a readyToVerify PR goes to settling, and a
+  verified one stays frozen with the failure as a decision.
 - **Mark verified** runs `gh pr edit <url> --add-label <verificationLabel>`
   through `PullRequestLabeler` in the project's checkout, then records the
   watch as verified with the label added, so the row moves without waiting for

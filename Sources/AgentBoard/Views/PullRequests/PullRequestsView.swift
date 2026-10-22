@@ -119,6 +119,7 @@ struct PullRequestsView: View {
                 isMarking: marking.contains(listing.id),
                 markVerified: { markVerified(listing.watch, project: project) },
                 walkThrough: { openWindow(id: PRVerifyScene.id, value: listing.watch.id) },
+                sendBack: { sendBack(listing.watch, failure: $0) },
                 togglePause: { togglePause(listing.watch) }
             )
             ForEach(listing.decisions) { decision in
@@ -152,6 +153,16 @@ struct PullRequestsView: View {
         }
     }
 
+    private func sendBack(_ watch: PRWatch, failure: String) -> Bool {
+        do {
+            try actions.sendBack(watch, failure: failure)
+            return true
+        } catch {
+            errorMessage = errorText(error)
+            return false
+        }
+    }
+
     private func togglePause(_ watch: PRWatch) {
         do {
             try actions.setPaused(!watch.paused, watch: watch)
@@ -178,6 +189,11 @@ struct PullRequestActions {
             try labeler.addLabel(label, to: url, cwd: cwd)
         }.value
         try PRWatchStore(db).markVerified(watchId: watch.id, label: label)
+    }
+
+    /// Records what verifying the PR turned up as a verify failure (SPEC §13.1).
+    func sendBack(_ watch: PRWatch, failure: String) throws {
+        try PRWatchStore(db).addVerifyFailure(watchId: watch.id, body: failure)
     }
 
     func setPaused(_ paused: Bool, watch: PRWatch) throws {
@@ -254,9 +270,16 @@ struct PullRequestRow: View {
     let isMarking: Bool
     let markVerified: () -> Void
     let walkThrough: () -> Void
+    /// Returns whether the failure was recorded.
+    let sendBack: (String) -> Bool
     let togglePause: () -> Void
 
+    @State private var sendingBack = false
+    @State private var failure = ""
+
     private var watch: PRWatch { listing.watch }
+    private var canSendBack: Bool { watch.state == .readyToVerify || watch.state == .verified }
+    private var trimmedFailure: String { failure.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -281,9 +304,42 @@ struct PullRequestRow: View {
                 Button("Walk me through it", action: walkThrough)
                     .help("Run this project's verify command for this pull request in a new terminal window")
             }
+            if canSendBack {
+                Button("Send back") { sendingBack = true }
+                    .help(watch.state == .verified
+                        ? "Record what verifying turned up; the PR stays frozen until you remove the label"
+                        : "Record what verifying turned up, so follow-through fixes it")
+                    .popover(isPresented: $sendingBack, arrowEdge: .bottom) { sendBackForm }
+            }
             Button(watch.paused ? "Resume" : "Pause", action: togglePause)
         }
         .padding(.vertical, 2)
+    }
+
+    private var sendBackForm: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("What failed?")
+                .fontWeight(.semibold)
+            TextField("What you did, what you expected, what happened", text: $failure, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(4...10)
+                .frame(width: 360)
+            HStack {
+                Spacer()
+                Button("Cancel") { sendingBack = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Send back", action: submitSendBack)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmedFailure.isEmpty)
+            }
+        }
+        .padding(12)
+    }
+
+    private func submitSendBack() {
+        guard !trimmedFailure.isEmpty, sendBack(trimmedFailure) else { return }
+        failure = ""
+        sendingBack = false
     }
 
     private var details: String {

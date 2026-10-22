@@ -468,6 +468,24 @@ public final class OrchestratorToolHandler: ToolHandler {
                 required: ["request_id", "state", "body"]
             )
         ),
+        ToolDescriptor(
+            name: "add_pr_item",
+            description: "Report a failure found while verifying a watched pull request by hand, so PR follow-through "
+                + "fixes it. The body becomes a `verify_failure` item on that pull request and goes through triage "
+                + "like review feedback. A pull request that is ready to verify goes back to settling; one already "
+                + "verified is frozen, so the failure waits as a decision for the human instead of starting a fix "
+                + "round. Refused for a pull request this project does not watch, and for a merged or closed one. "
+                + "Say what you did, what you expected and what happened.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "pr_url": ToolSchema.string("The pull request's GitHub URL."),
+                    "body": ToolSchema.string(
+                        "The failure, as a reviewer would write it.", maxLength: PRWatchStore.maxVerifyFailureLength
+                    ),
+                ],
+                required: ["pr_url", "body"]
+            )
+        ),
     ] + NoteTools.orchestratorDescriptors
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
@@ -511,6 +529,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "send_message": return try await sendMessage(arguments, identity: identity)
         case "delete_message": return try deleteMessage(arguments, identity: identity)
         case "reply_to_request": return try await replyToRequest(arguments, identity: identity)
+        case "add_pr_item": return try addPRItem(arguments, identity: identity)
         default: throw ToolError("Unknown tool: \(name)")
         }
     }
@@ -992,6 +1011,28 @@ public final class OrchestratorToolHandler: ToolHandler {
         }
         try messages.delete(id: id)
         return ToolResult(text: "Deleted message \(id) for both projects.")
+    }
+
+    // MARK: PR follow-through (SPEC §13.1)
+
+    private func addPRItem(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let url = try ToolArguments.requiredString("pr_url", in: arguments)
+        let body = try ToolArguments.requiredString("body", in: arguments)
+        let watches = PRWatchStore(db)
+        guard let watch = try watches.liveWatch(url: url, projectId: identity.projectId) else {
+            throw ToolError("\(url) is not an open pull request this project watches.")
+        }
+        let item: PRItem
+        do {
+            item = try watches.addVerifyFailure(watchId: watch.id, body: body)
+        } catch let rejection as PRVerdictRejection {
+            throw ToolError("\(rejection.reason) Nothing was recorded.")
+        }
+        let state = try watches.get(watch.id)?.state ?? watch.state
+        let outcome = item.verdict == .decision
+            ? "It is verified, so the failure waits as a decision for the human; no fix round starts."
+            : "It is \(state.rawValue); triage picks the failure up with the next round."
+        return ToolResult(text: "Recorded on #\(watch.number). \(outcome)")
     }
 
     // MARK: Coordinator requests (SPEC §9.4)
