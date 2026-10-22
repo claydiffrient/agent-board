@@ -400,6 +400,10 @@ struct ProjectSettingsSheet: View {
             Text("Factual replies are \"Fixed in <sha>\", an answer to a factual question, a pointer to the commit that already did it, and a note that out-of-scope work is tracked separately. Anything argued waits for you as a decision.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Toggle("Re-request reviews", isOn: $settings.prFollowThrough.reRequestReviews)
+            Text("After a fix round is pushed, asks each reviewer whose feedback it addressed to review again, unless they approved or already have a pending request. GitHub notifies them as you.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .prRoles:
             ForEach(FollowThroughRole.allCases) { role in
                 roleRows(role)

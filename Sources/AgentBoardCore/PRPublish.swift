@@ -154,6 +154,43 @@ extension PRWatchStore {
             )
         }
     }
+
+    /// Claims a pushed round's review re-request (SPEC §13.2) and returns the authors of the thread and
+    /// review items it handled. Nil when the round never pushed or was already claimed, so it runs once.
+    public func claimReviewRequests(watchId: String, round number: Int, now: Int64 = .nowMillis) throws -> [String]? {
+        try db.writer.write { db in
+            try db.execute(
+                sql: """
+                UPDATE pr_round SET review_requests_at = ?
+                WHERE watch_id = ? AND number = ? AND pushed_head_oid IS NOT NULL AND review_requests_at IS NULL
+                """,
+                arguments: [now, watchId, number]
+            )
+            guard db.changesCount > 0 else { return nil }
+            return try String.fetchAll(
+                db,
+                sql: """
+                SELECT author FROM pr_item
+                WHERE watch_id = ? AND round = ? AND state = 'handled' AND kind IN ('thread', 'review')
+                AND author IS NOT NULL
+                GROUP BY lower(author) ORDER BY min(id)
+                """,
+                arguments: [watchId, number]
+            )
+        }
+    }
+
+    public func recordReviewRequests(
+        watchId: String, round number: Int, requested: [String], error: String?
+    ) throws {
+        let json = String(decoding: try JSONEncoder().encode(requested), as: UTF8.self)
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE pr_round SET review_requests_json = ?, review_request_error = ? WHERE watch_id = ? AND number = ?",
+                arguments: [json, error, watchId, number]
+            )
+        }
+    }
 }
 
 extension Board {

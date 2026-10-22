@@ -45,6 +45,8 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
     /// When `postFactualReplies` was last turned on. Stamped by `ProjectStore.updateSettings`; only items
     /// handled since then are replied to (SPEC §13.2).
     public var postFactualRepliesSince: Int64? = nil
+    /// Asks the reviewers a pushed round answered to review again, which notifies them as the user (SPEC §13.2).
+    public var reRequestReviews: Bool = false
     public var roles: PRFollowThroughRoles = PRFollowThroughRoles()
     /// Matched case-insensitively by the publish guard.
     public var privateTerms: [String] = []
@@ -61,6 +63,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         dailyBudgetUSD: Double? = nil,
         verifyCommand: String? = nil,
         postFactualReplies: Bool = false,
+        reRequestReviews: Bool = false,
         roles: PRFollowThroughRoles = PRFollowThroughRoles(),
         privateTerms: [String] = [],
         checksAwaitingVerification: [String] = []
@@ -73,6 +76,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         self.dailyBudgetUSD = dailyBudgetUSD
         self.verifyCommand = verifyCommand
         self.postFactualReplies = postFactualReplies
+        self.reRequestReviews = reRequestReviews
         self.roles = roles
         self.privateTerms = privateTerms
         self.checksAwaitingVerification = checksAwaitingVerification
@@ -123,6 +127,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         verifyCommand = try c.decodeIfPresent(String.self, forKey: .verifyCommand)
         postFactualReplies = try c.decodeIfPresent(Bool.self, forKey: .postFactualReplies) ?? defaults.postFactualReplies
         postFactualRepliesSince = try c.decodeIfPresent(Int64.self, forKey: .postFactualRepliesSince)
+        reRequestReviews = try c.decodeIfPresent(Bool.self, forKey: .reRequestReviews) ?? defaults.reRequestReviews
         roles = try c.decodeIfPresent(PRFollowThroughRoles.self, forKey: .roles) ?? defaults.roles
         privateTerms = try c.decodeIfPresent([String].self, forKey: .privateTerms) ?? defaults.privateTerms
         checksAwaitingVerification = try c.decodeIfPresent([String].self, forKey: .checksAwaitingVerification)

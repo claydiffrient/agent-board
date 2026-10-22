@@ -264,6 +264,9 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
     public var followupTaskId: String? = nil
     /// The round branch's tip when its follow-up check started: the head the check judged.
     public var checkedHeadOid: String? = nil
+    public var reviewRequestsAt: Int64? = nil
+    public var reviewRequestsJSON: String? = nil
+    public var reviewRequestError: String? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -280,6 +283,14 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
         case reviewFindings = "review_findings"
         case followupTaskId = "followup_task_id"
         case checkedHeadOid = "checked_head_oid"
+        case reviewRequestsAt = "review_requests_at"
+        case reviewRequestsJSON = "review_requests_json"
+        case reviewRequestError = "review_request_error"
+    }
+
+    /// The logins this round re-requested review from (SPEC §13.2).
+    public var reviewRequests: [String] {
+        reviewRequestsJSON.flatMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) } ?? []
     }
 
     /// The branch a round's fixer commits on (SPEC §13.1).

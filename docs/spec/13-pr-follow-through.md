@@ -54,7 +54,8 @@ triage.
   most twice a round; the third failed check parks the PR instead.
 - **publishing** *(phase 3)* — re-reads the remote head and goes to **stale**
   if it moved. Otherwise fast-forward pushes the round branch to the PR's head
-  ref, then posts factual replies when `postFactualReplies` is on. It never
+  ref, then posts factual replies when `postFactualReplies` is on and
+  re-requests review when `reRequestReviews` is on (§13.2). It never
   resolves threads.
 - **awaitingCI** *(phase 3 reads green/red; phase 4 adds the log-tail items on
   red)* — green goes to watching; red goes straight to triaging, with each
@@ -498,6 +499,24 @@ reads that PR again (or its watch ends). An item reopened by a new reply loses `
 `reply_error` and `reply_abandoned_at`, so once it is handled again it gets a
 fresh reply. No thread is ever resolved: resolving is the reviewer's call.
 
+**Re-requesting review.** When the project's `reRequestReviews` setting is on,
+a round whose push was recorded asks for review again, right after its replies.
+A round that went stale, froze or parked asks nothing. The candidates are the
+authors of the thread and review items handled in that round (`pr_item.round`
+is the round's number), not every past reviewer. One `gh api graphql` read of
+the pull request's reviews and pending review requests then keeps only those
+whose latest review, `PENDING` and `DISMISSED` ones aside, is
+`CHANGES_REQUESTED` or `COMMENTED`, which leaves out anyone who approved. It
+also drops the viewer, bots (a `Bot` author, or a login ending in `[bot]`,
+which GitHub will not request) and anyone whose request is still pending. The
+rest are asked in one
+`gh api repos/<owner>/<name>/pulls/<n>/requested_reviewers` call. GitHub
+notifies each of them as the user, which is why the setting is off by default.
+The round is claimed first by stamping `pr_round.review_requests_at`, so a
+round asks at most once. The logins asked go in `review_requests_json`, and a
+failed read or request is logged and kept in `review_request_error`; it is not
+retried, and it neither parks the watch nor holds back replies.
+
 **The triage session (phase 2).** `WorkerSupervisor.spawnTriager(watchId)` is
 the only way one starts; the orchestrator has no tool for it. It is held to
 the same §8 caps, shutdown order and concurrency count as any worker, since
@@ -561,6 +580,7 @@ project that never opts in pays nothing:
 | `requireApproval` | `true` | 1 |
 | `verifyCommand` | `nil` — a shell command template with `{url}` that the Walk me through it row action runs in a terminal through an interactive login shell; a Claude command goes through `claude`, e.g. `claude "/review:verify {url}"` | 1 (button shown only once a value is set) |
 | `postFactualReplies` | `false` | 3 (no replies exist before phase 3) |
+| `reRequestReviews` | `false` — re-requests review after a pushed round, which notifies reviewers as the user (§13.2) | 4 |
 | `roles.triage` / `roles.fixer` / `roles.reviewer` / `roles.followupCheck` | each `{rosterAgentId?, model?}`, unset | 2 (`triage`), 3 (the rest) |
 | `privateTerms` | `[]` | 1 |
 | `checksAwaitingVerification` | `[]` — check-run names or status contexts, matched exactly, ignored when deciding whether CI has passed (§13.1) | 4 |
@@ -688,7 +708,8 @@ on at all.
   that wait on verification**, a comma-separated `checksAwaitingVerification`
   field whose save trims names and drops blanks and repeats),
   **Replies** (`postFactualReplies`, captioned with which verdicts count as
-  factual), **Publish guard** (the `privateTerms` list: each term a row
+  factual, and `reRequestReviews`, captioned that GitHub notifies reviewers as
+  the user), **Publish guard** (the `privateTerms` list: each term a row
   with a remove button, plus a field that adds one on Return), and **Roles**
   (for each of Triage, Fixer, Reviewer and Follow-up check, an agent picker of
   Default plus the project's enabled roster agents, and a model picker; a

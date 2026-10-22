@@ -16,6 +16,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
     private var fixture: SupervisorFixture!
     private var head = ""
     private var onAC = true
+    private var reviews: [[String: Any]] = []
     private let repository = "example-org/app"
     private var url: String { "https://github.com/\(repository)/pull/12" }
     private var watches: PRWatchStore { PRWatchStore(fixture.db) }
@@ -60,21 +61,22 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
     private func enable(
         settleMinutes: Int = 0, budget: Double? = nil, label: String? = nil, replies: Bool = false,
+        reRequest: Bool = false,
         roles: PRFollowThroughRoles = PRFollowThroughRoles(fixer: PRFollowThroughRole(model: "fixer-model"))
     ) throws {
         var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
         settings.prFollowThrough = PRFollowThroughSettings(
             enabled: true, verificationLabel: label, settleMinutes: settleMinutes, dailyBudgetUSD: budget,
-            postFactualReplies: replies, roles: roles
+            postFactualReplies: replies, reRequestReviews: reRequest, roles: roles
         )
         try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
     }
 
-    private func thread(_ id: String, body: String = "Rename this.") -> [String: Any] {
+    private func thread(_ id: String, body: String = "Rename this.", author: String = "reviewer") -> [String: Any] {
         [
             "id": id, "isResolved": false, "isOutdated": false,
             "comments": ["nodes": [[
-                "author": ["login": "reviewer"], "body": body, "url": "\(url)#\(id)",
+                "author": ["login": author], "body": body, "url": "\(url)#\(id)",
                 "path": "Sources/App.swift", "line": 3,
             ]]],
         ]
@@ -108,7 +110,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
             "number": 12, "url": url, "title": "Add widgets", "isDraft": false, "headRefName": "add-widgets",
             "headRefOid": head, "baseRefName": "main", "reviewDecision": "APPROVED", "mergeable": "MERGEABLE",
             "labels": ["nodes": []], "commits": ["nodes": [["commit": ["statusCheckRollup": rollup]]]],
-            "reviewThreads": ["nodes": threads], "reviews": ["nodes": []],
+            "reviewThreads": ["nodes": threads], "reviews": ["nodes": reviews],
         ]])
     }
 
@@ -392,7 +394,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
     private let gradingPlugin = "/plugins/grading"
 
     /// A reviewer role and a follow-up check role, each a board-local roster agent.
-    private func enableChecking(label: String? = nil, replies: Bool = false) throws {
+    private func enableChecking(label: String? = nil, replies: Bool = false, reRequest: Bool = false) throws {
         let store = RosterStore(fixture.db)
         let rita = try store.create(name: "Rita", role: "reviewer", systemPrompt: "You review for correctness.")
         let gail = try store.create(
@@ -400,7 +402,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         )
         try store.enable(agentId: rita.id, forProject: fixture.project.id)
         try store.enable(agentId: gail.id, forProject: fixture.project.id)
-        try enable(label: label, replies: replies, roles: PRFollowThroughRoles(
+        try enable(label: label, replies: replies, reRequest: reRequest, roles: PRFollowThroughRoles(
             fixer: PRFollowThroughRole(model: "fixer-model"), reviewer: PRFollowThroughRole(rosterAgentId: rita.id),
             followupCheck: PRFollowThroughRole(rosterAgentId: gail.id)
         ))
@@ -420,9 +422,11 @@ final class PRFollowThroughLoopTests: XCTestCase {
         try await fixture.identity(token: try XCTUnwrap(fixture.grants.forSession(session.sessionId).first).token)
     }
 
-    /// One `fix` thread, triaged, with its round's fixer running; with `question`, an `answer` thread too.
-    private func runningFixer(question: Bool = false) async throws -> BoardTask {
-        answer(threads: [thread("T_fix")] + (question ? [thread("T_question", body: "Why 3?")] : []))
+    /// One `fix` thread, triaged, with its round's fixer running; with `question`, an `answer` thread too,
+    /// and an `answer` thread with no reply from each of `answeredBy`.
+    private func runningFixer(question: Bool = false, answeredBy: [String] = []) async throws -> BoardTask {
+        let answered = answeredBy.map { thread("T_\($0)", body: "Looks odd.", author: $0) }
+        answer(threads: [thread("T_fix")] + (question ? [thread("T_question", body: "Why 3?")] : []) + answered)
         await poll()
         let ids = Dictionary(uniqueKeysWithValues: try watches.items(watchId: try onlyWatch().id).map {
             ($0.githubNodeId, Double($0.id ?? 0))
@@ -430,6 +434,11 @@ final class PRFollowThroughLoopTests: XCTestCase {
         var verdicts: [JSONValue] = [.object([
             "item_id": .number(ids["T_fix"]!), "verdict": .string("fix"), "approach": .string("Rename n to count."),
         ])]
+        for author in answeredBy {
+            verdicts.append(.object([
+                "item_id": .number(ids["T_\(author)"]!), "verdict": .string("answer"), "approach": .string("Nothing to do."),
+            ]))
+        }
         if question {
             verdicts.append(.object([
                 "item_id": .number(ids["T_question"]!), "verdict": .string("answer"),
@@ -630,12 +639,13 @@ final class PRFollowThroughLoopTests: XCTestCase {
     /// worktree.
     private func passedRound(
         label: String? = nil, replies: Bool = false, question: Bool = false, labels: [String] = [],
-        remoteHead: String? = nil, repliesGone: Bool = false
+        remoteHead: String? = nil, repliesGone: Bool = false, reRequest: Bool = false, answeredBy: [String] = []
     ) async throws -> (tip: String, worktree: String) {
-        try enableChecking(label: label, replies: replies)
+        try enableChecking(label: label, replies: replies, reRequest: reRequest)
+        fixture.gh.answerReviewRequests()
         fixture.gh.answer(url, state: "OPEN", head: remoteHead ?? head, labels: labels)
         if repliesGone { fixture.gh.failRepliesAsGone() } else { fixture.gh.answerReplies(url: "\(url)#discussion_r1") }
-        let fixer = try await runningFixer(question: question)
+        let fixer = try await runningFixer(question: question, answeredBy: answeredBy)
         let worktree = try XCTUnwrap(try activeSession(on: fixer.id).worktreePath)
         try await completeFixer(fixer, file: "fix.txt")
         await poll()
@@ -643,6 +653,40 @@ final class PRFollowThroughLoopTests: XCTestCase {
         try await grade("fixed", evidence: "App.swift:3 now says count.")
         await poll()
         return (try rev("HEAD", in: URL(fileURLWithPath: worktree)), worktree)
+    }
+
+    private var reviewRequestCalls: [[String]] {
+        fixture.gh.calls.filter { $0.count > 1 && $0[1].hasSuffix("/requested_reviewers") }
+    }
+
+    /// The round handles feedback from a reviewer still requesting changes, an approver and a bot.
+    private func reviewedRound(reRequest: Bool) async throws -> PRRound {
+        reviews = [
+            ["id": "R_1", "state": "CHANGES_REQUESTED", "body": "", "author": ["login": "reviewer"]],
+            ["id": "R_2", "state": "APPROVED", "body": "", "author": ["login": "approver"]],
+            ["id": "R_3", "state": "COMMENTED", "body": "", "author": ["__typename": "Bot", "login": "lint-helper"]],
+        ]
+        _ = try await passedRound(reRequest: reRequest, answeredBy: ["approver", "lint-helper"])
+        await poll()
+        await poll()
+        return try XCTUnwrap(try watches.rounds(watchId: try onlyWatch().id).first)
+    }
+
+    func testAPushedRoundReRequestsReviewOnceAndOnlyFromTheBlockingReviewerItAnswered() async throws {
+        let round = try await reviewedRound(reRequest: true)
+
+        XCTAssertEqual(round.outcome, "published")
+        XCTAssertEqual(reviewRequestCalls, [["api", "repos/\(repository)/pulls/12/requested_reviewers", "-f", "reviewers[]=reviewer"]])
+        XCTAssertEqual(round.reviewRequests, ["reviewer"])
+        XCTAssertNil(round.reviewRequestError)
+    }
+
+    func testWithReRequestsOffAPushedRoundRequestsNoReview() async throws {
+        let round = try await reviewedRound(reRequest: false)
+
+        XCTAssertEqual(round.outcome, "published")
+        XCTAssertEqual(reviewRequestCalls, [])
+        XCTAssertNil(round.reviewRequestsAt)
     }
 
     func testAPassedRoundFastForwardsOntoThePRHeadRefAndPostsNoReplyWhileRepliesAreOff() async throws {

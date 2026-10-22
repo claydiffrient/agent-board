@@ -185,6 +185,11 @@ final class FakeGh: GhRunning, @unchecked Sendable {
         }
     }
 
+    /// What re-requesting review prints.
+    func answerReviewRequests() {
+        lock.withLock { answers[Self.reviewRequestKey] = CommandResult(status: 0, stdout: "{}", stderr: "") }
+    }
+
     /// What `gh run view --job <jobId> --log-failed` prints.
     func answerFailedLog(jobId: Int64, log: String) {
         lock.withLock { answers[Self.failedLogKey(jobId)] = CommandResult(status: 0, stdout: log, stderr: "") }
@@ -193,6 +198,7 @@ final class FakeGh: GhRunning, @unchecked Sendable {
     private static let searchKey = "search prs"
     private static let replyKey = "reply"
     private static let commentKey = "comment"
+    private static let reviewRequestKey = "requested reviewers"
 
     private static func graphQLKey(_ repository: String) -> String { "graphql \(repository)" }
 
@@ -207,6 +213,9 @@ final class FakeGh: GhRunning, @unchecked Sendable {
             return replyKey
         }
         if arguments.count > 1, arguments[0] == "api", arguments[1].hasSuffix("/comments") { return commentKey }
+        if arguments.count > 1, arguments[0] == "api", arguments[1].hasSuffix("/requested_reviewers") {
+            return reviewRequestKey
+        }
         if arguments.starts(with: ["api", "graphql"]) {
             func value(_ name: String) -> String {
                 arguments.first { $0.hasPrefix("\(name)=") }.map { String($0.dropFirst(name.count + 1)) } ?? ""
