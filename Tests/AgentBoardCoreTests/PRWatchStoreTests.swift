@@ -310,6 +310,35 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertEqual(try store.badgeCounts(), [f.project.id: PRBadgeCount(readyToVerify: 1, openDecisions: 1)])
     }
 
+    func testTheObservedPageListsAnActiveTriageSessionUntilItEnds() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: []))
+        let task = try f.board.createTriageTask(watchId: watch.id, baseOid: "base", headOid: "abc123")
+        try f.sessions.insert(f.session("triager", taskId: task.id))
+
+        let sessions = PageSessions()
+        let ended = expectation(description: "the page drops the ended session")
+        let cancellable = store.observePage().start(
+            in: f.db.reader,
+            scheduling: .immediate,
+            onError: { XCTFail("observation failed: \($0)") },
+            onChange: { page in
+                sessions.values.append(page.flatMap(\.listings).flatMap(\.sessions))
+                if sessions.values.count == 2 { ended.fulfill() }
+            }
+        )
+        defer { cancellable.cancel() }
+        try f.sessions.setState("triager", .completed, endedAt: .nowMillis)
+        wait(for: [ended], timeout: 5)
+
+        XCTAssertEqual(sessions.values, [[PRListingSession(sessionId: "triager", role: .triage)], []])
+    }
+
+    private final class PageSessions: @unchecked Sendable {
+        var values: [[PRListingSession]] = []
+    }
+
     private func setReplies(_ f: Fixture, _ on: Bool, now: Int64) throws {
         var settings = try XCTUnwrap(f.projects.get(f.project.id)).settings
         settings.prFollowThrough.postFactualReplies = on

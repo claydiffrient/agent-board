@@ -435,16 +435,39 @@ public enum PRPageGroup: String, Sendable, CaseIterable, Equatable {
     }
 }
 
+public enum PRSessionRole: String, Sendable, Equatable {
+    case triage
+    case fixer
+    case reviewer
+}
+
+/// An active session on one of a watch's triage or fix-round tasks, which its row offers to attach to
+/// (SPEC §13.4).
+public struct PRListingSession: Sendable, Equatable, Identifiable {
+    public var sessionId: String
+    public var role: PRSessionRole
+
+    public init(sessionId: String, role: PRSessionRole) {
+        self.sessionId = sessionId
+        self.role = role
+    }
+
+    public var id: String { sessionId }
+}
+
 public struct PRWatchListing: Sendable, Equatable, Identifiable {
     public var watch: PRWatch
     public var openItems: Int
     /// The open decision items, oldest first, which the Needs you group lists under the row.
     public var decisions: [PRItem]
+    /// Oldest first.
+    public var sessions: [PRListingSession]
 
-    public init(watch: PRWatch, openItems: Int, decisions: [PRItem] = []) {
+    public init(watch: PRWatch, openItems: Int, decisions: [PRItem] = [], sessions: [PRListingSession] = []) {
         self.watch = watch
         self.openItems = openItems
         self.decisions = decisions
+        self.sessions = sessions
     }
 
     public var id: String { watch.id }

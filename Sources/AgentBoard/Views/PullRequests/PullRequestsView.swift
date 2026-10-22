@@ -339,6 +339,7 @@ struct PullRequestRow: View {
     let resume: () -> Void
     let stopWatching: () -> Void
 
+    @Environment(\.openWindow) private var openWindow
     @State private var sendingBack = false
     @State private var failure = ""
 
@@ -365,6 +366,9 @@ struct PullRequestRow: View {
                 }
             }
             Spacer(minLength: 8)
+            ForEach(listing.sessions) { session in
+                attachButton(session)
+            }
             if watch.state != .verified {
                 Button(isMarking ? "Marking…" : "Mark verified", action: markVerified)
                     .disabled(verificationLabel == nil || isMarking)
@@ -392,6 +396,18 @@ struct PullRequestRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// SPEC §13.4: opens the session's terminal window, as the Status page's attach button does.
+    private func attachButton(_ session: PRListingSession) -> some View {
+        let attach = SessionAction.attach
+        return Button {
+            openWindow(id: "terminal", value: session.sessionId)
+        } label: {
+            Label(session.role.title, systemImage: attach.symbol)
+        }
+        .accessibilityLabel("\(attach.accessibilityLabel): \(session.role.title)")
+        .help("Attach to the \(session.role.title.lowercased()) agent's Claude session")
     }
 
     private var sendBackForm: some View {
@@ -459,6 +475,16 @@ extension PRPageGroup {
         case .waitingOnReviewers: "Nothing is waiting on reviewers."
         case .verified: "Nothing is verified yet."
         case .parked: "Nothing is parked."
+        }
+    }
+}
+
+extension PRSessionRole {
+    var title: String {
+        switch self {
+        case .triage: "Triage"
+        case .fixer: "Fixer"
+        case .reviewer: "Reviewer"
         }
     }
 }
