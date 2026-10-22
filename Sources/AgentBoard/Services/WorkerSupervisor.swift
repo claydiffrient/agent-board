@@ -6,6 +6,12 @@ import AppKit
 import Foundation
 import Observation
 
+struct PRWatchRefreshFailure: LocalizedError, Equatable {
+    let failures: [String]
+
+    var errorDescription: String? { failures.joined(separator: "\n") }
+}
+
 enum SupervisorError: LocalizedError {
     case notAGitRepository(String)
     case projectNotFound(String)
@@ -171,7 +177,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let prWatches: PRWatchStore
     /// Millis of the last PR follow-through poll; 0 means none yet.
     @ObservationIgnored private var lastPRWatchPoll: Int64 = 0
-    @ObservationIgnored private var prWatchPoll: _Concurrency.Task<Void, Never>?
+    /// The running poll and the watch ids it is scoped to; nil scope polls every watch.
+    @ObservationIgnored private var prWatchPoll: (scope: Set<String>?, task: _Concurrency.Task<[String], Never>)?
+    private(set) var isPollingPRWatches = false
     @ObservationIgnored private var prWatchSearchFailures = 0
     /// Consecutive polls on which git could not read a project's `origin`, by project id.
     @ObservationIgnored private var prWatchRemoteFailures: [String: Int] = [:]
@@ -2071,30 +2079,59 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// A call made while a poll runs waits for it and then polls again, so it always reads state
     /// written before the call.
     func pollPRWatches() async {
-        while let inFlight = prWatchPoll { await inFlight.value }
-        let poll = _Concurrency.Task {
-            await runPRWatchPoll()
-            prWatchPoll = nil
-        }
-        prWatchPoll = poll
-        await poll.value
+        while let inFlight = prWatchPoll { _ = await inFlight.task.value }
+        _ = await startPRWatchPoll(scope: nil)
     }
 
-    private func runPRWatchPoll() async {
+    /// SPEC §13.4 Refresh: the same poll and advance, for only these watches. A poll already running
+    /// that covers them is joined rather than overlapped; one that does not is waited out first.
+    /// Throws what kept the poll from reading them.
+    func pollPRWatches(watchIds: Set<String>) async throws {
+        while let inFlight = prWatchPoll {
+            let failures = await inFlight.task.value
+            if inFlight.scope.map({ watchIds.isSubset(of: $0) }) ?? true {
+                if failures.isEmpty { return }
+                throw PRWatchRefreshFailure(failures: failures)
+            }
+        }
+        let failures = await startPRWatchPoll(scope: watchIds)
+        if !failures.isEmpty { throw PRWatchRefreshFailure(failures: failures) }
+    }
+
+    private func startPRWatchPoll(scope: Set<String>?) async -> [String] {
+        let poll = _Concurrency.Task {
+            let failures = await runPRWatchPoll(scope: scope)
+            prWatchPoll = nil
+            isPollingPRWatches = false
+            return failures
+        }
+        prWatchPoll = (scope, poll)
+        isPollingPRWatches = true
+        return await poll.value
+    }
+
+    private func runPRWatchPoll(scope: Set<String>?) async -> [String] {
         let enabled = ((try? projects.list()) ?? []).filter { $0.settings.prFollowThrough.enabled }
         guard !enabled.isEmpty else {
             setPRPollProblems([:], enabled: [])
-            return
+            return []
         }
-        await refreshPRWatches(enabled)
-        await advancePRWatches(enabled)
+        let failures = await refreshPRWatches(enabled, scope: scope)
+        await advancePRWatches(enabled, scope: scope)
+        return failures
     }
 
     /// Writes each poll through `PRWatchStore` and moves a watch among watching, settling,
     /// readyToVerify and verified, bannering a PR's arrival in readyToVerify once per head oid
     /// (§13.4); a watch whose PR left the open list settles to merged or closed by `gh pr view`,
-    /// and one whose PR went back to draft is deleted.
-    private func refreshPRWatches(_ enabled: [Project]) async {
+    /// and one whose PR went back to draft is deleted. A `scope` limits the reads and writes to those
+    /// watches. Returns what could not be read for the watches in scope.
+    private func refreshPRWatches(_ enabled: [Project], scope: Set<String>?) async -> [String] {
+        func key(_ repository: String, _ number: Int) -> String { "\(repository.lowercased())#\(number)" }
+        let scoped = scope.map { ids in ids.compactMap { try? prWatches.get($0) } }
+        let scopedKeys = scoped.map { Set($0.map { key("\($0.repoOwner)/\($0.repoName)", $0.number) }) }
+        let scopedProjects = scoped.map { Set($0.map(\.projectId)) }
+        var unread: [String] = []
         var projectByRepo: [String: Project] = [:]
         var problems: [String: String] = [:]
         for project in enabled {
@@ -2113,6 +2150,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 if failures >= Self.prWatchFailuresBeforeAttention {
                     problems[project.id] = "Reading `origin` has failed \(failures) times in a row: \(describe(error))"
                 }
+                if scopedProjects?.contains(project.id) ?? true {
+                    unread.append("Could not read \(project.name)'s `origin`: \(describe(error))")
+                }
                 continue
             }
             guard let slug = PullRequestLaunch.githubSlug(remoteURL: remote)?.lowercased(),
@@ -2122,7 +2162,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         guard let anyProject = projectByRepo.values.first else {
             setPRPollProblems(problems, enabled: enabled)
-            return
+            return unread
         }
 
         let reader = pullRequestWatch
@@ -2134,7 +2174,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch let failure as PullRequestWatchFailure where failure.ghUnavailable {
             for project in enabled { problems[project.id] = failure.description }
             setPRPollProblems(problems, enabled: enabled)
-            return
+            return unread + [failure.description]
         } catch {
             prWatchSearchFailures += 1
             NSLog("PR watch poll failed (%d in a row): %@", prWatchSearchFailures, describe(error))
@@ -2145,12 +2185,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
                 setPRPollProblems(problems, enabled: enabled)
             }
-            return
+            return unread + ["`gh search prs` failed: \(describe(error))"]
         }
 
-        func key(_ repository: String, _ number: Int) -> String { "\(repository.lowercased())#\(number)" }
         let drafts = Set(authored.filter(\.isDraft).map { key($0.repository, $0.number) })
-        let open = authored.filter { !$0.isDraft && projectByRepo[$0.repository.lowercased()] != nil }
+        let open = authored.filter {
+            !$0.isDraft && projectByRepo[$0.repository.lowercased()] != nil
+                && scopedKeys?.contains(key($0.repository, $0.number)) ?? true
+        }
         let stillOpen = Set(open.map { key($0.repository, $0.number) })
         for (slug, prs) in Dictionary(grouping: open, by: { $0.repository.lowercased() }) {
             guard let project = projectByRepo[slug] else { continue }
@@ -2158,17 +2200,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard parts.count == 2 else { continue }
             let cwd = URL(fileURLWithPath: project.repoPath)
             let numbers = prs.map(\.number)
-            guard let snapshots = try? await offMain({
-                try reader.snapshots(owner: parts[0], name: parts[1], numbers: numbers, cwd: cwd)
-            }) else { continue }
-            for snapshot in snapshots {
+            let snapshots: [PRSnapshot]
+            do {
+                snapshots = try await offMain {
+                    try reader.snapshots(owner: parts[0], name: parts[1], numbers: numbers, cwd: cwd)
+                }
+            } catch {
+                unread.append("Could not read \(prs[0].repository)'s pull requests: \(describe(error))")
+                continue
+            }
+            for snapshot in snapshots
+            where scopedKeys?.contains(key("\(snapshot.repoOwner)/\(snapshot.repoName)", snapshot.number)) ?? true {
                 await applyPRSnapshot(snapshot, project: project)
             }
         }
 
         let states = pullRequestStates
         for project in enabled {
-            for watch in (try? prWatches.live(projectId: project.id)) ?? [] {
+            for watch in (try? prWatches.live(projectId: project.id)) ?? [] where scope?.contains(watch.id) ?? true {
                 let watchKey = key("\(watch.repoOwner)/\(watch.repoName)", watch.number)
                 if stillOpen.contains(watchKey) { continue }
                 if drafts.contains(watchKey) {
@@ -2185,6 +2234,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
         }
         setPRPollProblems(problems, enabled: enabled)
+        return unread
     }
 
     /// The failed checks on an awaitingCI watch's pushed head that have no item yet, each GitHub Actions
@@ -2253,9 +2303,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// for `settleMinutes` and nothing holds it, a triaging one moves on once that triage ends, a
     /// fixing one starts its round's fixer, a checking one its reviewer and follow-up check, and a
     /// publishing one pushes its round. Then each open decision not yet announced banners once (§13.4).
-    private func advancePRWatches(_ enabled: [Project]) async {
+    private func advancePRWatches(_ enabled: [Project], scope: Set<String>?) async {
         for project in enabled {
-            for watch in (try? prWatches.live(projectId: project.id)) ?? [] {
+            for watch in (try? prWatches.live(projectId: project.id)) ?? [] where scope?.contains(watch.id) ?? true {
                 switch watch.state {
                 case .settling: await startTriageIfSettled(watch, project: project)
                 case .triaging: await settleTriageRound(watch, project: project)
