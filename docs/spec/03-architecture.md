@@ -121,8 +121,10 @@ For a task `T` in project `P`:
    human or by a wind-down order (§8) still gets its file-lock `PreToolUse`
    entry (§8.4).
 5. Generate `mcp-<session>.json`: one HTTP server entry for `/mcp` with
-   `Authorization: Bearer <token>`, where the token carries scope `worker` and
-   is bound to `(session, task)`.
+   `Authorization: Bearer <token>`, where the token carries the scope the
+   session was spawned with, `worker` or `reviewer` (§5.1), and is bound to
+   `(session, task)`. A resume issues its replacement token with the same scope
+   (§5).
 6. Compose the opening prompt: task title, body, acceptance criteria, epic goal,
    task- and epic-attached notes in full, a one-line index of every other note in
    the project naming its `note://` resource uri, the project's build and test
