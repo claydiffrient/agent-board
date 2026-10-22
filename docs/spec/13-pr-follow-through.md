@@ -386,9 +386,14 @@ item is answered on its thread with `gh api graphql`'s
 pull-request comment through `gh api repos/<owner>/<name>/issues/<n>/comments`,
 led by a link to the review. The reply's URL is stored in `reply_url`, so
 nothing is posted twice. A failed post is logged and its error kept in
-`reply_error`; it is tried again at the next point, except when `gh` reports
-the comment gone (`NOT_FOUND` or HTTP 404), which sets `reply_abandoned_at` and
-ends the attempts. An item reopened by a new reply loses `reply_url`,
+`reply_error`; it is tried again at the next point. When `gh` reports the
+comment gone (`NOT_FOUND`, HTTP 404 or "Could not resolve to a node"), the
+pull request is read once with `gh pr view`, since GitHub answers the same for
+a repository the token cannot see. If it reads, the thread itself is gone: the
+post sets `reply_abandoned_at` and ends the attempts. If it does not, the item
+keeps only its `reply_error` and stays owed, and the project gets a
+`pr_poll_problem` row naming the PR, which stays through later polls until one
+reads that PR again (or its watch ends). An item reopened by a new reply loses `reply_url`,
 `reply_error` and `reply_abandoned_at`, so once it is handled again it gets a
 fresh reply. No thread is ever resolved: resolving is the reviewer's call.
 

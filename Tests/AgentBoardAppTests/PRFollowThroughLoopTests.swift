@@ -675,17 +675,27 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(replyCalls.map(\.last), ["body=Three retries.", "body=It was renamed upstream."])
     }
 
-    func testAReplyToAThreadGitHubNoLongerHasIsTriedOnceAndRecordedNotRetriedAtTheNextPostingPoint() async throws {
+    /// GitHub answers NOT_FOUND for a repository the token cannot see as well as for a deleted thread.
+    func testAGoneReplyIsAbandonedOnlyWhileThePRStillReadsAndOtherwiseStaysOwed() async throws {
         let watch = try await staleRound(repliesGone: true)
         XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question"])
 
+        let unreadable = "GraphQL: Could not resolve to a Repository with the name '\(repository)'. (repository)"
+        fixture.gh.fail(url, stderr: unreadable)
+        fixture.gh.failGraphQL(repository: repository, stderr: unreadable)
         try await answerStaleFix(watch)
 
         XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question", "thread=T_fix"])
-        let question = try XCTUnwrap(try watches.items(watchId: watch.id).first { $0.githubNodeId == "T_question" })
+        let items = try watches.items(watchId: watch.id)
+        let question = try XCTUnwrap(items.first { $0.githubNodeId == "T_question" })
         XCTAssertNil(question.replyURL)
-        XCTAssertNotNil(question.replyAbandonedAt)
+        XCTAssertNotNil(question.replyAbandonedAt, "the PR read, so the thread itself is gone")
         XCTAssertTrue(question.replyError?.contains("Could not resolve to a node") == true, question.replyError ?? "")
+        let fix = try XCTUnwrap(items.first { $0.githubNodeId == "T_fix" })
+        XCTAssertNil(fix.replyAbandonedAt, "the PR did not read, so the 404 may be the token's")
+        XCTAssertEqual(try watches.pendingReplies(watchId: watch.id).map(\.githubNodeId), ["T_fix"])
+        let attention = try ProjectAttentionStore(fixture.db).attention(projectId: fixture.project.id)
+        XCTAssertEqual(attention?.causes.contains { $0.reason == .prPollUnavailable }, true, "\(String(describing: attention))")
     }
 
     func testAVerificationLabelOnThePRBlocksThePushAndFreezesTheRoundsItemsAsDecisions() async throws {

@@ -367,7 +367,7 @@ CREATE TABLE pr_item (
   reply_body            TEXT,
   reply_url             TEXT,            -- the reply publishing posted (§13.2); null until one is
   reply_error           TEXT,            -- the last failed post's error (§13.2)
-  reply_abandoned_at    INTEGER,         -- when a post found the comment gone; no reply is tried again
+  reply_abandoned_at    INTEGER,         -- when a post found the comment gone on a PR that still reads; no reply is tried again
   handled_at            INTEGER,         -- when it last became handled; bounds the replies §13.2 posts
   round                 INTEGER NOT NULL DEFAULT 0,  -- the round it arrived in, then the round that handled it, whose replies post it
   created_at            INTEGER NOT NULL,

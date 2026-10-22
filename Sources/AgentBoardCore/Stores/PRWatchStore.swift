@@ -190,6 +190,16 @@ public struct PRWatchStore: Sendable {
         }
     }
 
+    /// Records one project's problem between polls, keeping a row it already has.
+    public func addPollProblem(projectId: String, detail: String, now: Int64 = .nowMillis) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "INSERT OR IGNORE INTO pr_poll_problem (project_id, detail, since) VALUES (?, ?, ?)",
+                arguments: [projectId, detail, now]
+            )
+        }
+    }
+
     public func setPaused(_ paused: Bool, watchId: String, now: Int64 = .nowMillis) throws {
         try db.writer.write { db in
             try db.execute(

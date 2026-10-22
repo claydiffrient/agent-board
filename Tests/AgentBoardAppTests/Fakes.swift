@@ -164,6 +164,10 @@ final class FakeGh: GhRunning, @unchecked Sendable {
         lock.withLock { answers[Self.graphQLKey(repository)] = CommandResult(status: 0, stdout: json, stderr: "") }
     }
 
+    func failGraphQL(repository: String, stderr: String) {
+        lock.withLock { answers[Self.graphQLKey(repository)] = CommandResult(status: 1, stdout: "", stderr: stderr) }
+    }
+
     /// What posting a thread reply and a PR comment print, each naming `url`.
     func answerReplies(url: String) {
         let reply = #"{"data":{"addPullRequestReviewThreadReply":{"comment":{"url":"\#(url)"}}}}"#

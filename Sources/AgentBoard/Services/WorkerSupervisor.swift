@@ -168,6 +168,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var prWatchSearchFailures = 0
     /// Consecutive polls on which git could not read a project's `origin`, by project id.
     @ObservationIgnored private var prWatchRemoteFailures: [String: Int] = [:]
+    /// Watches whose pull request could not be read after a reply to it came back not found (SPEC
+    /// §13.2), with their project and detail. Each stays among the poll's problems until a poll reads it.
+    @ObservationIgnored private var prReplyReadFailures: [String: (projectId: String, detail: String)] = [:]
     /// Millis of the last pull request merge check; 0 means none yet, so the first tick after
     /// launch checks.
     @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
@@ -1914,7 +1917,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func runPRWatchPoll() async {
         let enabled = ((try? projects.list()) ?? []).filter { $0.settings.prFollowThrough.enabled }
         guard !enabled.isEmpty else {
-            try? prWatches.setPollProblems([:])
+            setPRPollProblems([:], enabled: [])
             return
         }
         await refreshPRWatches(enabled)
@@ -1952,7 +1955,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             projectByRepo[slug] = project
         }
         guard let anyProject = projectByRepo.values.first else {
-            try? prWatches.setPollProblems(problems)
+            setPRPollProblems(problems, enabled: enabled)
             return
         }
 
@@ -1962,10 +1965,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let cwd = URL(fileURLWithPath: anyProject.repoPath)
             authored = try await offMain { try reader.authored(cwd: cwd) }
             prWatchSearchFailures = 0
-            try? prWatches.setPollProblems(problems)
         } catch let failure as PullRequestWatchFailure where failure.ghUnavailable {
             for project in enabled { problems[project.id] = failure.description }
-            try? prWatches.setPollProblems(problems)
+            setPRPollProblems(problems, enabled: enabled)
             return
         } catch {
             prWatchSearchFailures += 1
@@ -1975,7 +1977,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     problems[project.id] =
                         "`gh search prs` has failed \(prWatchSearchFailures) times in a row: \(describe(error))"
                 }
-                try? prWatches.setPollProblems(problems)
+                setPRPollProblems(problems, enabled: enabled)
             }
             return
         }
@@ -2016,11 +2018,23 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
             }
         }
+        setPRPollProblems(problems, enabled: enabled)
+    }
+
+    /// `problems` plus each live watch's unreadable pull request from posting replies.
+    private func setPRPollProblems(_ problems: [String: String], enabled: [Project]) {
+        if !prReplyReadFailures.isEmpty {
+            let live = Set(enabled.flatMap { (try? prWatches.live(projectId: $0.id)) ?? [] }.map(\.id))
+            prReplyReadFailures = prReplyReadFailures.filter { live.contains($0.key) }
+        }
+        let all = prReplyReadFailures.values.reduce(into: problems) { $0[$1.projectId] = $0[$1.projectId] ?? $1.detail }
+        try? prWatches.setPollProblems(all)
     }
 
     private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) {
         do {
             var watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
+            prReplyReadFailures[watch.id] = nil
             if let settled = try prWatches.settleAwaitingCI(watchId: watch.id) { watch.state = settled }
             let open = try prWatches.openItems(watchId: watch.id)
             if let next = PRWatchTransition.next(
@@ -2295,7 +2309,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §13.2: with `postFactualReplies` on, each handled thread item still owed a reply gets one and
     /// each review body a PR comment, its URL recorded. Nothing is resolved. A failed post is recorded on
-    /// the item, and abandoned when GitHub says its comment is gone.
+    /// the item, and abandoned when GitHub says its comment is gone while the pull request still reads:
+    /// GitHub says the same of a whole repository the token cannot see.
     private func postFactualReplies(watchId: String, project: Project) async {
         guard project.settings.prFollowThrough.postFactualReplies, let watch = try? prWatches.get(watchId),
               let items = try? prWatches.pendingReplies(watchId: watchId), !items.isEmpty
@@ -2306,6 +2321,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
         let replier = pullRequestReplies
         let cwd = URL(fileURLWithPath: project.repoPath)
+        var readable: Bool?
         for item in items {
             guard let id = item.id, let text = item.factualReply(pushedHeadOid: pushed[item.round] ?? nil) else { continue }
             let body = item.kind == .review ? item.url.map { "In reply to \($0):\n\n\(text)" } ?? text : text
@@ -2321,8 +2337,30 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try prWatches.recordReply(itemId: id, url: url)
             } catch {
                 NSLog("PR follow-through: the reply to %@ on %@ was not posted: %@", item.githubNodeId, watch.url, describe(error))
-                try? prWatches.recordReplyFailure(itemId: id, error: describe(error), gone: error is PullRequestReplyTargetGone)
+                var gone = false
+                if error is PullRequestReplyTargetGone {
+                    if readable == nil { readable = await pullRequestReadsForReplies(watch, project: project) }
+                    gone = readable == true
+                }
+                try? prWatches.recordReplyFailure(itemId: id, error: describe(error), gone: gone)
             }
+        }
+    }
+
+    /// One `gh pr view` of the watch's pull request. One that fails raises the project's PR watch
+    /// attention until a poll reads the pull request again.
+    private func pullRequestReadsForReplies(_ watch: PRWatch, project: Project) async -> Bool {
+        let states = pullRequestStates
+        let (url, cwd) = (watch.url, URL(fileURLWithPath: project.repoPath))
+        do {
+            _ = try await offMain { try states.state(of: url, cwd: cwd) }
+            prReplyReadFailures[watch.id] = nil
+            return true
+        } catch {
+            let detail = "replies to #\(watch.number) are held because the pull request could not be read: \(describe(error))"
+            prReplyReadFailures[watch.id] = (project.id, detail)
+            try? prWatches.addPollProblem(projectId: project.id, detail: detail)
+            return false
         }
     }
 
