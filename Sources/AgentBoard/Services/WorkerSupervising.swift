@@ -93,9 +93,15 @@ protocol WorkerSupervising: AnyObject {
     /// The launch sweep as a dry run (SPEC §8.6); nil where there is nothing to sweep with. Only the
     /// dry run is on the protocol, so no surface can reach the sweep that stops sessions.
     func previewLeakedAgentSweep() async -> AgentSweepReport?
+    /// True while a PR follow-through poll, the tick's or a Refresh, is running (SPEC §13.4).
+    var isPollingPRWatches: Bool { get }
+    /// Polls these watches now and applies their transitions, joining a poll already in flight.
+    func pollPRWatches(watchIds: Set<String>) async throws
 }
 
 extension WorkerSupervising {
+    var isPollingPRWatches: Bool { false }
+    func pollPRWatches(watchIds: Set<String>) async throws {}
     func focusChanged(projectId: String?) {}
     func reportQueued(projectId: String) async {}
     func previewLeakedAgentSweep() async -> AgentSweepReport? { nil }

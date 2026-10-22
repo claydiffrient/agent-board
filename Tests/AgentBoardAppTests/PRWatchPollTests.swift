@@ -485,4 +485,58 @@ final class PRWatchPollTests: XCTestCase {
 
         XCTAssertEqual(searches, 2, "only the direct call polled after the slow one")
     }
+
+    /// SPEC §13.4 Refresh: a section's button reads only that section's pull requests and applies
+    /// what they now say without waiting for a tick.
+    func testRefreshingASectionPollsOnlyItsWatchesAndAppliesTheirTransition() async throws {
+        try enable()
+        let numbers = [12, 13]
+        fixture.gh.answerSearch(numbers.map {
+            AuthoredPullRequest(repository: repository, number: $0, url: "https://github.com/\(repository)/pull/\($0)", title: "Add widgets")
+        })
+        fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: numbers.map { pullRequest($0, checks: "PENDING") })
+        await fixture.supervisor.pollPRWatches()
+        let live = try watches.live(projectId: fixture.project.id)
+        let waiting = try XCTUnwrap(live.first { $0.number == 12 })
+        let elsewhere = try XCTUnwrap(live.first { $0.number == 13 })
+        try watches.setState(.settling, watchId: elsewhere.id)
+        try await fixture.db.writer.write {
+            try $0.execute(sql: "UPDATE pr_watch SET last_polled_at = 1 WHERE id = ?", arguments: [elsewhere.id])
+        }
+
+        fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: numbers.map { pullRequest($0) })
+        try await fixture.supervisor.pollPRWatches(watchIds: [waiting.id])
+
+        XCTAssertEqual(try watches.get(waiting.id)?.state, .readyToVerify)
+        let untouched = try XCTUnwrap(watches.get(elsewhere.id))
+        XCTAssertEqual(untouched.state, .settling)
+        XCTAssertEqual(untouched.lastPolledAt, 1)
+        XCTAssertEqual(
+            fixture.gh.calls.last { $0.first == "api" },
+            PullRequestWatchReader.graphQLArguments(owner: "example-org", name: "app", numbers: [12])
+        )
+    }
+
+    func testARefreshDuringATickPollJoinsItAndStillAppliesItsResult() async throws {
+        try enable()
+        answer(pullRequest(checks: "PENDING"))
+        await fixture.supervisor.pollPRWatches()
+        let watch = try onlyWatch()
+
+        answer(pullRequest())
+        fixture.gh.holdSearch()
+        await fixture.supervisor.meterTick()
+        for _ in 0..<500 where searches == 1 { try await _Concurrency.Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(searches, 2)
+        XCTAssertTrue(fixture.supervisor.isPollingPRWatches)
+
+        let refresh = _Concurrency.Task { try await fixture.supervisor.pollPRWatches(watchIds: [watch.id]) }
+        try await _Concurrency.Task.sleep(for: .milliseconds(100))
+        fixture.gh.releaseSearch()
+        try await refresh.value
+
+        XCTAssertEqual(searches, 2, "the refresh joined the tick's poll")
+        XCTAssertEqual(try watches.get(watch.id)?.state, .readyToVerify)
+        XCTAssertFalse(fixture.supervisor.isPollingPRWatches)
+    }
 }

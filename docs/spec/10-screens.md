@@ -435,8 +435,12 @@ with a one-line placeholder when empty. A **Project** menu above the list
 narrows it to one project with follow-through on; while it shows every project,
 each row names its project. A row shows the title (a link that opens the PR in
 the browser), `owner/repo #n`, the state, the round once one has run, the open
-item count, and "pushed …" from `head_changed_at` — or, for a PR whose head has
-not moved since watching began, "updated …" from `updated_at`. Row actions: **Mark verified**
+item count, "pushed …" from `head_changed_at` — or, for a PR whose head has
+not moved since watching began, "updated …" from `updated_at` — and "polled …"
+from `last_polled_at`, the last time a poll read it from GitHub. Each group's
+header carries a **Refresh** button (accessible name "Refresh <group>") that
+polls that group's watches now and applies their transitions, showing a spinner
+while it or any poll runs and its failure inline in the group (§13.4). Row actions: **Mark verified**
 (hidden once verified, disabled when the project sets no verification label),
 **Walk me through it** (only once the project sets a `verifyCommand`), and
 **Pause**, which sets `paused` and becomes **Resume**. A stale row, shown under
