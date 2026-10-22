@@ -668,7 +668,9 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
         try await answerStaleFix(watch)
 
-        XCTAssertEqual(try onlyWatch().state, .watching)
+        // The watch's own state keeps advancing (e.g. on to readyToVerify) once the round closes, so
+        // assert on the closed round rather than an instant of `state` a background metering poll can race past.
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["stale", "triaged"])
         XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question", "thread=T_fix"])
         XCTAssertEqual(replyCalls.map(\.last), ["body=Three retries.", "body=It was renamed upstream."])
     }
