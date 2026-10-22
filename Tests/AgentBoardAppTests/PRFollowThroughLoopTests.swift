@@ -46,6 +46,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         _ = try fixture.git(["push", "-q", remote.path, "add-widgets"])
         onAC = true
         fixture.supervisor.isOnACPower = { [unowned self] in self.onAC }
+        fixture.supervisor.pollsPRWatchesOnTick = false
         await fixture.supervisor.start()
         try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
     }
@@ -458,7 +459,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
             await poll()
             guard failure < PRWatchStore.failedChecksBeforePark else { break }
             XCTAssertEqual(try onlyWatch().state, .fixing)
-            XCTAssertTrue([.ready, .running].contains(try fixture.tasks.get(fixer.id)?.column), "the tick's poll may respawn it first")
+            XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .ready)
             await poll()
             let spawns = await fixture.runtime.spawns
             let respawn = try XCTUnwrap(spawns.last)
@@ -543,9 +544,8 @@ final class PRFollowThroughLoopTests: XCTestCase {
     }
 
     /// A round that has passed its check, with GitHub reporting the PR open at `remoteHead` (default
-    /// `head`) carrying `labels` and accepting replies. Everything is staged before the check passes,
-    /// since the metering tick may poll on its own and publish, dropping the worktree before this returns.
-    /// Returns the round branch's tip and the round's worktree path.
+    /// `head`) carrying `labels` and accepting replies. Returns the round branch's tip and the round's
+    /// worktree.
     private func passedRound(
         label: String? = nil, replies: Bool = false, question: Bool = false, labels: [String] = [],
         remoteHead: String? = nil, repliesGone: Bool = false
@@ -556,12 +556,11 @@ final class PRFollowThroughLoopTests: XCTestCase {
         let fixer = try await runningFixer(question: question)
         let worktree = try XCTUnwrap(try activeSession(on: fixer.id).worktreePath)
         try await completeFixer(fixer, file: "fix.txt")
-        let tip = try rev("HEAD", in: URL(fileURLWithPath: worktree))
         await poll()
         try await review(fixer, accept: true)
         try await grade("fixed", evidence: "App.swift:3 now says count.")
         await poll()
-        return (tip, worktree)
+        return (try rev("HEAD", in: URL(fileURLWithPath: worktree)), worktree)
     }
 
     func testAPassedRoundFastForwardsOntoThePRHeadRefAndPostsNoReplyWhileRepliesAreOff() async throws {
@@ -663,15 +662,13 @@ final class PRFollowThroughLoopTests: XCTestCase {
         let watch = try await staleRound()
 
         XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), head, "nothing is pushed")
-        XCTAssertEqual(try watches.rounds(watchId: watch.id).first?.outcome, "stale", "the tick's poll may open round 2 first")
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["stale"])
         XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question"])
         XCTAssertEqual(replyCalls.map(\.last), ["body=Three retries."])
 
         try await answerStaleFix(watch)
 
-        // The watch's own state keeps advancing (e.g. on to readyToVerify) once the round closes, so
-        // assert on the closed round rather than an instant of `state` a background metering poll can race past.
-        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["stale", "triaged"])
+        XCTAssertEqual(try onlyWatch().state, .watching)
         XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question", "thread=T_fix"])
         XCTAssertEqual(replyCalls.map(\.last), ["body=Three retries.", "body=It was renamed upstream."])
     }
