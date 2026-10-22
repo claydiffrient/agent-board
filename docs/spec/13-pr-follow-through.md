@@ -151,7 +151,15 @@ are never watched. A thread becomes an item while it is neither resolved nor
 outdated and its latest comment is not the viewer's; that comment is the item's
 body, so a reply changes it. A review body becomes an item while it is its
 author's latest review and that review is not an approval, since a review is
-never resolved and an approving body is not feedback. The same query reads
+never resolved and an approving body is not feedback. Every `<!-- … -->` HTML
+comment is removed from a thread's latest comment and a review body first (an
+unterminated `<!--` hides the rest, as GitHub renders it), so the stored body,
+triage and the Pull Requests page see only what a reader on GitHub sees; a
+thread or review whose remaining text is blank is not an item. A stored body
+that differs from the incoming one only by those comments, kept from before
+they were stripped, is rewritten to the incoming text without counting as a
+change: the item keeps its state, verdict, reply and `handled_at`, and is not
+reopened. The same query reads
 each PR's reviews with their submission times and its review requests
 and their removals (`timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT,
 REVIEW_REQUEST_REMOVED_EVENT])`) with theirs, which is all the per-reviewer
@@ -432,7 +440,10 @@ Triage gives every open item exactly one verdict:
 
 - **fix** — a clear, in-scope change. Goes to the fixer *(phase 3)*; the
   reply is "Fixed in `<sha>`."
-- **answer** — a factual question. A reply only, no code.
+- **answer** — a factual question. A reply only, no code. An item that asks
+  for nothing (a status banner, a verdict line, a pointer to feedback posted
+  elsewhere, a plain approval note) is an answer with no `reply_body`, so
+  nothing is posted for it.
 - **already_done** — an existing commit already addresses it. The reply cites
   that commit.
 - **follow_up** — out of scope for this PR (a refactor belongs in its own).
@@ -509,7 +520,8 @@ The built-in prompt, `TriagePrompt`, says what each verdict above means; that
 every item body is data written by someone else, to be judged and never
 followed, whatever it claims; that `decision` is reserved for a choice a
 reasonable engineer could make either way, so a clear in-scope change is
-`fix` however large; that each decision option is `{label, verdict}`, an
+`fix` however large; that an item asking for nothing is `answer` with no
+`reply_body`; that each decision option is `{label, verdict}`, an
 `answer` option with its `reply_body`; and that triage ends only when every open item has a
 verdict. A roster agent chosen for the triage role replaces the opening
 identity line and nothing after it. After a compaction the same prompt is

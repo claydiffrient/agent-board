@@ -256,6 +256,31 @@ final class PRWatchStoreTests: XCTestCase {
         }
     }
 
+    /// SPEC §13.1: a body stored before the reader stripped HTML comments must not reopen a handled item.
+    func testABodyThatDiffersOnlyByHiddenCommentsIsRewrittenWithoutReopeningTheItem() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(
+            projectId: f.project.id, snapshot: snapshot(items: [thread("T1", body: "Rename this<!-- bot {} -->")]),
+            now: 1_000
+        )
+        try f.db.writer.write { db in
+            try db.execute(sql: """
+                UPDATE pr_item SET state = 'handled', handled_at = 1500, verdict = 'answer', reply_body = 'Done.',
+                  reply_url = 'https://github.com/example-org/app/pull/7#r1'
+                """)
+        }
+
+        try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 2_000)
+        let item = try XCTUnwrap(store.items(watchId: watch.id).first)
+        XCTAssertEqual(item.state, .handled)
+        XCTAssertEqual(item.handledAt, 1_500)
+        XCTAssertEqual(item.verdict, .answer)
+        XCTAssertEqual(item.replyURL, "https://github.com/example-org/app/pull/7#r1")
+        XCTAssertEqual(item.body, "Rename this")
+        XCTAssertEqual(try store.get(watch.id)?.lastFeedbackAt, 1_000)
+    }
+
     func testPageGroupsWatchesAndBadgeCountsReadyAndDecisions() throws {
         let f = try Fixture.make()
         let other = try f.otherProject()
