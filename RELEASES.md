@@ -9,6 +9,33 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.6.1 — 2026-10-22
+
+- **Pull requests.** A pull request whose required checks had all passed
+  could sit in "awaiting CI" indefinitely, because a pending check that
+  wasn't actually required was still being counted against it — fixed by
+  reading each check's own required flag from the pull request itself,
+  unioned with what branch protection and rulesets name, and falling back
+  to the old all-checks-pass rule only when nothing is required from
+  either source. PR Follow-Through → Verification gains **Checks that
+  wait on verification**, a list of check names to ignore when deciding
+  whether CI passed, for a check that only goes green once you've
+  verified the pull request yourself. Each group on the Pull Requests
+  page now has its own **Refresh** button, which polls just that
+  section's pull requests and joins a poll already running instead of
+  starting a second one; every row also shows when it was last polled.
+  **Walk me through it** now runs the verify command in an interactive
+  login shell, the way your own terminal would, so anything on your
+  terminal's PATH (including `claude`) works there now; typing a Claude
+  slash command as the verify command gets a note in Project Settings
+  with a button to rewrite it as `claude "…"`, and the Verify window
+  shows the same hint if a slash-command-shaped command fails fast. The
+  Orchestrator now gets a short update whenever PR Follow-Through
+  finishes a milestone on one of your pull requests — ready to verify,
+  parked, a new decision, a round's outcome, merged or closed.
+- **Settings.** The Roles help text in PR Follow-Through settings said
+  only Triage ran; it now names all four roles and says they all run.
+
 ## 0.6.0 — 2026-10-21
 
 - **Pull requests.** A new pinned sidebar page, **Pull Requests**, watches
