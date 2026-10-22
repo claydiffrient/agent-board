@@ -112,13 +112,27 @@ final class FakeGh: GhRunning, @unchecked Sendable {
     private let lock = NSLock()
     private var answers: [String: CommandResult] = [:]
     private var recorded: [[String]] = []
+    private var searchGate: DispatchSemaphore?
 
     var calls: [[String]] { lock.withLock { recorded } }
 
-    func answer(_ url: String, state: String, mergeCommit: String? = nil, head: String? = nil) {
+    /// Blocks every `gh search prs` until `releaseSearch()`, standing in for a slow `gh`.
+    func holdSearch() {
+        lock.withLock { searchGate = DispatchSemaphore(value: 0) }
+    }
+
+    func releaseSearch() {
+        lock.withLock { () -> DispatchSemaphore? in
+            defer { searchGate = nil }
+            return searchGate
+        }?.signal()
+    }
+
+    func answer(_ url: String, state: String, mergeCommit: String? = nil, head: String? = nil, labels: [String] = []) {
         let commit = mergeCommit.map { #"{"oid":"\#($0)"}"# } ?? "null"
         let headRefOid = head.map { #""\#($0)""# } ?? "null"
-        let json = #"{"headRefOid":\#(headRefOid),"mergeCommit":\#(commit),"mergedAt":null,"state":"\#(state)"}"#
+        let names = labels.map { #"{"name":"\#($0)"}"# }.joined(separator: ",")
+        let json = #"{"headRefOid":\#(headRefOid),"labels":[\#(names)],"mergeCommit":\#(commit),"mergedAt":null,"state":"\#(state)"}"#
         lock.withLock { answers[url] = CommandResult(status: 0, stdout: json, stderr: "") }
     }
 
@@ -150,12 +164,35 @@ final class FakeGh: GhRunning, @unchecked Sendable {
         lock.withLock { answers[Self.graphQLKey(repository)] = CommandResult(status: 0, stdout: json, stderr: "") }
     }
 
+    /// What posting a thread reply and a PR comment print, each naming `url`.
+    func answerReplies(url: String) {
+        let reply = #"{"data":{"addPullRequestReviewThreadReply":{"comment":{"url":"\#(url)"}}}}"#
+        lock.withLock {
+            answers[Self.replyKey] = CommandResult(status: 0, stdout: reply, stderr: "")
+            answers[Self.commentKey] = CommandResult(status: 0, stdout: #"{"html_url":"\#(url)"}"#, stderr: "")
+        }
+    }
+
+    /// What `gh api graphql` prints when a reply's thread is gone from GitHub.
+    func failRepliesAsGone() {
+        let errors = #"{"data":{"addPullRequestReviewThreadReply":null},"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a node"}]}"#
+        lock.withLock {
+            answers[Self.replyKey] = CommandResult(status: 1, stdout: errors, stderr: "gh: Could not resolve to a node")
+        }
+    }
+
     private static let searchKey = "search prs"
+    private static let replyKey = "reply"
+    private static let commentKey = "comment"
 
     private static func graphQLKey(_ repository: String) -> String { "graphql \(repository)" }
 
     private static func key(for arguments: [String]) -> String {
         if arguments.starts(with: ["search", "prs"]) { return searchKey }
+        if arguments.starts(with: ["api", "graphql"]), arguments.contains(where: { $0.hasPrefix("query=mutation") }) {
+            return replyKey
+        }
+        if arguments.count > 1, arguments[0] == "api", arguments[1].hasSuffix("/comments") { return commentKey }
         if arguments.starts(with: ["api", "graphql"]) {
             func value(_ name: String) -> String {
                 arguments.first { $0.hasPrefix("\(name)=") }.map { String($0.dropFirst(name.count + 1)) } ?? ""
@@ -166,9 +203,13 @@ final class FakeGh: GhRunning, @unchecked Sendable {
     }
 
     func run(_ arguments: [String], cwd: URL) throws -> CommandResult {
-        try lock.withLock {
+        let key = Self.key(for: arguments)
+        let gate = lock.withLock { () -> DispatchSemaphore? in
             recorded.append(arguments)
-            let key = Self.key(for: arguments)
+            return key == Self.searchKey ? searchGate : nil
+        }
+        gate?.wait()
+        return try lock.withLock {
             guard let answer = answers[key] else { throw PullRequestCheckFailure("FakeGh has no answer for \(key)") }
             return answer
         }

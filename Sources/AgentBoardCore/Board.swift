@@ -164,7 +164,8 @@ public struct Board: Sendable {
             guard let project = try Project.fetchOne(db, key: task.projectId) else {
                 throw BoardError.projectNotFound(task.projectId)
             }
-            if project.settings.autonomyEnabled {
+            // SPEC §13.5's §8 amendment: a fix round skips approval where follow-through is on.
+            if project.settings.autonomyEnabled || (task.origin == .fixRound && project.settings.prFollowThrough.enabled) {
                 return .proceed
             }
             if let existing = try ApprovalStore.pendingSpawn(db, taskId: taskId) {
@@ -399,6 +400,9 @@ public struct Board: Sendable {
             }
             if let session = try AgentSession.fetchOne(db, key: sessionId), !session.state.isActive {
                 return try Self.lateCompletion(db, task: task, session: session, summary: summary)
+            }
+            if task.origin == .fixRound {
+                return try Self.completeFixRound(db, task: task, sessionId: sessionId, summary: summary)
             }
             let report = try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .complete, body: summary
@@ -881,7 +885,8 @@ public struct Board: Sendable {
 
     /// Ends a worker session that will not report for itself and queues a `failed` report, so the
     /// orchestrator stops believing the worker is running. A task stranded in `running` leaves it:
-    /// for `review` when `salvage` shows commits on its branch, otherwise back to `ready`.
+    /// for `review` when `salvage` shows commits on its branch, otherwise back to `ready`. A triage
+    /// task is closed instead, with no report (SPEC §13.2).
     ///
     /// An already-inactive session row is not a reason to stop. The worker's `SessionEnd` hook races
     /// this call and writes `stopped` first often enough that bailing there strands the task in
@@ -910,6 +915,22 @@ public struct Board: Sendable {
             try FileLockStore.releaseAll(db, sessionId: sessionId)
             guard let task else { return nil }
             let taskId = task.id
+
+            // SPEC §13.1, §13.2: the orchestrator never asked for a triage or follow-up check and nothing can
+            // reassign one, so an unfinished one is closed with no report and the follow-through loop decides.
+            if task.origin.isPullRequestReader {
+                if task.column != .done, task.column != .closed {
+                    try TaskStore.setBlocked(db, taskId, false, reason: nil)
+                    try TaskStore.close(db, taskId, reason: reason, by: "Agent Board", at: .nowMillis)
+                    _ = try ProgressStore.append(
+                        db, taskId: taskId, sessionId: sessionId, kind: .note,
+                        text: task.origin == .triage
+                            ? "Triage ended before every item had a verdict: \(reason)"
+                            : "Follow-up check ended before every item had a grade: \(reason)"
+                    )
+                }
+                return nil
+            }
 
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             if let settledLine = try Self.settledLine(db, task: task) {

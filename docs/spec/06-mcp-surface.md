@@ -4,9 +4,10 @@ Served at `http://127.0.0.1:<port>/mcp`. Scope comes from the bearer token, not
 from the request. A worker calling an orchestrator tool gets a tool-not-found
 error, because the tool list is rendered per scope. Resources and prompts are
 not scoped this way — any valid token in the project sees the full resource
-and prompt lists, worker and orchestrator alike — with one exception: a
+and prompt lists, worker and orchestrator alike — with two exceptions: a
 `reviewer` token sees no `note://` resource and is refused a read of one
-(§5.1). `initialize`'s advertised `capabilities` includes `resources` and `prompts` only when a handler for it is
+(§5.1), and neither does a `triager` token, which is offered no briefing
+resource either. `initialize`'s advertised `capabilities` includes `resources` and `prompts` only when a handler for it is
 wired, so `tools: {}` alone still means what it used to.
 
 ### No tool call holds its answer past 60 seconds
@@ -140,6 +141,44 @@ of orchestrator scope: it is the authority to move one named task out of
 Every call reads the task id off the token, never off the arguments, so a
 reviewer cannot reach a task it was not given. It cannot spawn, reassign, stop a
 session, query the board, propose, or report on its own behalf.
+
+### Triager scope
+
+Held by a PR triager (§13.2), which only the supervisor spawns: no orchestrator
+tool and no human assign starts one, and a worker or reviewer spawn onto a
+`triage` or `followup_check` task is refused, since either grant would hold authority over the
+checkout this scope withholds. Deliberately not a subset of worker scope: it
+is the authority to read one watched pull request's open items and record
+their verdicts, and nothing besides.
+
+| Tool | Effect |
+|---|---|
+| `get_pr_items()` | The watch's repository, number, title and URL; its base and head refs with the `base_oid` and `head_oid` of the diff the triager was spawned to read; and every open item with its `item_id`, kind, author, path and line, URL, body, and any verdict already set |
+| `set_verdicts(verdicts[])` | Each entry is `{item_id, verdict, approach, reply_body?, decision_question?, decision_options?}`, `verdict` one of `fix`, `answer`, `already_done`, `follow_up`, `decision`. Each `decision_options` entry is `{label, verdict, reply_body?}`, its `verdict` `fix` or `answer`, the verdict choosing it applies (§13.4); an `answer` option needs a non-blank `reply_body`, the reply that would be posted. Writes `verdict`, `approach`, `reply_body`, and for a decision `decision_question` and `decision_options_json`, onto `pr_item`. All or nothing: an item that is not an open item of this triager's own watch, a blank `approach`, a decision without a question and at least two options, or an option that is neither `fix` nor an `answer` with a reply, refuses the whole call and writes no entry. A later verdict replaces an earlier one. The answer lists the open items still without a verdict; once there are none, the triage task goes to `done` with a progress note counting the verdicts, the session completes and its grant is revoked, and the session is stopped after the answer is written (§5) |
+| `log_progress(text)` | Appends to the triage task's `progress` |
+
+A round's follow-up checker (§13.1) holds this scope too, bound to a
+`followup_check` task, and is offered these tools instead of the two above:
+
+| Tool | Effect |
+|---|---|
+| `get_followup_items()` | The watch's repository, number, title and URL; the round's number, `base_head_oid` and `checked_head_oid`; and each item the round's fixer was given — the open `fix` items naming its `fix_round` task, in the task body's order — with its `item_id`, its number in the task body, kind, author, path and line, URL, body, triage's approach, and any grade already set |
+| `set_followup_grades(grades[])` | Each entry is `{item_id, grade, evidence}`, `grade` one of `fixed`, `partly`, `not_fixed`, `moot`. Writes `followup_grade` and `followup_note` onto `pr_item`. All or nothing: an item outside the round's items, or blank evidence, refuses the whole call. A later grade replaces an earlier one. The answer lists the items still without a grade; once there are none, the check's task goes to `done` the way a finished triage's does |
+
+Every call reads the watch off the token's task, through `pr_triage` for a
+triager and through `pr_round.followup_task_id` for a follow-up checker (§4),
+never off the arguments, so neither can reach another watch's items, or
+any task, note, or board query. Its spawn carries the reviewer's deny list
+(§5.1) plus `Bash(gh *)` and every git subcommand that writes refs or config,
+and the board-database deny. The PreToolUse guard (§8) holds the same line in
+process: for a triager it denies Edit, MultiEdit, Write and NotebookEdit (its
+hook matcher names them as well as Bash), any `gh`, and any git subcommand
+outside a read-only allow-list (`diff`, `log`, `show`, `status`, `blame`,
+`grep`, `rev-parse`, `rev-list`, `merge-base`, `ls-files`, `cat-file` and
+their kind), so a write subcommand git adds later is denied by default.
+Other Bash file writes (`sed -i`, a `>` redirect, `tee`) are not denied, so the
+scope withholds the file-write tools, `gh` and git writes rather than every
+change to its disposable checkout.
 
 ### Orchestrator scope
 

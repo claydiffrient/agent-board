@@ -11,6 +11,9 @@ extension AttentionCause {
                 return "1 worker blocked: \(detail)"
             }
             return count == 1 ? "1 worker blocked" : "\(count) workers blocked"
+        case .pullRequestDecision:
+            if count == 1, let detail { return "1 pull request decision waiting: \(detail)" }
+            return count == 1 ? "1 pull request decision waiting" : "\(count) pull request decisions waiting"
         case .strandedReports:
             let reports = count == 1 ? "1 report" : "\(count) reports"
             return "\(reports) waiting with no orchestrator running"
@@ -20,6 +23,9 @@ extension AttentionCause {
                 : "\(count) agents have not acknowledged shutdown"
         case .prPollUnavailable:
             return detail.map { "1 PR watch stopped: \($0)" } ?? "1 PR watch stopped"
+        case .parkedPullRequest:
+            if count == 1, let detail { return "1 pull request parked: \(detail)" }
+            return count == 1 ? "1 pull request parked" : "\(count) pull requests parked"
         }
     }
 }
