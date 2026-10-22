@@ -626,6 +626,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// many times over (SPEC §3.1).
     private struct PendingCheckout: Sendable {
         var manager: WorktreeManager
+        var taskId: String
         var name: String
         var branch: String
         /// Nil checks out `branch` as it stands, as the epic integrator's worktree does.
@@ -664,7 +665,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return CheckoutSite(
             placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch,
             warnings: fallbackWarnings + [start.warning].compactMap { $0 },
-            pending: PendingCheckout(manager: manager, name: taskId, branch: branch, base: start.ref)
+            pending: PendingCheckout(manager: manager, taskId: taskId, name: taskId, branch: branch, base: start.ref)
         )
     }
 
@@ -672,8 +673,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         // SPEC §5: a worktree a reap or teardown has claimed is about to be deleted, so it is not reused.
         await awaitTeardown(of: pending.manager.worktreeRoot.appendingPathComponent(pending.name).path)
         // A reviewer creates its worktree before any session row exists, so a discard cannot cancel it.
-        if discarding.contains(pending.name) || (try? tasks.get(pending.name)) == nil {
-            throw SupervisorError.taskBeingDiscarded(taskId: pending.name)
+        if discarding.contains(pending.taskId) || (try? tasks.get(pending.taskId)) == nil {
+            throw SupervisorError.taskBeingDiscarded(taskId: pending.taskId)
         }
         await beforeCheckoutCreated()
         try _Concurrency.Task.checkCancellation()
@@ -1011,7 +1012,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 ),
                 placeholder: placeholder,
                 port: port,
-                checkout: PendingCheckout(manager: manager, name: worktreeName, branch: epicBranch, base: nil),
+                checkout: PendingCheckout(
+                    manager: manager, taskId: task.id, name: worktreeName, branch: epicBranch, base: nil
+                ),
                 placingMark: worktree.path
             )
             setupHoldsMark = true
