@@ -84,8 +84,9 @@ enum SupervisorError: LocalizedError {
             return "Agent Board quit while the worktree was still being set up"
         case .setupStillRunning(let title, let path):
             return "an earlier attempt at \"\(title)\" is still setting up \(path), running the repository's "
-                + "post-checkout hook or removing what a failed one left; spawn again once that attempt's "
-                + "session has left `setup`, or after its failed report"
+                + "post-checkout hook or removing what a failed one left; spawn again once a report says that "
+                + "setup has ended: the attempt's failed report, or, for an attempt that was stopped, a report "
+                + "saying its setup ended. If its worker starts instead, the task is held and needs no retry"
         case .worktreeBeingRemoved(let path):
             return "\(path) is being removed by a cleanup that claimed it first, so a session resumed there would "
                 + "lose its checkout; spawn the task again instead, which waits for the removal and creates a fresh worktree"
@@ -216,6 +217,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var placing: Set<String> = []
     /// Runs once a spawn's worktree exists and before its agent launches, so a test can act in that gap.
     @ObservationIgnored var afterCheckoutCreated: @MainActor () async -> Void = {}
+    /// Runs while a spawn holds its mark and before `git worktree add`, so a test can act in that gap.
+    @ObservationIgnored var beforeCheckoutCreated: @MainActor () async -> Void = {}
+    /// Tasks a discard is waiting out the setup of; that setup's end is not a cue to retry.
+    @ObservationIgnored private var discarding: Set<String> = []
     /// A resume starts the process before it moves the task back to `running`, so until then its
     /// session looks like a stray one on a settled task to `reconcile`.
     @ObservationIgnored private var resuming: Set<String> = []
@@ -691,6 +696,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func createWorktree(_ pending: PendingCheckout) async throws {
         // SPEC §5: a worktree a reap or teardown has claimed is about to be deleted, so it is not reused.
         await awaitTeardown(of: pending.manager.worktreeRoot.appendingPathComponent(pending.name).path)
+        await beforeCheckoutCreated()
+        try _Concurrency.Task.checkCancellation()
         try await offMain {
             guard try Self.existingWorktree(pending.manager, name: pending.name) == nil else { return }
             if let base = pending.base {
@@ -732,7 +739,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// orchestrator the way every other asynchronous worker outcome does: as a queued report, with
     /// the task put back in `ready` rather than left in `running` behind a session that never ran.
     /// `placingMark` is released once setup ends, not when `spawn` answers, so no retry adopts the
-    /// worktree while this attempt's hook or its rollback is still running in it (SPEC §3.1).
+    /// worktree while this attempt's hook or its rollback is still running in it (SPEC §3.1). A cancelled
+    /// setup is ended by whoever cancelled it; if that happened before setup ended, its end queues a
+    /// report of its own, since a retry refused meanwhile has no other cue.
     private func beginSetup(
         _ plan: LaunchPlan, placeholder: AgentSession, port: Int,
         checkout: PendingCheckout? = nil, placingMark: String? = nil
@@ -740,7 +749,6 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let sessionId = placeholder.sessionId
         setupTasks[sessionId] = _Concurrency.Task { [weak self] in
             guard let self else { return }
-            defer { if let placingMark { placing.remove(placingMark) } }
             do {
                 if let checkout {
                     try await createWorktree(checkout)
@@ -748,13 +756,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     try _Concurrency.Task.checkCancellation()
                 }
                 _ = try await launch(plan, port: port, placeholder: placeholder)
-            } catch {
+            } catch where !_Concurrency.Task.isCancelled {
                 lastError = describe(error)
                 // The placeholder may already have been resolved into a real session, in which case
                 // that is the row to end — the placeholder no longer exists to be reported against.
                 let live = ((try? sessions.forTask(plan.taskId)) ?? [])
                     .first { $0.state.isActive }?.sessionId ?? sessionId
                 failSetup(sessionId: live, projectId: plan.project.id, error: error)
+            } catch {}
+            if let placingMark { placing.remove(placingMark) }
+            if _Concurrency.Task.isCancelled, !discarding.contains(plan.taskId),
+               (try? sessions.get(sessionId))?.state.isActive == false {
+                reportSetupEnded(plan, sessionId: sessionId)
             }
             setupTasks[sessionId] = nil
         }
@@ -779,6 +792,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         // bare `failed` state — while `detail` is the actual worktree-prep failure, which only the
         // queued report on the Orchestrator screen shows.
         post("Worker never started", body: detail, projectId: projectId, category: .workerFailures)
+    }
+
+    private func reportSetupEnded(_ plan: LaunchPlan, sessionId: String) {
+        guard let task = try? tasks.get(plan.taskId) else { return }
+        let lines = [
+            "Setup ended for an attempt that was stopped while it set up",
+            "Task: \(task.id) (\(task.title))",
+            "Session: \(sessionId) (attempt \(plan.attempt))",
+            "Nothing is setting up this task any more, so a spawn refused with \"still setting up\" can be sent again.",
+        ]
+        _ = try? ReportStore(db).insert(
+            projectId: plan.project.id, taskId: task.id, sessionId: nil, kind: .decision,
+            body: lines.joined(separator: "\n")
+        )
+        announceReports(projectId: plan.project.id)
     }
 
     /// A lock held by a session the last run of the app never saw end — a killed process, a crash —
@@ -2668,15 +2696,23 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
             let taskSessions = try sessions.forTask(taskId)
+            discarding.insert(taskId)
+            defer { discarding.remove(taskId) }
+            var setups: [_Concurrency.Task<Void, Never>] = []
             for session in taskSessions where session.state.isActive {
                 if let shortId = session.shortId {
                     try? await stopAgent(session, shortId: shortId)
+                } else if let setup = setupTasks[session.sessionId] {
+                    setup.cancel()
+                    setups.append(setup)
                 }
                 try sessions.setState(session.sessionId, .stopped, endedAt: .nowMillis)
             }
             for session in taskSessions {
                 try grants.revokeAll(sessionId: session.sessionId)
             }
+            // SPEC §5: a setup still running would create the worktree after the teardown looked for it.
+            for setup in setups { await setup.value }
             let cleanup = await tearDownWorktrees(claimTeardown(of: taskSessions), task: task, project: project)
             report(cleanup.notices)
             try board.discard(taskId: taskId, cleanup: cleanup.findings.map(\.text))
@@ -3084,9 +3120,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let orphans = scan.orphans.filter { claim.paths.contains($0.url.path) }
         let removal: @MainActor (WorkerSupervisor) async -> Void = { supervisor in
             defer { supervisor.releaseTeardown(claim) }
-            let cleanup = await supervisor.offMainResult {
+            var cleanup = await supervisor.offMainResult {
                 Self.reap(manager: manager, orphans: orphans, bases: bases)
             }
+            cleanup.notices += await supervisor.sweepMergedBranches(manager, bases: bases)
             supervisor.recordReap(cleanup, projectId: projectId)
         }
         if project.settings.worktreeTeardown != nil, !orphans.isEmpty {
@@ -3198,7 +3235,6 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 notices.append(reason)
             }
         }
-        notices.append(contentsOf: sweepMergedBranches(manager, bases: bases))
         cleanup.notices.insert(contentsOf: notices, at: 0)
         return cleanup
     }
@@ -3206,12 +3242,32 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Task branches outlive their worktree: every accepted task before this swept them up leaves one
     /// behind. Only failures are reported, since an unmerged branch is the normal in-flight state. An
     /// unreadable worktree record blocks every branch's holder check, so it is named once per sweep.
-    private nonisolated static func sweepMergedBranches(_ manager: WorktreeManager, bases: [String]) -> [String] {
+    /// A spawn's new branch has no commits and reads as merged, so a task being placed keeps its branch,
+    /// and every other worktree-less task's path is claimed until its branch is gone (SPEC §5).
+    private func sweepMergedBranches(_ manager: WorktreeManager, bases: [String]) async -> [String] {
+        let candidates = await offMainResult { Self.worktreelessTaskBranches(manager) }
+        let placed = Set(placing.map(Self.resolved))
+        let claim = claimTeardown(of: candidates.map(\.path).filter { !placed.contains(Self.resolved($0)) })
+        defer { releaseTeardown(claim) }
+        let branches = candidates.filter { claim.paths.contains($0.path) }.map(\.branch)
+        return await offMainResult { Self.deleteMergedBranches(manager, branches, bases: bases) }
+    }
+
+    /// A branch whose worktree is on disk is kept by the holder check, so only the rest need a claim.
+    private nonisolated static func worktreelessTaskBranches(_ manager: WorktreeManager) -> [(branch: String, path: String)] {
         guard let branches = try? manager.localBranches(withPrefix: taskBranchPrefix) else { return [] }
+        return branches
+            .filter { !$0.hasPrefix(EpicStore.branchPrefix) && !$0.hasPrefix(SharedCheckoutGroup.branchPrefix) }
+            .map { ($0, manager.worktreeRoot.appendingPathComponent(String($0.dropFirst(taskBranchPrefix.count))).path) }
+            .filter { !FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private nonisolated static func deleteMergedBranches(
+        _ manager: WorktreeManager, _ branches: [String], bases: [String]
+    ) -> [String] {
         var failures: [String] = []
         var blocked: [String: (record: UnreadableWorktreeRecord, branches: Int)] = [:]
-        for branch in branches
-        where !branch.hasPrefix(EpicStore.branchPrefix) && !branch.hasPrefix(SharedCheckoutGroup.branchPrefix) {
+        for branch in branches {
             do {
                 if case .keptUnreadable(_, let record) = try manager.deleteBranchIfMerged(branch, into: bases) {
                     blocked[record.directory, default: (record, 0)].branches += 1

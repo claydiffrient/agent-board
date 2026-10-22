@@ -140,7 +140,11 @@ nobody reviewed.
   `decision` report of their own. With no hook, a human's Accept removes the
   worktrees inside the accept. Discarding a task removes its worktrees the same
   way before the task is deleted; the task's progress goes with it, so its
-  findings are kept only in the discard's `decision` report.
+  findings are kept only in the discard's `decision` report. A discard that
+  lands while a spawn of the task is still setting up (§3.1) cancels that setup
+  and waits for it to end before looking for worktrees: a setup cancelled before
+  `git worktree add` creates nothing, and one already running its hook finishes,
+  so the removal finds its worktree. That setup's end queues no report.
 
   The merge takes the task's branch into the branch meant to carry it:
   `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling
@@ -370,7 +374,13 @@ removal to finish and then creates a fresh worktree at the same path. It waits
 only on a claim for its own path, so it is never held up by removals of other
 worktrees. Anything dirty or unmerged is left alone and reported. A task branch
 cut moments ago sits exactly at its base, so it reads as merged until its
-worker's first commit, and the worktree check alone protects it. That check
+worker's first commit. Once its worktree exists the worktree check protects it;
+before that, the branch sweep skips `agentboard/<task-id>` while the spawn's
+mark is on `<root>/<task-id>`, and claims that path, as a teardown would, for
+every other task branch with no worktree there until its delete is done, so a
+spawn that marks the path afterwards waits on the claim before `git worktree
+add`. Without the claim, a worktree added between the sweep's check and its
+delete would lose its new branch. The worktree check
 reads each worktree's `HEAD` (and an in-progress rebase's `head-name` or
 bisect's `BISECT_START`) from git's own admin files and keeps the branch when
 any of them cannot be read: `git worktree list` exits 0 in that case while

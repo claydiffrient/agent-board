@@ -70,6 +70,11 @@ final class WorktreeSetupRetryTests: XCTestCase {
         let gate = try installGatedHook(then: "echo 'setup: build server socket closed' >&2; exit 1")
         let task = try makeTask()
         let first = try await fixture.supervisor.spawnWorker(taskId: task.id)
+        let hookStarted = fixture.supportDir.appendingPathComponent("hook-used").path
+        let deadline = Date().addingTimeInterval(30)
+        while !FileManager.default.fileExists(atPath: hookStarted), Date() < deadline {
+            try await _Concurrency.Task.sleep(for: .milliseconds(20))
+        }
         try await fixture.supervisor.stop(sessionId: first.setupSessionId)
 
         do {
@@ -81,6 +86,11 @@ final class WorktreeSetupRetryTests: XCTestCase {
         FileManager.default.createFile(atPath: gate.path, contents: nil)
         await fixture.supervisor.waitForSetup()
 
+        let reports = try ReportStore(fixture.db).unconsumed(projectId: fixture.project.id)
+        XCTAssertTrue(
+            reports.contains { $0.body.hasPrefix("Setup ended") && $0.taskId == task.id },
+            "the refusal promised a cue, but the stopped attempt's setup ended without a report: \(reports.map(\.body))"
+        )
         _ = try await fixture.supervisor.spawnWorker(taskId: task.id)
     }
 
