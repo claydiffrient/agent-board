@@ -53,7 +53,7 @@ CREATE TABLE task (
   failed         INTEGER NOT NULL DEFAULT 0,
   failure_reason TEXT,
   ordering       REAL NOT NULL,
-  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration
+  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration | triage | follow_through
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
@@ -120,7 +120,7 @@ CREATE TABLE token_grant (
   token       TEXT PRIMARY KEY,      -- random, per session
   session_id  TEXT REFERENCES agent_session(session_id),  -- NULL until `claude --bg` returns the id
   project_id  TEXT REFERENCES project(id),  -- NULL for the Coordinator's grant only (§8.2)
-  scope       TEXT NOT NULL,         -- orchestrator | worker | reviewer | coordinator
+  scope       TEXT NOT NULL,         -- orchestrator | worker | reviewer | coordinator | triager
   task_id     TEXT,                  -- worker: the only task it may mutate
   created_at  INTEGER NOT NULL,
   revoked_at  INTEGER,
@@ -336,6 +336,7 @@ CREATE TABLE pr_watch (
   verified_at      INTEGER,
   est_cost_usd     REAL NOT NULL DEFAULT 0,
   ready_notified_oid TEXT,            -- the head whose Ready to verify banner fired (§13.4)
+  parked_reason    TEXT,              -- why follow-through parked it, e.g. the last of three failed triages (§13.1)
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,  -- moves only when something other than last_polled_at changes
   UNIQUE (project_id, repo_owner, repo_name, number)
@@ -357,9 +358,10 @@ CREATE TABLE pr_item (
   verdict               TEXT,            -- fix | answer | already_done | follow_up | decision; null until triaged
   approach              TEXT,
   decision_question     TEXT,
-  decision_options_json TEXT,
-  decision_answer       TEXT,
-  fix_task_id           TEXT REFERENCES task(id) ON DELETE SET NULL,
+  decision_options_json TEXT,            -- [{label, verdict: fix|answer, reply_body?}]; a bare string reads as fix (§13.4)
+  decision_answer       TEXT,            -- the human's answer from Needs you (§13.4)
+  decision_notified_at  INTEGER,         -- when this decision's banner was claimed; one banner per decision
+  fix_task_id           TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the fix or follow-up task triage made of it (§13.1)
   followup_grade        TEXT,            -- fixed | partly | not_fixed | moot
   reply_body            TEXT,
   reply_url             TEXT,
@@ -376,7 +378,7 @@ CREATE TABLE pr_round (
   number          INTEGER NOT NULL,
   base_head_oid   TEXT NOT NULL,     -- the PR head the round's branch was cut from
   pushed_head_oid TEXT,
-  outcome         TEXT,
+  outcome         TEXT,              -- triaged | triage_failed | interrupted; null while the round runs
   started_at      INTEGER NOT NULL,
   ended_at        INTEGER,
   UNIQUE (watch_id, number)
@@ -396,6 +398,18 @@ CREATE TABLE pr_poll_problem (
   detail     TEXT NOT NULL,
   since      INTEGER NOT NULL
 );
+
+-- One triage run (§13.2): the synthetic `triage` task its session is bound to, the watch it
+-- triages, and the diff it was spawned to read. A triager grant reaches its watch only through this.
+CREATE TABLE pr_triage (
+  task_id    TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
+  watch_id   TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+  base_oid   TEXT NOT NULL,   -- origin's tip of the PR's base branch, fetched at spawn
+  head_oid   TEXT NOT NULL,   -- the PR head the triager's detached checkout is at
+  round      INTEGER NOT NULL DEFAULT 0,  -- the watch's round this triage was spawned for
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX pr_triage_watch ON pr_triage(watch_id);
 ```
 
 Every `epic.state` value is written by exactly one place, and nothing writes one
@@ -561,8 +575,13 @@ overrides (§5, §5.1) still apply over it, and there are no per-epic rows.
 `watching`. Items are matched by `github_node_id`, so the same snapshot twice
 changes nothing but `last_polled_at`. An open item that the snapshot reports
 resolved, or leaves out, becomes `handled`; a resolved item never seen before is
-not stored. A `handled` or `dismissed` item whose body changed — a new reply —
-reopens to `open` with its verdict and grade cleared. `settings_json.prFollowThrough`
+not stored. An unresolved item whose body changed — a new reply — loses
+everything triage gave it: `verdict`, `approach`, the `decision_*` fields,
+`reply_body` and `followup_grade`, so the next round triages it afresh. A
+`handled` or `dismissed` one also reopens to `open` and drops `fix_task_id`; the
+task it named stays on the board as the record of the earlier round, and is
+never treated as the item's current task. An item still open keeps its
+`fix_task_id`. `settings_json.prFollowThrough`
 holds every work-specific value — `enabled`, `verificationLabel`,
 `requireApproval`, `settleMinutes`, `roundCap`, `dailyBudgetUSD`,
 `verifyCommand`, `postFactualReplies`, `roles` (`triage`, `fixer`, `reviewer`,

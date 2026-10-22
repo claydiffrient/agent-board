@@ -100,29 +100,42 @@ public enum TranscriptMeter {
 
 /// Remembers the byte offset between polls and folds only new lines into the running summary.
 public struct TranscriptTailer: Sendable {
+    private struct FileIdentity: Equatable, Sendable {
+        var device: UInt64
+        var inode: UInt64
+    }
+
     public let url: URL
     public private(set) var offset: UInt64 = 0
     public private(set) var summary = TranscriptSummary()
     private var partialLine = Data()
     private var accumulator = TranscriptAccumulator()
+    private var identity: FileIdentity?
 
     public init(url: URL) {
         self.url = url
     }
 
-    /// Returns the change in usage since the previous poll. A truncated file restarts from zero.
+    /// Returns the change in usage since the previous poll. A truncated or replaced file restarts
+    /// from zero.
     @discardableResult
     public mutating func poll() throws -> UsageTotals {
         let before = accumulator.summary.totals
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
 
+        var info = stat()
+        guard fstat(handle.fileDescriptor, &info) == 0 else {
+            throw CocoaError(.fileReadUnknown, userInfo: [NSURLErrorKey: url])
+        }
+        let current = FileIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino))
         let size = try handle.seekToEnd()
-        if size < offset {
+        if size < offset || identity.map({ $0 != current }) == true {
             offset = 0
             partialLine = Data()
             accumulator = TranscriptAccumulator()
         }
+        identity = current
         try handle.seek(toOffset: offset)
         guard let chunk = try handle.readToEnd(), !chunk.isEmpty else {
             summary = accumulator.summary

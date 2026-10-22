@@ -8,12 +8,16 @@ public enum AttentionReason: String, Sendable, Codable, CaseIterable, Equatable 
     case pendingApproval
     /// A worker called `report_blocked` and stopped until a human answers (SPEC D15).
     case blockedWorker
+    /// Triage left a decision on a watched pull request for the human to answer (SPEC §13.4).
+    case pullRequestDecision
     /// Reports queued for an orchestrator that is not running, so nothing will pull them.
     case strandedReports
     /// A shutdown order past its grace period whose deliveries are still unacknowledged.
     case overdueShutdown
     /// PR follow-through is on but `gh` is missing or not logged in, so no PR is being watched (SPEC §13.1).
     case prPollUnavailable
+    /// Follow-through parked a pull request, which waits for the human to resume it (SPEC §13.1).
+    case parkedPullRequest
 
     var severity: Int { Self.allCases.firstIndex(of: self)! }
 }
@@ -108,9 +112,11 @@ public struct ProjectAttentionStore: Sendable {
         }
         add(.pendingApproval, row["approvals"])
         add(.blockedWorker, row["blocked_workers"], detail: row["blocked_title"])
+        add(.pullRequestDecision, row["pr_decisions"], detail: row["pr_decision_detail"])
         add(.strandedReports, row["stranded_reports"])
         add(.overdueShutdown, row["overdue_deliveries"])
         add(.prPollUnavailable, row["pr_poll_problems"], detail: row["pr_poll_detail"])
+        add(.parkedPullRequest, row["parked_pull_requests"], detail: row["parked_detail"])
         return ProjectAttention(
             id: row["id"],
             name: row["name"],
@@ -142,7 +148,10 @@ public struct ProjectAttentionStore: Sendable {
     }
 
     /// `blocked_title` is a bare column beside `MIN(updated_at)`: SQLite guarantees it comes from
-    /// the row that produced the minimum, so the detail names the longest-blocked task.
+    /// the row that produced the minimum, so the detail names the longest-blocked task. The parked
+    /// and decision details name the most recent pull request the same way. Both count only in a
+    /// project with follow-through on, and a decision only on a watch that is not paused, the
+    /// badge's rule.
     static let sql = """
         SELECT p.id AS id,
                p.name AS name,
@@ -152,7 +161,11 @@ public struct ProjectAttentionStore: Sendable {
                CASE WHEN COALESCE(o.n, 0) > 0 THEN 0 ELSE COALESCE(r.n, 0) END AS stranded_reports,
                COALESCE(s.n, 0) AS overdue_deliveries,
                CASE WHEN pp.project_id IS NULL THEN 0 ELSE 1 END AS pr_poll_problems,
-               pp.detail AS pr_poll_detail
+               pp.detail AS pr_poll_detail,
+               COALESCE(pk.n, 0) AS parked_pull_requests,
+               pk.detail AS parked_detail,
+               COALESCE(dc.n, 0) AS pr_decisions,
+               dc.detail AS pr_decision_detail
         FROM project p
         LEFT JOIN (
             SELECT project_id, COUNT(*) AS n FROM approval
@@ -180,6 +193,19 @@ public struct ProjectAttentionStore: Sendable {
             GROUP BY so.project_id
         ) s ON s.project_id = p.id
         LEFT JOIN pr_poll_problem pp ON pp.project_id = p.id
+        LEFT JOIN (
+            SELECT project_id, COUNT(*) AS n, MAX(updated_at),
+                   '#' || number || ': ' || COALESCE(parked_reason, 'parked') AS detail
+            FROM pr_watch WHERE state = 'parked' GROUP BY project_id
+        ) pk ON pk.project_id = p.id AND json_extract(p.settings_json, '$.prFollowThrough.enabled') = 1
+        LEFT JOIN (
+            SELECT w.project_id AS project_id, COUNT(*) AS n, MAX(i.updated_at),
+                   '#' || w.number || ': ' || COALESCE(i.decision_question, 'a decision') AS detail
+            FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id JOIN project p ON p.id = w.project_id
+            WHERE i.state = 'open' AND i.verdict = 'decision' AND w.state NOT IN ('merged', 'closed')
+              AND \(PRWatchStore.countsTowardAttention)
+            GROUP BY w.project_id
+        ) dc ON dc.project_id = p.id
         ORDER BY p.name COLLATE NOCASE, p.created_at
         """
 }

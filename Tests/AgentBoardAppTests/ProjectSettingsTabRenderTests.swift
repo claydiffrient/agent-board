@@ -598,20 +598,30 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
             $0.prFollowThrough = PRFollowThroughSettings(
                 enabled: true, verificationLabel: "verified-example", requireApproval: false,
                 settleMinutes: 15, roundCap: 2, verifyCommand: "example-verify {url}",
-                postFactualReplies: true, privateTerms: ["Globex"]
+                postFactualReplies: true,
+                roles: PRFollowThroughRoles(
+                    triage: .init(model: "example-triage"), fixer: .init(model: "example-fixer"),
+                    reviewer: .init(model: "example-reviewer"), followupCheck: .init(model: "example-check")
+                ),
+                privateTerms: ["Globex"]
             )
         }
         let mounted = try mount(tab: .prFollowThrough, configure: configure)
 
+        let roleModels = ["example-triage", "example-fixer", "example-reviewer", "example-check"]
         XCTAssertEqual(
             mounted.fields.map(\.stringValue),
-            ["15", "2", "", "verified-example", "example-verify {url}", ""]
+            ["15", "2", "", "verified-example", "example-verify {url}", ""] + roleModels
         )
         XCTAssertEqual(
             mounted.fields.map(\.placeholderString),
             [nil, nil, "Spawn caps", "e.g. verified", "e.g. open {url}", "Press Return to add"]
+                + Array(repeating: "Model id", count: roleModels.count)
         )
         XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off, .on])
+        if !mounted.collect(NSPopUpButton.self).isEmpty {
+            XCTAssertEqual(popUpButtons(titled: "Default", in: mounted.host).count, 4, "one agent picker per role")
+        }
 
         let (db, project) = try storedProject(configure)
         let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
@@ -654,6 +664,43 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let sheet = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
         let seeded: ProjectSettings? = seededState(sheet, "_settings")
         XCTAssertEqual(seeded?.prFollowThrough, saved)
+    }
+
+    func testRolePickersOfferEnabledAgentsAndTheirSelectionsRoundTrip() throws {
+        let db = try AppDatabase.inMemory()
+        let roster = RosterStore(db)
+        let rita = try roster.create(name: "Rita", role: "reviewer", systemPrompt: "")
+        let off = try roster.create(name: "Off", role: "fixer", systemPrompt: "", enabled: false)
+        let gone = try roster.create(name: "Gone", role: "fixer", systemPrompt: "")
+
+        XCTAssertEqual(
+            ProjectSettingsSheet.roleAgentOptions(projectAgents: [rita, off], rosterAgents: [rita, off, gone], current: gone.id),
+            [
+                .init(agentId: nil, title: "Default"), .init(agentId: rita.id, title: "Rita"),
+                .init(agentId: gone.id, title: "Gone (not available)"),
+            ]
+        )
+
+        var roles = PRFollowThroughRoles()
+        for role in ProjectSettingsSheet.FollowThroughRole.allCases {
+            roles[keyPath: role.keyPath] = ProjectSettingsSheet.updating(roles[keyPath: role.keyPath]) {
+                $0.rosterAgentId = rita.id
+            }
+        }
+        roles.fixer = ProjectSettingsSheet.updating(roles.fixer) { $0.model = "claude-sonnet-5-5" }
+        roles.reviewer = ProjectSettingsSheet.updating(roles.reviewer) { $0.rosterAgentId = nil }
+        XCTAssertNil(roles.reviewer, "a role cleared back to Default is stored as absent")
+
+        let draft = PRFollowThroughSettings(roles: roles)
+        let (_, project) = try storedProject {
+            $0.prFollowThrough = ProjectSettingsSheet.savedFollowThrough(draft, pendingTerm: "")
+        }
+        let sheet = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
+        let seeded: ProjectSettings? = seededState(sheet, "_settings")
+        XCTAssertEqual(seeded?.prFollowThrough.roles, PRFollowThroughRoles(
+            triage: .init(rosterAgentId: rita.id), fixer: .init(rosterAgentId: rita.id, model: "claude-sonnet-5-5"),
+            followupCheck: .init(rosterAgentId: rita.id)
+        ))
     }
 
     private func storedProject(_ configure: (inout ProjectSettings) -> Void) throws -> (AppDatabase, Project) {

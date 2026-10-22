@@ -190,6 +190,15 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("roster_plugin_dirs") { db in
             try db.execute(sql: "ALTER TABLE roster_agent ADD COLUMN plugin_dirs TEXT NOT NULL DEFAULT '[]'")
         }
+        migrator.registerMigration("pr_triage") { db in
+            try db.execute(sql: Schema.prTriage)
+        }
+        migrator.registerMigration("pr_triage_round") { db in
+            try db.execute(sql: Schema.prTriageRound)
+        }
+        migrator.registerMigration("pr_item_decision_notified") { db in
+            try db.execute(sql: Schema.prItemDecisionNotified)
+        }
         migrator.registerMigration("worktree_slot") { db in
             try db.execute(sql: Schema.worktreeSlot)
         }

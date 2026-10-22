@@ -30,10 +30,20 @@ enum SupervisorError: LocalizedError {
     case epicStillOpen(String)
     case globalShutdownIncomplete([String])
     case dependencyNotOnBranch(dependencyId: String, title: String, commit: String, branch: String, landing: TaskLanding?)
+    case watchNotFound(String)
+    case triageTaskNotAssignable(title: String)
+    case triageNotResumable(title: String)
+    case pullRequestNotFetched(String)
 
     var errorDescription: String? {
         switch self {
         case .approvalNotFound(let id): return "approval \(id) not found"
+        case .watchNotFound(let id): return "watched pull request \(id) not found"
+        case .triageTaskNotAssignable(let title):
+            return "\"\(title)\" is a pull request triage; only Agent Board's follow-through starts one"
+        case .triageNotResumable(let title):
+            return "\"\(title)\" is a pull request triage, which is not resumed; follow-through starts a fresh one"
+        case .pullRequestNotFetched(let reason): return "the pull request could not be fetched: \(reason)"
         case .rosterAgentNotUsable(let id, let projectName):
             return "roster agent \(id) is not in \(projectName)'s usable set; enable it for this project first"
         case .epicCloseRefused(let reason): return reason
@@ -137,8 +147,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let prWatches: PRWatchStore
     /// Millis of the last PR follow-through poll; 0 means none yet.
     @ObservationIgnored private var lastPRWatchPoll: Int64 = 0
-    @ObservationIgnored private var prWatchPollInFlight = false
+    @ObservationIgnored private var prWatchPoll: _Concurrency.Task<Void, Never>?
     @ObservationIgnored private var prWatchSearchFailures = 0
+    /// Consecutive polls on which git could not read a project's `origin`, by project id.
+    @ObservationIgnored private var prWatchRemoteFailures: [String: Int] = [:]
     /// Millis of the last pull request merge check; 0 means none yet, so the first tick after
     /// launch checks.
     @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
@@ -162,6 +174,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var worktreeSweeps: [String: _Concurrency.Task<Void, Never>] = [:]
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
     @ObservationIgnored private var stallNotified: Set<String> = []
+    /// One per metered session, so a tick reads only what each transcript appended since the last (SPEC §7).
+    @ObservationIgnored private var transcriptTailers: [String: TranscriptTailer] = [:]
     /// `<project-id>\u{01}<branch>` for each shared branch whose pre-ledger `Agent-Board-Task`
     /// trailers have already been read back this run.
     @ObservationIgnored private var trailersBackfilled: Set<String> = []
@@ -180,6 +194,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Resolved paths of worktrees some teardown is removing now. No other removal touches them, so
     /// a teardown hook never runs twice in one worktree (SPEC §3.1).
     @ObservationIgnored private var tearingDown: Set<String> = []
+    @ObservationIgnored private var teardownWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     /// Worktree paths a spawn is creating, counted per spawn, until its session row is written. Until
     /// then the worktree is clean and at its base, so a reap would take it for an orphan (SPEC §5).
     @ObservationIgnored private var placing: [String: Int] = [:]
@@ -354,6 +369,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         taskId: String, rosterAgentId: String? = nil, scope: AgentBoardCore.TokenScope = .worker
     ) async throws -> WorkerSpawn {
         guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
+        // A worker or reviewer grant on a triage task would hold authority over the PR's checkout that
+        // the triager scope exists to withhold.
+        guard task.origin != .triage else { throw SupervisorError.triageTaskNotAssignable(title: task.title) }
         guard task.column != .running, task.column != .done, task.column != .closed else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
         }
@@ -628,6 +646,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let slotCount = occupiesSlot ? project.settings.worktreeSlots : 0
         let leased = try slots.lease(taskId: taskId)
         let leasedSlots = Set(try slots.slots(projectId: project.id).compactMap { $0.taskId == nil ? nil : $0.slot })
+        // SPEC §5: a worktree a reap or teardown has claimed is about to be deleted, so it is not reused.
+        await awaitTeardown(of: (leased.map { Self.slotPath(manager, $0.slot) }) ?? manager.worktreeRoot.appendingPathComponent(taskId).path)
         let (found, cut, unusable) = try await offMain { () -> (URL?, BaseStartPoint, Set<Int>) in
             if let leased {
                 return (manager.worktreeRoot.appendingPathComponent(WorktreeSlot.name(leased.slot)), BaseStartPoint(ref: base), [])
@@ -770,7 +790,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func failSetup(sessionId: String, projectId: String, error: Error) {
         let detail = describe(error)
-        let queued = (try? board.terminate(sessionId: sessionId, cause: .setupFailed(detail))) ?? nil
+        let queued = (try? terminateSession(sessionId, cause: .setupFailed(detail))) ?? nil
         guard queued != nil else { return }
         announceReports(projectId: projectId)
         // `sessionId` always names a real row (`assign` writes it before setup runs), so this could
@@ -800,7 +820,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func stopOrphanedCoordinatorSessions() {
         guard coordinatorConsoleInstance?.isProcessRunning != true else { return }
         for session in (try? coordinator.sessions()) ?? [] where session.state.isActive {
-            _ = try? board.terminate(sessionId: session.sessionId, cause: .vanished)
+            _ = try? terminateSession(session.sessionId, cause: .vanished)
         }
     }
 
@@ -871,7 +891,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 token: grant.token,
                 autoModeJSON: project.settings.autoModeJSON,
                 extraMcpServers: nil,
-                fileLocks: plan.worktreePath == nil
+                fileLocks: plan.worktreePath == nil,
+                readOnly: plan.scope == .triager
             )
             let request = SpawnRequest(
                 cwd: plan.cwd,
@@ -880,11 +901,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 configFiles: configFiles,
                 // A deny-list, layered on: a rostered agent can only ever have less authority than a
                 // plain worker, and an empty list is exactly a plain worker's.
-                disallowedTools: SpawnRequest.defaultDisallowedTools
-                    + (plan.scope == .reviewer
-                        ? SpawnRequest.reviewerDisallowedTools
-                            + SpawnRequest.reviewerBoardDeny(supportDir: appSupportDir, home: home)
-                        : [])
+                disallowedTools: Self.disallowedTools(scope: plan.scope, supportDir: appSupportDir, home: home)
                     + (plan.rosterAgent?.disallowedTools ?? []),
                 tools: plan.rosterAgent?.tools,
                 model: plan.model,
@@ -909,6 +926,103 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             try? grants.revoke(token: grant.token)
             throw error
+        }
+    }
+
+    nonisolated static func disallowedTools(scope: AgentBoardCore.TokenScope, supportDir: URL, home: URL) -> [String] {
+        switch scope {
+        case .reviewer:
+            return SpawnRequest.defaultDisallowedTools + SpawnRequest.reviewerDisallowedTools
+                + SpawnRequest.reviewerBoardDeny(supportDir: supportDir, home: home)
+        case .triager:
+            return SpawnRequest.triagerDisallowedTools
+                + SpawnRequest.reviewerBoardDeny(supportDir: supportDir, home: home)
+        case .worker, .orchestrator, .coordinator:
+            return SpawnRequest.defaultDisallowedTools
+        }
+    }
+
+    /// SPEC §13.2. The triager is an ordinary worker session, so every §8 cap counts it, in a
+    /// detached checkout of the PR head fetched from origin, bound to a synthetic `triage` task so its
+    /// card and progress log are real. Nothing but the supervisor calls this.
+    @discardableResult
+    func spawnTriager(watchId: String) async throws -> AgentSession {
+        guard let watch = try prWatches.get(watchId) else { throw SupervisorError.watchNotFound(watchId) }
+        guard let project = try projects.get(watch.projectId) else {
+            throw SupervisorError.projectNotFound(watch.projectId)
+        }
+        guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        try requireNoShutdown(projectId: project.id)
+        if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
+            throw SupervisorError.capRefused(reason)
+        }
+        let role = project.settings.prFollowThrough.roles.triage
+        let agent = try role?.rosterAgentId.map { id -> RosterAgent in
+            guard let agent = try roster.usableAgent(id, forProject: project.id) else {
+                throw SupervisorError.rosterAgentNotUsable(id: id, projectName: project.name)
+            }
+            return agent
+        }
+
+        let manager = worktreeManager(for: project)
+        let headOid = watch.headOid
+        let baseRef = watch.baseRef
+        let baseOid: String
+        do {
+            baseOid = try await offMain { () -> String in
+                guard try manager.fetchCommitIfMissing(headOid, from: "origin") else {
+                    throw AgentRuntimeError("origin has no commit \(headOid)")
+                }
+                return try manager.fetchRemoteTip(baseRef)
+            }
+        } catch {
+            throw SupervisorError.pullRequestNotFetched(describe(error))
+        }
+
+        let task = try board.createTriageTask(watchId: watch.id, baseOid: baseOid, headOid: headOid)
+        let triage = PRTriage(
+            taskId: task.id, watchId: watch.id, baseOid: baseOid, headOid: headOid, round: watch.round,
+            createdAt: task.createdAt
+        )
+        _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(task.id))
+        var assigned: AgentSession?
+        do {
+            let worktree = try await offMain { try manager.createDetached(name: task.id, commit: headOid) }
+            let placeholder = try board.assign(
+                taskId: task.id,
+                session: AgentSession(
+                    sessionId: "setup-\(UUID().uuidString)", projectId: project.id, taskId: task.id, role: .worker,
+                    worktreePath: worktree.path, cwd: worktree.path, state: .setup, attempt: 1,
+                    rosterAgentId: agent?.id
+                )
+            )
+            assigned = placeholder
+            beginSetup(
+                LaunchPlan(
+                    project: project,
+                    taskId: task.id,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
+                    branch: headOid,
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: TriagePrompt.compose(
+                        watch: watch, triage: triage, workingDirectory: worktree.path, agent: agent?.identity
+                    ),
+                    model: role?.model ?? agent?.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    scope: .triager
+                ),
+                placeholder: placeholder,
+                port: port
+            )
+            return placeholder
+        } catch {
+            if assigned == nil { try? tasks.delete(task.id) }
+            throw SupervisorError.spawnFailed(
+                worktree: manager.worktreeRoot.appendingPathComponent(task.id).path, underlying: describe(error)
+            )
         }
     }
 
@@ -1030,7 +1144,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.sessionHasNoShortId(sessionId)
         }
         let salvage = await branchSalvage(taskId: session.taskId)
-        try board.terminate(sessionId: sessionId, cause: .stopped(by: actor), salvage: salvage)
+        try terminateSession(sessionId, cause: .stopped(by: actor), salvage: salvage)
         try grants.revokeAll(sessionId: sessionId)
         announceReports(projectId: session.projectId)
         refreshSleepAssertion()
@@ -1107,6 +1221,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(session.projectId) else {
                 throw SupervisorError.projectNotFound(session.projectId)
             }
+            // SPEC §13.2: the grant and config below are a worker's, and a triage is cheap to start over.
+            if let task = try tasks.get(taskId), task.origin == .triage {
+                throw SupervisorError.triageNotResumable(title: task.title)
+            }
             let token: String
             if let grant = try grants.forSession(sessionId).first(where: { !$0.isRevoked }) {
                 token = grant.token
@@ -1154,7 +1272,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     } else {
                         throw SupervisorError.sessionHasNoShortId(session.sessionId)
                     }
-                    try board.terminate(sessionId: session.sessionId, cause: .stopped(by: .human))
+                    try terminateSession(session.sessionId, cause: .stopped(by: .human))
                 } catch {
                     firstFailure = firstFailure ?? error
                 }
@@ -1239,7 +1357,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
                 guard let info = Self.liveListing(of: session, in: listing ?? []) else {
                     let salvage = await branchSalvage(taskId: session.taskId)
-                    try board.terminate(sessionId: session.sessionId, cause: .vanished, salvage: salvage)
+                    try terminateSession(session.sessionId, cause: .vanished, salvage: salvage)
                     await reapProcesses(of: session, listing: listing)
                     try grants.revokeAll(sessionId: session.sessionId)
                     announceReports(projectId: session.projectId)
@@ -1504,32 +1622,65 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         for projectId in touched { announceReports(projectId: projectId) }
     }
 
-    /// SPEC §13.1, phase 1: watches the user's open, non-draft pull requests in every project with
-    /// PR follow-through on, mapping each repository to the project whose `origin` names it. Writes
-    /// each poll through `PRWatchStore` and moves only watching, readyToVerify and verified, bannering
-    /// a PR's arrival in readyToVerify once per head oid (§13.4); a watch
-    /// whose PR left the open list settles to merged or closed by `gh pr view`, and one whose PR went
-    /// back to draft is deleted. No project enabled means no `gh` call at all.
+    /// SPEC §13.1: watches the user's open, non-draft pull requests in every project with PR
+    /// follow-through on, mapping each repository to the project whose `origin` names it, then
+    /// advances each watch through settling and triaging. No project enabled means no `gh` call at all.
+    /// A call made while a poll runs waits for it and then polls again, so it always reads state
+    /// written before the call.
     func pollPRWatches() async {
-        guard !prWatchPollInFlight else { return }
+        while let inFlight = prWatchPoll { await inFlight.value }
+        let poll = _Concurrency.Task {
+            await runPRWatchPoll()
+            prWatchPoll = nil
+        }
+        prWatchPoll = poll
+        await poll.value
+    }
+
+    private func runPRWatchPoll() async {
         let enabled = ((try? projects.list()) ?? []).filter { $0.settings.prFollowThrough.enabled }
         guard !enabled.isEmpty else {
-            try? prWatches.clearPollProblems()
+            try? prWatches.setPollProblems([:])
             return
         }
-        prWatchPollInFlight = true
-        defer { prWatchPollInFlight = false }
+        await refreshPRWatches(enabled)
+        await advancePRWatches(enabled)
+    }
 
+    /// Writes each poll through `PRWatchStore` and moves a watch among watching, settling,
+    /// readyToVerify and verified, bannering a PR's arrival in readyToVerify once per head oid
+    /// (§13.4); a watch whose PR left the open list settles to merged or closed by `gh pr view`,
+    /// and one whose PR went back to draft is deleted.
+    private func refreshPRWatches(_ enabled: [Project]) async {
         var projectByRepo: [String: Project] = [:]
+        var problems: [String: String] = [:]
         for project in enabled {
             let repo = URL(fileURLWithPath: project.repoPath)
-            guard let remote = try? await offMain({ try BranchPublisher(repoPath: repo).requireRemote() }),
-                  let slug = PullRequestLaunch.githubSlug(remoteURL: remote)?.lowercased(),
+            let remote: String
+            do {
+                remote = try await offMain { try BranchPublisher(repoPath: repo).requireRemote() }
+                prWatchRemoteFailures[project.id] = nil
+            } catch PublishFailure.noRemote {
+                prWatchRemoteFailures[project.id] = nil
+                continue
+            } catch {
+                let failures = (prWatchRemoteFailures[project.id] ?? 0) + 1
+                prWatchRemoteFailures[project.id] = failures
+                NSLog("PR watch could not read %@'s origin (%d in a row): %@", project.name, failures, describe(error))
+                if failures >= Self.prWatchFailuresBeforeAttention {
+                    problems[project.id] = "Reading `origin` has failed \(failures) times in a row: \(describe(error))"
+                }
+                continue
+            }
+            guard let slug = PullRequestLaunch.githubSlug(remoteURL: remote)?.lowercased(),
                   projectByRepo[slug] == nil
             else { continue }
             projectByRepo[slug] = project
         }
-        guard let anyProject = projectByRepo.values.first else { return }
+        guard let anyProject = projectByRepo.values.first else {
+            try? prWatches.setPollProblems(problems)
+            return
+        }
 
         let reader = pullRequestWatch
         let authored: [AuthoredPullRequest]
@@ -1537,18 +1688,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let cwd = URL(fileURLWithPath: anyProject.repoPath)
             authored = try await offMain { try reader.authored(cwd: cwd) }
             prWatchSearchFailures = 0
-            try? prWatches.clearPollProblems()
+            try? prWatches.setPollProblems(problems)
         } catch let failure as PullRequestWatchFailure where failure.ghUnavailable {
-            try? prWatches.setPollProblem(failure.description, projectIds: Set(enabled.map(\.id)))
+            for project in enabled { problems[project.id] = failure.description }
+            try? prWatches.setPollProblems(problems)
             return
         } catch {
             prWatchSearchFailures += 1
             NSLog("PR watch poll failed (%d in a row): %@", prWatchSearchFailures, describe(error))
             if prWatchSearchFailures >= Self.prWatchFailuresBeforeAttention {
-                try? prWatches.setPollProblem(
-                    "`gh search prs` has failed \(prWatchSearchFailures) times in a row: \(describe(error))",
-                    projectIds: Set(enabled.map(\.id))
-                )
+                for project in enabled {
+                    problems[project.id] =
+                        "`gh search prs` has failed \(prWatchSearchFailures) times in a row: \(describe(error))"
+                }
+                try? prWatches.setPollProblems(problems)
             }
             return
         }
@@ -1594,14 +1747,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) {
         do {
             let watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
-            let openItems = try prWatches.items(watchId: watch.id).filter { $0.state == .open }.count
+            let open = try prWatches.openItems(watchId: watch.id)
             if let next = PRWatchTransition.next(
-                from: watch, snapshot: snapshot, openItems: openItems,
+                from: watch, snapshot: snapshot, openItems: open.count,
+                untriagedItems: open.filter { $0.verdict == nil }.count,
                 settings: project.settings.prFollowThrough
             ) {
                 try prWatches.setState(next, watchId: watch.id)
             }
-            if let ready = try prWatches.claimReadyNotification(watchId: watch.id) {
+            // SPEC §13.4: a paused watch claims its banner without showing it, so resuming replays nothing.
+            if let ready = try prWatches.claimReadyNotification(watchId: watch.id), !ready.paused {
                 post(
                     "Pull request ready to verify", body: "#\(ready.number) \(ready.title)",
                     projectId: project.id, category: .prReadyToVerify, subject: .pullRequest(ready.id)
@@ -1609,6 +1764,94 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
         } catch {
             report(["could not record \(snapshot.url): \(describe(error))"])
+        }
+    }
+
+    /// SPEC §13.1 and §13.2: a settling watch starts one triager per round once no item has arrived
+    /// for `settleMinutes` and nothing holds it, and a triaging one moves on once that triage ends.
+    /// Then each open decision not yet announced banners once (§13.4).
+    private func advancePRWatches(_ enabled: [Project]) async {
+        for project in enabled {
+            for watch in (try? prWatches.live(projectId: project.id)) ?? [] {
+                switch watch.state {
+                case .settling: await startTriageIfSettled(watch, project: project)
+                case .triaging: settleTriageRound(watch, project: project)
+                default: break
+                }
+                announceDecisions(watchId: watch.id, project: project)
+            }
+        }
+    }
+
+    private func announceDecisions(watchId: String, project: Project) {
+        guard let decisions = try? prWatches.claimDecisionNotifications(watchId: watchId), !decisions.isEmpty,
+              let watch = try? prWatches.get(watchId), !watch.paused
+        else { return }
+        for decision in decisions {
+            post(
+                "Pull request decision waiting", body: "#\(watch.number): \(decision.decisionQuestion ?? watch.title)",
+                projectId: project.id, category: .prDecisions, subject: .pullRequest(watch.id)
+            )
+        }
+    }
+
+    private func startTriageIfSettled(_ watch: PRWatch, project: Project) async {
+        let settleMillis = Int64(max(project.settings.prFollowThrough.settleMinutes, 0)) * 60_000
+        guard !watch.paused, Int64.nowMillis - (watch.lastFeedbackAt ?? watch.updatedAt) >= settleMillis,
+              ((try? prWatches.untriagedItemCount(watchId: watch.id)) ?? 0) > 0,
+              !isTriageHeld(project: project),
+              (try? prWatches.beginTriageRound(watchId: watch.id)) != nil
+        else { return }
+        do {
+            try await spawnTriager(watchId: watch.id)
+        } catch {
+            failTriageRound(watch, failure: describe(error))
+        }
+    }
+
+    /// SPEC §13.1's settling holds: the daily budget, AC power and the §8 spawn caps, plus a
+    /// shutdown order, which refuses every spawn.
+    private func isTriageHeld(project: Project) -> Bool {
+        if isShuttingDown(projectId: project.id) || !isOnACPower() { return true }
+        if let budget = project.settings.prFollowThrough.dailyBudgetUSD {
+            let midnight = Int64(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970 * 1000)
+            if ((try? prWatches.followThroughSpend(projectId: project.id, since: midnight)) ?? 0) >= budget { return true }
+        }
+        guard case .allowed? = try? CapCheck(db).canSpawn(projectId: project.id) else { return true }
+        return false
+    }
+
+    private func settleTriageRound(_ watch: PRWatch, project: Project) {
+        guard let triage = try? prWatches.triage(watchId: watch.id, round: watch.round),
+              let task = try? tasks.get(triage.taskId)
+        else {
+            failTriageRound(watch, failure: "round \(watch.round)'s triage never started")
+            return
+        }
+        switch task.column {
+        case .done:
+            let fixer = project.settings.prFollowThrough.roles.fixer
+            do {
+                try board.applyVerdicts(watchId: watch.id, fixerModel: fixer?.model ?? project.settings.defaultModel)
+            } catch {
+                report(["could not apply the triage of \(watch.url): \(describe(error))"])
+            }
+        case .closed:
+            failTriageRound(watch, failure: task.closedReason ?? "the triage was closed")
+        default:
+            // Only a crash between creating the task and assigning its session leaves one with none.
+            guard ((try? sessions.forTask(task.id)) ?? []).isEmpty else { return }
+            try? tasks.delete(task.id)
+            failTriageRound(watch, failure: "the triage never got a session")
+        }
+    }
+
+    private func failTriageRound(_ watch: PRWatch, failure: String) {
+        NSLog("PR follow-through: the triage of %@ failed: %@", watch.url, failure)
+        do {
+            try prWatches.abandonTriageRound(watchId: watch.id, failure: failure)
+        } catch {
+            report(["could not record the failed triage of \(watch.url): \(describe(error))"])
         }
     }
 
@@ -2036,8 +2279,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         continue
                     }
                     let salvage = await branchSalvage(taskId: session.taskId)
-                    let report = (try? board.terminate(
-                        sessionId: session.sessionId, cause: .vanished, salvage: salvage
+                    let report = (try? terminateSession(
+                        session.sessionId, cause: .vanished, salvage: salvage
                     )) ?? nil
                     queuedReport = queuedReport || report != nil
                     await reapProcesses(of: session, listing: listed)
@@ -2052,8 +2295,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if state == "stopped" || status == "stopped" {
                 if session.state.isActive {
                     let salvage = await branchSalvage(taskId: session.taskId)
-                    let report = (try? board.terminate(
-                        sessionId: session.sessionId, cause: .vanished, salvage: salvage
+                    let report = (try? terminateSession(
+                        session.sessionId, cause: .vanished, salvage: salvage
                     )) ?? nil
                     queuedReport = queuedReport || report != nil
                     await reapProcesses(of: session, listing: listed)
@@ -2087,7 +2330,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
               (try? await stopAgent(session, shortId: shortId, listing: listing)) != nil,
               session.state.isActive
         else { return false }
-        let report = (try? board.terminate(sessionId: session.sessionId, cause: .taskSettled)) ?? nil
+        let report = (try? terminateSession(session.sessionId, cause: .taskSettled)) ?? nil
         try? grants.revokeAll(sessionId: session.sessionId)
         return report != nil
     }
@@ -2343,6 +2586,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func releaseTeardown(_ claim: TeardownClaim) {
         tearingDown.subtract(claim.resolvedPaths)
+        for path in claim.resolvedPaths {
+            teardownWaiters.removeValue(forKey: path)?.forEach { $0.resume() }
+        }
+    }
+
+    private func awaitTeardown(of path: String) async {
+        let resolvedPath = Self.resolved(path)
+        while tearingDown.contains(resolvedPath) {
+            await withCheckedContinuation { teardownWaiters[resolvedPath, default: []].append($0) }
+        }
     }
 
     private func tearDownWorktrees(_ claim: TeardownClaim, task: BoardTask, project: Project) async -> WorktreeCleanup {
@@ -3017,8 +3270,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let order = try shutdowns.outstanding(projectId: projectId) else {
                 throw SupervisorError.noShutdownOrder
             }
-            let workers = try sessions.active(projectId: projectId)
-                .filter { $0.role == .worker && $0.state != .setup }
+            let active = try sessions.active(projectId: projectId).filter { $0.role == .worker }
+            // SPEC §13.2: a triager has no acknowledge_shutdown and is never resumed, so it is stopped
+            // outright, and its round is retried once the order lifts rather than counted as failed.
+            let triagers = Set(active.filter { session in
+                session.taskId.flatMap { try? tasks.get($0) }?.origin == .triage
+            }.map(\.sessionId))
+            for triager in active where triagers.contains(triager.sessionId) {
+                if let triage = triager.taskId.flatMap({ try? prWatches.triage(taskId: $0) }) {
+                    _ = try? prWatches.abandonTriageRound(watchId: triage.watchId, failure: nil)
+                }
+                try? await stopSession(triager.sessionId, by: .human)
+            }
+            let workers = active.filter { $0.state != .setup && !triagers.contains($0.sessionId) }
             for worker in workers {
                 try deliveries.enroll(orderId: order.id, sessionId: worker.sessionId, taskId: worker.taskId)
             }
@@ -3178,6 +3442,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         MacNotifier.shared.post(title: $0, body: $1, route: $2)
     }
 
+    /// Read before each follow-through spawn (SPEC §13.1); a test substitutes the answer.
+    @ObservationIgnored var isOnACPower: @MainActor () -> Bool = { PowerSource.isOnAC() }
+
     /// The gating decision for every banner that is not driven by the attention signal.
     /// `MacNotifier.post` is inert under `xctest`, so this is what the tests assert on.
     /// A project that has gone missing keeps the default, which is to notify.
@@ -3244,7 +3511,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if let shortId = session.shortId {
             try? await stopAgent(session, shortId: shortId)
         }
-        _ = try? board.terminate(sessionId: sessionId, cause: .shutdownAcknowledged(note: note ?? nil))
+        _ = try? terminateSession(sessionId, cause: .shutdownAcknowledged(note: note ?? nil))
         try? grants.revokeAll(sessionId: sessionId)
         announceReports(projectId: projectId)
         if let order = try? shutdowns.outstanding(projectId: projectId) {
@@ -3260,6 +3527,32 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func workerCompleted(projectId: String, sessionId: String) async {
         guard let session = try? sessions.get(sessionId), let shortId = session.shortId else { return }
         try? await stopAgent(session, shortId: shortId)
+        await tearDownFinishedTriage(session)
+    }
+
+    /// Every way a session ends goes through here, so a triage's checkout goes however it ended.
+    @discardableResult
+    private func terminateSession(
+        _ sessionId: String, cause: SessionTermination, salvage: BranchSalvage? = nil
+    ) throws -> Report? {
+        let report = try board.terminate(sessionId: sessionId, cause: cause, salvage: salvage)
+        if let session = try? sessions.get(sessionId), let taskId = session.taskId,
+           (try? tasks.get(taskId))?.origin == .triage {
+            inBackground { await $0.tearDownFinishedTriage(session) }
+        }
+        return report
+    }
+
+    /// SPEC §13.2: a triage lands nothing, and its detached checkout of the PR head always has commits
+    /// outside the project's bases, so the orphan sweep would keep it forever.
+    private func tearDownFinishedTriage(_ session: AgentSession) async {
+        guard let taskId = session.taskId, let task = try? tasks.get(taskId), task.origin == .triage,
+              task.column == .done || task.column == .closed, let project = try? projects.get(task.projectId),
+              let taskSessions = try? sessions.forTask(taskId), !taskSessions.contains(where: \.state.isActive)
+        else { return }
+        await startTeardown(
+            claimTeardown(of: taskSessions), task: task, project: project, report: nil, landingNotice: nil
+        )
     }
 
     /// SPEC §8.5: a session the board ended is stopped again when Claude Code resumes it on its own,
@@ -3382,12 +3675,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         if now - lastPRWatchPoll >= Self.prWatchPollIntervalMillis {
             lastPRWatchPoll = now
-            _Concurrency.Task { await self.pollPRWatches() }
+            // A slow `gh` must not queue a poll per tick behind the one still running.
+            if prWatchPoll == nil { _Concurrency.Task { await self.pollPRWatches() } }
         }
         if now - lastOrphanReap >= Self.orphanReapIntervalMillis {
             lastOrphanReap = now
             reapOrphanedWorktreesOnTick(all)
         }
+        var metered: Set<String> = []
         for project in all {
             refreshShutdownProgressIfOrdered(projectId: project.id)
             await recoverStrandedTasks(projectId: project.id)
@@ -3395,13 +3690,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let projectSessions = try? sessions.all(projectId: project.id) else { continue }
             let stallSeconds = project.settings.caps.stallSeconds
             for session in projectSessions where Self.shouldMeter(session, now: now) {
+                metered.insert(session.sessionId)
                 await meter(session, limits: limits, stallSeconds: stallSeconds, awake: awake)
             }
         }
         // Metered like an orchestrator, with no cap: `meter` enforces caps on workers only.
         for session in (try? coordinator.sessions()) ?? [] where Self.shouldMeter(session, now: now) {
+            metered.insert(session.sessionId)
             await meter(session, limits: .default, stallSeconds: 0, awake: awake)
         }
+        transcriptTailers = transcriptTailers.filter { metered.contains($0.key) }
         refreshSleepAssertion(all)
     }
 
@@ -3499,7 +3797,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
         if let path = session.transcriptPath {
             let url = URL(fileURLWithPath: path)
-            if let summary = try? await offMain({ try TranscriptMeter.summarize(transcriptAt: url) }) {
+            let tailer = transcriptTailers[session.sessionId].flatMap { $0.url == url ? $0 : nil }
+                ?? TranscriptTailer(url: url)
+            if let polled = try? await offMain({
+                var next = tailer
+                try next.poll()
+                return next
+            }) {
+                transcriptTailers[session.sessionId] = polled
+                let summary = polled.summary
                 totals = summary.totals
                 context = ContextPressure(
                     usedTokens: summary.contextTokens,
@@ -3580,7 +3886,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             try? await stopAgent(session, shortId: shortId)
         }
         let salvage = await branchSalvage(taskId: session.taskId)
-        _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description), salvage: salvage)
+        _ = try? terminateSession(session.sessionId, cause: .capBreach(description), salvage: salvage)
         announceReports(projectId: session.projectId)
         post(
             "Worker stopped at cap", body: description, projectId: session.projectId,
