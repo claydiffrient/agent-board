@@ -84,7 +84,7 @@ struct CoordinatorRow: View {
 }
 
 /// The Pull Requests row (SPEC §13.4). Its badge counts pull requests ready to verify plus open
-/// decisions, across every project.
+/// decisions, across every project with follow-through on.
 struct PullRequestsRow: View {
     let count: Int
 

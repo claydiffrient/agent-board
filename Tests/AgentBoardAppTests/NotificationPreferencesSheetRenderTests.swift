@@ -70,7 +70,7 @@ final class NotificationPreferencesSheetRenderTests: XCTestCase {
             NotificationCategory.allCases.map(\.title),
             [
                 "Approvals waiting", "Blocked workers", "Cap breaches and stalls", "Worker failures",
-                "Pull requests ready to verify",
+                "Pull requests ready to verify", "Pull request decisions",
             ]
         )
     }

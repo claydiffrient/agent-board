@@ -101,6 +101,10 @@ public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, Data
     case workerProposal = "worker_proposal"
     /// The synthetic task an epic's integrator worker is bound to (§5.2 step 3).
     case integration
+    /// The synthetic task a PR's triager is bound to (SPEC §13.2). Only the supervisor spawns onto it.
+    case triage
+    /// A backlog task follow-through created from a triaged PR item (SPEC §13.2).
+    case followThrough = "follow_through"
 }
 
 /// What kind of work a task is. Under `agent` review it picks the task's row in the project's
@@ -185,6 +189,8 @@ public enum TokenScope: String, Codable, Sendable, CaseIterable, Equatable, Data
     /// The Coordinator (SPEC §8.2): belongs to no project, so its grant has no `project_id`. It reads
     /// every project's board and writes to none.
     case coordinator
+    /// A PR triager (SPEC §6): reads its own watch's items and writes their verdicts, nothing else.
+    case triager
 }
 
 /// How much human acceptance a finished task needs before it reaches `done`.

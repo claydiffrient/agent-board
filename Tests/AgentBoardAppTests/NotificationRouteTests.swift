@@ -83,6 +83,8 @@ final class NotificationRouteTests: XCTestCase {
             .strandedReports: .reports,
             .overdueShutdown: .shutdown,
             .prPollUnavailable: .project,
+            .parkedPullRequest: .project,
+            .pullRequestDecision: .project,
         ]
         for reason in AttentionReason.allCases {
             XCTAssertEqual(NotificationRoute.subject(for: reason), expected[reason], "\(reason)")

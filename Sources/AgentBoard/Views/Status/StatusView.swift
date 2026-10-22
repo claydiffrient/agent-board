@@ -126,6 +126,7 @@ struct StatusView: View {
     /// uncapped Role, Task and Last activity.
     private func table(_ layout: Layout) -> some View {
         let roster = layout.roster
+        let triages = Set(tasks.value.filter { $0.origin == .triage }.map(\.id))
         return Table(layout.rows) {
             TableColumn("ID") { session in
                 Text(session.displayShortId)
@@ -196,7 +197,8 @@ struct StatusView: View {
                     SessionActionButtons(session: session, showsTitle: false)
                     if session.state.isActive {
                         Button("Stop") { run { try await env.supervisor.stop(sessionId: session.sessionId) } }
-                    } else if session.state == .stopped || session.state == .failed {
+                    } else if session.state == .stopped || session.state == .failed,
+                              session.taskId.map(triages.contains) != true {
                         Button("Resume") { run { try await env.supervisor.resume(sessionId: session.sessionId) } }
                     }
                 }
