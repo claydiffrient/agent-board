@@ -311,6 +311,23 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertEqual(ProjectSettings.decode(settings.encoded()), settings)
     }
 
+    func testAVerifyFailureSentBackMidRoundLeavesTheRoundAlone() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try store.setState(.settling, watchId: watch.id)
+        XCTAssertEqual(try store.beginTriageRound(watchId: watch.id, now: 2_000)?.number, 1)
+        XCTAssertEqual(try store.get(watch.id)?.state, .triaging)
+
+        let item = try store.addVerifyFailure(watchId: watch.id, body: "Still broken in prod.", now: 3_000)
+
+        let after = try XCTUnwrap(store.get(watch.id))
+        XCTAssertEqual(after.state, .triaging, "a send-back mid-round must not force the watch to settling")
+        XCTAssertEqual(after.round, 1, "the round must not be disturbed")
+        XCTAssertEqual(item.round, 1, "the item carries the round in progress")
+        XCTAssertEqual(after.lastFeedbackAt, 3_000)
+    }
+
     func testVerifyCommandFillsInTheURLAndRefusesOneAShellWouldParse() {
         var settings = PRFollowThroughSettings()
         let url = "https://github.com/example-org/app/pull/7"
