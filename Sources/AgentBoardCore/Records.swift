@@ -594,8 +594,9 @@ public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiabl
     public var epicId: String?
     public var requestedBy: String
     public var reason: String?
-    /// JSON for the kinds that carry one — a `PublishRequest` on `push` and `pull_request`. Nil for
-    /// `spawn` and `integration`, which are fully described by `taskId`/`epicId`.
+    /// JSON for the kinds that carry one — a `PublishRequest` on `push` and `pull_request`, a
+    /// `PRItemDismissalRequest` on `pr_item_dismissal`. Nil for `spawn` and `integration`, which are
+    /// fully described by `taskId`/`epicId`.
     public var payload: String?
     public var createdAt: Int64
     public var resolvedAt: Int64?

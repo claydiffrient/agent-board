@@ -17,7 +17,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
     static let scopedByIdentity: Set<String> = [
         "list_tasks", "create_task", "list_agents", "list_reports", "list_approvals",
         "create_epic", "list_epics", "push_branch", "search_notes", "create_note",
-        "list_roster_agents",
+        "list_roster_agents", "list_pr_watches", "list_pr_poll_problems",
     ]
 
     /// Tools that accept an id and must throw a `ToolError` when it belongs to another project.
@@ -27,6 +27,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "promote_proposal", "get_epic", "request_integration", "close_epic", "open_pull_request",
         "read_note", "append_section", "replace_section", "attach_note", "pin_note",
         "assign_to_agent", "add_comment", "delete_message", "reply_to_request", "add_pr_item",
+        "get_pr_watch", "dismiss_pr_item",
     ]
 
     /// The whole of the permitted crossing: queue text into another project's channel, and learn
@@ -56,11 +57,13 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "create_epic", "request_integration", "close_epic", "push_branch", "open_pull_request", "send_message",
         "attach_note", "pin_note",
         "update_status", "propose_task", "report_complete", "hand_off", "report_blocked", "acknowledge_shutdown",
-        "commit_my_work", "accept_task", "reopen_task", "reply_to_request", "add_pr_item",
+        "commit_my_work", "accept_task", "reopen_task", "reply_to_request", "add_pr_item", "dismiss_pr_item",
     ]
 
-    /// Reads of a caller's own roster or task, which mean nothing to a session with no project.
-    static let notOfferedToCoordinator: Set<String> = ["list_roster_agents", "get_my_task"]
+    /// Reads of a caller's own roster, task or pull requests, which mean nothing to a session with no project.
+    static let notOfferedToCoordinator: Set<String> = [
+        "list_roster_agents", "get_my_task", "list_pr_watches", "get_pr_watch", "list_pr_poll_problems",
+    ]
 
     override func setUpWithError() throws {
         f = try BridgeFixture.make()
@@ -93,7 +96,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
             "a tool was added to the orchestrator surface without a cross-project test in this file"
         )
         XCTAssertEqual(classified.subtracting(surface), [], "this audit names tools that no longer exist")
-        XCTAssertEqual(surface.count, 40)
+        XCTAssertEqual(surface.count, 44)
     }
 
     func testOnlySendMessageAcceptsAnotherProjectsId() async {
@@ -435,6 +438,27 @@ final class CrossProjectBoundaryTests: XCTestCase {
 
         XCTAssertEqual(try watches.items(watchId: theirs.id), [])
         XCTAssertEqual(try watches.get(theirs.id)?.state, .readyToVerify)
+    }
+
+    func testPRWatchReadsAnswerNotFoundForAnotherProjectsWatch() async throws {
+        let watches = PRWatchStore(f.db)
+        let theirs = try watches.upsert(projectId: other.id, snapshot: PRSnapshot(
+            repoOwner: "example-org", repoName: "app", number: 8,
+            url: "https://github.com/example-org/app/pull/8", title: "Theirs",
+            headRef: "feature-8", headOid: String(repeating: "d", count: 40), baseRef: "main"
+        ))
+        try watches.addPollProblem(projectId: other.id, detail: "their gh is logged out")
+
+        await XCTAssertToolError(
+            try await f.call("get_pr_watch", ["watch_id": .string(theirs.id)]), containing: "not found in this project"
+        )
+        await XCTAssertToolError(
+            try await f.call("get_pr_watch", ["number": .number(8)]), containing: "not found in this project"
+        )
+        let listed = try await f.callJSON("list_pr_watches")
+        XCTAssertEqual(listed["watches"]?.arrayValue, [])
+        let problems = try await f.callJSON("list_pr_poll_problems")
+        XCTAssertEqual(problems["poll_problems"]?.arrayValue, [])
     }
 
     // MARK: The permitted crossing, and its edges

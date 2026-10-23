@@ -6,6 +6,7 @@ import GRDB
 enum PRMilestone {
     case readyToVerify
     case parked(reason: String?)
+    case unparked(reason: String)
     case decision(question: String?)
     case round(number: Int, outcome: PRRoundOutcome, pushedHeadOid: String? = nil)
     case merged
@@ -19,6 +20,7 @@ enum PRMilestone {
         switch self {
         case .readyToVerify: "ready_to_verify"
         case .parked: "parked"
+        case .unparked: "unparked"
         case .decision: "decision"
         case .round(_, let outcome, _): "round_\(outcome.rawValue)"
         case .merged: "merged"
@@ -32,6 +34,8 @@ enum PRMilestone {
             "approved, checks green and nothing open at \(watch.headOid.prefix(7))"
         case .parked(let reason):
             Self.oneLine(reason) ?? "parked"
+        case .unparked(let reason):
+            "\(Self.oneLine(reason) ?? "unparked"); now \(watch.state.rawValue)"
         case .decision(let question):
             Self.oneLine(question) ?? "a decision is waiting on the Pull Requests page"
         case .round(let number, .published, let sha):

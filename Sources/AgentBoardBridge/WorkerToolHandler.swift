@@ -207,7 +207,7 @@ public final class WorkerToolHandler: ToolHandler {
             try await requireNoCommitInFlight(identity)
             let outcome = try reportComplete(task, arguments: arguments, identity: identity)
             guard !outcome.wasAlreadyComplete else { return Self.completionResult(outcome) }
-            if outcome.endedSessionState != nil {
+            if outcome.endedSessionState != nil || outcome.closedUnderSession {
                 await events.reportQueued(projectId: identity.projectId)
                 return stoppingAfterwards(Self.completionResult(outcome), identity: identity)
             }
@@ -544,6 +544,12 @@ public final class WorkerToolHandler: ToolHandler {
     }
 
     private static func completionResult(_ outcome: Board.CompletionOutcome) -> ToolResult {
+        if outcome.closedUnderSession {
+            return ToolResult(
+                text: "\(Self.recordedLine(outcome)) The task was closed while you worked on it, so the report "
+                    + "changed nothing and it stays Closed. Stop here; do not start further work."
+            )
+        }
         if let ended = outcome.endedSessionState {
             return ToolResult(
                 text: "\(Self.recordedLine(outcome)) Agent Board had already ended this session (\(ended.rawValue)) "

@@ -2427,8 +2427,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     private func startTriageIfSettled(_ watch: PRWatch, project: Project) async {
-        let settleMillis = Int64(max(project.settings.prFollowThrough.settleMinutes, 0)) * 60_000
-        let settled = Int64.nowMillis - (watch.lastFeedbackAt ?? watch.updatedAt) >= settleMillis
+        let settled = Int64.nowMillis >= watch.settleDeadline(settleMinutes: project.settings.prFollowThrough.settleMinutes)
             || (try? prWatches.hasUntriagedCheck(watchId: watch.id)) == true
         guard !watch.paused, settled, !isFollowThroughHeld(project: project) else { return }
         guard ((try? prWatches.untriagedItemCount(watchId: watch.id)) ?? 0) > 0 else {
@@ -4029,7 +4028,29 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 if let epicId = approval.epicId { try await spawnIntegrator(epicId: epicId) }
             case .push, .pullRequest:
                 try await publish(approval)
+            case .prItemDismissal:
+                defer { announceReports(projectId: approval.projectId) }
+                try await stopSessions(closedByDismissing: try PRItemDismissalRequest.decode(approval.payload).itemId)
+                try board.applyItemDismissal(approval)
             }
+        }
+    }
+
+    func dismissPRItem(itemId: Int64, reason: String) async throws {
+        try await recording {
+            guard !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw PRVerdictRejection("A dismissal needs a reason.")
+            }
+            try await stopSessions(closedByDismissing: itemId)
+            let watch = try prWatches.dismissItem(itemId: itemId, reason: reason, by: PRWatchStore.humanDismissal)
+            announceReports(projectId: watch.projectId)
+        }
+    }
+
+    /// A fixer or checker left running on a task the dismissal closes would spend on a dead round.
+    private func stopSessions(closedByDismissing itemId: Int64) async throws {
+        for taskId in try prWatches.tasksClosedByDismissing(itemId: itemId) {
+            try await stopLiveSessions(onTask: taskId, by: .human)
         }
     }
 
@@ -4073,7 +4094,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     summary: "\(verb) from \(from) into \(base).",
                     url: result.url
                 )
-            case .spawn, .integration:
+            case .spawn, .integration, .prItemDismissal:
                 return
             }
         } catch {

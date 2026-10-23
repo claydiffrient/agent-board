@@ -178,6 +178,22 @@ struct PullRequestsView: View {
                     answer(decision, choice: choice)
                 }
             }
+            if !listing.items.isEmpty {
+                PRItemList(items: listing.items) { item, reason in
+                    await dismiss(item, reason: reason)
+                }
+            }
+        }
+    }
+
+    private func dismiss(_ item: PRItem, reason: String) async -> Bool {
+        guard let id = item.id else { return false }
+        do {
+            try await env.supervisor.dismissPRItem(itemId: id, reason: reason)
+            return true
+        } catch {
+            errorMessage = errorText(error)
+            return false
         }
     }
 
@@ -266,6 +282,97 @@ struct PullRequestActions {
     func answer(_ decision: PRItem, choice: PRDecisionChoice) throws {
         guard let id = decision.id else { return }
         try Board(db).answerDecision(itemId: id, choice: choice)
+    }
+
+}
+
+/// A row's open items, collapsed under it, each with **Dismiss…** (SPEC §13.4).
+struct PRItemList: View {
+    let items: [PRItem]
+    /// Returns whether the dismissal was recorded.
+    let dismiss: (PRItem, String) async -> Bool
+
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            ForEach(items) { item in
+                PRItemRow(item: item) { await dismiss(item, $0) }
+            }
+        } label: {
+            Text(items.count == 1 ? "1 open item" : "\(items.count) open items")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.leading, 16)
+    }
+}
+
+/// One open item: its author, kind and first line, so the right one gets dismissed.
+struct PRItemRow: View {
+    let item: PRItem
+    let dismiss: (String) async -> Bool
+
+    @State private var dismissing = false
+    @State private var submitting = false
+    @State private var reason = ""
+
+    private var trimmedReason: String { reason.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(summary)
+                .font(.caption)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(item.body)
+            Spacer(minLength: 8)
+            Button("Dismiss…") { dismissing = true }
+                .controlSize(.small)
+                .accessibilityLabel("Dismiss item \(item.id ?? 0)")
+                .help("Retire this item with a reason: no fix, no reply, and no later check grades it")
+                .popover(isPresented: $dismissing, arrowEdge: .bottom) { form }
+        }
+    }
+
+    var summary: String {
+        var parts = [item.author, item.kind.rawValue.replacingOccurrences(of: "_", with: " ")].compactMap { $0 }
+        if let grade = item.followupGrade, grade == .partly || grade == .notFixed {
+            parts.append("graded \(grade.rawValue.replacingOccurrences(of: "_", with: " "))")
+        }
+        parts.append(item.firstLine())
+        return parts.joined(separator: " · ")
+    }
+
+    private var form: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Why does this item need nothing more?")
+                .fontWeight(.semibold)
+            TextField("Reason", text: $reason)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 320)
+                .onSubmit(submit)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismissing = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Dismiss", action: submit)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmedReason.isEmpty || submitting)
+            }
+        }
+        .padding(12)
+    }
+
+    private func submit() {
+        guard !trimmedReason.isEmpty, !submitting else { return }
+        submitting = true
+        _Concurrency.Task {
+            defer { submitting = false }
+            guard await dismiss(trimmedReason) else { return }
+            reason = ""
+            dismissing = false
+        }
     }
 }
 

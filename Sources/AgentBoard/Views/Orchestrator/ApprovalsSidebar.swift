@@ -319,6 +319,8 @@ struct ApprovalsSidebar: View {
             return "Push \(branchOf(approval)) to the remote"
         case .pullRequest:
             return "Open a pull request from \(branchOf(approval))"
+        case .prItemDismissal:
+            return "Dismiss a pull request item"
         }
     }
 
