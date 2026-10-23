@@ -73,6 +73,26 @@ extension PRWatchStore {
         }
     }
 
+    static let authorOnlyOptions = [
+        PRDecisionOption(label: "I'll do it", verdict: .answer, replyBody: "I'll make this change on GitHub myself."),
+        PRDecisionOption(label: "Leave it as is", verdict: .answer),
+    ]
+
+    /// A check item no commit can satisfy becomes a decision for the author (SPEC §13.1), out of the round.
+    static func handToAuthor(_ db: Database, item: PRItem, now: Int64) throws {
+        let question = "This needs a change on GitHub that no commit can make, so it is yours to do: "
+            + (item.followupNote ?? "the follow-up check gave no detail.")
+        try db.execute(
+            sql: """
+            UPDATE pr_item SET verdict = 'decision', decision_question = ?, decision_options_json = ?,
+            decision_answer = NULL, decision_notified_at = NULL, fix_task_id = NULL, followup_grade = NULL,
+            followup_note = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            arguments: [question, encodeOptions(authorOnlyOptions), now, item.id]
+        )
+    }
+
     /// A shutdown order stops a running follow-up check; the round's check starts a fresh one once it lifts.
     public func interruptFollowupCheck(taskId: String) throws {
         try db.writer.write { db in
@@ -193,10 +213,12 @@ extension Board {
         }
     }
 
-    /// Checking's decision (SPEC §13.1), once the review is in and every item is graded. A pass sends the
-    /// task to `done` and the watch to publishing. Anything else is a failed check: the first two put the
-    /// findings on the task, where the next fixer's opening prompt reads them, and send it back to fixing;
-    /// the third parks the watch. Nil while either half is still out.
+    /// Checking's decision (SPEC §13.1), once the review is in and every item is graded. Items graded
+    /// `needs_author` become decisions first and count toward neither outcome. A pass sends the task to
+    /// `done` and the watch to publishing. Anything else is a failed check: the first two put the findings on
+    /// the task, where the next fixer's opening prompt reads them, and send it back to fixing; the third
+    /// parks the watch. A reopened round whose every item went to the author ends instead, since no fixer
+    /// has anything left to do. Nil while either half is still out.
     @discardableResult
     public func settleCheck(watchId: String, now: Int64 = .nowMillis) throws -> PRWatchState? {
         try db.writer.write { db in
@@ -211,17 +233,34 @@ extension Board {
                     return nil
                 }
             }
-            let unfixed = items.enumerated().filter { $0.element.followupGrade != .fixed && $0.element.followupGrade != .moot }
+            let forAuthor = items.filter { $0.followupGrade == .needsAuthor }
+            for item in forAuthor { try PRWatchStore.handToAuthor(db, item: item, now: now) }
+            let handedOver = forAuthor.isEmpty ? "" : " " + Self.handedToAuthor(forAuthor)
+            let unfixed = items.enumerated().filter {
+                ![.fixed, .moot, .needsAuthor].contains($0.element.followupGrade)
+            }
             if review == .accepted, unfixed.isEmpty {
                 _ = try ProgressStore.append(
                     db, taskId: taskId, sessionId: nil, kind: .note,
                     text: "\(Self.reviewPassedLead) Round \(round.number) passed its check: the reviewer accepted it "
-                        + "and every item is fixed or moot."
+                        + "and every item is fixed or moot.\(handedOver)"
                 )
                 try TaskStore.move(db, taskId, to: .done, before: nil)
                 watch.state = .publishing
                 watch.updatedAt = now
                 try watch.update(db)
+                return watch.state
+            }
+            if !forAuthor.isEmpty, forAuthor.count == items.count {
+                try PRWatchStore.endRound(db, watchId: watchId, number: round.number, outcome: .triaged, now: now)
+                try TaskStore.close(
+                    db, taskId, reason: "Round \(round.number) has nothing left to fix.\(handedOver)",
+                    by: "follow-through", at: now
+                )
+                watch.state = try PRWatchStore.untriagedItemCount(db, watchId: watchId) > 0 ? .settling : .watching
+                watch.updatedAt = now
+                try watch.update(db)
+                try PRWatchStore.report(db, watch: watch, .round(number: round.number, outcome: .triaged))
                 return watch.state
             }
 
@@ -230,18 +269,20 @@ extension Board {
             var findings = [round.reviewFindings].compactMap { $0 }
             if !unfixed.isEmpty {
                 findings.append("The follow-up check graded these items short of fixed:\n" + unfixed.map { offset, item in
-                    "- Item \(offset + 1): \(item.followupGrade?.rawValue ?? "ungraded") — \(item.followupNote ?? "no evidence")"
+                    "- Item \(offset + 1) (id \(item.id ?? 0)): \(item.followupGrade?.rawValue ?? "ungraded") — "
+                        + (item.followupNote ?? "no evidence")
                 }.joined(separator: "\n"))
             }
             let text = "\(Self.reviewFailedLead) Round \(round.number)'s check failed (\(failures) of "
-                + "\(PRWatchStore.failedChecksBeforePark)).\n\n" + findings.joined(separator: "\n\n")
+                + "\(PRWatchStore.failedChecksBeforePark)).\(handedOver)\n\n" + findings.joined(separator: "\n\n")
             _ = try ProgressStore.append(db, taskId: taskId, sessionId: nil, kind: .note, text: text)
             if failures >= PRWatchStore.failedChecksBeforePark {
                 try round.update(db)
                 try Self.parkRound(
                     db, watch: &watch, round: round,
-                    reason: "Round \(round.number) failed its check \(failures) times. The last:\n\n"
-                        + findings.joined(separator: "\n\n"),
+                    reason: "Round \(round.number) failed its check \(failures) times: "
+                        + Self.checkFailureHeadline(unfixed: unfixed.map(\.element), reopened: review == .reopened)
+                        + "\n\nThe last check's findings:\n\n" + findings.joined(separator: "\n\n"),
                     now: now
                 )
                 return watch.state
@@ -255,6 +296,34 @@ extension Board {
             try watch.update(db)
             return watch.state
         }
+    }
+
+    /// The cause on one line (SPEC §13.1 parked), since the Pull Requests page and the orchestrator's
+    /// report show only a parked reason's first line. Names items by id, with triage's approach, never the
+    /// comment, which is untrusted.
+    static func checkFailureHeadline(unfixed: [PRItem], reopened: Bool) -> String {
+        let shown = 3
+        var causes = unfixed.prefix(shown).map { item in
+            let grade = switch item.followupGrade {
+            case .partly?: "partly fixed"
+            case nil: "ungraded"
+            default: "not fixed"
+            }
+            let gist = item.approach?.split(whereSeparator: \.isNewline).first.map {
+                let line = $0.trimmingCharacters(in: .whitespaces)
+                return line.count > 60 ? String(line.prefix(59)) + "…" : line
+            }
+            return "item \(item.id ?? 0) \(grade)" + (gist.map { " (\($0))" } ?? "")
+        }
+        if unfixed.count > shown { causes.append("\(unfixed.count - shown) more items short of fixed") }
+        if reopened { causes.append("the reviewer reopened it") }
+        return causes.isEmpty ? "no finding recorded" : causes.joined(separator: "; ")
+    }
+
+    private static func handedToAuthor(_ items: [PRItem]) -> String {
+        let ids = items.map { String($0.id ?? 0) }.joined(separator: ", ")
+        return "\(items.count == 1 ? "Item" : "Items") \(ids) can only be done by the author on GitHub, so "
+            + "\(items.count == 1 ? "it waits" : "they wait") as a decision."
     }
 
     /// Parks a checking watch whose round cannot be checked, closing its fix task so no person is left

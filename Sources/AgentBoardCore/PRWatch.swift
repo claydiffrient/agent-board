@@ -52,6 +52,9 @@ public enum PRFollowupGrade: String, Codable, Sendable, CaseIterable, Equatable,
     case partly
     case notFixed = "not_fixed"
     case moot
+    /// Only the pull request's author can do it on GitHub, so the check hands it to them as a decision
+    /// rather than failing the round (SPEC §13.1).
+    case needsAuthor = "needs_author"
 }
 
 public enum PRRoundReview: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {

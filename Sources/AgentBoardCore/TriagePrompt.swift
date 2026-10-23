@@ -68,6 +68,10 @@ public enum TriagePrompt {
     verdict `fix` or `answer`. A `fix` option changes code; an `answer` option changes none and carries \
     `reply_body`, the reply that explains the choice to the reviewer. For example, "Change the helper" is \
     `fix`, and "Keep it local" is `answer` with a short reason as its reply.
+    A fixer can only commit to the branch. A request only the author can carry out on GitHub, such as \
+    editing the pull request's description or title, changing its labels or reviewers, or replying \
+    elsewhere, is never `fix`. It is `decision`, asking the author to do it, with options such as "I'll do \
+    it" as `answer` with a short `reply_body`, or `answer` when it is already done.
     A `conflict` item is the pull request conflicting with its base. It is `fix`: the fixer merges the base \
     into the branch.
     A `check` item is a required check that failed after Agent Board pushed a fix round, with the end of its \
