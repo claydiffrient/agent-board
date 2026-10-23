@@ -421,9 +421,14 @@ settling to triage them.
 **Verify failures (phase 4).** What the human finds while verifying a PR by
 hand re-enters the loop as an item of kind `verify_failure`, recorded either by
 the **Send back** row action (§13.4) or by an agent through the orchestrator's
-`add_pr_item(pr_url, body)` (§6), which a manual-verification skill's agent
+`add_pr_item(pr_url, body, answers?)` (§6), which a manual-verification skill's agent
 calls. The item has no author, path or URL, and its node id is
-`verify:<uuid>`, so it never collides with a GitHub id; the poll never sees it
+`verify:<uuid>`, so it never collides with a GitHub id. An orchestrator that
+files a reviewer's requests this way, because they never became an item of
+their own, passes `answers`: the review's node id or the reviewer's login,
+stored on the item so triage of that reviewer's blank change request finds it
+(§13.2). Nothing reads a review URL or `@login` out of the body, so an item
+filed without `answers` stays unlinked. The poll never sees the item
 on GitHub and so never marks it handled for leaving the snapshot. On a
 verified watch it becomes a frozen decision at once, as above, and the watch
 stays verified until the human removes the label. From watching, settling or
@@ -462,10 +467,14 @@ Triage gives every open item exactly one verdict:
   Creates a backlog task; the reply says the work is tracked separately.
 A `conflict` item is always `fix`: the built-in prompt says the fixer merges
 the base into the branch.
-A blank `CHANGES_REQUESTED` review's item carries no requests itself: the
-built-in prompt has triage look for them in that author's other items, usually
-a `comment` item, and give the review `answer` with no `reply_body`, or
-`already_done`, when one carries them, and `decision` when none does.
+A blank `CHANGES_REQUESTED` review's item carries no requests itself:
+`get_pr_items` lists, as its `linked_items`, every item whose `answers` names
+that review's node id or its author, open or handled, and the built-in prompt
+has triage look for the requests there and in that author's other items,
+usually a `comment` item. A review whose linked item is already handled is
+`already_done` with no `reply_body`; one whose requests another open item
+carries is `answer` with no `reply_body`, or `already_done` when a commit
+already addresses them; and one whose requests no item carries is `decision`.
 
 - **decision** — a trade-off, a disagreement with the reviewer, or anything
   that sets direction. Needs the human: triage's question and its options

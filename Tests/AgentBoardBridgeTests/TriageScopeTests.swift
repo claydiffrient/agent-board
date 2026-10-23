@@ -114,6 +114,32 @@ final class TriageScopeTests: XCTestCase {
         XCTAssertTrue(events.contains(.workerCompleted(projectId: f.project.id, sessionId: "triager-1")))
     }
 
+    /// SPEC §13.2: a blank change request shows the hand-added item that answers it, even once handled.
+    func testABlankChangeRequestListsTheHandledItemFiledToAnswerIt() async throws {
+        let pr = try watches.upsert(projectId: f.project.id, snapshot: PRSnapshot(
+            repoOwner: "example-org", repoName: "app", number: 7,
+            url: "https://github.com/example-org/app/pull/7", title: "Change 7",
+            headRef: "feature-7", headOid: String(repeating: "b", count: 40), baseRef: "main",
+            items: [PRSnapshotItem(
+                githubNodeId: "PRR_blank", kind: .review, author: "reviewer",
+                body: PRSnapshotItem.emptyChangeRequestBody(author: "reviewer")
+            )]
+        ))
+        _ = try await f.call("add_pr_item", [
+            "pr_url": .string(pr.url), "body": .string("Rename the helper, per the reviewer's comment."),
+            "answers": .string("PRR_blank"),
+        ])
+        try await f.db.writer.write { try $0.execute(sql: "UPDATE pr_item SET state = 'handled' WHERE kind = 'verify_failure'") }
+        let filed = try XCTUnwrap(try watches.items(watchId: pr.id).first { $0.kind == .verifyFailure }?.id)
+
+        let result = try await f.callJSON("get_pr_items", as: try triager(on: pr))
+
+        let review = try XCTUnwrap(result["items"]?.arrayValue?.first { $0["kind"]?.stringValue == "review" })
+        let linked = try XCTUnwrap(review["linked_items"]?.arrayValue)
+        XCTAssertEqual(linked.map { $0["item_id"]?.numberValue }, [Double(filed)])
+        XCTAssertEqual(linked.map { $0["state"]?.stringValue }, ["handled"])
+    }
+
     func testTheGuardDeniesATriagerFileEditsGitWritesAndGh() async throws {
         let identity = try triager(on: try watch(1, items: ["rename this"]))
         let sessionId = try XCTUnwrap(identity.sessionId)

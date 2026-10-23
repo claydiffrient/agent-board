@@ -610,6 +610,11 @@ enum Schema {
     ALTER TABLE pr_round ADD COLUMN review_request_error TEXT;
     """
 
+    /// The review node id or reviewer login a hand-added item answers (SPEC §13.1).
+    static let prItemAnswers = """
+    ALTER TABLE pr_item ADD COLUMN answers TEXT;
+    """
+
     /// One row per pooled worktree slot that has ever been leased (SPEC §3.1 step 2, §4).
     static let worktreeSlot = """
     CREATE TABLE worktree_slot (
