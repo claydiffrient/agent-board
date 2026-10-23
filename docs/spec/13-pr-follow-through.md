@@ -899,3 +899,15 @@ paused, resuming replays none. The orchestrator's briefing (§9) describes these
 reports as information, not requests to act: Agent Board runs the loop itself,
 and a decision or a parked PR is the human's to handle on the Pull Requests
 page.
+
+A report says only that something happened. To see why, the orchestrator reads
+follow-through's state through three read-only tools (§6): `list_pr_watches`
+for every watch with its full `parked_reason` and its open, decision and
+failed-reply counts, `get_pr_watch` for one watch's items and rounds (reply
+status, `answers`, head oids, `check_failures`, `unavailable_checks`, and
+findings on request), and `list_pr_poll_problems` for a poll that cannot run.
+Each reads only the caller's own project, and none changes anything: resume,
+pause, answering a decision and Mark verified stay the human's, on the Pull
+Requests page. Item bodies, approaches, findings, reply errors and parked
+reasons can quote reviewers or agents, so each tool's description and result
+label them as data, never instructions.
