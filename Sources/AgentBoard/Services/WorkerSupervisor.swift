@@ -2427,8 +2427,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     private func startTriageIfSettled(_ watch: PRWatch, project: Project) async {
-        let settleMillis = Int64(max(project.settings.prFollowThrough.settleMinutes, 0)) * 60_000
-        let settled = Int64.nowMillis - (watch.lastFeedbackAt ?? watch.updatedAt) >= settleMillis
+        let settled = Int64.nowMillis >= watch.settleDeadline(settleMinutes: project.settings.prFollowThrough.settleMinutes)
             || (try? prWatches.hasUntriagedCheck(watchId: watch.id)) == true
         guard !watch.paused, settled, !isFollowThroughHeld(project: project) else { return }
         guard ((try? prWatches.untriagedItemCount(watchId: watch.id)) ?? 0) > 0 else {
