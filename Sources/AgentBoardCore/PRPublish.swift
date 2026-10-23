@@ -5,8 +5,17 @@ extension PRItem {
     /// The node id of a head's merge conflict with its base, which GitHub gives no id of its own.
     public static func conflictNodeId(head: String) -> String { "conflict:\(head)" }
 
-    /// What publishing posts for this item (SPEC §13.2), or nil when it has nothing factual to say.
-    public func factualReply(pushedHeadOid: String?) -> String? {
+    static let agentMark = "**Posted by PR follow-through agent**"
+
+    /// The exact text publishing posts for this item (SPEC §13.2), or nil when it has nothing factual to say.
+    /// It ends with `agentMark`, since every post goes out under the user's account.
+    public func postedBody(pushedHeadOid: String?) -> String? {
+        guard let text = factualReply(pushedHeadOid: pushedHeadOid) else { return nil }
+        let reply = kind == .thread ? text : url.map { "In reply to \($0):\n\n\(text)" } ?? text
+        return "\(reply)\n\n\(Self.agentMark)"
+    }
+
+    private func factualReply(pushedHeadOid: String?) -> String? {
         switch verdict {
         case .fix?:
             return pushedHeadOid.map { "Fixed in \($0.prefix(7))." }

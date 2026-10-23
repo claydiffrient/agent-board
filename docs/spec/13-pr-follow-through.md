@@ -502,7 +502,12 @@ item is answered on its thread with `gh api graphql`'s
 `addPullRequestReviewThreadReply`; a review body or a conversation comment,
 which has no thread, gets one pull-request comment through
 `gh api repos/<owner>/<name>/issues/<n>/comments`, led by a link to the review
-or comment it answers. The reply's URL is stored in `reply_url`, so
+or comment it answers. Every post, thread reply or pull-request comment, ends
+with a blank line and `**Posted by PR follow-through agent**`: it goes out under
+the user's own account, and readers must be able to tell it from something the
+user wrote. `PRItem.postedBody` builds the whole posted text, so the mark is
+added in one place; nothing hidden marks it, since the watcher already skips
+the viewer's own comments. The reply's URL is stored in `reply_url`, so
 nothing is posted twice. A failed post is logged and its error kept in
 `reply_error`; it is tried again at the next point. When `gh` reports the
 comment gone (`NOT_FOUND`, HTTP 404 or "Could not resolve to a node"), the

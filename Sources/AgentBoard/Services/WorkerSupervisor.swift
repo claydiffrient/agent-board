@@ -2603,8 +2603,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let cwd = URL(fileURLWithPath: project.repoPath)
         var readable: Bool?
         for item in items {
-            guard let id = item.id, let text = item.factualReply(pushedHeadOid: pushed[item.round] ?? nil) else { continue }
-            let body = item.kind == .thread ? text : item.url.map { "In reply to \($0):\n\n\(text)" } ?? text
+            guard let id = item.id, let body = item.postedBody(pushedHeadOid: pushed[item.round] ?? nil) else { continue }
             do {
                 let url: String
                 if item.kind == .thread {
