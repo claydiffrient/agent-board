@@ -464,8 +464,11 @@ executable is `claude`), so the rules below run without real processes.
   orchestrator or Coordinator. A worker row is a reviewer when it records the
   checkout it was spawned on (`reviewHead`); its `role` says worker. A host
   with no row is not a root (`SessionInventoryRoots`);
-- each orchestrator console's and the Coordinator's process, and each
-  project's shell console (`WorkerSupervisor.consoleProcessRoots`);
+- each orchestrator console's process, owned by its project and session with
+  the role orchestrator; the Coordinator's console process, owned by its
+  session with the role Coordinator and no project; and each project's shell
+  console, owned by its project with the role human shell
+  (`WorkerSupervisor.consoleProcessRoots`);
 - each terminal window the app opened — a worktree shell, a `claude attach`
   and a PR verify shell — which registers its child with the
   `TerminalProcessRegistry` while it runs, owned by its project (and session
