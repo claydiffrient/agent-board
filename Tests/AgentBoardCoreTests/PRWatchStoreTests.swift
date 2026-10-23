@@ -160,6 +160,71 @@ final class PRWatchStoreTests: XCTestCase {
         ])
     }
 
+    @discardableResult
+    private func checkRound(
+        _ f: Fixture, watchId: String, taskId: String, attempt: Int, grade: (PRItem) -> PRFollowupGrade
+    ) throws -> PRWatchState? {
+        let store = PRWatchStore(f.db)
+        let fixer = "fixer-\(attempt)"
+        try f.board.assign(taskId: taskId, session: f.session(fixer))
+        try f.sessions.setState(fixer, .running)
+        try f.board.complete(taskId: taskId, sessionId: fixer, summary: "Fixed.")
+        let check = try XCTUnwrap(f.board.createFollowupCheckTask(watchId: watchId, headOid: "tip-\(attempt)"))
+        let round = try XCTUnwrap(store.currentRound(watchId: watchId))
+        try store.setFollowupGrades(
+            store.checkItems(round: round).map { PRGradeInput(itemId: $0.id ?? 0, grade: grade($0), note: "Still named n.") },
+            taskId: check.id
+        )
+        try f.board.finishTriage(taskId: check.id, sessionId: nil, summary: "Graded.")
+        try f.board.recordRoundReview(taskId: taskId, sessionId: nil, reviewerName: "Rita", accepted: true, text: "Fine.")
+        return try f.board.settleCheck(watchId: watchId)
+    }
+
+    /// SPEC §13.1 parked: the Pull Requests page and the orchestrator's report show only the first line.
+    func testAThirdFailedCheckParksWithTheFailingItemOnTheReasonsFirstLine() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try triage(f, watchId: watch.id, as: .fix)
+        let task = try XCTUnwrap(f.board.createFixRoundTask(watchId: watch.id, model: nil))
+        let itemId = try XCTUnwrap(store.items(watchId: watch.id).first?.id)
+
+        for attempt in 1...PRWatchStore.failedChecksBeforePark {
+            try checkRound(f, watchId: watch.id, taskId: task.id, attempt: attempt) { _ in .notFixed }
+        }
+
+        let parked = try XCTUnwrap(store.get(watch.id))
+        XCTAssertEqual(parked.state, .parked)
+        XCTAssertEqual(
+            parked.parkedReason?.split(separator: "\n").first.map(String.init),
+            "Round 1 failed its check 3 times: item \(itemId) not fixed (Rename it.)"
+        )
+        XCTAssertTrue(parked.parkedReason?.contains("Still named n.") == true, parked.parkedReason ?? "")
+    }
+
+    /// SPEC §13.1: an item only the author can do on GitHub goes to them, and the rest of the round passes.
+    func testANeedsAuthorGradeBecomesADecisionInsteadOfFailingTheCheck() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(
+            projectId: f.project.id,
+            snapshot: snapshot(items: [thread("T1"), thread("T2", body: "Update the PR description.")]), now: 1_000
+        )
+        try triage(f, watchId: watch.id, as: .fix)
+        let task = try XCTUnwrap(f.board.createFixRoundTask(watchId: watch.id, model: nil))
+
+        let state = try checkRound(f, watchId: watch.id, taskId: task.id, attempt: 1) {
+            $0.githubNodeId == "T2" ? .needsAuthor : .fixed
+        }
+
+        XCTAssertEqual(state, .publishing)
+        XCTAssertEqual(try store.currentRound(watchId: watch.id)?.checkFailures, 0)
+        let handed = try XCTUnwrap(store.items(watchId: watch.id).first { $0.githubNodeId == "T2" })
+        XCTAssertTrue(handed.isOpenDecision)
+        XCTAssertEqual(handed.decisionOptions.map(\.verdict), [.answer, .answer])
+        XCTAssertEqual(try store.claimDecisionNotifications(watchId: watch.id).map(\.id), [handed.id])
+    }
+
     func testAFixRoundSkipsSpawnApprovalOnlyWhereFollowThroughIsOn() throws {
         let f = try Fixture.make()
         let store = PRWatchStore(f.db)

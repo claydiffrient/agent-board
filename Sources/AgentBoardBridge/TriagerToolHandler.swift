@@ -94,8 +94,9 @@ public final class TriagerToolHandler: ToolHandler {
                             "item_id": ToolSchema.integer("The item_id from get_followup_items."),
                             "grade": ToolSchema.enumeration(PRFollowupGrade.allCases.map(\.rawValue)),
                             "evidence": ToolSchema.string(
-                                "The file and line or command that shows the grade. For anything but fixed, what "
-                                    + "is still missing, written for the fixer to act on."
+                                "The file and line or command that shows the grade. For partly or not_fixed, what "
+                                    + "is still missing, written for the fixer to act on. For needs_author, what the "
+                                    + "author has to do on GitHub."
                             ),
                         ],
                         required: ["item_id", "grade", "evidence"]

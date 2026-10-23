@@ -58,8 +58,11 @@ public enum FollowupCheckPrompt {
     - `not_fixed`: the round does not address it.
     - `moot`: it no longer applies, because the code it was about is gone or changed so the point no \
     longer holds. Say what made it moot.
-    Anything but `fixed` or `moot` sends the round back to its fixer with your evidence as the finding, so \
-    write it for the fixer to act on.
+    - `needs_author`: no commit can satisfy it, because only the pull request's author can do it on GitHub, \
+    such as editing the description or title, changing labels or reviewers, or replying elsewhere. Say what \
+    the author has to do; it goes to them as a decision.
+    Anything but `fixed`, `moot` or `needs_author` sends the round back to its fixer with your evidence as the \
+    finding, so write it for the fixer to act on.
     """
 
     static let howToWork = """
