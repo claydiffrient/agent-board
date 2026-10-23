@@ -21,9 +21,12 @@ enum AppComposition {
                 shellConsolePIDs: { [weak supervisor] in supervisor?.shellConsolePIDs() ?? [:] }
             )
             _Concurrency.Task { await ports.run() }
+            let terminals = TerminalProcessRegistry()
             let environment = AppEnvironment(
                 db: db, supervisor: supervisor, sleepGuard: sleepGuard, startup: startup,
-                listeningPorts: ports, agentDefinitions: AgentDefinitionDirectories()
+                listeningPorts: ports, agentDefinitions: AgentDefinitionDirectories(),
+                processSampler: LiveProcessSampler.board(db: db, supervisor: supervisor, terminals: terminals, ports: ports),
+                terminalProcesses: terminals
             )
             MacNotifier.shared.start(router: environment.router)
             return environment

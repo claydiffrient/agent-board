@@ -44,6 +44,28 @@ each other. Both are all-time sums of `agent_session.est_cost_usd`, ended sessio
 included, and neither has a cap; the Coordinator total rides in the same
 statement as the working-session count, so the page still runs two.
 
+**Processes** — a **Projects | Processes** toggle under the headline switches
+the cards for a table of every process Agent Board launched or controls
+(§8.7), in the style of Activity Monitor's "All Processes, Hierarchically".
+Rows are grouped by owner: a project, then each owner within it (a task's
+worker or reviewer under the task's title, the orchestrator, a shell), then
+that owner's process tree indented beneath its root; the Coordinator and Agent
+Board are groups of their own, Agent Board last. Owner and group rows carry
+the sum of their processes' CPU and memory. The columns are Process, PID,
+Owner, CPU %, Memory, Uptime and Ports. CPU on a process's first reading is
+unknown and drawn as a dash, not 0. Clicking CPU % or Memory sorts by it and
+flattens the tree; **Show Hierarchy** restores it. A totals line under the
+table gives the process count, total CPU and total memory. The seven columns'
+ideal widths fit the 761pt minimum detail width without scrolling sideways
+(§10.1); a long command or owner truncates, with the full text as its tooltip.
+
+The cost rule is the page's own: At a Glance always opens on Projects and the
+toggle is not remembered, so landing on the page never samples. The table
+samples every 2 seconds, off the main thread, only while it is on screen;
+switching back to Projects or leaving At a Glance cancels the sampler. A
+section on the page was rejected for that reason: it would be built, and so
+sampling, whenever the page is open, whether or not it was scrolled into view.
+
 **Shut Down** — a button beside the At a Glance headline, for the wind-down
 that quitting does not do on its own: workers are detached `claude --bg`
 sessions that outlive the app, keep spending, and keep committing into

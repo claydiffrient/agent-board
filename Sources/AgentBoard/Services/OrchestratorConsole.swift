@@ -114,6 +114,11 @@ final class OrchestratorConsole: ReportAnnouncing {
         terminal.process.running
     }
 
+    var processPID: pid_t? {
+        let pid = terminal.process.shellPid
+        return isProcessRunning && pid > 0 ? pid : nil
+    }
+
     // MARK: - Lifecycle
 
     func start() {

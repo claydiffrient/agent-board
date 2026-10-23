@@ -78,7 +78,8 @@ struct PRVerifyWindow: View {
                         arguments: command.arguments,
                         currentDirectory: command.directory,
                         environment: command.environment,
-                        execName: command.execName
+                        execName: command.execName,
+                        inventory: watch.map { (ProcessOwner(role: .humanShell, projectId: $0.projectId), env.terminalProcesses) }
                     ) { code in
                         let exited = code.map(ShellConsole.exitCode(fromWaitStatus:)) ?? -1
                         exitCode = exited

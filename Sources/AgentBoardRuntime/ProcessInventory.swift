@@ -207,7 +207,7 @@ public struct LiveProcessSampler: ProcessSampling {
     public func samples(every interval: Duration) -> AsyncStream<SampledInventory> {
         let roots = roots
         let ports = ports
-        return AsyncStream { continuation in
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             let task = _Concurrency.Task.detached(priority: .utility) {
                 var sampler = ProcessUsageSampler()
                 while !_Concurrency.Task.isCancelled {

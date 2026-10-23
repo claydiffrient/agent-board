@@ -8,6 +8,11 @@ import SwiftUI
 /// cross-project `ProjectAttentionStore.observeAll` that feeds the sidebar badges, so the page adds
 /// no second observation of the same signal and cannot disagree with the sidebar about it.
 struct AtAGlanceView: View {
+    enum Mode: Hashable {
+        case projects
+        case processes
+    }
+
     let projects: [Project]
     let workspaces: [Workspace]
     let attention: [ProjectAttention]
@@ -21,6 +26,9 @@ struct AtAGlanceView: View {
     @State private var summary = Observed<GlanceSummary>(.empty)
     @State private var confirmingShutdown = false
     @State private var windingDown = false
+    /// Not remembered across visits: the page lands on Projects, so At a Glance itself never
+    /// starts the process sampler (SPEC §10).
+    @State var mode = Mode.projects
 
     private var sections: [GlanceGrouping.Section] {
         GlanceGrouping.sections(projects: projects, workspaces: workspaces, summary: summary.value)
@@ -63,17 +71,7 @@ struct AtAGlanceView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                headline
-                coordinatorCard
-                ForEach(sections) { section in
-                    sectionView(section)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(20)
-        }
+        content
         .navigationTitle("At a Glance")
         .task {
             await summary.run(GlanceStore(env.db).observe(), in: env.db.reader)
@@ -105,6 +103,41 @@ struct AtAGlanceView: View {
             Button("Try Again") { env.quitter.requestQuit() }
             Button("OK", role: .cancel) {}
         } message: { Text($0) }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch mode {
+        case .projects:
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    header
+                    coordinatorCard
+                    ForEach(sections) { section in
+                        sectionView(section)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(20)
+            }
+        case .processes:
+            VStack(alignment: .leading, spacing: 0) {
+                header.padding(20)
+                ProcessInventoryView(projects: projects)
+            }
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            headline
+            Picker("Show", selection: $mode) {
+                Text("Projects").tag(Mode.projects)
+                Text("Processes").tag(Mode.processes)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+        }
     }
 
     private var headline: some View {

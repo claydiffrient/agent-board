@@ -31,6 +31,10 @@ final class AppEnvironment {
     let agentDefinitions: AgentDefinitionDirectories
     /// What the Pull Requests page's Mark verified runs `gh` through; a test hands in a fake.
     let gh: any GhRunning
+    /// At a Glance's process view (SPEC §8.7, §10). Nil where nothing is wired, which the view
+    /// shows as an empty table.
+    let processSampler: (any ProcessSampling)?
+    let terminalProcesses: TerminalProcessRegistry
 
     var roster: RosterStore { RosterStore(db, definitions: agentDefinitions) }
 
@@ -42,7 +46,9 @@ final class AppEnvironment {
         startup: _Concurrency.Task<Void, Never>? = nil,
         listeningPorts: ListeningPortModel? = nil,
         agentDefinitions: AgentDefinitionDirectories = .none,
-        gh: any GhRunning = SystemGh()
+        gh: any GhRunning = SystemGh(),
+        processSampler: (any ProcessSampling)? = nil,
+        terminalProcesses: TerminalProcessRegistry? = nil
     ) {
         self.db = db
         self.supervisor = supervisor
@@ -56,5 +62,7 @@ final class AppEnvironment {
         sweepPreview = SweepPreview(supervisor: supervisor)
         self.agentDefinitions = agentDefinitions
         self.gh = gh
+        self.processSampler = processSampler
+        self.terminalProcesses = terminalProcesses ?? TerminalProcessRegistry()
     }
 }

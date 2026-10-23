@@ -458,19 +458,29 @@ executable is `claude`), so the rules below run without real processes.
 
 **Roots.** Each root is a pid and the owner its tree belongs to:
 
-- each live session's `claude` host, from `claude agents`, owned by its
-  session, task and project with the role worker, reviewer, orchestrator or
-  Coordinator;
-- each orchestrator console's and the Coordinator's process;
-- each human shell or terminal the app opened (`ShellConsole`, a worktree
-  shell), owned by its project with the role human shell;
+- each session's `claude` host that `claude agents` lists, matched to its
+  `agent_session` row by session id or short id as the reaper matches it,
+  owned by its session, task and project with the role worker, reviewer,
+  orchestrator or Coordinator. A worker row is a reviewer when it records the
+  checkout it was spawned on (`reviewHead`); its `role` says worker. A host
+  with no row is not a root (`SessionInventoryRoots`);
+- each orchestrator console's and the Coordinator's process, and each
+  project's shell console (`WorkerSupervisor.consoleProcessRoots`);
+- each terminal window the app opened — a worktree shell, a `claude attach`
+  and a PR verify shell — which registers its child with the
+  `TerminalProcessRegistry` while it runs, owned by its project (and session
+  and task, where it has one) with the role human shell;
 - the app's own pid, owned by Agent Board. `LiveProcessSampler` always adds
   it. Board-run commands are Foundation `Process` children of the app, so
   `git worktree add` and its hook, `BoundedCommand` verification runs and the
   `ProcessRunner` helpers (git, gh, account-usage refresh) are in its tree.
 
-A session whose host is gone is still passed, with no pid and its worktree,
-so its orphans are found.
+An ended session with no host is passed with no pid and its worktree, so its
+orphans are found — but only while that worktree is still on disk and no
+active session or listed host occupies it. A shared-checkout session has no
+worktree path and is never claimed. `claude agents` launches a process, so the
+session roots are rebuilt at most every 10 seconds (`SessionProcessRoots`);
+the console and terminal roots are read on every sample.
 
 **Attribution.** Every process goes to the nearest root on its parent chain.
 The consoles and shells are children of the app, so their trees go to their
@@ -486,8 +496,10 @@ and while another live session shares the worktree, as in §8.5. When two
 claims cover the same worktree, the orphan goes to the latest session that
 started before it.
 
-**Ports.** Listening ports come from the Ports sweep's rows (§10) and attach
-to the pid the sweep gave the row: the process that bound the socket.
+**Ports.** Listening ports come from the Ports sweep's last rows
+(`ListeningPortModel`, §10) and attach to the pid the sweep gave the row: the
+process that bound the socket. The process view asks for one sweep when it
+appears; otherwise the rows are as fresh as the sweep's hourly refresh.
 
 **Usage.** CPU % is the change in a process's total user plus system time
 (`proc_pidinfo` `PROC_PIDTASKINFO`) over the wall time between two readings,
@@ -497,6 +509,9 @@ Readings are keyed by `PIDIdentity`, so a reused pid starts with no history.
 A process's first reading shows CPU as unknown, not 0. Wall time is
 `CLOCK_UPTIME_RAW`, which stops while the Mac sleeps.
 
-**Cost.** Sampling runs only while its stream is iterated (`ProcessSampling`).
-Cancelling the iterating task stops it, so the view costs nothing off screen
-(§10).
+**Cost.** Sampling runs only while its stream is iterated (`ProcessSampling`),
+off the main thread. Cancelling the iterating task stops it, so the view costs
+nothing off screen (§10). The stream keeps only the newest sample, so a slow
+view never works through stale ones. A process whose reading fails once has no
+usage that sample and starts again with no history, so its CPU reads unknown
+on the next one.

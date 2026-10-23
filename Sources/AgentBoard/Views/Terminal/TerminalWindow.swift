@@ -30,7 +30,11 @@ struct TerminalWindow: View {
                         executable: command.executable,
                         arguments: command.arguments,
                         currentDirectory: session.cwd,
-                        environment: environment
+                        environment: environment,
+                        inventory: (
+                            ProcessOwner(role: .humanShell, projectId: session.projectId, taskId: session.taskId, sessionId: session.sessionId),
+                            env.terminalProcesses
+                        )
                     ) { code in
                         exitCode = code ?? -1
                     }
@@ -76,10 +80,12 @@ struct TerminalHostView: NSViewRepresentable {
     let environment: [String]
     /// A leading `-` makes the child a login shell. Nil for anything that is not one.
     var execName: String? = nil
+    /// Registers the child as a process inventory root while it runs (SPEC §8.7).
+    var inventory: (owner: ProcessOwner, registry: TerminalProcessRegistry)? = nil
     let onExit: @MainActor (Int32?) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onExit: onExit)
+        Coordinator(onExit: onExit, registry: inventory?.registry)
     }
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
@@ -94,6 +100,10 @@ struct TerminalHostView: NSViewRepresentable {
             execName: execName,
             currentDirectory: currentDirectory
         )
+        if let inventory, terminal.process.running {
+            context.coordinator.pid = terminal.process.shellPid
+            inventory.registry.register(terminal.process.shellPid, owner: inventory.owner)
+        }
         DispatchQueue.main.async {
             terminal.window?.makeFirstResponder(terminal)
         }
@@ -114,17 +124,27 @@ struct TerminalHostView: NSViewRepresentable {
 
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
         weak var terminal: LocalProcessTerminalView?
+        var pid: pid_t?
         private let onExit: @MainActor (Int32?) -> Void
+        private let registry: TerminalProcessRegistry?
         private var finished = false
 
-        init(onExit: @escaping @MainActor (Int32?) -> Void) {
+        init(onExit: @escaping @MainActor (Int32?) -> Void, registry: TerminalProcessRegistry?) {
             self.onExit = onExit
+            self.registry = registry
         }
 
         func terminate() {
+            unregister()
             guard !finished, let terminal, terminal.process.running else { return }
             finished = true
             terminal.terminate()
+        }
+
+        private func unregister() {
+            guard let pid, let registry else { return }
+            self.pid = nil
+            _Concurrency.Task { @MainActor in registry.unregister(pid) }
         }
 
         func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
@@ -134,6 +154,7 @@ struct TerminalHostView: NSViewRepresentable {
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 
         func processTerminated(source: TerminalView, exitCode: Int32?) {
+            unregister()
             guard !finished else { return }
             finished = true
             let onExit = onExit
