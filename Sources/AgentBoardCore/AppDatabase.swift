@@ -236,6 +236,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("pr_item_answers") { db in
             try db.execute(sql: Schema.prItemAnswers)
         }
+        migrator.registerMigration("pr_round_unavailable_checks") { db in
+            try db.execute(sql: Schema.prRoundUnavailableChecks)
+        }
         return migrator
     }
 }
