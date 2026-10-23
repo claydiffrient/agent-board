@@ -163,7 +163,10 @@ public enum IntegrationPlan {
 
         var merge = ["## Branches to merge, in dependency order"]
         if toMerge.isEmpty {
-            merge.append("Nothing is left to merge. Verify the state of `\(epic.branch)` and report what you found.")
+            merge.append(
+                "Nothing is left to merge. Verify the state of `\(epic.branch)` and report what you found: "
+                    + "the integration is finished when you call `report_complete`, merged or not."
+            )
         } else {
             merge.append("Merge these into `\(epic.branch)` in exactly this order — each is listed after the branches it depends on.")
             merge.append(mergeList(toMerge).joined(separator: "\n"))
@@ -220,6 +223,9 @@ public enum IntegrationPlan {
         - Merge the branches under **Branches to merge**, in that order, one at a time: `git merge --no-ff <branch>`. Nothing listed in any other section is yours to merge.
         - Resolve every conflict yourself. Read both sides before choosing; do not drop one side's work to make the merge go through.
         - After the merges, \(verification.integratorInstruction)
+        - Never end your turn to wait for a command. A `run_in_background` command makes no activity while it runs, and the \
+        idle cap stops a silent session before that command's notification can wake it. Run the build and tests in the \
+        foreground; if one is moved to the background, keep reading its output until it finishes.
         - The `agent-board` MCP server holds this assignment. Use `log_progress` at meaningful milestones, not after every merge.
         - If you are stuck on something that needs a human decision, call `report_blocked(reason)` and stop.
         """)
@@ -233,6 +239,7 @@ public enum IntegrationPlan {
         skipped and why, and \(verification.reportInstruction). That ends your task; do not start \
         further work afterwards.
         """)
+        sections.append(OpeningPrompt.turnEnding)
         return sections.joined(separator: "\n\n")
     }
 }

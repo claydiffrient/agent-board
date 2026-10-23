@@ -125,7 +125,7 @@ final class LaunchSweepTests: XCTestCase {
     private func listing(_ shortIds: [String]) -> [AgentInfo] {
         shortIds.enumerated().map { index, shortId in
             AgentInfo(id: shortId, cwd: "/tmp", kind: "background", sessionId: "uuid-\(shortId)",
-                      state: "done", pid: 9000 + index)
+                      state: "done", pid: unheldPID(index))
         }
     }
 
@@ -163,9 +163,9 @@ final class LaunchSweepTests: XCTestCase {
     func testASessionAbsentFromTheDatabaseIsNeverTargeted() async throws {
         try session("ours", .completed)
         await fixture.runtime.setListed([
-            AgentInfo(id: "ours", cwd: "/tmp", kind: "background", sessionId: "uuid-ours", state: "done", pid: 9001),
-            AgentInfo(id: "stranger", cwd: "/tmp", kind: "background", sessionId: "uuid-stranger", state: "done", pid: 9002),
-            AgentInfo(id: "human", cwd: "/Users/someone", kind: "interactive", sessionId: "uuid-human", state: "idle", pid: 9003),
+            AgentInfo(id: "ours", cwd: "/tmp", kind: "background", sessionId: "uuid-ours", state: "done", pid: unheldPID(1)),
+            AgentInfo(id: "stranger", cwd: "/tmp", kind: "background", sessionId: "uuid-stranger", state: "done", pid: unheldPID(2)),
+            AgentInfo(id: "human", cwd: "/Users/someone", kind: "interactive", sessionId: "uuid-human", state: "idle", pid: unheldPID(3)),
         ])
 
         let report = await fixture.supervisor.sweepLeakedAgents()
@@ -340,9 +340,9 @@ final class SweepDryRunTests: XCTestCase {
         try session("busy", .running)
         try session(nil, .completed)
         await fixture.runtime.setListed([
-            AgentInfo(id: "leaked", cwd: "/tmp", kind: "background", sessionId: "uuid-leaked", state: "done", pid: 9001),
-            AgentInfo(id: "busy", cwd: "/tmp", kind: "background", sessionId: "uuid-busy", state: "working", pid: 9002),
-            AgentInfo(id: "elsewhere", cwd: "/tmp", kind: "background", sessionId: "uuid-elsewhere", state: "idle", pid: 9003),
+            AgentInfo(id: "leaked", cwd: "/tmp", kind: "background", sessionId: "uuid-leaked", state: "done", pid: unheldPID(1)),
+            AgentInfo(id: "busy", cwd: "/tmp", kind: "background", sessionId: "uuid-busy", state: "working", pid: unheldPID(2)),
+            AgentInfo(id: "elsewhere", cwd: "/tmp", kind: "background", sessionId: "uuid-elsewhere", state: "idle", pid: unheldPID(3)),
         ])
 
         let report = await fixture.supervisor.sweepLeakedAgents(dryRun: true)
@@ -373,9 +373,9 @@ final class SweepDryRunTests: XCTestCase {
         try session("b", .idle)
         try session("c", .failed)
         await fixture.runtime.setListed([
-            AgentInfo(id: "a", cwd: "/tmp", kind: "background", sessionId: "uuid-a", pid: 9001),
-            AgentInfo(id: "b", cwd: "/tmp", kind: "background", sessionId: "uuid-b", pid: 9002),
-            AgentInfo(id: "c", cwd: "/tmp", kind: "background", sessionId: "uuid-c", pid: 9003),
+            AgentInfo(id: "a", cwd: "/tmp", kind: "background", sessionId: "uuid-a", pid: unheldPID(1)),
+            AgentInfo(id: "b", cwd: "/tmp", kind: "background", sessionId: "uuid-b", pid: unheldPID(2)),
+            AgentInfo(id: "c", cwd: "/tmp", kind: "background", sessionId: "uuid-c", pid: unheldPID(3)),
         ])
 
         let report = await fixture.supervisor.sweepLeakedAgents(dryRun: true)

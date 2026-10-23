@@ -676,6 +676,11 @@ than one that is finished; they merge nothing and are not part of this sequence.
    drop verification: it tells the integrator to work out how this project
    builds and tests itself, run both, and name in its report exactly what it
    ran. Nothing in the prompt assumes a language or a build tool.
+   It tells the integrator never to end its turn to wait for a command, and
+   ends with the same *How your turns end* section a worker's prompt does
+   (§3.1 step 6). Without them an integrator with nothing to merge started its
+   full test run in the background, ended its turn to wait, and was stopped by
+   the idle cap four times without ever reporting.
    `spawnIntegrator` runs the same launch path as any task worker (§3.1 steps
    3-8: memory symlink, generated `--settings`/`--mcp-config`, a worker-scoped
    token, `--permission-mode auto`, `--strict-mcp-config`, the push/PR
