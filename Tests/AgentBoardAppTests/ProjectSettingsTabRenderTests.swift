@@ -619,7 +619,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
             [nil, nil, "Spawn caps", "e.g. verified", "e.g. open {url}", "Comma-separated check names", "Press Return to add"]
                 + Array(repeating: "Model id", count: roleModels.count)
         )
-        XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off, .on])
+        XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off, .on, .off])
         if !mounted.collect(NSPopUpButton.self).isEmpty {
             XCTAssertEqual(popUpButtons(titled: "Default", in: mounted.host).count, 4, "one agent picker per role")
         }
@@ -627,7 +627,10 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let (db, project) = try storedProject(configure)
         let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
             .environment(renderEnvironment(db: db))
-        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 900))
+        // The Replies section's new "Re-request reviews" toggle and caption push Publish guard
+        // further down than the 900pt mounts elsewhere in this file hold; this tab needs the extra
+        // room to keep Publish guard inside the captured window.
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 1000))
         defer { mount.close() }
         let wanted = ["Watch", "Verification", "Replies", "Publish guard", "Globex"]
         var lines: [String] = []
