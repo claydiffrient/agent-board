@@ -25,8 +25,8 @@ final class SweepPreviewTests: XCTestCase {
             cwd: fixture.supportDir.path, state: .completed
         ))
         await fixture.runtime.setListed([
-            AgentInfo(id: "leaked", cwd: "/tmp", kind: "background", sessionId: "uuid-leaked", state: "done", pid: 9001),
-            AgentInfo(id: "busy", cwd: "/tmp", kind: "background", sessionId: "uuid-busy", state: "working", pid: 9002),
+            AgentInfo(id: "leaked", cwd: "/tmp", kind: "background", sessionId: "uuid-leaked", state: "done", pid: unheldPID(1)),
+            AgentInfo(id: "busy", cwd: "/tmp", kind: "background", sessionId: "uuid-busy", state: "working", pid: unheldPID(2)),
         ])
     }
 

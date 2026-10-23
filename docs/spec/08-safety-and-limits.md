@@ -384,16 +384,22 @@ registry row whatever happened to the process, and it can time out. So the
 host's pid, as `claude agents` lists it for this session, is read with its
 start time before the stop. If that listing came back empty, which is what a
 `claude agents` that timed out looks like, the host is looked up once more
-after the stop. After the stop and the reap, the host gets 3s to
-exit by itself. If it is still there, it gets SIGTERM, and then SIGKILL 3s
-later. This runs whether `claude stop` succeeded or failed. A host that
+after the stop. The pid is the host only while it is a `claude` executable
+whose start time is no later than when that listing was read. The leaked-agent
+sweep reads one listing and reuses it across every stop it makes, which took
+71s on this machine, and a pid freed in that time can go to any new process.
+A pid that fails either check is treated as a host already gone, and nothing
+is signaled. After the stop and the reap, a host already gone is done with at
+once. One still there gets up to 3s to exit by itself, then SIGTERM, and then
+SIGKILL 3s later. This runs whether `claude stop` succeeded or failed. A host that
 survives both signals is not passed over. The board queues a `failed` report
 naming the session, the task and the pid, along with a notification. The
 session is still marked ended, and its revoked grant still refuses every
 board tool. But git commits never pass through the board, so the report is
 the only thing that tells a human a process is still able to write to the
 branch. This target comes from the session's own registry entry, which is
-positive evidence, never from argv or a process name.
+positive evidence, never from argv or a process name; the executable and
+start-time checks can only rule a pid out.
 
 Before this step existed, a host could outlive a stop like this. On
 2026-10-23 at 12:07, under a load average of 175, the idle cap ended worker

@@ -248,6 +248,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored var beforeCheckoutCreated: @MainActor () async -> Void = {}
     /// Off in a test that drives every `pollPRWatches()` itself, so the tick's poll cannot advance a watch between two of its own.
     @ObservationIgnored var pollsPRWatchesOnTick = true
+    /// Whether a pid runs `claude`, the only process a stop signals as a session's host; a test swaps in a stand-in.
+    @ObservationIgnored var isClaudeHost: (pid_t) -> Bool = SessionProcessReaper.isClaudeExecutable
     /// Tasks a discard is waiting out the setup of; that setup's end is not a cue to retry.
     @ObservationIgnored private var discarding: Set<String> = []
     /// A resume starts the process before it moves the task back to `running`, so until then its
@@ -1549,21 +1551,26 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §8.5: no process a session started outlives it, the host included. The host's tree is
     /// read before `claude stop`, which leaves a `run_in_background` command running under launchd.
-    private func stopAgent(_ session: AgentSession, shortId: String, listing: [AgentInfo]? = nil) async throws {
-        let listed = await listingOrFetch(listing)
-        let host = Self.hostPID(of: session, in: listed).flatMap(SessionProcessReaper.identity(of:))
+    private func stopAgent(_ session: AgentSession, shortId: String, listing: AgentListing? = nil) async throws {
+        let listed = await agentListing(listing)
+        let hostPID = Self.hostPID(of: session, in: listed.agents)
+        let host = verifiedHost(hostPID, in: listed)
         var tree: Set<PIDIdentity> = []
-        if let host { tree = await SessionProcessReaper.tree(ofHost: host.pid) }
+        if let hostPID { tree = await SessionProcessReaper.tree(ofHost: hostPID) }
         do {
             try await runtime.stop(shortId: shortId)
         } catch {
-            await reapProcesses(of: session, tree: tree, listing: listed)
-            await endHost(host, of: session, listed: listed, stopError: describe(error))
+            await reapProcesses(of: session, tree: tree, listing: listed.agents)
+            await endHost(host, of: session, listed: listed.agents, stopError: describe(error))
             throw error
         }
         try? sessions.markAgentStopped(session.sessionId)
-        await reapProcesses(of: session, tree: tree, listing: listed)
-        await endHost(host, of: session, listed: listed, stopError: nil)
+        await reapProcesses(of: session, tree: tree, listing: listed.agents)
+        await endHost(host, of: session, listed: listed.agents, stopError: nil)
+    }
+
+    private func verifiedHost(_ pid: pid_t?, in listing: AgentListing) -> PIDIdentity? {
+        pid.flatMap { SessionProcessReaper.host($0, listedAtMicros: listing.readAtMicros, isClaude: isClaudeHost) }
     }
 
     /// SPEC §8.5: `claude stop` answering is not proof its host ended. One that outlives the signals
@@ -1574,7 +1581,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     ) async {
         var host = captured
         if host == nil, listed.isEmpty {
-            host = Self.hostPID(of: session, in: await listingOrFetch(nil)).flatMap(SessionProcessReaper.identity(of:))
+            let relisted = await agentListing(nil)
+            host = verifiedHost(Self.hostPID(of: session, in: relisted.agents), in: relisted)
         }
         guard let host, !(await SessionProcessReaper.end(host: host)) else { return }
         let title = (try? session.taskId.flatMap { try tasks.get($0) })?.title
@@ -1625,6 +1633,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func listingOrFetch(_ listing: [AgentInfo]?) async -> [AgentInfo] {
         if let listing { return listing }
         return (try? await runtime.listSessions()) ?? []
+    }
+
+    private func agentListing(_ listing: AgentListing?) async -> AgentListing {
+        if let listing { return listing }
+        return AgentListing(await listingOrFetch(nil))
+    }
+
+    /// A `claude agents` read and when it returned, which no host it names can have started after.
+    private struct AgentListing {
+        var agents: [AgentInfo]
+        var readAtMicros: Int64
+
+        init(_ agents: [AgentInfo]) {
+            self.agents = agents
+            readAtMicros = Int64(Date().timeIntervalSince1970 * 1_000_000)
+        }
     }
 
     private static func hostPID(of session: AgentSession, in listing: [AgentInfo]) -> pid_t? {
@@ -3124,13 +3148,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     private func reconcileNow(projectId: String) async {
-        let listed: [AgentInfo]
+        let listing: AgentListing
         do {
-            listed = try await runtime.listSessions()
+            listing = AgentListing(try await runtime.listSessions())
         } catch {
             lastError = describe(error)
             return
         }
+        let listed = listing.agents
         guard let ours = try? sessions.all(projectId: projectId) else { return }
         /// Snapshotted before the terminate pass so a session this reconcile just declared vanished
         /// keeps its worktree for one more cycle.
@@ -3176,7 +3201,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 if session.state == .stopped || session.state.isActive, let taskId = session.taskId,
                    !resuming.contains(session.sessionId),
                    (try? board.isSettled(taskId: taskId, apartFrom: session.sessionId)) == true {
-                    let queued = await stopOnSettledTask(session, listed: info, in: listed)
+                    let queued = await stopOnSettledTask(session, listed: info, in: listing)
                     queuedReport = queuedReport || queued
                 } else if [.starting, .idle, .stopped].contains(session.state) {
                     try? sessions.setState(session.sessionId, .running)
@@ -3196,7 +3221,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §10, Status: nothing belongs running on a settled task, so its process is stopped and
     /// its row is not revived. True when that queued a report.
-    private func stopOnSettledTask(_ session: AgentSession, listed info: AgentInfo, in listing: [AgentInfo]) async -> Bool {
+    private func stopOnSettledTask(_ session: AgentSession, listed info: AgentInfo, in listing: AgentListing) async -> Bool {
         guard let shortId = session.shortId ?? info.id,
               (try? await stopAgent(session, shortId: shortId, listing: listing)) != nil,
               session.state.isActive
@@ -4486,7 +4511,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let rows = projectIds.flatMap { (try? sessions.sweepCandidates(projectId: $0)) ?? [] }
         let confirmed = projectIds.flatMap { (try? sessions.confirmedStoppedShortIds(projectId: $0)) ?? [] }
         report.confirmedStopped = confirmed.count
-        let listed = try? await runtime.listSessions()
+        let listing = (try? await runtime.listSessions()).map(AgentListing.init)
+        let listed = listing?.agents
         // A registry entry without a pid has no process to free. Measured on this machine: of 124
         // inactive rows `claude stop` accepted, the 8 carrying a pid were the whole 1,311 MB, and
         // the other 116 cost 60s of the 71s the sweep took and moved nothing.
@@ -4510,7 +4536,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
             do {
                 if let session = rows.first(where: { $0.sessionId == decision.sessionId }) {
-                    try await stopAgent(session, shortId: shortId, listing: listed)
+                    try await stopAgent(session, shortId: shortId, listing: listing)
                 } else {
                     try await runtime.stop(shortId: shortId)
                     try? sessions.markAgentStopped(decision.sessionId)

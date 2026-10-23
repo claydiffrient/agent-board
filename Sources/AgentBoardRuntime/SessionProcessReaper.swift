@@ -75,12 +75,20 @@ public enum SessionProcessReaper {
         return alive(signalled)
     }
 
-    public static func identity(of pid: pid_t) -> PIDIdentity? {
-        LibProc.bsdInfo(pid).map { PIDIdentity(pid: pid, startedAtMicros: LibProc.startedAtMicros($0)) }
+    public static func isClaudeExecutable(_ pid: pid_t) -> Bool {
+        LibProc.bsdInfo(pid).map { LibProc.isClaude(pid, info: $0) } ?? false
+    }
+
+    /// SPEC §8.5: the process holding a listed host's pid, or nil unless it is a `claude` started no
+    /// later than the listing was read. A listing outlives its read, and a freed pid gets reused.
+    public static func host(_ pid: pid_t, listedAtMicros: Int64, isClaude: (pid_t) -> Bool) -> PIDIdentity? {
+        guard let info = LibProc.bsdInfo(pid), isClaude(pid) else { return nil }
+        let started = LibProc.startedAtMicros(info)
+        return started <= listedAtMicros ? PIDIdentity(pid: pid, startedAtMicros: started) : nil
     }
 
     /// SPEC §8.5: the host itself, which `targets` never names. `claude stop` gets `grace` to end it,
-    /// then it is signalled as `reap` signals. True once it is gone.
+    /// then it is signalled as `reap` signals. True once it is gone, at once if it already was.
     public static func end(
         host: PIDIdentity,
         grace: Duration = .seconds(3),

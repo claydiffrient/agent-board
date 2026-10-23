@@ -244,6 +244,9 @@ struct FixtureError: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
+/// Above macOS's PID_MAX (99,999), so no process holds it: a listed host pid that a stop can never signal.
+func unheldPID(_ offset: Int = 0) -> Int { 100_000 + offset }
+
 @MainActor
 struct SupervisorFixture {
     let db: AppDatabase

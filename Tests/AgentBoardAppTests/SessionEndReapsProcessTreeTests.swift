@@ -77,6 +77,8 @@ final class SessionEndReapsProcessTreeTests: XCTestCase {
         lingering.arguments = ["600"]
         try lingering.run()
         host = lingering
+        let standIn = lingering.processIdentifier
+        fixture.supervisor.isClaudeHost = { $0 == standIn }
         await fixture.runtime.setListed([AgentInfo(
             id: session.shortId, cwd: session.cwd, kind: "background", sessionId: session.sessionId,
             pid: Int(lingering.processIdentifier)
@@ -95,6 +97,27 @@ final class SessionEndReapsProcessTreeTests: XCTestCase {
             isRunning(lingering.processIdentifier),
             "the idle cap ended the session while its claude host kept running"
         )
+    }
+
+    /// A listing is reused across stops, so the pid it names for a host may since belong to anything.
+    func testAStopLeavesAListedHostPidThatIsNotClaudeAlone() async throws {
+        let worker = try fixture.workerAtWork()
+        let session = try XCTUnwrap(fixture.sessions.get(worker.sessionId))
+        let impostor = Process()
+        impostor.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        impostor.arguments = ["600"]
+        try impostor.run()
+        host = impostor
+        await fixture.runtime.setListed([AgentInfo(
+            id: session.shortId, cwd: session.cwd, kind: "background", sessionId: session.sessionId,
+            pid: Int(impostor.processIdentifier)
+        )])
+
+        try await fixture.supervisor.stopWorker(sessionId: worker.sessionId)
+
+        let stopped = await fixture.runtime.stopped
+        XCTAssertEqual(stopped, [session.shortId].compactMap { $0 }, "the stop never ran")
+        XCTAssertTrue(isRunning(impostor.processIdentifier), "a stop signaled a process that is not claude")
     }
 
     private func waitForPIDs(in file: URL) async throws -> [pid_t] {
