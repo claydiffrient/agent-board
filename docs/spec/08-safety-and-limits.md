@@ -372,9 +372,45 @@ Nothing outside the session's own tree is signalled:
 - The following are never signalled: the app and its ancestors, every other
   live `claude` host listed by `claude agents` together with its ancestors
   and descendants, and any process whose executable is `claude` (the
-  daemon).
+  daemon). The session's own host is the one exception, and it is reached
+  by the separate step below, never by these rules.
 - A human's terminal keeps its controlling tty. An app launched by launchd
   runs in `/`.
+
+**The host itself ends too, or the board says it did not.** The rules above
+never name the `claude` host, so the host's own end rests on `claude stop`
+alone, and `claude stop` answering does not prove it. It exits 0 for a
+registry row whatever happened to the process, and it can time out. So the
+host's pid, as `claude agents` lists it for this session, is read with its
+start time before the stop. If that listing came back empty, which is what a
+`claude agents` that timed out looks like, the host is looked up once more
+after the stop. After the stop and the reap, the host gets 3s to
+exit by itself. If it is still there, it gets SIGTERM, and then SIGKILL 3s
+later. This runs whether `claude stop` succeeded or failed. A host that
+survives both signals is not passed over. The board queues a `failed` report
+naming the session, the task and the pid, along with a notification. The
+session is still marked ended, and its revoked grant still refuses every
+board tool. But git commits never pass through the board, so the report is
+the only thing that tells a human a process is still able to write to the
+branch. This target comes from the session's own registry entry, which is
+positive evidence, never from argv or a process name.
+
+Before this step existed, a host could outlive a stop like this. On
+2026-10-23 at 12:07, under a load average of 175, the idle cap ended worker
+session 3d828d82. Its row went to `failed` with `agent_stopped_at` still
+NULL, which means `claude stop` threw: the caps discard that error. A minute
+later `claude agents` still listed the session as `working`, with its
+`bg-spare` host alive and two of its shells still running under it.
+
+The `claude daemon run … --spawned-by {"label":"claude --bg","cwd":…}`
+process is not a session's host. It is the one daemon that parents every
+`--bg` session's `bg-pty-host` on the machine. Its `spawned-by` records the
+`claude --bg` call that happened to start it, so it names some worker's
+worktree and outlives that worker by design. Measured 2026-10-23 on
+Claude Code 2.1.309: one `claude daemon run --origin transient` parented the
+hosts of four live sessions in four different worktrees, plus an unclaimed
+spare. Its `spawned-by` named only the worktree of the oldest of them, the
+session whose `claude --bg` had started it.
 
 **A session the board ended stays stopped.** `claude stop` does not keep a
 session down. Claude Code resumes a stopped `--bg` session by itself to deliver

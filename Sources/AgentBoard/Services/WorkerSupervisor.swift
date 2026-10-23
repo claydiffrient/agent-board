@@ -1547,20 +1547,58 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         refreshSleepAssertion()
     }
 
-    /// SPEC §8.5: no process a session started outlives it. The host's tree is read before
-    /// `claude stop`, which leaves a `run_in_background` command running under launchd.
+    /// SPEC §8.5: no process a session started outlives it, the host included. The host's tree is
+    /// read before `claude stop`, which leaves a `run_in_background` command running under launchd.
     private func stopAgent(_ session: AgentSession, shortId: String, listing: [AgentInfo]? = nil) async throws {
         let listed = await listingOrFetch(listing)
+        let host = Self.hostPID(of: session, in: listed).flatMap(SessionProcessReaper.identity(of:))
         var tree: Set<PIDIdentity> = []
-        if let host = Self.hostPID(of: session, in: listed) { tree = await SessionProcessReaper.tree(ofHost: host) }
+        if let host { tree = await SessionProcessReaper.tree(ofHost: host.pid) }
         do {
             try await runtime.stop(shortId: shortId)
         } catch {
             await reapProcesses(of: session, tree: tree, listing: listed)
+            await endHost(host, of: session, listed: listed, stopError: describe(error))
             throw error
         }
         try? sessions.markAgentStopped(session.sessionId)
         await reapProcesses(of: session, tree: tree, listing: listed)
+        await endHost(host, of: session, listed: listed, stopError: nil)
+    }
+
+    /// SPEC §8.5: `claude stop` answering is not proof its host ended. One that outlives the signals
+    /// as well is reported by pid, since git commits never pass through the board. An empty `listed`
+    /// is what a `claude agents` that failed under load looks like, so the host is looked up again.
+    private func endHost(
+        _ captured: PIDIdentity?, of session: AgentSession, listed: [AgentInfo], stopError: String?
+    ) async {
+        var host = captured
+        if host == nil, listed.isEmpty {
+            host = Self.hostPID(of: session, in: await listingOrFetch(nil)).flatMap(SessionProcessReaper.identity(of:))
+        }
+        guard let host, !(await SessionProcessReaper.end(host: host)) else { return }
+        let title = (try? session.taskId.flatMap { try tasks.get($0) })?.title
+        var lines = [
+            "A stopped session's claude process is still running",
+            "Task: \(session.taskId ?? "none")\(title.map { " (\($0))" } ?? "")",
+            "Session: \(session.sessionId) (attempt \(session.attempt))",
+            "Process: pid \(host.pid) survived `claude stop`, SIGTERM and SIGKILL.",
+        ]
+        if let stopError { lines.append("`claude stop` failed: \(stopError)") }
+        lines.append(
+            "Its board tools are refused once the session is ended, but it can still edit files and commit"
+                + (session.worktreePath.map { " in \($0)" } ?? "") + ". End it by hand: `kill -9 \(host.pid)`."
+        )
+        _ = try? ReportStore(db).insert(
+            projectId: session.projectId, taskId: session.taskId, sessionId: session.sessionId, kind: .failed,
+            body: lines.joined(separator: "\n")
+        )
+        announceReports(projectId: session.projectId)
+        post(
+            "Stopped worker still running",
+            body: "\(session.displayShortId) (pid \(host.pid)) survived claude stop and SIGKILL.",
+            projectId: session.projectId, category: .workerFailures, subject: .session(session.sessionId)
+        )
     }
 
     /// SPEC §8.5. The worktree rule is off for a shared checkout, and while another live session

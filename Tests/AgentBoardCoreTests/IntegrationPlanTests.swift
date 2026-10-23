@@ -185,6 +185,7 @@ final class IntegrationPlanTests: XCTestCase {
         )
 
         XCTAssertTrue(prompt.contains("Nothing is left to merge."), prompt)
+        XCTAssertTrue(prompt.hasSuffix(OpeningPrompt.turnEnding), "an integrator with nothing to merge idled out instead of reporting")
     }
 
     func testPromptTellsTheIntegratorALandedTaskNeedsNoAction() throws {

@@ -62,6 +62,41 @@ final class SessionEndReapsProcessTreeTests: XCTestCase {
         }
     }
 
+    func testTheIdleCapEndsAHostThatClaudeStopLeftRunning() async throws {
+        let worker = try fixture.workerAtWork()
+        let silentSince = Int64.nowMillis - 600_000
+        try await fixture.db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE agent_session SET started_at = ?, last_activity = ? WHERE session_id = ?",
+                arguments: [silentSince, silentSince, worker.sessionId]
+            )
+        }
+        let session = try XCTUnwrap(fixture.sessions.get(worker.sessionId))
+        let lingering = Process()
+        lingering.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        lingering.arguments = ["600"]
+        try lingering.run()
+        host = lingering
+        await fixture.runtime.setListed([AgentInfo(
+            id: session.shortId, cwd: session.cwd, kind: "background", sessionId: session.sessionId,
+            pid: Int(lingering.processIdentifier)
+        )])
+
+        await fixture.supervisor.meter(
+            session,
+            limits: CapLimits(maxTokens: nil, maxWallClockSeconds: nil, maxIdleSeconds: 300),
+            stallSeconds: 100_000,
+            awake: AwakeElapsed(nowMillis: .nowMillis)
+        )
+
+        let stopped = await fixture.runtime.stopped
+        XCTAssertEqual(stopped, [session.shortId].compactMap { $0 }, "the idle cap never fired")
+        XCTAssertFalse(
+            isRunning(lingering.processIdentifier),
+            "the idle cap ended the session while its claude host kept running"
+        )
+    }
+
     private func waitForPIDs(in file: URL) async throws -> [pid_t] {
         let deadline = ContinuousClock.now + .seconds(10)
         while ContinuousClock.now < deadline {
