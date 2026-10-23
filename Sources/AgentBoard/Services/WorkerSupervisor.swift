@@ -4030,8 +4030,27 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try await publish(approval)
             case .prItemDismissal:
                 defer { announceReports(projectId: approval.projectId) }
+                try await stopSessions(closedByDismissing: try PRItemDismissalRequest.decode(approval.payload).itemId)
                 try board.applyItemDismissal(approval)
             }
+        }
+    }
+
+    func dismissPRItem(itemId: Int64, reason: String) async throws {
+        try await recording {
+            guard !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw PRVerdictRejection("A dismissal needs a reason.")
+            }
+            try await stopSessions(closedByDismissing: itemId)
+            let watch = try prWatches.dismissItem(itemId: itemId, reason: reason, by: PRWatchStore.humanDismissal)
+            announceReports(projectId: watch.projectId)
+        }
+    }
+
+    /// A fixer or checker left running on a task the dismissal closes would spend on a dead round.
+    private func stopSessions(closedByDismissing itemId: Int64) async throws {
+        for taskId in try prWatches.tasksClosedByDismissing(itemId: itemId) {
+            try await stopLiveSessions(onTask: taskId, by: .human)
         }
     }
 

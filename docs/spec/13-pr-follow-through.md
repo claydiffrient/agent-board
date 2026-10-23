@@ -507,8 +507,13 @@ round's fix task no open item, the round ends as `triaged`, its fix and
 follow-up check tasks close, and the watch goes to settling when feedback
 awaits a round, else watching. A watch parked by that round's failure —
 `check_failed`, `check_unavailable` or `fixer_failed` — unparks the same way
-once the round has no open item left; a park for any other cause stays. A new
-reply on a dismissed thread reopens it like any other (§4).
+once the round has no open item left, and reports `unparked` (§13.6); a park
+for any other cause stays. Both the page and a granted approval go through the
+supervisor, which first stops any session still holding one of those tasks — a
+running fixer, follow-up check or round reviewer — with the ordinary session
+stop. A `report_complete` that still reaches a closed task records the report,
+already consumed, ends the session and leaves the task closed. A new reply on a
+dismissed thread reopens it like any other (§4).
 
 ### 13.2 Verdicts — phase 2 (triage) and phase 3 (fix, reply)
 
@@ -906,6 +911,7 @@ twice for one transition.
 |---|---|---|
 | Ready to verify | `ready_to_verify` | The Ready to verify banner's claim (§13.4): once per head oid |
 | Parked | `parked` | Every park, with the first line of `parked_reason` |
+| Unparked | `unparked` | A dismissal lifts an item-bound park (§13.1 dismissed items), naming the item and reason and the state the watch moved to |
 | New decision | `decision` | The decision banner's claim (§13.4): once per item, with the first line of triage's question |
 | Round outcome | `round_published` / `round_stale` / `round_fixer_failed` / `round_triaged` | A round pushed (with the pushed sha), went stale, ended `fixer_failed`, or ended `triaged` with no fix item open |
 | Merged or closed | `merged` / `closed` | The poll settles the watch to either |

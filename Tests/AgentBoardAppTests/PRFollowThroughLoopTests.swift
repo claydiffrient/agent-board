@@ -570,6 +570,28 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(after, parked)
     }
 
+    /// SPEC §13.1 dismissed items: dismissing a running fixer's last item stops that fixer, and its late
+    /// report leaves the closed fix task closed instead of putting a dead round's card back in Review.
+    func testDismissingARunningFixersLastItemStopsTheFixerAndItsLateReportLeavesTheTaskClosed() async throws {
+        try enable()
+        let fixer = try await runningFixer()
+        let session = try activeSession(on: fixer.id)
+        let shortId = try XCTUnwrap(session.shortId)
+        let itemId = try XCTUnwrap(try watches.items(watchId: try onlyWatch().id).first { $0.githubNodeId == "T_fix" }?.id)
+        let before = await fixture.runtime.stopped
+
+        try await fixture.supervisor.dismissPRItem(itemId: itemId, reason: "Settled with gh pr edit.")
+
+        let stopped = await fixture.runtime.stopped
+        XCTAssertEqual(Array(stopped.dropFirst(before.count)), [shortId])
+        XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .closed)
+        XCTAssertEqual(try onlyWatch().state, .watching)
+
+        _ = try fixture.board.complete(taskId: fixer.id, sessionId: session.sessionId, summary: "Renamed it.")
+
+        XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .closed)
+    }
+
     /// The round's worktree is gone and cannot come back while another checkout holds its branch: the check is
     /// retried at the next point rather than failed or superseded, and the reviewer gets the worktree back.
     func testACheckThatCouldNotStartIsRetriedAndPushesItsRoundWithNoNewRound() async throws {

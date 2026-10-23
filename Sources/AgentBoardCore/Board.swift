@@ -233,10 +233,12 @@ public struct Board: Sendable {
     }
 
     /// Resolves the approval and queues a `decision` report so the orchestrator learns the outcome on its next pull.
+    /// A granted dismissal is reported by `applyItemDismissal` instead, which says what it did.
     @discardableResult
     public func resolveApproval(_ id: String, approved: Bool, by: String, reason: String? = nil) throws -> Approval {
         try db.writer.write { db in
             let approval = try ApprovalStore.resolve(db, id, approved ? .approved : .denied)
+            if approved, approval.kind == .prItemDismissal { return approval }
             var body = "\(approval.kind.rawValue) \(approved ? "approved" : "denied")"
             if let taskId = approval.taskId {
                 body += " for task \(taskId)"
@@ -385,9 +387,13 @@ public struct Board: Sendable {
         /// The state of a session Agent Board had already ended before this call. Its report is kept
         /// as a `decision`, and nothing on the task moves (SPEC §5.1).
         public var endedSessionState: SessionState? = nil
+        /// The task was closed while this session still ran on it, so the report moved nothing.
+        public var closedUnderSession = false
 
         /// Never true on a resend: the first call already ran the acceptance path.
-        public var autoAccept: Bool { routing == .autoAccept && !wasAlreadyComplete && endedSessionState == nil }
+        public var autoAccept: Bool {
+            routing == .autoAccept && !wasAlreadyComplete && endedSessionState == nil && !closedUnderSession
+        }
     }
 
     static let lateCompletionHeadline = "Late report_complete from a session Agent Board had already ended"
@@ -419,6 +425,9 @@ public struct Board: Sendable {
             // SPEC §5.1: a live session another one has taken the task from must not move it.
             if let holder = try SessionStore.activeHolder(db, taskId: taskId), holder.sessionId != sessionId {
                 throw BoardError.sessionNotOnTask(sessionId: sessionId, taskId: taskId)
+            }
+            if task.column == .closed {
+                return try Self.completionOnClosedTask(db, task: task, sessionId: sessionId, summary: summary)
             }
             if task.origin == .fixRound {
                 return try Self.completeFixRound(db, task: task, sessionId: sessionId, summary: summary)
@@ -502,6 +511,28 @@ public struct Board: Sendable {
             column: task.column,
             wasAlreadyComplete: existing != nil,
             endedSessionState: session.state
+        )
+    }
+
+    /// A dismissal can close a round's task under its fixer or checker (SPEC §13.1 dismissed items). The
+    /// task stays closed; the report is kept, already consumed, and the session ends.
+    private static func completionOnClosedTask(
+        _ db: Database, task: Task, sessionId: String, summary: String
+    ) throws -> CompletionOutcome {
+        let report = try ReportStore.insert(
+            db, projectId: task.projectId, taskId: task.id, sessionId: sessionId, kind: .complete, body: summary
+        )
+        try db.execute(sql: "UPDATE report SET consumed_at = ? WHERE id = ?", arguments: [Int64.nowMillis, report.id])
+        _ = try ProgressStore.append(
+            db, taskId: task.id, sessionId: nil, kind: .status,
+            text: "Session \(sessionId) reported complete after this task was closed; it stays closed."
+        )
+        try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
+        try FileLockStore.releaseAll(db, sessionId: sessionId)
+        return CompletionOutcome(
+            report: report, level: try ReviewPolicy.level(db, task: task),
+            routing: try ReviewPolicy.routing(db, task: task, completedBy: sessionId), column: .closed,
+            wasAlreadyComplete: false, closedUnderSession: true
         )
     }
 

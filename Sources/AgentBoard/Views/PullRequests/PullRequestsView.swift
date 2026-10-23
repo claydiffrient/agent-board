@@ -180,15 +180,16 @@ struct PullRequestsView: View {
             }
             if !listing.items.isEmpty {
                 PRItemList(items: listing.items) { item, reason in
-                    dismiss(item, reason: reason)
+                    await dismiss(item, reason: reason)
                 }
             }
         }
     }
 
-    private func dismiss(_ item: PRItem, reason: String) -> Bool {
+    private func dismiss(_ item: PRItem, reason: String) async -> Bool {
+        guard let id = item.id else { return false }
         do {
-            try actions.dismiss(item, reason: reason)
+            try await env.supervisor.dismissPRItem(itemId: id, reason: reason)
             return true
         } catch {
             errorMessage = errorText(error)
@@ -283,24 +284,20 @@ struct PullRequestActions {
         try Board(db).answerDecision(itemId: id, choice: choice)
     }
 
-    func dismiss(_ item: PRItem, reason: String) throws {
-        guard let id = item.id else { return }
-        try PRWatchStore(db).dismissItem(itemId: id, reason: reason, by: PRWatchStore.humanDismissal)
-    }
 }
 
 /// A row's open items, collapsed under it, each with **Dismiss…** (SPEC §13.4).
 struct PRItemList: View {
     let items: [PRItem]
     /// Returns whether the dismissal was recorded.
-    let dismiss: (PRItem, String) -> Bool
+    let dismiss: (PRItem, String) async -> Bool
 
     @State private var expanded = false
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
             ForEach(items) { item in
-                PRItemRow(item: item) { dismiss(item, $0) }
+                PRItemRow(item: item) { await dismiss(item, $0) }
             }
         } label: {
             Text(items.count == 1 ? "1 open item" : "\(items.count) open items")
@@ -314,9 +311,10 @@ struct PRItemList: View {
 /// One open item: its author, kind and first line, so the right one gets dismissed.
 struct PRItemRow: View {
     let item: PRItem
-    let dismiss: (String) -> Bool
+    let dismiss: (String) async -> Bool
 
     @State private var dismissing = false
+    @State private var submitting = false
     @State private var reason = ""
 
     private var trimmedReason: String { reason.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -360,16 +358,21 @@ struct PRItemRow: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Dismiss", action: submit)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(trimmedReason.isEmpty)
+                    .disabled(trimmedReason.isEmpty || submitting)
             }
         }
         .padding(12)
     }
 
     private func submit() {
-        guard !trimmedReason.isEmpty, dismiss(trimmedReason) else { return }
-        reason = ""
-        dismissing = false
+        guard !trimmedReason.isEmpty, !submitting else { return }
+        submitting = true
+        _Concurrency.Task {
+            defer { submitting = false }
+            guard await dismiss(trimmedReason) else { return }
+            reason = ""
+            dismissing = false
+        }
     }
 }
 

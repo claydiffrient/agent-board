@@ -68,24 +68,45 @@ extension PRWatchStore {
         item.dismissedAt = now
         item.updatedAt = now
         try item.update(db)
-        try settleAfterDismissal(db, watch: &watch, now: now)
+        try settleAfterDismissal(db, watch: &watch, itemId: itemId, reason: reason, now: now)
         return watch
     }
 
-    private static func settleAfterDismissal(_ db: Database, watch: inout PRWatch, now: Int64) throws {
+    /// The fix and follow-up check tasks that dismissing `itemId` would close, so a caller can stop any
+    /// session still working them first (SPEC §13.1 dismissed items).
+    public func tasksClosedByDismissing(itemId: Int64) throws -> [String] {
+        try db.reader.read { db in
+            guard let item = try PRItem.fetchOne(db, key: itemId), item.state == .open,
+                  let watch = try PRWatch.fetchOne(db, key: item.watchId),
+                  let round = try Self.roundSettled(db, watch: watch, dismissing: itemId)
+            else { return [] }
+            return [round.fixTaskId, round.followupTaskId].compactMap { $0 }
+        }
+    }
+
+    private static let itemBoundParks = Set([PRRoundOutcome.checkFailed, .checkUnavailable, .fixerFailed].map(\.rawValue))
+
+    /// The round a dismissal of `itemId` ends, or whose park it lifts, because no other item holds it.
+    private static func roundSettled(_ db: Database, watch: PRWatch, dismissing itemId: Int64) throws -> PRRound? {
         guard let round = try round(db, watchId: watch.id, number: watch.round), round.fixTaskId != nil,
-              try checkItems(db, round: round).isEmpty
-        else { return }
-        let nextState: PRWatchState = try untriagedItemCount(db, watchId: watch.id) > 0
-            || answeredFixCount(db, watchId: watch.id) > 0 ? .settling : .watching
-        let itemBound: [PRRoundOutcome] = [.checkFailed, .checkUnavailable, .fixerFailed]
+              try checkItems(db, round: round).allSatisfy({ $0.id == itemId })
+        else { return nil }
         switch watch.state {
-        case .fixing, .checking:
-            try endRound(db, watchId: watch.id, number: round.number, outcome: .triaged, now: now)
-        case .parked where itemBound.map(\.rawValue).contains(round.outcome ?? ""):
+        case .fixing, .checking: return round
+        case .parked where itemBoundParks.contains(round.outcome ?? ""): return round
+        default: return nil
+        }
+    }
+
+    private static func settleAfterDismissal(
+        _ db: Database, watch: inout PRWatch, itemId: Int64, reason: String, now: Int64
+    ) throws {
+        guard let round = try roundSettled(db, watch: watch, dismissing: itemId) else { return }
+        let wasParked = watch.state == .parked
+        if wasParked {
             watch.parkedReason = nil
-        default:
-            return
+        } else {
+            try endRound(db, watchId: watch.id, number: round.number, outcome: .triaged, now: now)
         }
         for taskId in [round.fixTaskId, round.followupTaskId].compactMap({ $0 }) {
             guard let task = try Task.fetchOne(db, key: taskId), task.column != .done, task.column != .closed else {
@@ -96,11 +117,14 @@ extension PRWatchStore {
                 by: "follow-through", at: now
             )
         }
-        let wasParked = watch.state == .parked
-        watch.state = nextState
+        watch.state = try untriagedItemCount(db, watchId: watch.id) > 0
+            || answeredFixCount(db, watchId: watch.id) > 0 ? .settling : .watching
         watch.updatedAt = now
         try watch.update(db)
-        if !wasParked { try report(db, watch: watch, .round(number: round.number, outcome: .triaged)) }
+        try report(
+            db, watch: watch,
+            wasParked ? .unparked(reason: "item \(itemId) dismissed: \(reason)") : .round(number: round.number, outcome: .triaged)
+        )
     }
 
     static func pendingDismissal(_ db: Database, projectId: String, itemId: Int64) throws -> Approval? {
