@@ -35,7 +35,8 @@ rest of stale and parked, and feeding CI and verification failures back into
 triage.
 
 - **watching** — polled every 60s. Leaves on new feedback (an unresolved
-  thread, a review body, a failed required check, a merge conflict) or when
+  thread, a review body, a conversation comment, a failed required check, a
+  merge conflict) or when
   the PR becomes ready to verify.
 - **settling** *(phase 2)* — entered from watching or readyToVerify when an
   open item has no verdict yet, and left for watching or readyToVerify when
@@ -54,7 +55,8 @@ triage.
   most twice a round; the third failed check parks the PR instead.
 - **publishing** *(phase 3)* — re-reads the remote head and goes to **stale**
   if it moved. Otherwise fast-forward pushes the round branch to the PR's head
-  ref, then posts factual replies when `postFactualReplies` is on. It never
+  ref, then posts factual replies when `postFactualReplies` is on and
+  re-requests review when `reRequestReviews` is on (§13.2). It never
   resolves threads.
 - **awaitingCI** *(phase 3 reads green/red; phase 4 adds the log-tail items on
   red)* — green goes to watching; red goes straight to triaging, with each
@@ -151,11 +153,21 @@ are never watched. A thread becomes an item while it is neither resolved nor
 outdated and its latest comment is not the viewer's; that comment is the item's
 body, so a reply changes it. A review body becomes an item while it is its
 author's latest review and that review is not an approval, since a review is
-never resolved and an approving body is not feedback. Every `<!-- … -->` HTML
-comment is removed from a thread's latest comment and a review body first (an
-unterminated `<!--` hides the rest, as GitHub renders it), so the stored body,
-triage and the Pull Requests page see only what a reader on GitHub sees; a
-thread or review whose remaining text is blank is not an item. A stored body
+never resolved and an approving body is not feedback. A conversation comment
+on the PR (the query's last 100 `comments`) becomes an item of kind `comment`
+when its author is not the viewer, bots included, and it was created after the
+head commit's `committedDate`, so turning this on, or a new watch, does not send
+a PR's whole old conversation to triage. A comment from before that cutoff
+creates no item, but one already stored keeps updating from it, so a push does
+not mark an untriaged comment handled by moving the cutoff past it. Every
+`<!-- … -->` HTML comment is removed from a thread's latest comment, a review
+body and a conversation comment first (an unterminated `<!--` hides the rest,
+as GitHub renders it), so the stored body, triage and the Pull Requests page see
+only what a reader on GitHub sees; a thread, review or comment whose remaining
+text is blank is not an item, with one exception: a `CHANGES_REQUESTED` review
+with a blank body is still an item, whose body says its author requested changes
+without a comment and that their requests may be in a conversation comment, so
+triage looks for them there. A stored body
 that differs from the incoming one only by those comments, kept from before
 they were stripped, is rewritten to the incoming text without counting as a
 change: the item keeps its state, verdict, reply and `handled_at`, and is not
@@ -429,7 +441,7 @@ stops a running triager rather than enrolling it: its round's outcome becomes
 `interrupted`, which never counts toward parking, and the watch waits in
 settling until the order lifts.
 
-Items are keyed by the GitHub node id of the thread or check they came from,
+Items are keyed by the GitHub node id of the thread, review, comment or check they came from,
 so each is handled once per round; a new reply on a thread reopens it for
 triage (§4), whether it was handled or still open with a verdict. The human's own comments, resolved threads, and outdated threads
 are never turned into items.
@@ -450,6 +462,10 @@ Triage gives every open item exactly one verdict:
   Creates a backlog task; the reply says the work is tracked separately.
 A `conflict` item is always `fix`: the built-in prompt says the fixer merges
 the base into the branch.
+A blank `CHANGES_REQUESTED` review's item carries no requests itself: the
+built-in prompt has triage look for them in that author's other items, usually
+a `comment` item, and give the review `answer` with no `reply_body`, or
+`already_done`, when one carries them, and `decision` when none does.
 
 - **decision** — a trade-off, a disagreement with the reviewer, or anything
   that sets direction. Needs the human: triage's question and its options
@@ -468,7 +484,7 @@ something argued rather than settled.
 
 **Posting replies (phase 3).** Replies go out after a round's push, when a
 publishing round goes stale or parks, or, for a round with no fix item, once its
-verdicts are applied. Each time, every handled thread or review item whose
+verdicts are applied. Each time, every handled thread, review or comment item whose
 `reply_url` is empty gets one, whatever round handled it, so an answer from a
 round that never pushed is still replied to at the next of those points. Only an
 item whose `handled_at` is at or after `postFactualRepliesSince` qualifies:
@@ -483,9 +499,10 @@ claims nothing. Any other factual item
 gets its triage `reply_body`; an item with no `reply_body` gets none. A frozen
 round posts nothing itself; its owed replies wait for the next point. A thread
 item is answered on its thread with `gh api graphql`'s
-`addPullRequestReviewThreadReply`; a review body, which has no thread, gets one
-pull-request comment through `gh api repos/<owner>/<name>/issues/<n>/comments`,
-led by a link to the review. The reply's URL is stored in `reply_url`, so
+`addPullRequestReviewThreadReply`; a review body or a conversation comment,
+which has no thread, gets one pull-request comment through
+`gh api repos/<owner>/<name>/issues/<n>/comments`, led by a link to the review
+or comment it answers. The reply's URL is stored in `reply_url`, so
 nothing is posted twice. A failed post is logged and its error kept in
 `reply_error`; it is tried again at the next point. When `gh` reports the
 comment gone (`NOT_FOUND`, HTTP 404 or "Could not resolve to a node"), the
@@ -497,6 +514,27 @@ keeps only its `reply_error` and stays owed, and the project gets a
 reads that PR again (or its watch ends). An item reopened by a new reply loses `reply_url`,
 `reply_error` and `reply_abandoned_at`, so once it is handled again it gets a
 fresh reply. No thread is ever resolved: resolving is the reviewer's call.
+
+**Re-requesting review.** When the project's `reRequestReviews` setting is on,
+a round whose push was recorded asks for review again, right after its replies.
+A round that went stale, froze or parked asks nothing. The candidates are the
+authors of the thread, review and comment items handled in that round (`pr_item.round`
+is the round's number), not every past reviewer. One `gh api graphql` read of
+the pull request's reviews and pending review requests then keeps only those
+whose latest review other than a comment, `PENDING` and `DISMISSED` ones
+aside, is `CHANGES_REQUESTED`, plus those who have only ever commented. A
+thread reply is itself a `COMMENTED` review, so, as in GitHub's own review
+decision, a comment after an approval leaves the approval standing and that
+reviewer is not asked. It
+also drops the viewer, bots (a `Bot` author, or a login ending in `[bot]`,
+which GitHub will not request) and anyone whose request is still pending. The
+rest are asked in one
+`gh api repos/<owner>/<name>/pulls/<n>/requested_reviewers` call. GitHub
+notifies each of them as the user, which is why the setting is off by default.
+The round is claimed first by stamping `pr_round.review_requests_at`, so a
+round asks at most once. The logins asked go in `review_requests_json`, and a
+failed read or request is logged and kept in `review_request_error`; it is not
+retried, and it neither parks the watch nor holds back replies.
 
 **The triage session (phase 2).** `WorkerSupervisor.spawnTriager(watchId)` is
 the only way one starts; the orchestrator has no tool for it. It is held to
@@ -561,6 +599,7 @@ project that never opts in pays nothing:
 | `requireApproval` | `true` | 1 |
 | `verifyCommand` | `nil` — a shell command template with `{url}` that the Walk me through it row action runs in a terminal through an interactive login shell; a Claude command goes through `claude`, e.g. `claude "/review:verify {url}"` | 1 (button shown only once a value is set) |
 | `postFactualReplies` | `false` | 3 (no replies exist before phase 3) |
+| `reRequestReviews` | `false` — re-requests review after a pushed round, which notifies reviewers as the user (§13.2) | 4 |
 | `roles.triage` / `roles.fixer` / `roles.reviewer` / `roles.followupCheck` | each `{rosterAgentId?, model?}`, unset | 2 (`triage`), 3 (the rest) |
 | `privateTerms` | `[]` | 1 |
 | `checksAwaitingVerification` | `[]` — check-run names or status contexts, matched exactly, ignored when deciding whether CI has passed (§13.1) | 4 |
@@ -699,7 +738,8 @@ on at all.
   that wait on verification**, a comma-separated `checksAwaitingVerification`
   field whose save trims names and drops blanks and repeats),
   **Replies** (`postFactualReplies`, captioned with which verdicts count as
-  factual), **Publish guard** (the `privateTerms` list: each term a row
+  factual, and `reRequestReviews`, captioned that GitHub notifies reviewers as
+  the user), **Publish guard** (the `privateTerms` list: each term a row
   with a remove button, plus a field that adds one on Return), and **Roles**
   (for each of Triage, Fixer, Reviewer and Follow-up check, an agent picker of
   Default plus the project's enabled roster agents, and a model picker; a

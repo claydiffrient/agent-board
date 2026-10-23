@@ -350,7 +350,7 @@ CREATE TABLE pr_item (
   id                    INTEGER PRIMARY KEY,
   watch_id              TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
   github_node_id        TEXT NOT NULL,
-  kind                  TEXT NOT NULL,   -- thread | review | check | conflict | verify_failure
+  kind                  TEXT NOT NULL,   -- thread | review | comment | check | conflict | verify_failure
   author                TEXT,
   body                  TEXT NOT NULL,
   path                  TEXT,
@@ -393,6 +393,9 @@ CREATE TABLE pr_round (
   review_findings TEXT,              -- a reopening reviewer's findings, for the fixer
   followup_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the current check's `followup_check` task
   checked_head_oid TEXT,             -- the round branch's tip the follow-up check judged
+  review_requests_at   INTEGER,      -- when the pushed round claimed its review re-request (§13.2)
+  review_requests_json TEXT,         -- the logins it re-requested, a JSON array
+  review_request_error TEXT,         -- why the re-request failed
   UNIQUE (watch_id, number)
 );
 
@@ -598,7 +601,7 @@ never treated as the item's current task. An item still open keeps its
 holds every work-specific value — `enabled`, `verificationLabel`,
 `requireApproval`, `settleMinutes`, `roundCap`, `dailyBudgetUSD`,
 `verifyCommand`, `postFactualReplies`, `postFactualRepliesSince` (when
-replies were last turned on, §13.2), `roles` (`triage`, `fixer`, `reviewer`,
+replies were last turned on, §13.2), `reRequestReviews` (§13.2), `roles` (`triage`, `fixer`, `reviewer`,
 `followupCheck`, each `{rosterAgentId, model}`), `privateTerms` and
 `checksAwaitingVerification` (check names left out of whether CI passed,
 §13.1) — and an

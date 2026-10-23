@@ -26,6 +26,8 @@ public enum PRWatchState: String, Codable, Sendable, CaseIterable, Equatable, Da
 public enum PRItemKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
     case thread
     case review
+    /// A pull request conversation comment (SPEC §13.1).
+    case comment
     case check
     case conflict
     case verifyFailure = "verify_failure"
@@ -264,6 +266,9 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
     public var followupTaskId: String? = nil
     /// The round branch's tip when its follow-up check started: the head the check judged.
     public var checkedHeadOid: String? = nil
+    public var reviewRequestsAt: Int64? = nil
+    public var reviewRequestsJSON: String? = nil
+    public var reviewRequestError: String? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -280,6 +285,14 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
         case reviewFindings = "review_findings"
         case followupTaskId = "followup_task_id"
         case checkedHeadOid = "checked_head_oid"
+        case reviewRequestsAt = "review_requests_at"
+        case reviewRequestsJSON = "review_requests_json"
+        case reviewRequestError = "review_request_error"
+    }
+
+    /// The logins this round re-requested review from (SPEC §13.2).
+    public var reviewRequests: [String] {
+        reviewRequestsJSON.flatMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) } ?? []
     }
 
     /// The branch a round's fixer commits on (SPEC §13.1).
@@ -387,10 +400,12 @@ public struct PRSnapshotItem: Sendable, Equatable {
     public var url: String?
     /// A resolved thread is handled; the poller may report it or simply leave it out.
     public var isResolved: Bool
+    /// False for feedback too old to start triage: it updates a stored item but creates none (SPEC §13.1).
+    public var opensItem: Bool
 
     public init(
         githubNodeId: String, kind: PRItemKind, author: String? = nil, body: String, path: String? = nil,
-        line: Int? = nil, url: String? = nil, isResolved: Bool = false
+        line: Int? = nil, url: String? = nil, isResolved: Bool = false, opensItem: Bool = true
     ) {
         self.githubNodeId = githubNodeId
         self.kind = kind
@@ -400,6 +415,12 @@ public struct PRSnapshotItem: Sendable, Equatable {
         self.line = line
         self.url = url
         self.isResolved = isResolved
+        self.opensItem = opensItem
+    }
+
+    /// SPEC §13.1: the body of a CHANGES_REQUESTED review that has no visible text of its own.
+    public static func emptyChangeRequestBody(author: String) -> String {
+        "\(author) requested changes without a comment. Their requests may be in a PR conversation comment."
     }
 
     /// SPEC §13.1: a comment body as GitHub renders it, with every `<!-- … -->` removed. An unterminated

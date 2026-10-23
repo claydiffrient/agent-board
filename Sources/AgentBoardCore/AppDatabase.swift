@@ -230,6 +230,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("worktree_slot") { db in
             try db.execute(sql: Schema.worktreeSlot)
         }
+        migrator.registerMigration("pr_round_review_requests") { db in
+            try db.execute(sql: Schema.prRoundReviewRequests)
+        }
         return migrator
     }
 }

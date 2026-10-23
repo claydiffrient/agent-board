@@ -61,7 +61,8 @@ public struct PullRequestWatchReader: Sendable {
     }
 
     /// One query for every listed pull request in `owner/name`. Drafts and anything GitHub no longer
-    /// returns are left out, feedback the viewer wrote never becomes an item, and the checks named in
+    /// returns are left out, feedback the viewer wrote never becomes an item, a conversation comment opens
+    /// one only when it is newer than the head commit (SPEC §13.1), and the checks named in
     /// `ignoring` count toward neither the checks state nor the failed checks.
     public func snapshots(
         owner: String, name: String, numbers: [Int], ignoring: Set<String> = [], cwd: URL
@@ -124,7 +125,7 @@ public struct PullRequestWatchReader: Sendable {
                 }
               }
               commits(last: 1) {
-                nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
+                nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { nodes {
                   ... on CheckRun {
                     id databaseId name status conclusion startedAt completedAt detailsUrl summary
                     checkSuite { app { slug } } isRequired(pullRequestNumber: \(number))
@@ -138,6 +139,7 @@ public struct PullRequestWatchReader: Sendable {
                 nodes { id isResolved isOutdated comments(last: 1) { nodes { author { login } body url path line } } }
               }
               reviews(last: 50) { nodes { id state body url submittedAt author { login } } }
+              comments(last: 100) { nodes { id author { login } body url createdAt } }
               timelineItems(last: 100, itemTypes: [REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT]) {
                 nodes {
                   __typename
@@ -213,10 +215,25 @@ public struct PullRequestWatchReader: Sendable {
             latestByAuthor[login.lowercased()] = review
         }
         for review in latestByAuthor.values.sorted(by: { $0.id < $1.id }) where review.state != "APPROVED" {
-            let body = PRSnapshotItem.visibleText(review.body)
-            guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            var body = PRSnapshotItem.visibleText(review.body)
+            if body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                guard review.state == "CHANGES_REQUESTED", let login = review.author?.login else { continue }
+                body = PRSnapshotItem.emptyChangeRequestBody(author: login)
+            }
             items.append(PRSnapshotItem(
                 githubNodeId: review.id, kind: .review, author: review.author?.login, body: body, url: review.url
+            ))
+        }
+        let iso = ISO8601DateFormatter()
+        let headCommittedAt = pr.commits?.nodes.last?.commit.committedDate.flatMap { iso.date(from: $0) }
+        for comment in pr.comments?.nodes ?? [] where !byViewer(comment.author) {
+            let body = PRSnapshotItem.visibleText(comment.body)
+            guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            let createdAt = comment.createdAt.flatMap { iso.date(from: $0) }
+            let afterHead = createdAt.flatMap { created in headCommittedAt.map { created > $0 } } ?? false
+            items.append(PRSnapshotItem(
+                githubNodeId: comment.id, kind: .comment, author: comment.author?.login, body: body, url: comment.url,
+                opensItem: afterHead
             ))
         }
         let standing = standings(of: pr, byViewer: byViewer)
@@ -467,7 +484,10 @@ private struct GraphQLResponse: Decodable {
         let rules: Nodes<Rule>?
     }
 
-    struct Commit: Decodable { let statusCheckRollup: Rollup? }
+    struct Commit: Decodable {
+        let committedDate: String?
+        let statusCheckRollup: Rollup?
+    }
     struct CommitNode: Decodable { let commit: Commit }
 
     struct Comment: Decodable {
@@ -492,6 +512,14 @@ private struct GraphQLResponse: Decodable {
         let url: String?
         let submittedAt: String?
         let author: Author?
+    }
+
+    struct IssueComment: Decodable {
+        let id: String
+        let author: Author?
+        let body: String
+        let url: String?
+        let createdAt: String?
     }
 
     /// A review request or its removal. A team request has no login and never matches a reviewer.
@@ -519,6 +547,7 @@ private struct GraphQLResponse: Decodable {
         let commits: Nodes<CommitNode>?
         let reviewThreads: Nodes<Thread>?
         let reviews: Nodes<Review>?
+        let comments: Nodes<IssueComment>?
         let timelineItems: Nodes<ReviewRequest>?
     }
 

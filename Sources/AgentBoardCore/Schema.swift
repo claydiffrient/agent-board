@@ -602,6 +602,14 @@ enum Schema {
     ALTER TABLE pr_watch ADD COLUMN resumed_at INTEGER;
     """
 
+    /// A pushed round's review re-request (SPEC §13.2): when it was claimed, the logins it asked for as a
+    /// JSON array, and the error that stopped it.
+    static let prRoundReviewRequests = """
+    ALTER TABLE pr_round ADD COLUMN review_requests_at INTEGER;
+    ALTER TABLE pr_round ADD COLUMN review_requests_json TEXT;
+    ALTER TABLE pr_round ADD COLUMN review_request_error TEXT;
+    """
+
     /// One row per pooled worktree slot that has ever been leased (SPEC §3.1 step 2, §4).
     static let worktreeSlot = """
     CREATE TABLE worktree_slot (

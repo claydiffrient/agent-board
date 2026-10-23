@@ -58,7 +58,7 @@ public struct PRWatchStore: Sendable {
             )
             for incoming in snapshot.items {
                 guard var item = stored.removeValue(forKey: incoming.githubNodeId) else {
-                    if incoming.isResolved { continue }
+                    if incoming.isResolved || !incoming.opensItem { continue }
                     var item = PRItem(
                         id: nil, watchId: watch.id, githubNodeId: incoming.githubNodeId, kind: incoming.kind,
                         author: incoming.author, body: incoming.body, path: incoming.path, line: incoming.line,

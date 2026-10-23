@@ -182,6 +182,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
     @ObservationIgnored private let pullRequestWatch: PullRequestWatchReader
     @ObservationIgnored private let pullRequestReplies: PullRequestReplier
+    @ObservationIgnored private let pullRequestReviewRequests: PullRequestReviewRequester
     @ObservationIgnored private let prWatches: PRWatchStore
     /// Millis of the last PR follow-through poll; 0 means none yet.
     @ObservationIgnored private var lastPRWatchPoll: Int64 = 0
@@ -316,6 +317,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         pullRequestStates = PullRequestStateReader(gh: gh)
         pullRequestWatch = PullRequestWatchReader(gh: gh)
         pullRequestReplies = PullRequestReplier(gh: gh)
+        pullRequestReviewRequests = PullRequestReviewRequester(gh: gh)
         prWatches = PRWatchStore(db)
     }
 
@@ -2574,6 +2576,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         await dropRoundWorktree(task, project: project)
         await postFactualReplies(watchId: watch.id, project: project)
+        await reRequestReviews(watch, round: round.number, project: project)
     }
 
     private func dropRoundWorktree(_ task: BoardTask, project: Project) async {
@@ -2601,7 +2604,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var readable: Bool?
         for item in items {
             guard let id = item.id, let text = item.factualReply(pushedHeadOid: pushed[item.round] ?? nil) else { continue }
-            let body = item.kind == .review ? item.url.map { "In reply to \($0):\n\n\(text)" } ?? text : text
+            let body = item.kind == .thread ? text : item.url.map { "In reply to \($0):\n\n\(text)" } ?? text
             do {
                 let url: String
                 if item.kind == .thread {
@@ -2622,6 +2625,33 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try? prWatches.recordReplyFailure(itemId: id, error: describe(error), gone: gone)
             }
         }
+    }
+
+    /// SPEC §13.2: with `reRequestReviews` on, a pushed round asks the authors of the feedback it handled
+    /// to review again, once: the round is claimed first, and what was asked or the error is kept on it.
+    /// A failure blocks nothing else.
+    private func reRequestReviews(_ watch: PRWatch, round: Int, project: Project) async {
+        guard project.settings.prFollowThrough.reRequestReviews,
+              let authors = try? prWatches.claimReviewRequests(watchId: watch.id, round: round)
+        else { return }
+        let requester = pullRequestReviewRequests
+        let (owner, name, number) = (watch.repoOwner, watch.repoName, watch.number)
+        let cwd = URL(fileURLWithPath: project.repoPath)
+        var reviewers: [String] = []
+        var failure: String?
+        do {
+            reviewers = try await offMain {
+                try requester.reviewersToRequest(owner: owner, name: name, number: number, authors: authors, cwd: cwd)
+            }
+            if !reviewers.isEmpty {
+                let asked = reviewers
+                try await offMain { try requester.request(owner: owner, name: name, number: number, reviewers: asked, cwd: cwd) }
+            }
+        } catch {
+            NSLog("PR follow-through: review was not re-requested on %@: %@", watch.url, describe(error))
+            failure = describe(error)
+        }
+        try? prWatches.recordReviewRequests(watchId: watch.id, round: round, requested: reviewers, error: failure)
     }
 
     /// One `gh pr view` of the watch's pull request. One that fails raises the project's PR watch
