@@ -67,6 +67,9 @@ public enum SessionTermination: Sendable, Equatable {
     /// session on it (SPEC §10, Status), and stopped it.
     case taskSettled
 
+    /// Opens the stop reason of every session whose setup failed, so nothing it launched ever ran.
+    public static let setupFailedLead = "setting up the worktree failed before the worker started:"
+
     var sessionState: SessionState {
         switch self {
         case .capBreach, .setupFailed: return .failed
@@ -96,7 +99,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .capBreach(let breach): return breach
         case .stopped(let actor): return "stopped from Agent Board by \(actor.described)"
         case .vanished: return "the session is no longer running and Agent Board did not stop it"
-        case .setupFailed(let detail): return "setting up the worktree failed before the worker started: \(detail)"
+        case .setupFailed(let detail): return "\(Self.setupFailedLead) \(detail)"
         case .shutdownAcknowledged: return "wound down for the project shutdown order and acknowledged"
         case .taskSettled: return "claude agents still listed it as running on a task with no work left for it"
         }

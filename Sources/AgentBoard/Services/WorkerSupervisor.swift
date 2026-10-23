@@ -1291,16 +1291,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         let manager = worktreeManager(for: project)
         let name = task.id
-        guard let worktree = try await offMain({ try Self.existingWorktree(manager, name: name) }) else {
-            throw SupervisorError.spawnFailed(
-                worktree: manager.worktreeRoot.appendingPathComponent(name).path,
-                underlying: "the round's worktree is gone, so there is nothing to review"
-            )
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let worktree: URL
+        if let existing = try await offMain({ try Self.existingWorktree(manager, name: name) }) {
+            worktree = existing
+        } else {
+            _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(name))
+            worktree = try await offMain { try manager.createForBranch(name: name, branch: branch) }
         }
         if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
             throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
         }
-        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
         let base = round.baseHeadOid
         guard try await offMain({ try ReviewCheckout.hasDiff(against: base, in: worktree) }) else {
             throw NothingToReview(reason: "Branch `\(branch)` has no change beyond the pull request's head `\(base)`, "
@@ -2426,8 +2427,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     private func startTriageIfSettled(_ watch: PRWatch, project: Project) async {
-        let settleMillis = Int64(max(project.settings.prFollowThrough.settleMinutes, 0)) * 60_000
-        let settled = Int64.nowMillis - (watch.lastFeedbackAt ?? watch.updatedAt) >= settleMillis
+        let settled = Int64.nowMillis >= watch.settleDeadline(settleMinutes: project.settings.prFollowThrough.settleMinutes)
             || (try? prWatches.hasUntriagedCheck(watchId: watch.id)) == true
         guard !watch.paused, settled, !isFollowThroughHeld(project: project) else { return }
         guard ((try? prWatches.untriagedItemCount(watchId: watch.id)) ?? 0) > 0 else {
@@ -2508,26 +2508,45 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// SPEC §13.1 checking: starts the round's reviewer and follow-up check under the settling holds,
-    /// then settles the round once both are in. A round that cannot be checked parks its watch.
+    /// then settles the round once both are in. A round that cannot be checked parks its watch; one whose
+    /// check never ran is retried at the next point, up to `unavailableChecksBeforePark` times, unless its
+    /// error is one no retry can fix.
     private func advanceCheck(_ watch: PRWatch, project: Project) async {
         guard let round = try? prWatches.currentRound(watchId: watch.id), let taskId = round.fixTaskId,
               let task = try? tasks.get(taskId), task.column == .review
         else { return }
         let held = isFollowThroughHeld(project: project)
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let manager = worktreeManager(for: project)
         do {
             if round.reviewVerdict == nil, try sessions.activeHolder(taskId: taskId) == nil {
-                let reviewers = try sessions.forTask(taskId).filter { $0.reviewHead != nil }.count
-                if reviewers > round.checkFailures {
+                let reviewers = try sessions.forTask(taskId).filter { $0.reviewHead != nil }
+                let neverRan = reviewers.filter { $0.stopReason?.hasPrefix(SessionTermination.setupFailedLead) == true }
+                if reviewers.count - neverRan.count > round.checkFailures {
                     try board.parkCheck(
                         watchId: watch.id, reason: "Round \(round.number)'s reviewer ended without a verdict."
                     )
                     return
+                }
+                if let last = reviewers.first, neverRan.contains(where: { $0.sessionId == last.sessionId }) {
+                    try board.recordUnavailableCheck(
+                        watchId: watch.id, tip: await roundTip(branch, manager: manager), counted: false,
+                        reason: "Round \(round.number)'s reviewer never started: \(last.stopReason ?? "")"
+                    )
+                    guard try prWatches.get(watch.id)?.state == .checking else { return }
                 }
                 if !held { try await startRoundReview(task, watch: watch) }
             }
             guard try prWatches.get(watch.id)?.state == .checking else { return }
             if let checkId = round.followupTaskId {
                 if let check = try tasks.get(checkId), check.column == .closed {
+                    if check.closedReason?.hasPrefix(SessionTermination.setupFailedLead) == true {
+                        try board.recordUnavailableCheck(
+                            watchId: watch.id, tip: await roundTip(branch, manager: manager), dropFollowupCheck: true,
+                            reason: "Round \(round.number)'s follow-up check never started: \(check.closedReason ?? "")"
+                        )
+                        return
+                    }
                     try board.parkCheck(
                         watchId: watch.id,
                         reason: "Round \(round.number)'s follow-up check ended before grading every item: "
@@ -2539,11 +2558,34 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try await spawnFollowupCheck(watch, round: round, project: project)
             }
             try board.settleCheck(watchId: watch.id)
+        } catch SupervisorError.capRefused, SupervisorError.shutdownOrdered {
+            return
         } catch {
             NSLog("PR follow-through: the check of %@ could not run: %@", watch.url, describe(error))
-            try? board.parkCheck(
-                watchId: watch.id, reason: "Round \(round.number)'s check could not run: \(describe(error))"
+            try? board.recordUnavailableCheck(
+                watchId: watch.id, tip: await roundTip(branch, manager: manager), retryable: Self.retryCanFix(error),
+                reason: "Round \(round.number)'s check could not run: \(describe(error))"
             )
+        }
+    }
+
+    private func roundTip(_ branch: String, manager: WorktreeManager) async -> PRRoundTip {
+        do {
+            guard let commit = try await offMain({ try manager.refCommit("refs/heads/\(branch)") }) else { return .gone }
+            return .commit(commit)
+        } catch {
+            return .unreadable(describe(error))
+        }
+    }
+
+    /// SPEC §13.1: a check that fails on configuration parks at once, since no later poll can start it.
+    private static func retryCanFix(_ error: Error) -> Bool {
+        switch error as? SupervisorError {
+        case .rosterAgentNotUsable, .serverNotRunning, .projectNotFound, .taskNotFound, .fixRoundNotFound,
+             .notAGitRepository:
+            return false
+        default:
+            return true
         }
     }
 

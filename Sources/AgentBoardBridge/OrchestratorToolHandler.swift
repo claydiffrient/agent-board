@@ -18,6 +18,7 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let roster: RosterStore
     private let notes: NoteTools
     private let comments: CommentTools
+    private let pullRequests: PRWatchTools
     private let control: any WorkerControl
     private let events: any BoardEventSink
 
@@ -36,6 +37,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         roster = RosterStore(db)
         notes = NoteTools(db: db)
         comments = CommentTools(db: db)
+        pullRequests = PRWatchTools(db: db)
         self.control = control
         self.events = events
     }
@@ -492,7 +494,7 @@ public final class OrchestratorToolHandler: ToolHandler {
                 required: ["pr_url", "body"]
             )
         ),
-    ] + NoteTools.orchestratorDescriptors
+    ] + PRWatchTools.descriptors + NoteTools.orchestratorDescriptors
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
         Self.descriptors
@@ -501,6 +503,9 @@ public final class OrchestratorToolHandler: ToolHandler {
     public func call(_ name: String, arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
         if Self.noteToolNames.contains(name) {
             return try notes.call(name, arguments: arguments, identity: identity)
+        }
+        if PRWatchTools.names.contains(name) {
+            return try pullRequests.call(name, arguments: arguments, identity: identity)
         }
         switch name {
         case "list_tasks": return try listTasks(arguments, identity: identity)

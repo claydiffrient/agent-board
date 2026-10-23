@@ -14,9 +14,19 @@ public struct PRGradeInput: Sendable, Equatable {
     }
 }
 
+/// A round branch's tip, as read for a check that never ran (SPEC §13.1).
+public enum PRRoundTip: Sendable, Equatable {
+    case commit(String)
+    case gone
+    /// git failed to read the branch, carrying its error; the round may still hold an unpushed commit.
+    case unreadable(String)
+}
+
 extension PRWatchStore {
     /// Failed checks in one round that park its watch (SPEC §13.1): the first two reopen the fixer.
     public static let failedChecksBeforePark = 3
+    /// Checks of one round that never ran, since the watch was last resumed, that park it (SPEC §13.1).
+    public static let unavailableChecksBeforePark = 3
 
     public func currentRound(watchId: String) throws -> PRRound? {
         try db.reader.read { db in
@@ -337,6 +347,72 @@ extension Board {
         }
     }
 
+    /// SPEC §13.1 checking: a check that never ran is not a failed check, and the watch stays checking for the
+    /// next point to retry it. Enough attempts, or one that no retry can fix (`retryable` false), park it with
+    /// its fix task kept in review; a gone branch abandons the round. Reviewers whose setup failed are counted
+    /// from their sessions, not by `counted`.
+    @discardableResult
+    public func recordUnavailableCheck(
+        watchId: String, tip: PRRoundTip, counted: Bool = true, dropFollowupCheck: Bool = false,
+        retryable: Bool = true, reason: String, now: Int64 = .nowMillis
+    ) throws -> PRWatchState? {
+        try db.writer.write { db in
+            guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .checking,
+                  var round = try PRWatchStore.round(db, watchId: watchId, number: watch.round),
+                  let taskId = round.fixTaskId
+            else { return nil }
+            if counted { round.unavailableChecks += 1 }
+            if dropFollowupCheck {
+                round.followupTaskId = nil
+                round.checkedHeadOid = nil
+            }
+            try round.update(db)
+            let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+            let unpushed: String
+            var readError = ""
+            switch tip {
+            case .gone:
+                try Self.parkRound(
+                    db, watch: &watch, round: round, outcome: .checkUnavailable,
+                    reason: "Round \(round.number)'s branch `\(branch)` is gone, so its fixes were never pushed. "
+                        + "Resume to fix its items in a new round.\n\n\(reason)",
+                    now: now
+                )
+                return watch.state
+            case .commit(let commit): unpushed = "Round \(round.number)'s commit \(commit) on `\(branch)` is unpushed"
+            case .unreadable(let error):
+                unpushed = "Round \(round.number)'s branch `\(branch)` could not be read, so its commit may be unpushed"
+                readError = "\n\n\(error)"
+            }
+            guard retryable else {
+                try Self.parkRound(
+                    db, watch: &watch, round: round, outcome: .checkUnavailable, closesFixTask: false,
+                    reason: "\(reason)\n\n\(unpushed). Fix the cause and resume to retry the check, or push or "
+                        + "discard it.\(readError)",
+                    now: now
+                )
+                return watch.state
+            }
+            let setupFailures = try Int.fetchOne(
+                db,
+                sql: """
+                SELECT COUNT(*) FROM agent_session
+                WHERE task_id = ? AND review_head IS NOT NULL AND stop_reason LIKE ? AND started_at >= ?
+                """,
+                arguments: [taskId, SessionTermination.setupFailedLead + "%", watch.resumedAt ?? 0]
+            ) ?? 0
+            let attempts = round.unavailableChecks + setupFailures
+            guard attempts >= PRWatchStore.unavailableChecksBeforePark else { return watch.state }
+            try Self.parkRound(
+                db, watch: &watch, round: round, outcome: .checkUnavailable, closesFixTask: false,
+                reason: "\(unpushed): its check could not run \(attempts) times. Push or discard it, or resume to "
+                    + "retry the check.\(readError)\n\nThe last: \(reason)",
+                now: now
+            )
+            return watch.state
+        }
+    }
+
     /// SPEC §13.1 parked: a fixing round whose last `failedSessionsBeforePark` fixer sessions each ended
     /// without a report parks, naming the last one's stop reason. A session wound down for a shutdown order
     /// is not a failure and does not break the run. Returns whether it parked.
@@ -368,12 +444,13 @@ extension Board {
         }
     }
 
+    /// A round parked with `closesFixTask` false keeps its fix task in review, so a resume can check it again.
     private static func parkRound(
         _ db: Database, watch: inout PRWatch, round: PRRound, outcome: PRRoundOutcome = .checkFailed,
-        reason: String, now: Int64
+        closesFixTask: Bool = true, reason: String, now: Int64
     ) throws {
         try PRWatchStore.endRound(db, watchId: watch.id, number: round.number, outcome: outcome, now: now)
-        for taskId in [round.fixTaskId, round.followupTaskId].compactMap({ $0 }) {
+        for taskId in [closesFixTask ? round.fixTaskId : nil, round.followupTaskId].compactMap({ $0 }) {
             guard let task = try Task.fetchOne(db, key: taskId), task.column != .done, task.column != .closed,
                   try SessionStore.activeHolder(db, taskId: taskId) == nil
             else { continue }

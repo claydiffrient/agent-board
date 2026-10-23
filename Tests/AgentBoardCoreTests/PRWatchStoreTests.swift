@@ -276,6 +276,65 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertNotNil(try store.beginTriageRound(watchId: watch.id, now: 6_000))
     }
 
+    /// SPEC §13.1: a round whose check never ran keeps its items through its park and Resume, since their
+    /// fixes are in its unpushed commit.
+    func testAResumedRoundWhoseCheckNeverRanIsCheckedAgainRatherThanSuperseded() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]))
+        try triage(f, watchId: watch.id, as: .fix)
+        let task = try XCTUnwrap(f.board.createFixRoundTask(watchId: watch.id, model: nil))
+        try f.tasks.move(task.id, to: .review)
+        try store.setState(.checking, watchId: watch.id)
+        for _ in 1..<PRWatchStore.unavailableChecksBeforePark {
+            XCTAssertEqual(try f.board.recordUnavailableCheck(watchId: watch.id, tip: .commit("f57a3f1c"), reason: "spawn failed"), .checking)
+        }
+        XCTAssertEqual(try f.board.recordUnavailableCheck(watchId: watch.id, tip: .commit("f57a3f1c"), reason: "spawn failed"), .parked)
+        let reason = try XCTUnwrap(store.get(watch.id)?.parkedReason)
+        XCTAssertTrue(reason.hasPrefix("Round 1's commit f57a3f1c on `agentboard/pr-7-r1` is unpushed"), reason)
+        XCTAssertEqual(try store.rounds(watchId: watch.id).map(\.outcome), [PRRoundOutcome.checkUnavailable.rawValue])
+        XCTAssertEqual(try store.rounds(watchId: watch.id).first?.checkFailures, 0)
+
+        let items = try store.items(watchId: watch.id)
+        XCTAssertEqual(try store.resume(watchId: watch.id)?.state, .checking)
+        XCTAssertEqual(try store.rounds(watchId: watch.id).map(\.outcome), [nil])
+        XCTAssertEqual(try store.items(watchId: watch.id).map(\.round), items.map(\.round))
+        XCTAssertEqual(try store.items(watchId: watch.id).map(\.fixTaskId), [task.id])
+    }
+
+    /// SPEC §13.1: reviewers whose setup failed count toward the park through their sessions, only those
+    /// started since the watch was last resumed.
+    func testTheThirdReviewerSetupFailureSinceResumeParksTheWatch() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]))
+        try triage(f, watchId: watch.id, as: .fix)
+        let task = try XCTUnwrap(f.board.createFixRoundTask(watchId: watch.id, model: nil))
+        try f.tasks.move(task.id, to: .review)
+        try store.setState(.checking, watchId: watch.id)
+        func setupFailed(at startedAt: Int64) throws -> PRWatchState? {
+            try f.sessions.insert(AgentSession(
+                sessionId: "setup-\(startedAt)", projectId: f.project.id, taskId: task.id, role: .worker,
+                cwd: "/tmp/review", state: .stopped, startedAt: startedAt,
+                stopReason: "\(SessionTermination.setupFailedLead) hook exited 1", reviewHead: "abc123"
+            ))
+            return try f.board.recordUnavailableCheck(
+                watchId: watch.id, tip: .commit("f57a3f1c"), counted: false, reason: "never started", now: startedAt
+            )
+        }
+        XCTAssertEqual(try setupFailed(at: 1_000), .checking)
+        XCTAssertEqual(try setupFailed(at: 2_000), .checking)
+        XCTAssertEqual(try setupFailed(at: 3_000), .parked)
+        XCTAssertEqual(try store.resume(watchId: watch.id, now: 4_000)?.state, .checking)
+
+        XCTAssertEqual(try setupFailed(at: 5_000), .checking)
+        XCTAssertEqual(try setupFailed(at: 6_000), .checking)
+        XCTAssertEqual(try setupFailed(at: 7_000), .parked)
+        let reason = try XCTUnwrap(store.get(watch.id)?.parkedReason)
+        XCTAssertTrue(reason.hasPrefix("Round 1's commit f57a3f1c on `agentboard/pr-7-r1` is unpushed: its check could not run 3 times"), reason)
+        XCTAssertEqual(try store.currentRound(watchId: watch.id)?.unavailableChecks, 0)
+    }
+
     func testAResumedWatchsNextFailedTriageDoesNotParkItAgain() throws {
         let f = try Fixture.make()
         let store = PRWatchStore(f.db)
