@@ -3947,6 +3947,23 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         shellConsoles.compactMapValues(\.shellPID)
     }
 
+    /// SPEC §8.7's console roots: each orchestrator console, the Coordinator's and each shell
+    /// console. Not on `WorkerSupervising`, for the same reason as `shellConsolePIDs`.
+    func consoleProcessRoots() -> [InventoryRoot] {
+        var roots = consoles.compactMap { projectId, console in
+            console.processPID.map {
+                InventoryRoot(pid: $0, owner: ProcessOwner(role: .orchestrator, projectId: projectId, sessionId: console.sessionId))
+            }
+        }
+        if let console = coordinatorConsoleInstance, let pid = console.processPID {
+            roots.append(InventoryRoot(pid: pid, owner: ProcessOwner(role: .coordinator, sessionId: console.sessionId)))
+        }
+        for (projectId, pid) in shellConsolePIDs() where pid > 0 {
+            roots.append(InventoryRoot(pid: pid, owner: ProcessOwner(role: .humanShell, projectId: projectId)))
+        }
+        return roots
+    }
+
     func shellConsole(projectId: String) throws -> ShellConsole {
         if let existing = shellConsoles[projectId] { return existing }
         guard try projects.get(projectId) != nil else { throw SupervisorError.projectNotFound(projectId) }

@@ -33,8 +33,9 @@ and an approval waiting is not idle. The page starts no observation of its own
 for that: it is handed the one `ProjectAttentionStore.observeAll` the sidebar
 already runs, so the two surfaces cannot disagree. Clicking anywhere on a card
 selects that project through the same write the sidebar uses, landing on Orchestrator and starting
-its console (§9) — which is the only way a console ever starts, so this page
-itself costs nothing.
+its console (§9) — which is the only way a console ever starts, so the Projects
+view costs nothing by itself; the Processes view below has a cost rule of its
+own.
 
 A **Coordinator** card sits above the project sections, showing the estimated
 spend of every Coordinator session (§8.2) and the same unread-replies dot as its
@@ -43,6 +44,40 @@ have spent anything shows its own total the same way, so the two read against
 each other. Both are all-time sums of `agent_session.est_cost_usd`, ended sessions
 included, and neither has a cap; the Coordinator total rides in the same
 statement as the working-session count, so the page still runs two.
+
+**Processes** — a **Projects | Processes** toggle under the headline switches
+the cards for a table of every process Agent Board launched or controls
+(§8.7), in the style of Activity Monitor's "All Processes, Hierarchically".
+Rows are grouped by owner: a project, then each owner within it (a task's
+worker or reviewer under the task's title, the orchestrator, a shell), then
+that owner's process tree indented beneath its root; the Coordinator and Agent
+Board are groups of their own, Agent Board last. Owner and group rows carry
+the sum of their processes' CPU and memory. The columns are Process, PID,
+Owner, CPU %, Memory, Uptime and Ports. CPU on a process's first reading is
+unknown and drawn as a dash, not 0. Clicking CPU % or Memory sorts by it and
+flattens the tree; **Show Hierarchy** restores it. A totals line under the
+table gives the process count, total CPU and total memory. The seven columns'
+ideal widths fit the 761pt minimum detail width without scrolling sideways
+(§10.1); a long command or owner truncates, with the full text as its tooltip.
+While the last `claude agents` read failed, the line under the table says
+**Session hosts unavailable** (§8.7).
+
+**Stop…** — in a process row's context menu, and as a button beside the
+totals line for the selected row. It plans first (§8.7): a refusal shows its
+reason under the totals and signals nothing. Otherwise a confirmation names
+the process and what will be signalled — the process and how many under it,
+SIGTERM then SIGKILL after two seconds, and its process group when that is
+signalled too — or, for a worker's or reviewer's host, that the session's own
+Stop runs instead. Confirming plans again against a fresh table, so a row that
+changed while the dialog was open is refused rather than signalled. Group and
+owner rows have no Stop. The outcome replaces the reason under the totals.
+
+The cost rule is the page's own: At a Glance always opens on Projects and the
+toggle is not remembered, so landing on the page never samples. The table
+samples every 2 seconds, off the main thread, only while it is on screen;
+switching back to Projects or leaving At a Glance cancels the sampler. A
+section on the page was rejected for that reason: it would be built, and so
+sampling, whenever the page is open, whether or not it was scrolled into view.
 
 **Shut Down** — a button beside the At a Glance headline, for the wind-down
 that quitting does not do on its own: workers are detached `claude --bg`
@@ -763,7 +798,8 @@ Measured at the minimum, rendered offscreen at 761×548 for a detail pane under
 the toolbar: At a Glance fits three card columns; Roster, Orchestrator, Notes and
 Coordinator lay out at their own minimums; the Task Board scrolls sideways
 through fixed 250pt columns, which it does at any width; and Status's session
-table fits without scrolling sideways, Actions included. A `Table` lays its
+table (Actions included) and the Processes table (§8.7) both fit without
+scrolling sideways. A `Table` lays its
 columns out at their *ideal* widths and scrolls when those overflow, and each
 column costs its width plus 17pt of intercell spacing, with 20pt more for the
 inset style. So the table has seven columns whose ideals come to 745pt: State
@@ -771,4 +807,7 @@ carries elapsed time under it, Last activity carries the last tool, and Spend
 draws the cost (with the cap's progress bar) while its token detail — counted
 tokens, the cap, cache reads — is the cell's tooltip. The 16pt left over is room
 for a legacy vertical scroller. Wider, the extra goes to Role, Task and Last
-activity; the other columns are capped.
+activity; the other columns are capped. The Processes table's seven columns
+(Process, PID, Owner, CPU %, Memory, Uptime, Ports) have ideals of 200, 52,
+120, 58, 64, 56 and 66, summing to 616pt — 755pt with the same spacing and
+inset, 6pt under the 761pt floor.

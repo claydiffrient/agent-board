@@ -31,13 +31,10 @@ public enum SessionProcessReaper {
     /// current descendants, minus anything protected (SPEC §8.5).
     static func targets(_ scope: SessionProcessScope, table: ProcessTable) -> Set<PIDIdentity> {
         var roots = Set(scope.tree.filter { table.identity(of: $0.pid) == $0 }.map(\.pid))
-        if let worktree = scope.worktree.map(canonical) {
-            for (pid, entry) in table.entries where entry.ppid == 1 && entry.startedAtMicros >= scope.startedAtMicros {
-                guard let fact = LibProc.facts(pid), !fact.hasControllingTerminal,
-                      let cwd = fact.cwd.map(canonical), cwd == worktree || cwd.hasPrefix(worktree + "/")
-                else { continue }
-                roots.insert(pid)
-            }
+        if let worktree = scope.worktree {
+            roots.formUnion(worktreeOrphans(
+                in: table, worktree: worktree, startedAtMicros: scope.startedAtMicros, facts: LibProc.facts
+            ))
         }
         var all = roots
         for root in roots { all.formUnion(table.descendants(of: root)) }
@@ -112,6 +109,25 @@ public enum SessionProcessReaper {
                 LibProc.startedAtMicros($0) == identity.startedAtMicros && $0.pbi_status != UInt32(SZOMB)
             } ?? false
         }
+    }
+
+    /// SPEC §8.5's second rule: reparented to launchd, no controlling terminal, cwd inside
+    /// `worktree`, started no earlier than the session. The process inventory (SPEC §8.7) uses it too.
+    public static func worktreeOrphans(
+        in table: ProcessTable,
+        worktree: String,
+        startedAtMicros: Int64,
+        facts: (pid_t) -> ProcessFacts?
+    ) -> Set<pid_t> {
+        let worktree = canonical(worktree)
+        var found: Set<pid_t> = []
+        for (pid, entry) in table.entries where entry.ppid == 1 && entry.startedAtMicros >= startedAtMicros {
+            guard let fact = facts(pid), !fact.hasControllingTerminal,
+                  let cwd = fact.cwd.map(canonical), cwd == worktree || cwd.hasPrefix(worktree + "/")
+            else { continue }
+            found.insert(pid)
+        }
+        return found
     }
 
     private static func canonical(_ path: String) -> String {

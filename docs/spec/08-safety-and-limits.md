@@ -490,3 +490,120 @@ stopped, because acting on it would let the listing add a target.
 run and shows its report in a window (§10). The dry run stops nothing and marks
 nothing; `WorkerSupervising` exposes only the dry run, so no surface can reach
 the real one.
+
+### 8.7 The process inventory
+
+`ProcessInventory` lists every process Agent Board launched or controls and
+names its owner. It decides from a `ProcessTable` snapshot, the roots its
+caller passes, and per-process facts (cwd, controlling tty, whether the
+executable is `claude`), so the rules below run without real processes.
+
+**Roots.** Each root is a pid and the owner its tree belongs to:
+
+- each session's `claude` host that `claude agents` lists, matched to its
+  `agent_session` row by session id or short id as the reaper matches it,
+  owned by its session, task and project with the role worker, reviewer,
+  orchestrator or Coordinator. A worker row is a reviewer when it records the
+  checkout it was spawned on (`reviewHead`); its `role` says worker. A host
+  with no row is not a root (`SessionInventoryRoots`);
+- each orchestrator console's process, owned by its project and session with
+  the role orchestrator; the Coordinator's console process, owned by its
+  session with the role Coordinator and no project; and each project's shell
+  console, owned by its project with the role human shell
+  (`WorkerSupervisor.consoleProcessRoots`);
+- each terminal window the app opened — a worktree shell, a `claude attach`
+  and a PR verify shell — which registers its child with the
+  `TerminalProcessRegistry` while it runs, owned by its project (and session
+  and task, where it has one) with the role human shell;
+- the app's own pid, owned by Agent Board. `LiveProcessSampler` always adds
+  it. Board-run commands are Foundation `Process` children of the app, so
+  `git worktree add` and its hook, `BoundedCommand` verification runs and the
+  `ProcessRunner` helpers (git, gh, account-usage refresh) are in its tree.
+
+An ended session with no host is passed with no pid and its worktree, so its
+orphans are found — but only while that worktree is still on disk and no
+active session or listed host occupies it. A shared-checkout session has no
+worktree path and is never claimed. `claude agents` launches a process, so the
+session roots are rebuilt at most every 10 seconds (`SessionProcessRoots`);
+the console and terminal roots are read on every sample. A failed `claude
+agents` read is not cached: that sample has no session host, says so
+(`SampledInventory.sessionHostsUnavailable`), and the next sample reads again.
+A host missing from the inventory cannot be stopped from it, which is the safe
+direction.
+
+A terminal window on the Coordinator's session registers no project: the
+Coordinator's row has an empty `project_id`, which the owner records as none,
+as `SessionInventoryRoots` does.
+
+**Attribution.** Every process goes to the nearest root on its parent chain.
+The consoles and shells are children of the app, so their trees go to their
+own owners, and only what is left under the app is Agent Board's. A process
+whose chain reaches no root, or reaches pid 1 first, is not listed. Nothing is
+matched by name.
+
+**Worktree orphans.** §8.5's second rule, the same function the reaper calls:
+reparented to launchd, no controlling terminal, cwd inside the session's own
+worktree, started no earlier than the session. Its descendants follow it. A
+`claude` executable is never an orphan. The rule is off for a shared checkout
+and while another live session shares the worktree, as in §8.5. When two
+claims cover the same worktree, the orphan goes to the latest session that
+started before it.
+
+**Ports.** Listening ports come from the Ports sweep's last rows
+(`ListeningPortModel`, §10) and attach to the pid the sweep gave the row: the
+process that bound the socket. The process view asks for one sweep when it
+appears; otherwise the rows are as fresh as the sweep's hourly refresh.
+
+**Usage.** CPU % is the change in a process's total user plus system time
+(`proc_pidinfo` `PROC_PIDTASKINFO`) over the wall time between two readings,
+where 100% is one core. Those times are Mach ticks, not nanoseconds, and are
+converted with `mach_timebase_info`. Resident memory comes from the same call.
+Readings are keyed by `PIDIdentity`, so a reused pid starts with no history.
+A process's first reading shows CPU as unknown, not 0. Wall time is
+`CLOCK_UPTIME_RAW`, which stops while the Mac sleeps.
+
+**Cost.** Sampling runs only while its stream is iterated (`ProcessSampling`),
+off the main thread. Cancelling the iterating task stops it, so the view costs
+nothing off screen (§10). The stream keeps only the newest sample, so a slow
+view never works through stale ones. A process whose reading fails once has no
+usage that sample and starts again with no history, so its CPU reads unknown
+on the next one.
+
+**Stopping a process.** The process view's Stop (§10) decides what it may
+signal with `ProcessStopPlanner`, from a process table and a `claude agents`
+listing both read when the human asks, never from the sample the row was
+drawn with. It refuses, signalling nothing and showing the reason, when:
+
+- the row is Agent Board's own pid or any ancestor of it;
+- the row, or anything below it, is a `claude` process other than the row's
+  own session host — another session's host, or a `claude` executable the
+  listing did not name. A failed listing names none, so every `claude` below
+  the row refuses the stop;
+- the row is an orchestrator's or the Coordinator's host, which runs in its
+  console and is ended there;
+- the row's `PIDIdentity` is not in the current inventory, or the live table
+  now gives that pid a different start time;
+- the row, or anything below it, belongs to another user (`pbi_uid`).
+
+A worker's or reviewer's host — the root of its owner's tree, with the session
+id the listing gives that pid — is never signalled. It goes through the
+session Stop (`WorkerSupervisor.stop(sessionId:)`): `claude stop`, the tree
+reaped as §8.5 does, the row stopped and its grants revoked by
+`Board.terminate`.
+
+Anything else stops as a tree: the row and every descendant, SIGTERM, then
+SIGKILL to whatever is still alive after `PortStopper`'s two-second grace.
+Each round re-reads the table, adds descendants forked since, and skips a pid
+whose start time changed. Its process group is signalled too only when the row
+leads that group and `PortStopPlanner` finds it holds nothing protected (the
+board, its ancestors and group, every listed host) and no `claude` or other
+user's process; the group reaches descendants already reparented to launchd,
+which the parent walk no longer finds. A group led by the row's parent is not
+signalled, unlike a port's stop: the row is a tree, and the parent is a row of
+its own.
+
+Every stop is recorded: a `note` progress row on the owning task; for a
+project-owned process with no task (a shell, an orchestrator console's child),
+a `decision` report on the project; for the Coordinator's, a `decision` report
+on its queue. Agent Board's own helpers belong to no project and are logged to
+the unified log (`AgentBoard`, category `process-stop`).

@@ -204,7 +204,11 @@ struct WorktreeShellWindow: View {
                 arguments: [],
                 currentDirectory: command.directory,
                 environment: command.environment,
-                execName: command.execName
+                execName: command.execName,
+                inventory: session.map {
+                    (ProcessOwner(role: .humanShell, projectId: $0.projectId, taskId: $0.taskId, sessionId: $0.sessionId),
+                     env.terminalProcesses)
+                }
             ) { code in
                 exitCode = code.map(ShellConsole.exitCode(fromWaitStatus:)) ?? -1
             }

@@ -42,7 +42,7 @@ Subsections stay in their parent's file. Numbers do not change when a title does
   caps and what a breach does, and the guards no prompt can talk past.
   §8.1 Shutdown order · §8.2 Cross-project authority boundary · §8.3 Sleep
   prevention · §8.4 Shared-checkout file locks · §8.5 Session end reaps the
-  process tree
+  process tree · §8.6 The leaked-agent sweep · §8.7 The process inventory
 
 - **§9 [Orchestrator](docs/spec/09-orchestrator.md)** — the per-project
   orchestrator session: how it starts, what it is told, how it hears back.
