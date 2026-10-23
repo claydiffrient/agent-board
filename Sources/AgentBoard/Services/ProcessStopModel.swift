@@ -66,12 +66,15 @@ final class ProcessStopModel {
             switch try await plan(row, in: inventory) {
             case .session(let sessionId):
                 try await supervisor.stop(sessionId: sessionId)
-                log("Stopped \(Self.name(process)), its session's claude host, from the process view.", for: process.owner)
+                log(
+                    "Stopped \(Self.name(process)), its session's claude host, from the process view.",
+                    pids: [process.pid], for: process.owner
+                )
                 message = "Stopped the session"
             case .tree(let tree):
                 let report = await stopper.stop(tree)
                 let text = Self.summary(process, report, grace: stopper.grace)
-                log(text, for: process.owner)
+                log(text, pids: Set(report.signalled.map(\.pid)), for: process.owner)
                 message = report.survivors.isEmpty ? "Stopped" : "\(report.survivors.count) still running after SIGKILL"
             }
         } catch {
@@ -80,16 +83,25 @@ final class ProcessStopModel {
     }
 
     /// Every task-owned stop goes on the task's progress, anything else project-owned to the
-    /// project's report queue as a `decision`; the app's own helpers have no board home.
-    private func log(_ text: String, for owner: ProcessOwner) {
-        if let taskId = owner.taskId {
-            _ = try? ProgressStore(db).append(taskId: taskId, sessionId: nil, kind: .note, text: text)
-        } else if let projectId = owner.projectId {
-            _ = try? ReportStore(db).insert(projectId: projectId, taskId: nil, sessionId: nil, kind: .decision, body: text)
-        } else if owner.role == .coordinator {
-            _ = try? ReportStore(db).insertForCoordinator(sessionId: nil, kind: .decision, body: text)
-        } else {
-            logger.notice("\(text, privacy: .public)")
+    /// project's report queue as a `decision`; the app's own helpers have no board home. A write
+    /// that fails here leaves the stop with no record anywhere, so the failure itself goes to the
+    /// logger rather than being swallowed.
+    private func log(_ text: String, pids: Set<pid_t>, for owner: ProcessOwner) {
+        do {
+            if let taskId = owner.taskId {
+                _ = try ProgressStore(db).append(taskId: taskId, sessionId: nil, kind: .note, text: text)
+            } else if let projectId = owner.projectId {
+                _ = try ReportStore(db).insert(projectId: projectId, taskId: nil, sessionId: nil, kind: .decision, body: text)
+            } else if owner.role == .coordinator {
+                _ = try ReportStore(db).insertForCoordinator(sessionId: nil, kind: .decision, body: text)
+            } else {
+                logger.notice("\(text, privacy: .public)")
+            }
+        } catch {
+            let pidList = pids.sorted().map(String.init).joined(separator: ", ")
+            logger.error(
+                "stop signalled pids [\(pidList, privacy: .public)] but could not be recorded: \(String(describing: error), privacy: .public)"
+            )
         }
     }
 
