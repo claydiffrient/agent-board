@@ -8,8 +8,11 @@ public enum PRRoundOutcome: String, Sendable, CaseIterable, Equatable, DatabaseV
     case triageFailed = "triage_failed"
     /// A shutdown order stopped the triage. Retried, never counted as a failure.
     case interrupted
-    /// The round's check failed `failedChecksBeforePark` times, or could not run, and the watch parked.
+    /// The round's check failed `failedChecksBeforePark` times and the watch parked.
     case checkFailed = "check_failed"
+    /// The round's check never ran `unavailableChecksBeforePark` times, or its branch was gone, and the watch
+    /// parked with the round's commit unpushed. Not a failed check (SPEC §13.1 checking).
+    case checkUnavailable = "check_unavailable"
     /// Publishing fast-forwarded the round onto the pull request's head.
     case published
     /// The pull request's head moved under the round, so nothing was pushed (SPEC §13.1 stale).

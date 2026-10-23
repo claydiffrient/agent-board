@@ -131,7 +131,8 @@ triage.
   settling, so the page shows the restart under In progress until then.
 - **parked** *(phase 2 for the forked case and failed triages; phase 3 for a
   stacked PR, a round's third failed check, and a refused publish; phase 4 for the round-cap and fixer cases)* — reached
-  when the round cap is hit, a round fails its check three times, three
+  when the round cap is hit, a round fails its check three times, a round's
+  check never runs three times or its branch is gone, three
   triages (phase 2) or fixer sessions fail in a row, the PR is stacked (its base is not the
   project's default branch and the stack needs a restack the human must do),
   or the PR is from a fork. Waits for the human to Resume or Stop watching
@@ -314,7 +315,8 @@ holds:
   the loop, so anything but an agent — a person, accept without review, or a
   named agent the project cannot use — parks the watch with the reason. The
   agent is recorded as the task's reviewer and spawned with reviewer scope in
-  the fixer's own worktree on the round branch, its review base
+  the fixer's own worktree on the round branch, recreated from that branch when
+  it is gone, its review base
   `base_head_oid`, so it reads `git diff <base_head_oid>...HEAD`; its model is
   `roles.reviewer.model`, else the agent's, else the project's default. Its
   prompt adds that accepting lets Agent Board push the round with no person in
@@ -324,7 +326,8 @@ holds:
   `review_findings`) and end its session; neither moves the task. A round
   branch with no change beyond `base_head_oid` is reopened on the spot with
   that reason, with no reviewer spawned. A reviewer session that ends without
-  a verdict parks the watch; one left idle without one is raised as §5.1 says.
+  a verdict parks the watch, unless its setup failed, which is a check that
+  never ran (below); one left idle without one is raised as §5.1 says.
 - **The follow-up check.** When the round has items to grade, a synthetic task
   of origin `followup_check` is created and recorded in `followup_task_id`
   with the round branch's tip as `checked_head_oid`, and a session holding a
@@ -337,7 +340,8 @@ holds:
   `not_fixed`, `moot` or `needs_author` — giving evidence for each. Once
   every item has a grade its task goes to `done` and its checkout is removed,
   as a finished triage's is. It is never assigned by hand or resumed, and one
-  that ends any other way closes its task and parks the watch; a shutdown order
+  that ends any other way closes its task and parks the watch, unless its setup
+  failed, which clears `followup_task_id` as a check that never ran (below); a shutdown order
   stops it at delivery and clears `followup_task_id`, so a fresh one starts
   once the order lifts.
 
@@ -366,8 +370,32 @@ show only that line: "Round 8 failed its check 3 times: item 47 not fixed
 (Rename the helper)", naming up to three items by id, each with its grade and
 the first line of triage's approach (never the comment, which is untrusted),
 and "the reviewer reopened it" when it did. The last findings follow after a
-blank line. A check that cannot start — a spawn that fails, a worktree that is
-gone — parks the watch the same way, with the error.
+blank line.
+
+A check that never ran is not a failed check and never counts in
+`check_failures`. That is a reviewer or follow-up check whose spawn throws or
+whose setup fails, or one that cannot start for a reason a later poll may
+clear: a worktree that cannot be recreated, a git failure, a checkout still
+held or being set up. A §8 cap or a shutdown order is a hold instead. The watch
+stays checking and the next poll retries the half that never ran, counting
+each attempt in `unavailable_checks` (a reviewer whose setup failed counts
+through its session). An attempt counts even when git cannot read the round
+branch's tip. The third since the watch was last resumed ends the round with
+outcome `check_unavailable`, keeps its fix task in review, and parks the watch
+with a `parked_reason` whose first line names the unpushed commit and its
+branch — "Round N's commit <sha> on `<branch>` is unpushed", or "Round N's
+branch `<branch>` could not be read" when the tip could not be read — so the
+author can push or discard it. A check that fails on configuration no retry can
+fix — a roster agent the project cannot use, the board's server not running,
+the project, the fix task or its round gone, a repository that is not git —
+parks the same way on its first attempt, its own error as the first line of
+`parked_reason`. A round branch that is gone ends the round the same way at
+once, closing its fix task, since nothing is left to push. Until a round
+pushes or is abandoned, no later round takes its items: their fixes are in its
+unpushed commit. The watch does not leave checking while it retries, and
+Resume (§13.4) sends a `check_unavailable` round whose fix task is still in
+review back to checking with its count cleared, rather than moving its items
+on to a new round.
 
 **Publishing (phase 3).** The one push Agent Board makes without an approval
 (§13.5). The next poll re-reads the PR with
@@ -664,7 +692,9 @@ on at all.
   stamps `resumed_at`, which restarts both the round cap and the failed-session
   streak, so a resumed watch's next single failure does not park it again. Each
   open `fix` item moves to the round after the watch's, so the next round takes
-  it up without a fresh triage. Stop watching (`PRWatchStore.stopWatching`)
+  it up without a fresh triage. A watch parked on a `check_unavailable` round
+  whose fix task is still in review goes back to checking instead, reopening
+  that round and keeping its items (§13.1). Stop watching (`PRWatchStore.stopWatching`)
   dismisses the open items and moves the watch to stopped (§13.1). A stale row
   shows "restarted: head moved" while it waits for the next poll.
 - **Refresh (phase 4).** Each group's header has a **Refresh** button that
@@ -859,8 +889,8 @@ twice for one transition.
 The body is two lines: `#<n> <title> — <url>`, then `<state>: <reason>`, the
 reason one line of at most 200 characters. It never carries a comment body, a
 CI log or a reply, which are untrusted and long; a decision's question is
-triage's own wording. A round that ends `check_failed` or `publish_failed`
-parks, and that park is its report; `triage_failed`, `interrupted` and
+triage's own wording. A round that ends `check_failed`, `check_unavailable` or
+`publish_failed` parks, and that park is its report; `triage_failed`, `interrupted` and
 `frozen` rounds report nothing of their own.
 
 The banners' gate applies: a paused watch, or one in a project with
