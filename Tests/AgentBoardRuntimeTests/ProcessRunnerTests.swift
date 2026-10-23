@@ -7,8 +7,6 @@ final class ProcessRunnerTests: XCTestCase {
     /// One call per core is enough to starve a stderr reader that waits on a dispatch queue: every
     /// call then sat out `pipeDrainTimeout` and threw, as a metering tick on a 3-core CI runner did.
     func testAsManyConcurrentRunsAsCoresAllReturnBothStreams() async throws {
-        // Resolved before any burst, as AppComposition does at launch; its lookup starves the same way.
-        _ = LoginShellPath.resolved
         try await assertBurstReturnsBothStreams {
             try ProcessRunner.run(executable: Self.shell, arguments: ["-c", "echo out; echo err >&2"])
         }
@@ -17,7 +15,6 @@ final class ProcessRunnerTests: XCTestCase {
     /// The timed variant starved the same way, but past its grace it returned empty output instead
     /// of throwing, so `claude agents --json --all` read as no agents.
     func testAsManyConcurrentTimedRunsAsCoresAllReturnBothStreams() async throws {
-        _ = LoginShellPath.resolved
         try await assertBurstReturnsBothStreams {
             try ProcessRunner.run(executable: Self.shell, arguments: ["-c", "echo out; echo err >&2"], timeout: 30)
         }
