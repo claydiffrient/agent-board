@@ -58,6 +58,18 @@ flattens the tree; **Show Hierarchy** restores it. A totals line under the
 table gives the process count, total CPU and total memory. The seven columns'
 ideal widths fit the 761pt minimum detail width without scrolling sideways
 (§10.1); a long command or owner truncates, with the full text as its tooltip.
+While the last `claude agents` read failed, the line under the table says
+**Session hosts unavailable** (§8.7).
+
+**Stop…** — in a process row's context menu, and as a button beside the
+totals line for the selected row. It plans first (§8.7): a refusal shows its
+reason under the totals and signals nothing. Otherwise a confirmation names
+the process and what will be signalled — the process and how many under it,
+SIGTERM then SIGKILL after two seconds, and its process group when that is
+signalled too — or, for a worker's or reviewer's host, that the session's own
+Stop runs instead. Confirming plans again against a fresh table, so a row that
+changed while the dialog was open is refused rather than signalled. Group and
+owner rows have no Stop. The outcome replaces the reason under the totals.
 
 The cost rule is the page's own: At a Glance always opens on Projects and the
 toggle is not remembered, so landing on the page never samples. The table

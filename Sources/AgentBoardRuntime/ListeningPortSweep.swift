@@ -89,12 +89,15 @@ public struct ProcessTable: Sendable {
         /// `kill(-n, …)` addresses the group whose id is `n`, so a stop has to know this before it
         /// can signal anything wider than a single process.
         public let pgid: pid_t
+        /// The effective uid; nil when unknown, which a stop treats as another user's.
+        public let uid: uid_t?
 
-        public init(ppid: pid_t, command: String, startedAtMicros: Int64 = 0, pgid: pid_t = 0) {
+        public init(ppid: pid_t, command: String, startedAtMicros: Int64 = 0, pgid: pid_t = 0, uid: uid_t? = nil) {
             self.ppid = ppid
             self.command = command
             self.startedAtMicros = startedAtMicros
             self.pgid = pgid
+            self.uid = uid
         }
     }
 
@@ -117,7 +120,8 @@ public struct ProcessTable: Sendable {
                 ppid: pid_t(bitPattern: info.pbi_ppid),
                 command: LibProc.command(info),
                 startedAtMicros: LibProc.startedAtMicros(info),
-                pgid: pid_t(bitPattern: info.pbi_pgid)
+                pgid: pid_t(bitPattern: info.pbi_pgid),
+                uid: info.pbi_uid
             )
         }
         return ProcessTable(entries: entries)

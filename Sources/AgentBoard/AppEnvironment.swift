@@ -35,6 +35,7 @@ final class AppEnvironment {
     /// shows as an empty table.
     let processSampler: (any ProcessSampling)?
     let terminalProcesses: TerminalProcessRegistry
+    let processStops: ProcessStopModel
 
     var roster: RosterStore { RosterStore(db, definitions: agentDefinitions) }
 
@@ -48,7 +49,8 @@ final class AppEnvironment {
         agentDefinitions: AgentDefinitionDirectories = .none,
         gh: any GhRunning = SystemGh(),
         processSampler: (any ProcessSampling)? = nil,
-        terminalProcesses: TerminalProcessRegistry? = nil
+        terminalProcesses: TerminalProcessRegistry? = nil,
+        processStops: ProcessStopModel? = nil
     ) {
         self.db = db
         self.supervisor = supervisor
@@ -64,5 +66,6 @@ final class AppEnvironment {
         self.gh = gh
         self.processSampler = processSampler
         self.terminalProcesses = terminalProcesses ?? TerminalProcessRegistry()
+        self.processStops = processStops ?? ProcessStopModel(db: db, supervisor: supervisor)
     }
 }

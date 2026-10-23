@@ -177,11 +177,27 @@ public struct SampledInventory: Sendable, Equatable {
     /// Missing for a process whose task info could not be read.
     public let usage: [PIDIdentity: ProcessUsage]
     public let sampledAt: Date
+    /// `claude agents` could not be read, so no session host is in this sample.
+    public let sessionHostsUnavailable: Bool
 
-    public init(inventory: ProcessInventory, usage: [PIDIdentity: ProcessUsage], sampledAt: Date) {
+    public init(
+        inventory: ProcessInventory, usage: [PIDIdentity: ProcessUsage], sampledAt: Date,
+        sessionHostsUnavailable: Bool = false
+    ) {
         self.inventory = inventory
         self.usage = usage
         self.sampledAt = sampledAt
+        self.sessionHostsUnavailable = sessionHostsUnavailable
+    }
+}
+
+public struct InventoryRootReading: Sendable, Equatable {
+    public var roots: [InventoryRoot]
+    public var sessionHostsUnavailable: Bool
+
+    public init(roots: [InventoryRoot], sessionHostsUnavailable: Bool = false) {
+        self.roots = roots
+        self.sessionHostsUnavailable = sessionHostsUnavailable
     }
 }
 
@@ -192,12 +208,12 @@ public protocol ProcessSampling: Sendable {
 }
 
 public struct LiveProcessSampler: ProcessSampling {
-    private let roots: @Sendable () async -> [InventoryRoot]
+    private let roots: @Sendable () async -> InventoryRootReading
     private let ports: @Sendable () async -> [ListeningPort]
 
     /// The app's own pid is always a root, owned by Agent Board; `roots` supplies everything else.
     public init(
-        roots: @escaping @Sendable () async -> [InventoryRoot],
+        roots: @escaping @Sendable () async -> InventoryRootReading,
         ports: @escaping @Sendable () async -> [ListeningPort] = { [] }
     ) {
         self.roots = roots
@@ -213,7 +229,10 @@ public struct LiveProcessSampler: ProcessSampling {
                 while !_Concurrency.Task.isCancelled {
                     let current = await roots()
                     let listening = await ports()
-                    continuation.yield(Self.sample(roots: current, ports: listening, sampler: &sampler))
+                    continuation.yield(Self.sample(
+                        roots: current.roots, ports: listening, sampler: &sampler,
+                        sessionHostsUnavailable: current.sessionHostsUnavailable
+                    ))
                     try? await _Concurrency.Task.sleep(for: interval)
                 }
                 continuation.finish()
@@ -225,7 +244,8 @@ public struct LiveProcessSampler: ProcessSampling {
     public static func sample(
         roots: [InventoryRoot],
         ports: [ListeningPort],
-        sampler: inout ProcessUsageSampler
+        sampler: inout ProcessUsageSampler,
+        sessionHostsUnavailable: Bool = false
     ) -> SampledInventory {
         let inventory = ProcessInventory.build(
             table: ProcessTable.current(),
@@ -238,7 +258,9 @@ public struct LiveProcessSampler: ProcessSampling {
             if let reading = LibProc.taskReading(process.pid) { readings[process.identity] = reading }
         }
         let usage = sampler.sample(readings, atNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW))
-        return SampledInventory(inventory: inventory, usage: usage, sampledAt: Date())
+        return SampledInventory(
+            inventory: inventory, usage: usage, sampledAt: Date(), sessionHostsUnavailable: sessionHostsUnavailable
+        )
     }
 }
 

@@ -480,7 +480,15 @@ orphans are found — but only while that worktree is still on disk and no
 active session or listed host occupies it. A shared-checkout session has no
 worktree path and is never claimed. `claude agents` launches a process, so the
 session roots are rebuilt at most every 10 seconds (`SessionProcessRoots`);
-the console and terminal roots are read on every sample.
+the console and terminal roots are read on every sample. A failed `claude
+agents` read is not cached: that sample has no session host, says so
+(`SampledInventory.sessionHostsUnavailable`), and the next sample reads again.
+A host missing from the inventory cannot be stopped from it, which is the safe
+direction.
+
+A terminal window on the Coordinator's session registers no project: the
+Coordinator's row has an empty `project_id`, which the owner records as none,
+as `SessionInventoryRoots` does.
 
 **Attribution.** Every process goes to the nearest root on its parent chain.
 The consoles and shells are children of the app, so their trees go to their
@@ -515,3 +523,42 @@ nothing off screen (§10). The stream keeps only the newest sample, so a slow
 view never works through stale ones. A process whose reading fails once has no
 usage that sample and starts again with no history, so its CPU reads unknown
 on the next one.
+
+**Stopping a process.** The process view's Stop (§10) decides what it may
+signal with `ProcessStopPlanner`, from a process table and a `claude agents`
+listing both read when the human asks, never from the sample the row was
+drawn with. It refuses, signalling nothing and showing the reason, when:
+
+- the row is Agent Board's own pid or any ancestor of it;
+- the row, or anything below it, is a `claude` process other than the row's
+  own session host — another session's host, or a `claude` executable the
+  listing did not name. A failed listing names none, so every `claude` below
+  the row refuses the stop;
+- the row is an orchestrator's or the Coordinator's host, which runs in its
+  console and is ended there;
+- the row's `PIDIdentity` is not in the current inventory, or the live table
+  now gives that pid a different start time;
+- the row, or anything below it, belongs to another user (`pbi_uid`).
+
+A worker's or reviewer's host — the root of its owner's tree, with the session
+id the listing gives that pid — is never signalled. It goes through the
+session Stop (`WorkerSupervisor.stop(sessionId:)`): `claude stop`, the tree
+reaped as §8.5 does, the row stopped and its grants revoked by
+`Board.terminate`.
+
+Anything else stops as a tree: the row and every descendant, SIGTERM, then
+SIGKILL to whatever is still alive after `PortStopper`'s two-second grace.
+Each round re-reads the table, adds descendants forked since, and skips a pid
+whose start time changed. Its process group is signalled too only when the row
+leads that group and `PortStopPlanner` finds it holds nothing protected (the
+board, its ancestors and group, every listed host) and no `claude` or other
+user's process; the group reaches descendants already reparented to launchd,
+which the parent walk no longer finds. A group led by the row's parent is not
+signalled, unlike a port's stop: the row is a tree, and the parent is a row of
+its own.
+
+Every stop is recorded: a `note` progress row on the owning task; for a
+project-owned process with no task (a shell, an orchestrator console's child),
+a `decision` report on the project; for the Coordinator's, a `decision` report
+on its queue. Agent Board's own helpers belong to no project and are logged to
+the unified log (`AgentBoard`, category `process-stop`).

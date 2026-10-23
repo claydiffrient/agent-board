@@ -32,7 +32,10 @@ struct TerminalWindow: View {
                         currentDirectory: session.cwd,
                         environment: environment,
                         inventory: (
-                            ProcessOwner(role: .humanShell, projectId: session.projectId, taskId: session.taskId, sessionId: session.sessionId),
+                            ProcessOwner(
+                                role: .humanShell, projectId: session.projectId.isEmpty ? nil : session.projectId,
+                                taskId: session.taskId, sessionId: session.sessionId
+                            ),
                             env.terminalProcesses
                         )
                     ) { code in
