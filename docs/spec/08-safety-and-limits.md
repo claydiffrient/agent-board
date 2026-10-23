@@ -448,3 +448,55 @@ stopped, because acting on it would let the listing add a target.
 run and shows its report in a window (§10). The dry run stops nothing and marks
 nothing; `WorkerSupervising` exposes only the dry run, so no surface can reach
 the real one.
+
+### 8.7 The process inventory
+
+`ProcessInventory` lists every process Agent Board launched or controls and
+names its owner. It decides from a `ProcessTable` snapshot, the roots its
+caller passes, and per-process facts (cwd, controlling tty, whether the
+executable is `claude`), so the rules below run without real processes.
+
+**Roots.** Each root is a pid and the owner its tree belongs to:
+
+- each live session's `claude` host, from `claude agents`, owned by its
+  session, task and project with the role worker, reviewer, orchestrator or
+  Coordinator;
+- each orchestrator console's and the Coordinator's process;
+- each human shell or terminal the app opened (`ShellConsole`, a worktree
+  shell), owned by its project with the role human shell;
+- the app's own pid, owned by Agent Board. `LiveProcessSampler` always adds
+  it. Board-run commands are Foundation `Process` children of the app, so
+  `git worktree add` and its hook, `BoundedCommand` verification runs and the
+  `ProcessRunner` helpers (git, gh, account-usage refresh) are in its tree.
+
+A session whose host is gone is still passed, with no pid and its worktree,
+so its orphans are found.
+
+**Attribution.** Every process goes to the nearest root on its parent chain.
+The consoles and shells are children of the app, so their trees go to their
+own owners, and only what is left under the app is Agent Board's. A process
+whose chain reaches no root, or reaches pid 1 first, is not listed. Nothing is
+matched by name.
+
+**Worktree orphans.** §8.5's second rule, the same function the reaper calls:
+reparented to launchd, no controlling terminal, cwd inside the session's own
+worktree, started no earlier than the session. Its descendants follow it. A
+`claude` executable is never an orphan. The rule is off for a shared checkout
+and while another live session shares the worktree, as in §8.5. When two
+claims cover the same worktree, the orphan goes to the latest session that
+started before it.
+
+**Ports.** Listening ports come from the Ports sweep's rows (§10) and attach
+to the pid the sweep gave the row: the process that bound the socket.
+
+**Usage.** CPU % is the change in a process's total user plus system time
+(`proc_pidinfo` `PROC_PIDTASKINFO`) over the wall time between two readings,
+where 100% is one core. Those times are Mach ticks, not nanoseconds, and are
+converted with `mach_timebase_info`. Resident memory comes from the same call.
+Readings are keyed by `PIDIdentity`, so a reused pid starts with no history.
+A process's first reading shows CPU as unknown, not 0. Wall time is
+`CLOCK_UPTIME_RAW`, which stops while the Mac sleeps.
+
+**Cost.** Sampling runs only while its stream is iterated (`ProcessSampling`).
+Cancelling the iterating task stops it, so the view costs nothing off screen
+(§10).
