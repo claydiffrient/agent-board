@@ -9,6 +9,36 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.7.0 — 2026-10-22
+
+- **Pull requests.** PR Follow-Through no longer acts on text a reviewer
+  hid in an HTML comment — a bot review whose only visible text was a
+  status banner could have a hidden finding acted on and the reply
+  posted against text nobody could see. Hidden comments are now stripped
+  before anything becomes an item, and feedback that turns out to ask
+  for nothing once stripped gets no reply at all. A PR conversation
+  comment posted after the pull request's head commit is now read as
+  feedback too, and a change-requested review left with an empty body
+  now opens an item pointing back at the reviewer's other comments,
+  instead of leaving the pull request stuck on "waiting on reviewers"
+  with nothing to act on. A new **Re-request reviews** setting, off by
+  default, asks the authors of handled feedback to review again once a
+  fix round is pushed — skipping anyone who already approved, the PR's
+  author, bots, and anyone with a request already pending. Each row on
+  the Pull Requests page now shows an attach button for every agent
+  actively working that PR — Triage, Fixer or Reviewer — opening its
+  live Claude session the same way the Status page's attach button does.
+- **Reliability.** Commands Agent Board runs no longer hang for up to 60
+  seconds or silently return empty output when several run at once —
+  this hit PR polls, git calls, and `claude agents` listings under
+  load. The cause was pipe reads scheduled on a shared dispatch queue
+  starving each other once as many callers piled up as the Mac has
+  cores; reads now happen on the calling thread instead. The same race
+  could deadlock the very first batch of commands a project ran, since
+  they all needed the login shell's PATH resolved at once; that lookup
+  now runs once on its own thread while the rest wait on it instead of
+  piling onto the same queue.
+
 ## 0.6.1 — 2026-10-22
 
 - **Pull requests.** A pull request whose required checks had all passed
