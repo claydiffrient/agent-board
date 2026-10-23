@@ -610,6 +610,11 @@ enum Schema {
     ALTER TABLE pr_round ADD COLUMN review_request_error TEXT;
     """
 
+    /// A round's checks that never ran (SPEC §13.1 checking), which do not count as failed checks.
+    static let prRoundUnavailableChecks = """
+    ALTER TABLE pr_round ADD COLUMN unavailable_checks INTEGER NOT NULL DEFAULT 0;
+    """
+
     /// One row per pooled worktree slot that has ever been leased (SPEC §3.1 step 2, §4).
     static let worktreeSlot = """
     CREATE TABLE worktree_slot (

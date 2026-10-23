@@ -384,7 +384,7 @@ CREATE TABLE pr_round (
   number          INTEGER NOT NULL,
   base_head_oid   TEXT NOT NULL,     -- the PR head the round's branch was cut from
   pushed_head_oid TEXT,              -- the round branch's tip publishing fast-forwarded the PR to
-  outcome         TEXT,              -- triaged | triage_failed | interrupted | check_failed | published | stale | frozen | publish_failed | fixer_failed; null while the round runs
+  outcome         TEXT,              -- triaged | triage_failed | interrupted | check_failed | check_unavailable | published | stale | frozen | publish_failed | fixer_failed; null while the round runs
   started_at      INTEGER NOT NULL,
   ended_at        INTEGER,
   fix_task_id     TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the round's `fix_round` task (§13.1)
@@ -393,6 +393,7 @@ CREATE TABLE pr_round (
   review_findings TEXT,              -- a reopening reviewer's findings, for the fixer
   followup_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the current check's `followup_check` task
   checked_head_oid TEXT,             -- the round branch's tip the follow-up check judged
+  unavailable_checks INTEGER NOT NULL DEFAULT 0,  -- checks that never ran since the last resume; the third parks (§13.1)
   review_requests_at   INTEGER,      -- when the pushed round claimed its review re-request (§13.2)
   review_requests_json TEXT,         -- the logins it re-requested, a JSON array
   review_request_error TEXT,         -- why the re-request failed

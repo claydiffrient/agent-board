@@ -211,6 +211,32 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertNotNil(try store.beginTriageRound(watchId: watch.id, now: 6_000))
     }
 
+    /// SPEC §13.1: a round whose check never ran keeps its items through its park and Resume, since their
+    /// fixes are in its unpushed commit.
+    func testAResumedRoundWhoseCheckNeverRanIsCheckedAgainRatherThanSuperseded() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]))
+        try triage(f, watchId: watch.id, as: .fix)
+        let task = try XCTUnwrap(f.board.createFixRoundTask(watchId: watch.id, model: nil))
+        try f.tasks.move(task.id, to: .review)
+        try store.setState(.checking, watchId: watch.id)
+        for _ in 1..<PRWatchStore.unavailableChecksBeforePark {
+            XCTAssertEqual(try f.board.recordUnavailableCheck(watchId: watch.id, tip: "f57a3f1c", reason: "spawn failed"), .checking)
+        }
+        XCTAssertEqual(try f.board.recordUnavailableCheck(watchId: watch.id, tip: "f57a3f1c", reason: "spawn failed"), .parked)
+        let reason = try XCTUnwrap(store.get(watch.id)?.parkedReason)
+        XCTAssertTrue(reason.hasPrefix("Round 1's commit f57a3f1c on `agentboard/pr-7-r1` is unpushed"), reason)
+        XCTAssertEqual(try store.rounds(watchId: watch.id).map(\.outcome), [PRRoundOutcome.checkUnavailable.rawValue])
+        XCTAssertEqual(try store.rounds(watchId: watch.id).first?.checkFailures, 0)
+
+        let items = try store.items(watchId: watch.id)
+        XCTAssertEqual(try store.resume(watchId: watch.id)?.state, .checking)
+        XCTAssertEqual(try store.rounds(watchId: watch.id).map(\.outcome), [nil])
+        XCTAssertEqual(try store.items(watchId: watch.id).map(\.round), items.map(\.round))
+        XCTAssertEqual(try store.items(watchId: watch.id).map(\.fixTaskId), [task.id])
+    }
+
     func testAResumedWatchsNextFailedTriageDoesNotParkItAgain() throws {
         let f = try Fixture.make()
         let store = PRWatchStore(f.db)

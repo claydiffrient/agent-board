@@ -569,6 +569,41 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(after, parked)
     }
 
+    /// The round's worktree is gone and its follow-up check cannot spawn: the reviewer gets the worktree back
+    /// from the branch, and the check is retried at the next point rather than failed or superseded.
+    func testACheckThatCouldNotSpawnIsRetriedAndPushesItsRoundWithNoNewRound() async throws {
+        try enableChecking()
+        fixture.gh.answer(url, state: "OPEN", head: head)
+        let checker = try XCTUnwrap(
+            try ProjectStore(fixture.db).get(fixture.project.id)?.settings.prFollowThrough.roles.followupCheck?.rosterAgentId
+        )
+        let fixer = try await runningFixer()
+        let worktree = try XCTUnwrap(try activeSession(on: fixer.id).worktreePath)
+        try await completeFixer(fixer, file: "fix.txt")
+        let tip = try rev("HEAD", in: URL(fileURLWithPath: worktree))
+        _ = try fixture.git(["worktree", "remove", "--force", worktree])
+        try RosterStore(fixture.db).disable(agentId: checker, forProject: fixture.project.id)
+
+        await poll()
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .checking, watch.parkedReason ?? "")
+        let round = try XCTUnwrap(try watches.currentRound(watchId: watch.id))
+        XCTAssertEqual(round.unavailableChecks, 1)
+        XCTAssertEqual(round.checkFailures, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree), "the reviewer's worktree comes back from the branch")
+
+        try RosterStore(fixture.db).enable(agentId: checker, forProject: fixture.project.id)
+        await poll()
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).count, 1)
+        try await review(fixer, accept: true)
+        try await grade("fixed", evidence: "App.swift:3 now says count.")
+        await poll()
+        await poll()
+
+        XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), tip)
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["published"])
+    }
+
     func testAFixingRoundWhoseFixItemIsResolvedBeforeItsFixerStartsEndsAndReturnsToWatching() async throws {
         try enable()
         answer(threads: [thread("T_fix")])

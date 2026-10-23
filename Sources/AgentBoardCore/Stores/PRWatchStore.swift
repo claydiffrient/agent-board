@@ -234,19 +234,34 @@ public struct PRWatchStore: Sendable {
 
     /// Parked → settling (SPEC §13.4 Resume). Stamping `resumed_at` restarts the round cap and the
     /// failure streak, and each open `fix` item moves past the current round, so the next round takes it
-    /// up without a fresh triage. Nil unless the watch is parked.
+    /// up without a fresh triage. A round whose check never ran keeps its items and goes back to checking,
+    /// since their fixes sit in its unpushed commit (SPEC §13.1). Nil unless the watch is parked.
     @discardableResult
     public func resume(watchId: String, now: Int64 = .nowMillis) throws -> PRWatch? {
         try db.writer.write { db in
             guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .parked else { return nil }
-            try db.execute(
-                sql: """
-                UPDATE pr_item SET round = ?, updated_at = ?
-                WHERE watch_id = ? AND state = 'open' AND verdict = 'fix' AND round <= ?
-                """,
-                arguments: [watch.round + 1, now, watchId, watch.round]
-            )
-            watch.state = .settling
+            if var round = try Self.round(db, watchId: watchId, number: watch.round),
+               round.outcome == PRRoundOutcome.checkUnavailable.rawValue,
+               let taskId = round.fixTaskId, try Task.fetchOne(db, key: taskId)?.column == .review {
+                round.outcome = nil
+                round.endedAt = nil
+                round.unavailableChecks = 0
+                if let checkId = round.followupTaskId, try Task.fetchOne(db, key: checkId)?.column != .done {
+                    round.followupTaskId = nil
+                    round.checkedHeadOid = nil
+                }
+                try round.update(db)
+                watch.state = .checking
+            } else {
+                try db.execute(
+                    sql: """
+                    UPDATE pr_item SET round = ?, updated_at = ?
+                    WHERE watch_id = ? AND state = 'open' AND verdict = 'fix' AND round <= ?
+                    """,
+                    arguments: [watch.round + 1, now, watchId, watch.round]
+                )
+                watch.state = .settling
+            }
             watch.parkedReason = nil
             watch.resumedAt = now
             watch.updatedAt = now
