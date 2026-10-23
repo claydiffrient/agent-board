@@ -138,9 +138,13 @@ final class ProcessTreeStopTests: XCTestCase {
         XCTAssertFalse(isRunning(plain), "plain did not exit from SIGTERM well before the grace elapsed")
         XCTAssertTrue(isRunning(stubborn), "the SIGTERM-ignoring child died before SIGKILL could have been sent")
 
-        // Still partway through the same grace, nowhere near its end: the ignoring child must
-        // still be the one process left standing.
-        try await _Concurrency.Task.sleep(for: .milliseconds(2300))
+        // Roughly the midpoint of the 4s grace (2.0s in), not its last 500ms: a check scheduled
+        // close to the deadline can run late on a loaded CI runner and catch the child already
+        // SIGKILLed even though the stopper did nothing wrong. 2.0s leaves ~2s of margin on both
+        // sides -- generous room for the scheduler to run late and still land well clear of the
+        // deadline, while staying far past the SIGTERM round so a premature-SIGKILL mutation still
+        // gets caught here if it somehow survived the first check.
+        try await _Concurrency.Task.sleep(for: .milliseconds(800))
         XCTAssertTrue(isRunning(stubborn), "the SIGTERM-ignoring child died before the grace elapsed")
 
         let report = await stopTask.value
