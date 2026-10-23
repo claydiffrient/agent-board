@@ -4028,6 +4028,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 if let epicId = approval.epicId { try await spawnIntegrator(epicId: epicId) }
             case .push, .pullRequest:
                 try await publish(approval)
+            case .prItemDismissal:
+                defer { announceReports(projectId: approval.projectId) }
+                try board.applyItemDismissal(approval)
             }
         }
     }
@@ -4072,7 +4075,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     summary: "\(verb) from \(from) into \(base).",
                     url: result.url
                 )
-            case .spawn, .integration:
+            case .spawn, .integration, .prItemDismissal:
                 return
             }
         } catch {

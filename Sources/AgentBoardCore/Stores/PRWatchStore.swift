@@ -88,6 +88,9 @@ public struct PRWatchStore: Sendable {
                         item.state = .open
                         item.fixTaskId = nil
                         item.round = watch.round
+                        item.dismissReason = nil
+                        item.dismissedBy = nil
+                        item.dismissedAt = nil
                     }
                     item.verdict = nil
                     item.approach = nil
@@ -339,12 +342,12 @@ public struct PRWatchStore: Sendable {
         }
         sql += " ORDER BY w.updated_at DESC, w.number DESC"
         let rows = try Row.fetchAll(db, sql: sql, arguments: arguments)
-        let decisions = Dictionary(
+        let open = Dictionary(
             grouping: try PRItem.fetchAll(
                 db,
                 sql: """
                 SELECT i.* FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id
-                WHERE i.state = 'open' AND i.verdict = 'decision' AND w.state NOT IN ('merged', 'closed')
+                WHERE i.state = 'open' AND w.state NOT IN ('merged', 'closed')
                 ORDER BY i.created_at, i.id
                 """
             ),
@@ -353,9 +356,10 @@ public struct PRWatchStore: Sendable {
         let sessions = try activeSessions(db)
         let listings = try rows.map { row in
             let watch = try PRWatch(row: row)
+            let items = open[watch.id] ?? []
             return PRWatchListing(
-                watch: watch, openItems: row["open_items"], decisions: decisions[watch.id] ?? [],
-                sessions: sessions[watch.id] ?? []
+                watch: watch, openItems: row["open_items"], decisions: items.filter(\.isOpenDecision),
+                items: items, sessions: sessions[watch.id] ?? []
             )
         }
         let grouped = Dictionary(grouping: listings) {

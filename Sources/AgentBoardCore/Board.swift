@@ -245,6 +245,8 @@ public struct Board: Sendable {
                 }
             } else if let epicId = approval.epicId {
                 body += " for epic \(epicId)"
+            } else if approval.kind == .prItemDismissal, let request = try? PRItemDismissalRequest.decode(approval.payload) {
+                body += " for item \(request.itemId)"
             }
             if let reason, !reason.isEmpty {
                 body += ": \(reason)"

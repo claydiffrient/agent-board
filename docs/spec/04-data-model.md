@@ -218,7 +218,7 @@ CREATE TABLE request_epic (
 CREATE TABLE approval (
   id           TEXT PRIMARY KEY,
   project_id   TEXT NOT NULL REFERENCES project(id),
-  kind         TEXT NOT NULL,            -- spawn | integration
+  kind         TEXT NOT NULL,            -- spawn | integration | push | pull_request | pr_item_dismissal
   task_id      TEXT REFERENCES task(id),
   epic_id      TEXT REFERENCES epic(id),
   requested_by TEXT NOT NULL,            -- session_id of the requester, or 'human'
@@ -372,6 +372,9 @@ CREATE TABLE pr_item (
   reply_abandoned_at    INTEGER,         -- when a post found the comment gone on a PR that still reads; no reply is tried again
   handled_at            INTEGER,         -- when it last became handled; bounds the replies §13.2 posts
   answers               TEXT,            -- the review node id or reviewer login an add_pr_item item answers (§13.1)
+  dismiss_reason        TEXT,            -- why it was dismissed by hand (§13.1 dismissed items); null for Stop watching
+  dismissed_by          TEXT,            -- 'human', or the orchestrator session and approval that granted it
+  dismissed_at          INTEGER,
   round                 INTEGER NOT NULL DEFAULT 0,  -- the round it arrived in, then the round that handled it, whose replies post it
   created_at            INTEGER NOT NULL,
   updated_at            INTEGER NOT NULL,
@@ -596,7 +599,8 @@ not stored. An unresolved item whose body changed — a new reply — loses
 everything triage gave it: `verdict`, `approach`, the `decision_*` fields,
 `reply_body`, `reply_url`, `reply_error`, `reply_abandoned_at` and
 `followup_grade`, so the next round triages it afresh and replies anew. A
-`handled` or `dismissed` one also reopens to `open` and drops `fix_task_id`; the
+`handled` or `dismissed` one also reopens to `open` and drops `fix_task_id` and
+the `dismiss_*` fields; the
 task it named stays on the board as the record of the earlier round, and is
 never treated as the item's current task. An item still open keeps its
 `fix_task_id`. `settings_json.prFollowThrough`

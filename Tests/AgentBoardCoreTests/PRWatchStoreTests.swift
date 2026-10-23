@@ -202,6 +202,39 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertTrue(parked.parkedReason?.contains("Still named n.") == true, parked.parkedReason ?? "")
     }
 
+    /// SPEC §13.1 dismissed items: a round left with nothing to check ends instead of failing its check.
+    func testDismissingTheOnlyFixItemOfACheckingRoundEndsTheRound() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try triage(f, watchId: watch.id, as: .fix)
+        let task = try XCTUnwrap(f.board.createFixRoundTask(watchId: watch.id, model: nil))
+        try f.board.assign(taskId: task.id, session: f.session("fixer"))
+        try f.sessions.setState("fixer", .running)
+        try f.board.complete(taskId: task.id, sessionId: "fixer", summary: "Edited the description with gh.")
+        let check = try XCTUnwrap(f.board.createFollowupCheckTask(watchId: watch.id, headOid: "tip"))
+        let itemId = try XCTUnwrap(store.items(watchId: watch.id).first?.id)
+
+        let after = try store.dismissItem(itemId: itemId, reason: "Done with gh pr edit.", by: PRWatchStore.humanDismissal)
+
+        XCTAssertEqual(after.state, .watching)
+        let round = try XCTUnwrap(store.currentRound(watchId: watch.id))
+        XCTAssertEqual(round.outcome, PRRoundOutcome.triaged.rawValue)
+        XCTAssertEqual(try store.checkItems(round: round), [])
+        XCTAssertEqual(try f.tasks.get(task.id)?.column, .closed)
+        XCTAssertEqual(try f.tasks.get(check.id)?.column, .closed)
+        let item = try XCTUnwrap(store.items(watchId: watch.id).first)
+        XCTAssertEqual(item.state, .dismissed)
+        XCTAssertEqual(item.dismissReason, "Done with gh pr edit.")
+
+        try store.upsert(
+            projectId: f.project.id, snapshot: snapshot(items: [thread("T1", body: "Rename this. And again.")]), now: 2_000
+        )
+        let reopened = try XCTUnwrap(store.items(watchId: watch.id).first)
+        XCTAssertEqual(reopened.state, .open)
+        XCTAssertNil(reopened.dismissReason)
+    }
+
     /// SPEC §13.1: an item only the author can do on GitHub goes to them, and the rest of the round passes.
     func testANeedsAuthorGradeBecomesADecisionInsteadOfFailingTheCheck() throws {
         let f = try Fixture.make()
