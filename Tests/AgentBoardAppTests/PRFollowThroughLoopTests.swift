@@ -616,7 +616,8 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
         for _ in 1..<PRWatchStore.unavailableChecksBeforePark {
             await poll()
-            XCTAssertEqual(try onlyWatch().state, .checking, try onlyWatch().parkedReason ?? "")
+            let watch = try onlyWatch()
+            XCTAssertEqual(watch.state, .checking, watch.parkedReason ?? "")
         }
         await poll()
         let watch = try onlyWatch()
