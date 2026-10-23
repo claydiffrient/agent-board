@@ -123,7 +123,27 @@ final class ProcessTreeStopTests: XCTestCase {
         guard case .tree(let tree) = plan else { return XCTFail("planned \(plan)") }
         XCTAssertEqual(Set(tree.members.map(\.pid)), [root, stubborn, plain])
 
-        let report = await PortStopper(grace: .seconds(1)).stop(tree)
+        // A grace as generous as the Ports suite's own escalation tests (PortStopTests uses 4s for
+        // the same shape), so "still alive partway through it" and "gone well before it elapses"
+        // stay unambiguous even on a loaded CI runner.
+        let grace = Duration.seconds(4)
+        let stopTask = _Concurrency.Task { await PortStopper(grace: grace).stop(tree) }
+
+        // root and plain both honor SIGTERM and have no reason to survive it. Catching them dead
+        // this early is itself the proof they died from SIGTERM: SIGKILL cannot have been sent yet
+        // -- the SIGTERM round's own wait loop cannot return before `grace` elapses, because it
+        // keeps looping as long as ANY signalled pid (stubborn, here) is still alive.
+        try await _Concurrency.Task.sleep(for: .milliseconds(1200))
+        XCTAssertFalse(isRunning(root), "root did not exit from SIGTERM well before the grace elapsed")
+        XCTAssertFalse(isRunning(plain), "plain did not exit from SIGTERM well before the grace elapsed")
+        XCTAssertTrue(isRunning(stubborn), "the SIGTERM-ignoring child died before SIGKILL could have been sent")
+
+        // Still partway through the same grace, nowhere near its end: the ignoring child must
+        // still be the one process left standing.
+        try await _Concurrency.Task.sleep(for: .milliseconds(2300))
+        XCTAssertTrue(isRunning(stubborn), "the SIGTERM-ignoring child died before the grace elapsed")
+
+        let report = await stopTask.value
 
         XCTAssertTrue(report.escalated, "the SIGTERM-ignoring child needed SIGKILL")
         XCTAssertEqual(report.survivors, [])
