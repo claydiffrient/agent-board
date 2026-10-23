@@ -371,6 +371,7 @@ CREATE TABLE pr_item (
   reply_error           TEXT,            -- the last failed post's error (§13.2)
   reply_abandoned_at    INTEGER,         -- when a post found the comment gone on a PR that still reads; no reply is tried again
   handled_at            INTEGER,         -- when it last became handled; bounds the replies §13.2 posts
+  answers               TEXT,            -- the review node id or reviewer login an add_pr_item item answers (§13.1)
   round                 INTEGER NOT NULL DEFAULT 0,  -- the round it arrived in, then the round that handled it, whose replies post it
   created_at            INTEGER NOT NULL,
   updated_at            INTEGER NOT NULL,

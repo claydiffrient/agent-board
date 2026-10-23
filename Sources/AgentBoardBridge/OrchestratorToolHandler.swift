@@ -475,12 +475,18 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "like review feedback. A pull request that is ready to verify goes back to settling; one already "
                 + "verified is frozen, so the failure waits as a decision for the human instead of starting a fix "
                 + "round. Refused for a pull request this project does not watch, and for a merged or closed one. "
-                + "Say what you did, what you expected and what happened.",
+                + "Say what you did, what you expected and what happened. When the body carries a reviewer's "
+                + "requests that never became an item, such as a change request whose text is in an older "
+                + "conversation comment, set `answers` so triage ties the two together.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "pr_url": ToolSchema.string("The pull request's GitHub URL."),
                     "body": ToolSchema.string(
                         "The failure, as a reviewer would write it.", maxLength: PRWatchStore.maxVerifyFailureLength
+                    ),
+                    "answers": ToolSchema.string(
+                        "Optional: the review this item answers, as its GraphQL node id, or the reviewer's login. "
+                            + "Nothing is read from the body."
                     ),
                 ],
                 required: ["pr_url", "body"]
@@ -1024,7 +1030,9 @@ public final class OrchestratorToolHandler: ToolHandler {
         }
         let item: PRItem
         do {
-            item = try watches.addVerifyFailure(watchId: watch.id, body: body)
+            item = try watches.addVerifyFailure(
+                watchId: watch.id, body: body, answers: ToolArguments.optionalString("answers", in: arguments)
+            )
         } catch let rejection as PRVerdictRejection {
             throw ToolError("\(rejection.reason) Nothing was recorded.")
         }

@@ -25,9 +25,14 @@ extension PRWatchStore {
     /// Records a failure found while verifying the pull request by hand (SPEC §13.1). On a verified
     /// watch it becomes a frozen decision and the watch stays verified; from watching, settling or
     /// readyToVerify the watch goes to settling; mid-round it waits for the next round like any feedback.
+    /// `answers` is the review node id or reviewer login it carries requests for; a leading `@` is dropped.
     @discardableResult
-    public func addVerifyFailure(watchId: String, body: String, now: Int64 = .nowMillis) throws -> PRItem {
+    public func addVerifyFailure(
+        watchId: String, body: String, answers: String? = nil, now: Int64 = .nowMillis
+    ) throws -> PRItem {
         let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        var link = answers?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if link.hasPrefix("@") { link.removeFirst() }
         guard !text.isEmpty else { throw PRVerdictRejection("The verification failure is empty.") }
         guard text.count <= Self.maxVerifyFailureLength else {
             throw PRVerdictRejection("The verification failure is over \(Self.maxVerifyFailureLength) characters.")
@@ -39,7 +44,7 @@ extension PRWatchStore {
             var item = PRItem(
                 id: nil, watchId: watchId, githubNodeId: "verify:\(BoardId.new())", kind: .verifyFailure,
                 author: nil, body: text, path: nil, line: nil, url: nil, state: .open, round: watch.round,
-                createdAt: now, updatedAt: now
+                createdAt: now, updatedAt: now, answers: link.isEmpty ? nil : link
             )
             try item.insert(db)
             if watch.state == .verified {

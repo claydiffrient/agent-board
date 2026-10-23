@@ -233,6 +233,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("pr_round_review_requests") { db in
             try db.execute(sql: Schema.prRoundReviewRequests)
         }
+        migrator.registerMigration("pr_item_answers") { db in
+            try db.execute(sql: Schema.prItemAnswers)
+        }
         return migrator
     }
 }

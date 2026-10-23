@@ -174,6 +174,8 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
     public var replyError: String? = nil
     /// Set once the item's comment is gone from GitHub, so its reply is never tried again (SPEC §13.2).
     public var replyAbandonedAt: Int64? = nil
+    /// The review node id or reviewer login an item added by hand answers (SPEC §13.1).
+    public var answers: String? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -203,6 +205,7 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
         case handledAt = "handled_at"
         case replyError = "reply_error"
         case replyAbandonedAt = "reply_abandoned_at"
+        case answers
     }
 
     public mutating func didInsert(_ inserted: InsertionSuccess) {
@@ -210,6 +213,18 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
     }
 
     public var isOpenDecision: Bool { state == .open && verdict == .decision }
+
+    /// A `CHANGES_REQUESTED` review with no text of its own (SPEC §13.1).
+    public var isEmptyChangeRequest: Bool {
+        guard kind == .review, let author else { return false }
+        return body == PRSnapshotItem.emptyChangeRequestBody(author: author)
+    }
+
+    /// Whether this item's `answers` names `review`'s node id or its author.
+    public func isLinked(to review: PRItem) -> Bool {
+        guard let answers, id != review.id else { return false }
+        return answers == review.githubNodeId || review.author?.caseInsensitiveCompare(answers) == .orderedSame
+    }
 
     public var decisionOptions: [PRDecisionOption] {
         guard let json = decisionOptionsJSON else { return [] }
