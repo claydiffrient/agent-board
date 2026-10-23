@@ -486,4 +486,26 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertNil(PRFollowThroughSettings.claudeForm(ofSlashCommand: #"claude "/review:verify {url}""#))
         XCTAssertNil(PRFollowThroughSettings.claudeForm(ofSlashCommand: "/ {url}"))
     }
+
+    func testEveryPostedBodyEndsWithTheAgentMark() {
+        let review = "https://github.com/example-org/app/pull/7#pullrequestreview-1"
+        var fix = PRItem(
+            id: nil, watchId: "w", githubNodeId: "T_1", kind: .thread, author: "reviewer", body: "Rename this",
+            path: nil, line: nil, url: nil, state: .handled, round: 1, createdAt: 0, updatedAt: 0
+        )
+        fix.verdict = .fix
+        var answer = fix
+        answer.kind = .review
+        answer.url = review
+        answer.verdict = .answer
+        answer.replyBody = "Three retries."
+
+        XCTAssertEqual(
+            fix.postedBody(pushedHeadOid: "9b22ce8f00d"), "Fixed in 9b22ce8.\n\n**Posted by PR follow-through agent**"
+        )
+        XCTAssertEqual(
+            answer.postedBody(pushedHeadOid: nil),
+            "In reply to \(review):\n\nThree retries.\n\n**Posted by PR follow-through agent**"
+        )
+    }
 }

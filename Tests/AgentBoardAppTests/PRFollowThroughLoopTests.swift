@@ -19,6 +19,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
     private var reviews: [[String: Any]] = []
     private let repository = "example-org/app"
     private var url: String { "https://github.com/\(repository)/pull/12" }
+    private let mark = "\n\n**Posted by PR follow-through agent**"
     private var watches: PRWatchStore { PRWatchStore(fixture.db) }
     private var remote: URL { fixture.supportDir.appendingPathComponent("remote.git") }
 
@@ -819,7 +820,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
         let replies = fixture.gh.calls.filter { $0.contains { $0.hasPrefix("query=mutation") } }
         XCTAssertEqual(replies.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_fix", "thread=T_question"])
-        XCTAssertEqual(replies.map(\.last), ["body=Fixed in \(tip.prefix(7)).", "body=Three retries."])
+        XCTAssertEqual(replies.map(\.last), ["body=Fixed in \(tip.prefix(7)).\(mark)", "body=Three retries.\(mark)"])
         XCTAssertFalse(fixture.gh.calls.joined().contains { $0.contains("resolveReviewThread") })
         XCTAssertEqual(Set(try watches.items(watchId: try onlyWatch().id).map(\.replyURL)), ["\(url)#discussion_r1"])
     }
@@ -882,13 +883,13 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), head, "nothing is pushed")
         XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["stale"])
         XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question"])
-        XCTAssertEqual(replyCalls.map(\.last), ["body=Three retries."])
+        XCTAssertEqual(replyCalls.map(\.last), ["body=Three retries.\(mark)"])
 
         try await answerStaleFix(watch)
 
         XCTAssertEqual(try onlyWatch().state, .watching)
         XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_question", "thread=T_fix"])
-        XCTAssertEqual(replyCalls.map(\.last), ["body=Three retries.", "body=It was renamed upstream."])
+        XCTAssertEqual(replyCalls.map(\.last), ["body=Three retries.\(mark)", "body=It was renamed upstream.\(mark)"])
     }
 
     /// GitHub answers NOT_FOUND for a repository the token cannot see as well as for a deleted thread.
