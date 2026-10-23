@@ -191,13 +191,18 @@ extension Board {
                 return watch
             }
         } catch {
-            try db.writer.write { db in
-                _ = try ReportStore.insert(
-                    db, projectId: approval.projectId, taskId: nil, sessionId: nil, kind: .decision,
-                    body: "Item \(request.itemId) was not dismissed: \(error.localizedDescription)"
-                )
-            }
+            try reportItemNotDismissed(request, projectId: approval.projectId, because: error.localizedDescription)
             throw error
+        }
+    }
+
+    /// The `decision` report for a granted dismissal that did not happen, naming why.
+    public func reportItemNotDismissed(_ request: PRItemDismissalRequest, projectId: String, because cause: String) throws {
+        try db.writer.write { db in
+            _ = try ReportStore.insert(
+                db, projectId: projectId, taskId: nil, sessionId: nil, kind: .decision,
+                body: "Item \(request.itemId) was not dismissed: \(cause)"
+            )
         }
     }
 }

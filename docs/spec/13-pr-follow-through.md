@@ -510,8 +510,11 @@ awaits a round, else watching. A watch parked by that round's failure —
 once the round has no open item left, and reports `unparked` (§13.6); a park
 for any other cause stays. Both the page and a granted approval go through the
 supervisor, which first stops any session still holding one of those tasks — a
-running fixer, follow-up check or round reviewer — with the ordinary session
-stop. A `report_complete` that still reaches a closed task records the report,
+running fixer, follow-up check or round reviewer. That stop neither moves the
+task nor reports: the dismissal closes the task next, and its own report is the
+only one. A stop that fails leaves the item open; the page shows the error, and
+a granted approval writes the "Item N was not dismissed" `decision` report
+naming it. A `report_complete` that still reaches a closed task records the report,
 already consumed, ends the session and leaves the task closed. A new reply on a
 dismissed thread reopens it like any other (§4).
 

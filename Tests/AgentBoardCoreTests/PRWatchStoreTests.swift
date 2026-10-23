@@ -236,8 +236,8 @@ final class PRWatchStoreTests: XCTestCase {
     }
 
     /// SPEC §13.1 dismissed items: a park its failing items caused lifts once they are dismissed, and the
-    /// orchestrator hears why. A park for another cause, here the round cap, stays.
-    func testDismissingTheLastFailingItemUnparksACheckFailedWatchButNotARoundCapPark() throws {
+    /// orchestrator hears why. A park for another cause, here a refused push, stays.
+    func testDismissingTheLastFailingItemUnparksACheckFailedWatchButNotARefusedPushPark() throws {
         let f = try Fixture.make()
         try enableFollowThrough(f, true)
         let store = PRWatchStore(f.db)
@@ -260,22 +260,38 @@ final class PRWatchStoreTests: XCTestCase {
             "unparked: item \(itemId) dismissed: Done with gh pr edit.; now watching"
         )
 
-        var settings = try XCTUnwrap(f.projects.get(f.project.id)).settings
-        settings.prFollowThrough.roundCap = 1
-        try f.projects.updateSettings(f.project.id, settings)
-        let capped = try store.upsert(
+        let refused = try store.upsert(
             projectId: f.project.id, snapshot: snapshot(number: 8, items: [thread("T2")]), now: 2_000
         )
-        try store.setState(.settling, watchId: capped.id, now: 3_000)
-        XCTAssertNotNil(try store.beginTriageRound(watchId: capped.id, now: 3_000))
-        try store.setState(.settling, watchId: capped.id, now: 4_000)
-        XCTAssertNil(try store.beginTriageRound(watchId: capped.id, now: 4_000))
-        let cappedItem = try XCTUnwrap(store.items(watchId: capped.id).first?.id)
+        try triage(f, watchId: refused.id, as: .fix)
+        let refusedTask = try XCTUnwrap(f.board.createFixRoundTask(watchId: refused.id, model: nil))
+        XCTAssertEqual(try checkRound(f, watchId: refused.id, taskId: refusedTask.id, attempt: 4) { _ in .fixed }, .publishing)
+        try f.board.parkPublishing(watchId: refused.id, reason: "The push was refused.")
+        let refusedItem = try XCTUnwrap(store.items(watchId: refused.id).first?.id)
 
-        let still = try store.dismissItem(itemId: cappedItem, reason: "Not needed.", by: PRWatchStore.humanDismissal)
+        let still = try store.dismissItem(itemId: refusedItem, reason: "Not needed.", by: PRWatchStore.humanDismissal)
 
         XCTAssertEqual(still.state, .parked)
-        XCTAssertTrue(still.parkedReason?.contains("round cap of 1") == true, still.parkedReason ?? "")
+        XCTAssertEqual(still.parkedReason, "The push was refused.")
+    }
+
+    /// SPEC §13.1 dismissed items: a fixer still running when its task closed reports into a closed task.
+    func testAReportFromAFixerStillRunningOnADismissedRoundLeavesItsTaskClosed() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try triage(f, watchId: watch.id, as: .fix)
+        let task = try XCTUnwrap(f.board.createFixRoundTask(watchId: watch.id, model: nil))
+        try f.board.assign(taskId: task.id, session: f.session("fixer"))
+        try f.sessions.setState("fixer", .running)
+        let itemId = try XCTUnwrap(store.items(watchId: watch.id).first?.id)
+        try store.dismissItem(itemId: itemId, reason: "Done with gh pr edit.", by: PRWatchStore.humanDismissal)
+        XCTAssertEqual(try f.tasks.get(task.id)?.column, .closed)
+
+        let outcome = try f.board.complete(taskId: task.id, sessionId: "fixer", summary: "Renamed it.")
+
+        XCTAssertTrue(outcome.closedUnderSession)
+        XCTAssertEqual(try f.tasks.get(task.id)?.column, .closed)
     }
 
     /// SPEC §13.1: an item only the author can do on GitHub goes to them, and the rest of the round passes.

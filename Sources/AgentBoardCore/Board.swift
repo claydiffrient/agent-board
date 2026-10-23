@@ -66,6 +66,9 @@ public enum SessionTermination: Sendable, Equatable {
     /// `reconcile` found a process still running on a task in `done`, or in `ready` with no
     /// session on it (SPEC §10, Status), and stopped it.
     case taskSettled
+    /// A dismissal closes the session's task next and reports it (SPEC §13.1 dismissed items), so the
+    /// stop neither moves the task nor reports.
+    case taskClosing(by: BoardActor)
 
     /// Opens the stop reason of every session whose setup failed, so nothing it launched ever ran.
     public static let setupFailedLead = "setting up the worktree failed before the worker started:"
@@ -73,7 +76,7 @@ public enum SessionTermination: Sendable, Equatable {
     var sessionState: SessionState {
         switch self {
         case .capBreach, .setupFailed: return .failed
-        case .stopped, .vanished, .shutdownAcknowledged, .taskSettled: return .stopped
+        case .stopped, .vanished, .shutdownAcknowledged, .taskSettled, .taskClosing: return .stopped
         }
     }
 
@@ -83,14 +86,14 @@ public enum SessionTermination: Sendable, Equatable {
     var salvagesBranchWork: Bool {
         switch self {
         case .capBreach, .vanished, .stopped: return true
-        case .setupFailed, .shutdownAcknowledged, .taskSettled: return false
+        case .setupFailed, .shutdownAcknowledged, .taskSettled, .taskClosing: return false
         }
     }
 
     var flagsTaskFailed: Bool {
         switch self {
         case .capBreach, .vanished, .setupFailed: return true
-        case .stopped, .shutdownAcknowledged, .taskSettled: return false
+        case .stopped, .shutdownAcknowledged, .taskSettled, .taskClosing: return false
         }
     }
 
@@ -102,12 +105,13 @@ public enum SessionTermination: Sendable, Equatable {
         case .setupFailed(let detail): return "\(Self.setupFailedLead) \(detail)"
         case .shutdownAcknowledged: return "wound down for the project shutdown order and acknowledged"
         case .taskSettled: return "claude agents still listed it as running on a task with no work left for it"
+        case .taskClosing(let actor): return "stopped from Agent Board by \(actor.described) to close its task for a dismissed item"
         }
     }
 
     var reportKind: ReportKind {
         switch self {
-        case .shutdownAcknowledged, .taskSettled: return .decision
+        case .shutdownAcknowledged, .taskSettled, .taskClosing: return .decision
         case .capBreach, .stopped, .vanished, .setupFailed: return .failed
         }
     }
@@ -118,6 +122,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .setupFailed: return "Worker never started: \(reason)"
         case .capBreach, .stopped, .vanished: return "Worker session ended without reporting: \(reason)"
         case .taskSettled: return "Session ended after its task was settled: \(reason)"
+        case .taskClosing: return "Session ended so its task could close: \(reason)"
         }
     }
 
@@ -127,7 +132,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .shutdownAcknowledged(let note):
             guard let note, !note.isEmpty else { return nil }
             return note
-        case .capBreach, .stopped, .vanished, .setupFailed, .taskSettled: return nil
+        case .capBreach, .stopped, .vanished, .setupFailed, .taskSettled, .taskClosing: return nil
         }
     }
 }
@@ -981,6 +986,7 @@ public struct Board: Sendable {
                 }
                 return nil
             }
+            if case .taskClosing = cause { return nil }
 
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             if let settledLine = try Self.settledLine(db, task: task) {
