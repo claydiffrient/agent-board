@@ -14,6 +14,14 @@ public struct PRGradeInput: Sendable, Equatable {
     }
 }
 
+/// A round branch's tip, as read for a check that never ran (SPEC §13.1).
+public enum PRRoundTip: Sendable, Equatable {
+    case commit(String)
+    case gone
+    /// git failed to read the branch, carrying its error; the round may still hold an unpushed commit.
+    case unreadable(String)
+}
+
 extension PRWatchStore {
     /// Failed checks in one round that park its watch (SPEC §13.1): the first two reopen the fixer.
     public static let failedChecksBeforePark = 3
@@ -271,12 +279,13 @@ extension Board {
     }
 
     /// SPEC §13.1 checking: a check that never ran is not a failed check, and the watch stays checking for the
-    /// next point to retry it. Enough attempts park it naming the unpushed `tip`; a nil `tip`, the branch gone,
-    /// abandons the round. Reviewers whose setup failed are counted from their sessions, not by `counted`.
+    /// next point to retry it. Enough attempts, or one that no retry can fix (`retryable` false), park it with
+    /// its fix task kept in review; a gone branch abandons the round. Reviewers whose setup failed are counted
+    /// from their sessions, not by `counted`.
     @discardableResult
     public func recordUnavailableCheck(
-        watchId: String, tip: String?, counted: Bool = true, dropFollowupCheck: Bool = false, reason: String,
-        now: Int64 = .nowMillis
+        watchId: String, tip: PRRoundTip, counted: Bool = true, dropFollowupCheck: Bool = false,
+        retryable: Bool = true, reason: String, now: Int64 = .nowMillis
     ) throws -> PRWatchState? {
         try db.writer.write { db in
             guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .checking,
@@ -290,11 +299,27 @@ extension Board {
             }
             try round.update(db)
             let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
-            guard let tip else {
+            let unpushed: String
+            var readError = ""
+            switch tip {
+            case .gone:
                 try Self.parkRound(
                     db, watch: &watch, round: round, outcome: .checkUnavailable,
                     reason: "Round \(round.number)'s branch `\(branch)` is gone, so its fixes were never pushed. "
                         + "Resume to fix its items in a new round.\n\n\(reason)",
+                    now: now
+                )
+                return watch.state
+            case .commit(let commit): unpushed = "Round \(round.number)'s commit \(commit) on `\(branch)` is unpushed"
+            case .unreadable(let error):
+                unpushed = "Round \(round.number)'s branch `\(branch)` could not be read, so its commit may be unpushed"
+                readError = "\n\n\(error)"
+            }
+            guard retryable else {
+                try Self.parkRound(
+                    db, watch: &watch, round: round, outcome: .checkUnavailable, closesFixTask: false,
+                    reason: "\(reason)\n\n\(unpushed). Fix the cause and resume to retry the check, or push or "
+                        + "discard it.\(readError)",
                     now: now
                 )
                 return watch.state
@@ -311,8 +336,8 @@ extension Board {
             guard attempts >= PRWatchStore.unavailableChecksBeforePark else { return watch.state }
             try Self.parkRound(
                 db, watch: &watch, round: round, outcome: .checkUnavailable, closesFixTask: false,
-                reason: "Round \(round.number)'s commit \(tip) on `\(branch)` is unpushed: its check could not run "
-                    + "\(attempts) times. Push or discard it, or resume to retry the check.\n\nThe last: \(reason)",
+                reason: "\(unpushed): its check could not run \(attempts) times. Push or discard it, or resume to "
+                    + "retry the check.\(readError)\n\nThe last: \(reason)",
                 now: now
             )
             return watch.state

@@ -2448,7 +2448,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §13.1 checking: starts the round's reviewer and follow-up check under the settling holds,
     /// then settles the round once both are in. A round that cannot be checked parks its watch; one whose
-    /// check never ran is retried at the next point, up to `unavailableChecksBeforePark` times.
+    /// check never ran is retried at the next point, up to `unavailableChecksBeforePark` times, unless its
+    /// error is one no retry can fix.
     private func advanceCheck(_ watch: PRWatch, project: Project) async {
         guard let round = try? prWatches.currentRound(watchId: watch.id), let taskId = round.fixTaskId,
               let task = try? tasks.get(taskId), task.column == .review
@@ -2467,9 +2468,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     return
                 }
                 if let last = reviewers.first, neverRan.contains(where: { $0.sessionId == last.sessionId }) {
-                    let tip = try await offMain { try manager.refCommit("refs/heads/\(branch)") }
                     try board.recordUnavailableCheck(
-                        watchId: watch.id, tip: tip, counted: false,
+                        watchId: watch.id, tip: await roundTip(branch, manager: manager), counted: false,
                         reason: "Round \(round.number)'s reviewer never started: \(last.stopReason ?? "")"
                     )
                     guard try prWatches.get(watch.id)?.state == .checking else { return }
@@ -2480,9 +2480,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if let checkId = round.followupTaskId {
                 if let check = try tasks.get(checkId), check.column == .closed {
                     if check.closedReason?.hasPrefix(SessionTermination.setupFailedLead) == true {
-                        let tip = try await offMain { try manager.refCommit("refs/heads/\(branch)") }
                         try board.recordUnavailableCheck(
-                            watchId: watch.id, tip: tip, dropFollowupCheck: true,
+                            watchId: watch.id, tip: await roundTip(branch, manager: manager), dropFollowupCheck: true,
                             reason: "Round \(round.number)'s follow-up check never started: \(check.closedReason ?? "")"
                         )
                         return
@@ -2502,11 +2501,30 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             return
         } catch {
             NSLog("PR follow-through: the check of %@ could not run: %@", watch.url, describe(error))
-            let tip: String?
-            do { tip = try await offMain { try manager.refCommit("refs/heads/\(branch)") } } catch { return }
             try? board.recordUnavailableCheck(
-                watchId: watch.id, tip: tip, reason: "Round \(round.number)'s check could not run: \(describe(error))"
+                watchId: watch.id, tip: await roundTip(branch, manager: manager), retryable: Self.retryCanFix(error),
+                reason: "Round \(round.number)'s check could not run: \(describe(error))"
             )
+        }
+    }
+
+    private func roundTip(_ branch: String, manager: WorktreeManager) async -> PRRoundTip {
+        do {
+            guard let commit = try await offMain({ try manager.refCommit("refs/heads/\(branch)") }) else { return .gone }
+            return .commit(commit)
+        } catch {
+            return .unreadable(describe(error))
+        }
+    }
+
+    /// SPEC §13.1: a check that fails on configuration parks at once, since no later poll can start it.
+    private static func retryCanFix(_ error: Error) -> Bool {
+        switch error as? SupervisorError {
+        case .rosterAgentNotUsable, .serverNotRunning, .projectNotFound, .taskNotFound, .fixRoundNotFound,
+             .notAGitRepository:
+            return false
+        default:
+            return true
         }
     }
 

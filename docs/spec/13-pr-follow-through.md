@@ -359,15 +359,22 @@ last findings.
 
 A check that never ran is not a failed check and never counts in
 `check_failures`. That is a reviewer or follow-up check whose spawn throws or
-whose setup fails, or a check that cannot start for any other reason; a §8
-cap or a shutdown order is a hold instead. The watch stays checking and the
-next poll retries the half that never ran, counting each attempt in
-`unavailable_checks` (a reviewer whose setup failed counts through its
-session). The third since the watch was last resumed ends the round with
+whose setup fails, or one that cannot start for a reason a later poll may
+clear: a worktree that cannot be recreated, a git failure, a checkout still
+held or being set up. A §8 cap or a shutdown order is a hold instead. The watch
+stays checking and the next poll retries the half that never ran, counting
+each attempt in `unavailable_checks` (a reviewer whose setup failed counts
+through its session). An attempt counts even when git cannot read the round
+branch's tip. The third since the watch was last resumed ends the round with
 outcome `check_unavailable`, keeps its fix task in review, and parks the watch
 with a `parked_reason` whose first line names the unpushed commit and its
-branch — "Round N's commit <sha> on `<branch>` is unpushed" — so the author can
-push or discard it. A round branch that is gone ends the round the same way at
+branch — "Round N's commit <sha> on `<branch>` is unpushed", or "Round N's
+branch `<branch>` could not be read" when the tip could not be read — so the
+author can push or discard it. A check that fails on configuration no retry can
+fix — a roster agent the project cannot use, the board's server not running,
+the project, the fix task or its round gone, a repository that is not git —
+parks the same way on its first attempt, its own error as the first line of
+`parked_reason`. A round branch that is gone ends the round the same way at
 once, closing its fix task, since nothing is left to push. Until a round
 pushes or is abandoned, no later round takes its items: their fixes are in its
 unpushed commit. The watch does not leave checking while it retries, and

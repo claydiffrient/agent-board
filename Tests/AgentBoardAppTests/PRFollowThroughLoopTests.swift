@@ -569,20 +569,18 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(after, parked)
     }
 
-    /// The round's worktree is gone and its follow-up check cannot spawn: the reviewer gets the worktree back
-    /// from the branch, and the check is retried at the next point rather than failed or superseded.
-    func testACheckThatCouldNotSpawnIsRetriedAndPushesItsRoundWithNoNewRound() async throws {
+    /// The round's worktree is gone and cannot come back while another checkout holds its branch: the check is
+    /// retried at the next point rather than failed or superseded, and the reviewer gets the worktree back.
+    func testACheckThatCouldNotStartIsRetriedAndPushesItsRoundWithNoNewRound() async throws {
         try enableChecking()
         fixture.gh.answer(url, state: "OPEN", head: head)
-        let checker = try XCTUnwrap(
-            try ProjectStore(fixture.db).get(fixture.project.id)?.settings.prFollowThrough.roles.followupCheck?.rosterAgentId
-        )
         let fixer = try await runningFixer()
         let worktree = try XCTUnwrap(try activeSession(on: fixer.id).worktreePath)
         try await completeFixer(fixer, file: "fix.txt")
         let tip = try rev("HEAD", in: URL(fileURLWithPath: worktree))
         _ = try fixture.git(["worktree", "remove", "--force", worktree])
-        try RosterStore(fixture.db).disable(agentId: checker, forProject: fixture.project.id)
+        let holder = fixture.supportDir.appendingPathComponent("holder").path
+        _ = try fixture.git(["worktree", "add", "-q", holder, "agentboard/pr-12-r1"])
 
         await poll()
         let watch = try onlyWatch()
@@ -590,10 +588,10 @@ final class PRFollowThroughLoopTests: XCTestCase {
         let round = try XCTUnwrap(try watches.currentRound(watchId: watch.id))
         XCTAssertEqual(round.unavailableChecks, 1)
         XCTAssertEqual(round.checkFailures, 0)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree), "the reviewer's worktree comes back from the branch")
 
-        try RosterStore(fixture.db).enable(agentId: checker, forProject: fixture.project.id)
+        _ = try fixture.git(["worktree", "remove", "--force", holder])
         await poll()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree), "the reviewer's worktree comes back from the branch")
         XCTAssertEqual(try watches.rounds(watchId: watch.id).count, 1)
         try await review(fixer, accept: true)
         try await grade("fixed", evidence: "App.swift:3 now says count.")
@@ -602,6 +600,47 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
         XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), tip)
         XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.outcome), ["published"])
+    }
+
+    /// git cannot read the round's tip, here a corrupt commit object: each poll still counts an attempt, so the
+    /// watch parks rather than retrying forever.
+    func testAnUnreadableRoundTipStillCountsTowardThePark() async throws {
+        try enableChecking()
+        let fixer = try await runningFixer()
+        let worktree = try XCTUnwrap(try activeSession(on: fixer.id).worktreePath)
+        try await completeFixer(fixer, file: "fix.txt")
+        let tip = try rev("HEAD", in: URL(fileURLWithPath: worktree))
+        let object = fixture.repo.appendingPathComponent(".git/objects/\(tip.prefix(2))/\(tip.dropFirst(2))")
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: object.path)
+        try Data("garbage".utf8).write(to: object)
+
+        for _ in 1..<PRWatchStore.unavailableChecksBeforePark {
+            await poll()
+            XCTAssertEqual(try onlyWatch().state, .checking, try onlyWatch().parkedReason ?? "")
+        }
+        await poll()
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .parked)
+        let reason = watch.parkedReason ?? ""
+        XCTAssertTrue(reason.hasPrefix("Round 1's branch `agentboard/pr-12-r1` could not be read"), reason)
+    }
+
+    /// A follow-up check role naming an agent the project cannot use parks on the first poll, its own reason first.
+    func testAConfigurationErrorParksTheCheckAtOnceWithItsOwnReason() async throws {
+        try enableChecking()
+        let checker = try XCTUnwrap(
+            try ProjectStore(fixture.db).get(fixture.project.id)?.settings.prFollowThrough.roles.followupCheck?.rosterAgentId
+        )
+        let fixer = try await runningFixer()
+        try await completeFixer(fixer, file: "fix.txt")
+        try RosterStore(fixture.db).disable(agentId: checker, forProject: fixture.project.id)
+
+        await poll()
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .parked)
+        let firstLine = watch.parkedReason?.components(separatedBy: "\n").first ?? ""
+        XCTAssertTrue(firstLine.hasPrefix("Round 1's check could not run: roster agent \(checker) is not in"), firstLine)
+        XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .review, "a resume checks the same round again")
     }
 
     func testAFixingRoundWhoseFixItemIsResolvedBeforeItsFixerStartsEndsAndReturnsToWatching() async throws {
