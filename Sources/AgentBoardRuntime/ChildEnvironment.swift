@@ -125,7 +125,7 @@ public enum LoginShellPath {
     private static func waitForExit(_ pid: pid_t, timeout: TimeInterval) -> Bool {
         let queue = kqueue()
         guard queue >= 0 else { return false }
-        defer { close(queue) }
+        defer { DescriptorLog.closeChecked(queue, site: "LoginShellPath.waitForExit") }
         var change = kevent(
             ident: UInt(pid), filter: Int16(EVFILT_PROC), flags: UInt16(EV_ADD | EV_ONESHOT),
             fflags: NOTE_EXIT, data: 0, udata: nil

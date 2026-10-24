@@ -51,7 +51,16 @@ enum ProcessRunner {
             process.standardInput = FileHandle.nullDevice
         }
 
-        try process.run()
+        let descriptors = DescriptorLog.descriptors("stdout", stdoutPipe) + DescriptorLog.descriptors("stderr", stderrPipe)
+            + (stdinPipe.map { DescriptorLog.descriptors("stdin", $0) } ?? [])
+        do {
+            try process.run()
+        } catch {
+            DescriptorLog.launchFailed(
+                executable.path, arguments: arguments, cwd: cwd, descriptors: descriptors, error: error
+            )
+            throw error
+        }
 
         guard let output = exchange(stdout: stdoutPipe, stderr: stderrPipe, stdin: stdinPipe.map { ($0, stdin ?? Data()) })
         else {
@@ -161,7 +170,15 @@ enum ProcessRunner {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        try process.run()
+        let descriptors = DescriptorLog.descriptors("stdout", stdoutPipe) + DescriptorLog.descriptors("stderr", stderrPipe)
+        do {
+            try process.run()
+        } catch {
+            DescriptorLog.launchFailed(
+                executable.path, arguments: arguments, cwd: cwd, descriptors: descriptors, error: error
+            )
+            throw error
+        }
         let exitWatch: ExitWatch
         do {
             exitWatch = try ExitWatch(process)
@@ -234,7 +251,7 @@ final class ExitWatch {
         }
     }
 
-    deinit { close(descriptor) }
+    deinit { DescriptorLog.closeChecked(descriptor, site: "ExitWatch.deinit") }
 
     /// What `Process.terminationStatus` reports, or nil while the child is still running at `deadline`.
     func status(by deadline: DispatchTime) -> Int32? {
