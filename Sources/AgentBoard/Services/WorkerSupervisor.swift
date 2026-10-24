@@ -1533,7 +1533,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording { try await stopSession(sessionId, by: .human) }
     }
 
-    private func stopSession(_ sessionId: String, by actor: BoardActor) async throws {
+    private func stopSession(_ sessionId: String, by actor: BoardActor, cause: SessionTermination? = nil) async throws {
         let session = try requireSession(sessionId)
         if let shortId = session.shortId {
             try await stopAgent(session, shortId: shortId)
@@ -1544,7 +1544,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.sessionHasNoShortId(sessionId)
         }
         let salvage = await branchSalvage(taskId: session.taskId)
-        try terminateSession(sessionId, cause: .stopped(by: actor), salvage: salvage)
+        try terminateSession(sessionId, cause: cause ?? .stopped(by: actor), salvage: salvage)
         try grants.revokeAll(sessionId: sessionId)
         announceReports(projectId: session.projectId)
         refreshSleepAssertion()
@@ -1868,11 +1868,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// SPEC §5: a rostered reviewer runs in the worker's own worktree, so a decision taken over its
     /// head must end it before anything removes that checkout. Only an agent `claude agents` still
     /// lists as live can abort the decision; a row whose process is gone is ended as vanished.
-    private func stopLiveSessions(onTask taskId: String, sparing: String? = nil, by actor: BoardActor) async throws {
+    private func stopLiveSessions(
+        onTask taskId: String, sparing: String? = nil, by actor: BoardActor, closing: Bool = false
+    ) async throws {
+        let closingCause: SessionTermination? = closing ? .taskClosing(by: actor) : nil
         var listing: [AgentInfo]?
         for session in try sessions.forTask(taskId) where session.state.isActive && session.sessionId != sparing {
             do {
-                try await stopSession(session.sessionId, by: actor)
+                try await stopSession(session.sessionId, by: actor, cause: closingCause)
             } catch {
                 if listing == nil {
                     guard let listed = try? await runtime.listSessions() else { throw error }
@@ -1880,7 +1883,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
                 guard let info = Self.liveListing(of: session, in: listing ?? []) else {
                     let salvage = await branchSalvage(taskId: session.taskId)
-                    try terminateSession(session.sessionId, cause: .vanished, salvage: salvage)
+                    try terminateSession(session.sessionId, cause: closingCause ?? .vanished, salvage: salvage)
                     await reapProcesses(of: session, listing: listing)
                     try grants.revokeAll(sessionId: session.sessionId)
                     announceReports(projectId: session.projectId)
@@ -1889,7 +1892,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
                 guard session.shortId == nil, let shortId = info.id else { throw error }
                 try sessions.setShortId(session.sessionId, shortId)
-                try await stopSession(session.sessionId, by: actor)
+                try await stopSession(session.sessionId, by: actor, cause: closingCause)
             }
         }
     }
@@ -4028,7 +4031,35 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 if let epicId = approval.epicId { try await spawnIntegrator(epicId: epicId) }
             case .push, .pullRequest:
                 try await publish(approval)
+            case .prItemDismissal:
+                defer { announceReports(projectId: approval.projectId) }
+                let request = try PRItemDismissalRequest.decode(approval.payload)
+                do {
+                    try await stopSessions(closedByDismissing: request.itemId)
+                } catch {
+                    try board.reportItemNotDismissed(request, projectId: approval.projectId, because: describe(error))
+                    throw error
+                }
+                try board.applyItemDismissal(approval)
             }
+        }
+    }
+
+    func dismissPRItem(itemId: Int64, reason: String) async throws {
+        try await recording {
+            guard !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw PRVerdictRejection("A dismissal needs a reason.")
+            }
+            try await stopSessions(closedByDismissing: itemId)
+            let watch = try prWatches.dismissItem(itemId: itemId, reason: reason, by: PRWatchStore.humanDismissal)
+            announceReports(projectId: watch.projectId)
+        }
+    }
+
+    /// A fixer or checker left running on a task the dismissal closes would spend on a dead round.
+    private func stopSessions(closedByDismissing itemId: Int64) async throws {
+        for taskId in try prWatches.tasksClosedByDismissing(itemId: itemId) {
+            try await stopLiveSessions(onTask: taskId, by: .human, closing: true)
         }
     }
 
@@ -4072,7 +4103,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     summary: "\(verb) from \(from) into \(base).",
                     url: result.url
                 )
-            case .spawn, .integration:
+            case .spawn, .integration, .prItemDismissal:
                 return
             }
         } catch {

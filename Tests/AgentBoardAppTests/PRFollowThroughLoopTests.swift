@@ -570,6 +570,61 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(after, parked)
     }
 
+    /// SPEC §13.1 dismissed items: dismissing a running fixer's last item stops that fixer, and its late
+    /// report leaves the closed fix task closed instead of putting a dead round's card back in Review.
+    func testDismissingARunningFixersLastItemStopsTheFixerAndItsLateReportLeavesTheTaskClosed() async throws {
+        try enable()
+        let fixer = try await runningFixer()
+        let session = try activeSession(on: fixer.id)
+        let shortId = try XCTUnwrap(session.shortId)
+        let itemId = try XCTUnwrap(try watches.items(watchId: try onlyWatch().id).first { $0.githubNodeId == "T_fix" }?.id)
+        let before = await fixture.runtime.stopped
+
+        try await fixture.supervisor.dismissPRItem(itemId: itemId, reason: "Settled with gh pr edit.")
+
+        let stopped = await fixture.runtime.stopped
+        XCTAssertEqual(Array(stopped.dropFirst(before.count)), [shortId])
+        XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .closed)
+        XCTAssertEqual(try onlyWatch().state, .watching)
+        XCTAssertEqual(
+            try ReportStore(fixture.db).unconsumed(projectId: fixture.project.id).filter { $0.taskId == fixer.id }.map(\.body),
+            [], "the dismissal's own report is the only one; the stop must not report a Ready move"
+        )
+
+        _ = try fixture.board.complete(taskId: fixer.id, sessionId: session.sessionId, summary: "Renamed it.")
+
+        XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .closed)
+    }
+
+    /// SPEC §13.1 dismissed items: a granted dismissal whose fixer will not stop says so, rather than ending
+    /// approved with nothing done.
+    func testAGrantedDismissalWhoseFixerWillNotStopReportsItWasNotDismissed() async throws {
+        try enable()
+        let fixer = try await runningFixer()
+        let session = try activeSession(on: fixer.id)
+        let shortId = try XCTUnwrap(session.shortId)
+        await fixture.runtime.failStop(shortId: shortId, FixtureError("permission denied"))
+        await fixture.runtime.setListed([
+            AgentInfo(id: shortId, cwd: session.cwd, kind: "bg", sessionId: session.sessionId, status: "running"),
+        ])
+        let watch = try onlyWatch()
+        let itemId = try XCTUnwrap(try watches.items(watchId: watch.id).first { $0.githubNodeId == "T_fix" }?.id)
+        let approval = try fixture.board.requestItemDismissal(
+            projectId: fixture.project.id, watchId: watch.id, itemId: itemId, reason: "Settled with gh pr edit.",
+            requestedBy: "orchestrator"
+        )
+
+        do {
+            try await fixture.supervisor.approve(approvalId: approval.id)
+            XCTFail("a stop that failed must fail the grant")
+        } catch {}
+
+        let decisions = try ReportStore(fixture.db).unconsumed(projectId: fixture.project.id)
+            .filter { $0.kind == .decision }.map(\.body)
+        XCTAssertEqual(decisions.last, "Item \(itemId) was not dismissed: permission denied")
+        XCTAssertEqual(try watches.items(watchId: watch.id).first { $0.id == itemId }?.state, .open)
+    }
+
     /// The round's worktree is gone and cannot come back while another checkout holds its branch: the check is
     /// retried at the next point rather than failed or superseded, and the reviewer gets the worktree back.
     func testACheckThatCouldNotStartIsRetriedAndPushesItsRoundWithNoNewRound() async throws {

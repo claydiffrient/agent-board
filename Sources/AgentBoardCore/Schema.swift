@@ -620,6 +620,13 @@ enum Schema {
     ALTER TABLE pr_round ADD COLUMN unavailable_checks INTEGER NOT NULL DEFAULT 0;
     """
 
+    /// Why, by whom and when a human retired one item (SPEC §13.1 dismissed items).
+    static let prItemDismissal = """
+    ALTER TABLE pr_item ADD COLUMN dismiss_reason TEXT;
+    ALTER TABLE pr_item ADD COLUMN dismissed_by TEXT;
+    ALTER TABLE pr_item ADD COLUMN dismissed_at INTEGER;
+    """
+
     /// One row per pooled worktree slot that has ever been leased (SPEC §3.1 step 2, §4).
     static let worktreeSlot = """
     CREATE TABLE worktree_slot (

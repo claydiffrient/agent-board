@@ -97,11 +97,15 @@ protocol WorkerSupervising: AnyObject {
     var isPollingPRWatches: Bool { get }
     /// Polls these watches now and applies their transitions, joining a poll already in flight.
     func pollPRWatches(watchIds: Set<String>) async throws
+    /// The human's dismissal of one open item (SPEC §13.1 dismissed items), after stopping any session
+    /// still working the round it ends.
+    func dismissPRItem(itemId: Int64, reason: String) async throws
 }
 
 extension WorkerSupervising {
     var isPollingPRWatches: Bool { false }
     func pollPRWatches(watchIds: Set<String>) async throws {}
+    func dismissPRItem(itemId: Int64, reason: String) async throws {}
     func focusChanged(projectId: String?) {}
     func reportQueued(projectId: String) async {}
     func previewLeakedAgentSweep() async -> AgentSweepReport? { nil }

@@ -176,6 +176,8 @@ public enum ApprovalKind: String, Codable, Sendable, CaseIterable, Equatable, Da
     case integration
     case push
     case pullRequest = "pull_request"
+    /// An orchestrator's `dismiss_pr_item`; the payload is a `PRItemDismissalRequest` (SPEC §6).
+    case prItemDismissal = "pr_item_dismissal"
 }
 
 public enum ApprovalResolution: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {

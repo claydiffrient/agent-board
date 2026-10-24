@@ -494,6 +494,30 @@ so each is handled once per round; a new reply on a thread reopens it for
 triage (§4), whether it was handled or still open with a verdict. The human's own comments, resolved threads, and outdated threads
 are never turned into items.
 
+**Dismissed items.** An open item can be retired by hand, with a required
+reason, when it was settled outside follow-through — a description edited with
+`gh pr edit`, say, which no round can commit. The human does it from the Pull
+Requests page (§13.4); an orchestrator asks with `dismiss_pr_item` (§6), which
+waits on the human's approval. `PRWatchStore.dismissItem` sets the item
+`dismissed` with `dismiss_reason`, `dismissed_by` and `dismissed_at` (§4). A
+dismissed item is never triaged, never graded by a follow-up check (a grade a
+running check sends for one is dropped), never counted as unfixed, and never
+replied to. If its round is fixing or checking and the dismissal leaves the
+round's fix task no open item, the round ends as `triaged`, its fix and
+follow-up check tasks close, and the watch goes to settling when feedback
+awaits a round, else watching. A watch parked by that round's failure —
+`check_failed`, `check_unavailable` or `fixer_failed` — unparks the same way
+once the round has no open item left, and reports `unparked` (§13.6); a park
+for any other cause stays. Both the page and a granted approval go through the
+supervisor, which first stops any session still holding one of those tasks — a
+running fixer, follow-up check or round reviewer. That stop neither moves the
+task nor reports: the dismissal closes the task next, and its own report is the
+only one. A stop that fails leaves the item open; the page shows the error, and
+a granted approval writes the "Item N was not dismissed" `decision` report
+naming it. A `report_complete` that still reaches a closed task records the report,
+already consumed, ends the session and leaves the task closed. A new reply on a
+dismissed thread reopens it like any other (§4).
+
 ### 13.2 Verdicts — phase 2 (triage) and phase 3 (fix, reply)
 
 Triage gives every open item exactly one verdict:
@@ -697,6 +721,14 @@ on at all.
   that round and keeping its items (§13.1). Stop watching (`PRWatchStore.stopWatching`)
   dismisses the open items and moves the watch to stopped (§13.1). A stale row
   shows "restarted: head moved" while it waits for the next poll.
+- **Dismiss one item.** Under a row with open items, a collapsed "N open
+  items" list shows each one's author, kind, first line, and "graded partly" or
+  "graded not fixed" when its last check fell short. Each has **Dismiss…**,
+  which asks why in a popover; the reason is required. Dismissing retires that
+  item alone, as §13.1's dismissed items describe, and may end its round or
+  unpark the watch. An orchestrator's `dismiss_pr_item` shows on Pending
+  Approvals as "Dismiss a pull request item", with the PR, the item and the
+  reason beneath.
 - **Refresh (phase 4).** Each group's header has a **Refresh** button that
   polls GitHub now for the watches in that group and applies their transitions
   (§13.1's poll, scoped), so CI settling or new feedback shows without waiting
@@ -882,6 +914,7 @@ twice for one transition.
 |---|---|---|
 | Ready to verify | `ready_to_verify` | The Ready to verify banner's claim (§13.4): once per head oid |
 | Parked | `parked` | Every park, with the first line of `parked_reason` |
+| Unparked | `unparked` | A dismissal lifts an item-bound park (§13.1 dismissed items), naming the item and reason and the state the watch moved to |
 | New decision | `decision` | The decision banner's claim (§13.4): once per item, with the first line of triage's question |
 | Round outcome | `round_published` / `round_stale` / `round_fixer_failed` / `round_triaged` | A round pushed (with the pushed sha), went stale, ended `fixer_failed`, or ended `triaged` with no fix item open |
 | Merged or closed | `merged` / `closed` | The poll settles the watch to either |

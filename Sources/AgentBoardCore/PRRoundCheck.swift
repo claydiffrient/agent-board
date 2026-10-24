@@ -57,7 +57,8 @@ extension PRWatchStore {
     }
 
     /// Writes every grade or none. Each item must be one its round's check grades, so a checker reaches
-    /// no other item. Returns the ids of that round's items still without a grade.
+    /// no other item; a grade for one of the watch's items dismissed since is dropped. Returns the ids of
+    /// that round's items still without a grade.
     @discardableResult
     public func setFollowupGrades(_ grades: [PRGradeInput], taskId: String, now: Int64 = .nowMillis) throws -> [Int64] {
         try db.writer.write { db in
@@ -68,6 +69,10 @@ extension PRWatchStore {
             var updated: [PRItem] = []
             for input in grades {
                 guard var item = items[input.itemId] else {
+                    if let gone = try PRItem.fetchOne(db, key: input.itemId), gone.watchId == round.watchId,
+                       gone.state == .dismissed {
+                        continue
+                    }
                     throw PRVerdictRejection("Item \(input.itemId) is not one of the items this round fixed.")
                 }
                 guard let note = Self.nonBlank(input.note) else {

@@ -66,6 +66,9 @@ public enum SessionTermination: Sendable, Equatable {
     /// `reconcile` found a process still running on a task in `done`, or in `ready` with no
     /// session on it (SPEC §10, Status), and stopped it.
     case taskSettled
+    /// A dismissal closes the session's task next and reports it (SPEC §13.1 dismissed items), so the
+    /// stop neither moves the task nor reports.
+    case taskClosing(by: BoardActor)
 
     /// Opens the stop reason of every session whose setup failed, so nothing it launched ever ran.
     public static let setupFailedLead = "setting up the worktree failed before the worker started:"
@@ -73,7 +76,7 @@ public enum SessionTermination: Sendable, Equatable {
     var sessionState: SessionState {
         switch self {
         case .capBreach, .setupFailed: return .failed
-        case .stopped, .vanished, .shutdownAcknowledged, .taskSettled: return .stopped
+        case .stopped, .vanished, .shutdownAcknowledged, .taskSettled, .taskClosing: return .stopped
         }
     }
 
@@ -83,14 +86,14 @@ public enum SessionTermination: Sendable, Equatable {
     var salvagesBranchWork: Bool {
         switch self {
         case .capBreach, .vanished, .stopped: return true
-        case .setupFailed, .shutdownAcknowledged, .taskSettled: return false
+        case .setupFailed, .shutdownAcknowledged, .taskSettled, .taskClosing: return false
         }
     }
 
     var flagsTaskFailed: Bool {
         switch self {
         case .capBreach, .vanished, .setupFailed: return true
-        case .stopped, .shutdownAcknowledged, .taskSettled: return false
+        case .stopped, .shutdownAcknowledged, .taskSettled, .taskClosing: return false
         }
     }
 
@@ -102,12 +105,13 @@ public enum SessionTermination: Sendable, Equatable {
         case .setupFailed(let detail): return "\(Self.setupFailedLead) \(detail)"
         case .shutdownAcknowledged: return "wound down for the project shutdown order and acknowledged"
         case .taskSettled: return "claude agents still listed it as running on a task with no work left for it"
+        case .taskClosing(let actor): return "stopped from Agent Board by \(actor.described) to close its task for a dismissed item"
         }
     }
 
     var reportKind: ReportKind {
         switch self {
-        case .shutdownAcknowledged, .taskSettled: return .decision
+        case .shutdownAcknowledged, .taskSettled, .taskClosing: return .decision
         case .capBreach, .stopped, .vanished, .setupFailed: return .failed
         }
     }
@@ -118,6 +122,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .setupFailed: return "Worker never started: \(reason)"
         case .capBreach, .stopped, .vanished: return "Worker session ended without reporting: \(reason)"
         case .taskSettled: return "Session ended after its task was settled: \(reason)"
+        case .taskClosing: return "Session ended so its task could close: \(reason)"
         }
     }
 
@@ -127,7 +132,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .shutdownAcknowledged(let note):
             guard let note, !note.isEmpty else { return nil }
             return note
-        case .capBreach, .stopped, .vanished, .setupFailed, .taskSettled: return nil
+        case .capBreach, .stopped, .vanished, .setupFailed, .taskSettled, .taskClosing: return nil
         }
     }
 }
@@ -233,10 +238,12 @@ public struct Board: Sendable {
     }
 
     /// Resolves the approval and queues a `decision` report so the orchestrator learns the outcome on its next pull.
+    /// A granted dismissal is reported by `applyItemDismissal` instead, which says what it did.
     @discardableResult
     public func resolveApproval(_ id: String, approved: Bool, by: String, reason: String? = nil) throws -> Approval {
         try db.writer.write { db in
             let approval = try ApprovalStore.resolve(db, id, approved ? .approved : .denied)
+            if approved, approval.kind == .prItemDismissal { return approval }
             var body = "\(approval.kind.rawValue) \(approved ? "approved" : "denied")"
             if let taskId = approval.taskId {
                 body += " for task \(taskId)"
@@ -245,6 +252,8 @@ public struct Board: Sendable {
                 }
             } else if let epicId = approval.epicId {
                 body += " for epic \(epicId)"
+            } else if approval.kind == .prItemDismissal, let request = try? PRItemDismissalRequest.decode(approval.payload) {
+                body += " for item \(request.itemId)"
             }
             if let reason, !reason.isEmpty {
                 body += ": \(reason)"
@@ -383,9 +392,13 @@ public struct Board: Sendable {
         /// The state of a session Agent Board had already ended before this call. Its report is kept
         /// as a `decision`, and nothing on the task moves (SPEC §5.1).
         public var endedSessionState: SessionState? = nil
+        /// The task was closed while this session still ran on it, so the report moved nothing.
+        public var closedUnderSession = false
 
         /// Never true on a resend: the first call already ran the acceptance path.
-        public var autoAccept: Bool { routing == .autoAccept && !wasAlreadyComplete && endedSessionState == nil }
+        public var autoAccept: Bool {
+            routing == .autoAccept && !wasAlreadyComplete && endedSessionState == nil && !closedUnderSession
+        }
     }
 
     static let lateCompletionHeadline = "Late report_complete from a session Agent Board had already ended"
@@ -417,6 +430,9 @@ public struct Board: Sendable {
             // SPEC §5.1: a live session another one has taken the task from must not move it.
             if let holder = try SessionStore.activeHolder(db, taskId: taskId), holder.sessionId != sessionId {
                 throw BoardError.sessionNotOnTask(sessionId: sessionId, taskId: taskId)
+            }
+            if task.column == .closed {
+                return try Self.completionOnClosedTask(db, task: task, sessionId: sessionId, summary: summary)
             }
             if task.origin == .fixRound {
                 return try Self.completeFixRound(db, task: task, sessionId: sessionId, summary: summary)
@@ -500,6 +516,28 @@ public struct Board: Sendable {
             column: task.column,
             wasAlreadyComplete: existing != nil,
             endedSessionState: session.state
+        )
+    }
+
+    /// A dismissal can close a round's task under its fixer or checker (SPEC §13.1 dismissed items). The
+    /// task stays closed; the report is kept, already consumed, and the session ends.
+    private static func completionOnClosedTask(
+        _ db: Database, task: Task, sessionId: String, summary: String
+    ) throws -> CompletionOutcome {
+        let report = try ReportStore.insert(
+            db, projectId: task.projectId, taskId: task.id, sessionId: sessionId, kind: .complete, body: summary
+        )
+        try db.execute(sql: "UPDATE report SET consumed_at = ? WHERE id = ?", arguments: [Int64.nowMillis, report.id])
+        _ = try ProgressStore.append(
+            db, taskId: task.id, sessionId: nil, kind: .status,
+            text: "Session \(sessionId) reported complete after this task was closed; it stays closed."
+        )
+        try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
+        try FileLockStore.releaseAll(db, sessionId: sessionId)
+        return CompletionOutcome(
+            report: report, level: try ReviewPolicy.level(db, task: task),
+            routing: try ReviewPolicy.routing(db, task: task, completedBy: sessionId), column: .closed,
+            wasAlreadyComplete: false, closedUnderSession: true
         )
     }
 
@@ -948,6 +986,7 @@ public struct Board: Sendable {
                 }
                 return nil
             }
+            if case .taskClosing = cause { return nil }
 
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             if let settledLine = try Self.settledLine(db, task: task) {

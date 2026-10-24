@@ -36,6 +36,7 @@ public enum PRItemKind: String, Codable, Sendable, CaseIterable, Equatable, Data
 public enum PRItemState: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
     case open
     case handled
+    /// Retired without a fix or a reply: by Stop watching, or by hand with a reason (SPEC §13.1).
     case dismissed
 }
 
@@ -176,6 +177,10 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
     public var replyAbandonedAt: Int64? = nil
     /// The review node id or reviewer login an item added by hand answers (SPEC §13.1).
     public var answers: String? = nil
+    public var dismissReason: String? = nil
+    /// `human`, or the orchestrator session and the approval that granted it (SPEC §13.4).
+    public var dismissedBy: String? = nil
+    public var dismissedAt: Int64? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -206,6 +211,9 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
         case replyError = "reply_error"
         case replyAbandonedAt = "reply_abandoned_at"
         case answers
+        case dismissReason = "dismiss_reason"
+        case dismissedBy = "dismissed_by"
+        case dismissedAt = "dismissed_at"
     }
 
     public mutating func didInsert(_ inserted: InsertionSuccess) {
@@ -502,13 +510,19 @@ public struct PRWatchListing: Sendable, Equatable, Identifiable {
     public var openItems: Int
     /// The open decision items, oldest first, which the Needs you group lists under the row.
     public var decisions: [PRItem]
+    /// Every open item, oldest first, which the row offers to dismiss (SPEC §13.4).
+    public var items: [PRItem]
     /// Oldest first.
     public var sessions: [PRListingSession]
 
-    public init(watch: PRWatch, openItems: Int, decisions: [PRItem] = [], sessions: [PRListingSession] = []) {
+    public init(
+        watch: PRWatch, openItems: Int, decisions: [PRItem] = [], items: [PRItem] = [],
+        sessions: [PRListingSession] = []
+    ) {
         self.watch = watch
         self.openItems = openItems
         self.decisions = decisions
+        self.items = items
         self.sessions = sessions
     }
 
