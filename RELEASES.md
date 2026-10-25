@@ -9,6 +9,49 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.8.0 — 2026-10-25
+
+- **Process management.** At a Glance gets a new Processes view, next to
+  Projects, listing every process Agent Board started or still controls:
+  each worker's, reviewer's, orchestrator's and the Coordinator's own
+  `claude` process and everything running under it, a process a session
+  left orphaned in its worktree after ending, shells and terminal windows
+  opened from the app, and Agent Board's own helper commands. Rows are
+  grouped by project and then by owner, and show CPU, memory, uptime and
+  any ports a process is listening on; sorting by a column flattens the
+  table, and Show Hierarchy brings the tree back. Selecting a row offers
+  **Stop…**, which always confirms first and refuses anything outside
+  what the view is allowed to touch — Agent Board itself, another
+  session's `claude` process, an orchestrator's or the Coordinator's own
+  console, or a process that's already changed. Separately, stopping a
+  session anywhere in the app — a cap, a manual Stop, Pause All,
+  shutdown, completion, or the background sweep for leaked sessions — now
+  also ends that session's `claude` process even when the normal stop
+  command itself fails, so a stopped session no longer leaves its process
+  running behind it.
+- **Pull requests.** Every reply PR Follow-Through posts on your behalf
+  now ends with a line marking it as agent-written, so a factual reply
+  about what fixed something doesn't read as something you typed
+  yourself. A reviewer request that only you can act on — editing the
+  PR's description or title, changing its labels or reviewers — now
+  becomes a decision waiting on you right away instead of a fix round
+  that fails three times before parking; a round that does end up
+  parking now names the specific item that's stuck on its first line
+  instead of just a failure count. A reviewer's empty change-request that
+  was already handled by a feedback item you filed by hand is now
+  recognized as already done instead of raising a duplicate decision for
+  you. A fix round whose check couldn't run at all — the tool to spawn it
+  failed, or its worktree went missing — is retried instead of being
+  treated as a failure, so a commit it already made isn't quietly left
+  unpushed; a genuine configuration problem (no server, no usable roster
+  agent, not a git repository) still parks right away. Each pull
+  request's row now lists its open items, each with a **Dismiss…**
+  button that asks for a reason — handling something outside Agent Board
+  no longer means stopping the whole pull request's watch just to clear
+  it. Orchestrators can now answer questions about a watched pull
+  request's state, items and parked reason directly, instead of you
+  having to look it up yourself.
+
 ## 0.7.0 — 2026-10-22
 
 - **Pull requests.** PR Follow-Through no longer acts on text a reviewer
