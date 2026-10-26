@@ -62,6 +62,23 @@ Per project, overridable:
   the turn it went missing in. `tools_in_flight` counts rather than flags
   because Claude runs parallel tool calls: the row keeps the oldest outstanding
   start, so a short call returning cannot end a long one's grace.
+- **A turn cut off by system sleep is resumed once, not left to the idle
+  cap.** When the Mac sleeps under an in-flight model request, Claude Code
+  ends the turn with `API Error: Your computer went to sleep mid-response. The
+  response above may be incomplete.` and fires `StopFailure`, not `Stop`; the
+  session then sits idle. All four worker idle-outs in 0.8.0 were this, each
+  under a lid close the §8.3 assertion cannot prevent, and with the lid shut
+  workers still run in the seconds-long powernap dark wakes, so every request
+  that outlasts one is cut. Workers subscribe to `StopFailure`, and
+  `StoreHookSink` matches its `last_assistant_message` against that exact
+  text (`SleepCutTurn.message`) — its `error` is `server_error`, which other
+  failures share. A match sends the worker one `claude --bg --resume` with
+  `SleepCutTurn.continuation`, the same channel §8.1 uses to reach an idle
+  worker, and logs it to the task's progress. A second cut within five awake
+  minutes of a continuation (`sleepContinuationWindowMillis`, on the
+  `SleepLedger` clock) gets nothing: a lid still closed would cut every
+  resume, and the idle cap ends that worker as before. The window is held in
+  memory, so an app relaunch resets it.
 - **Autonomy is off on first run.** Every `spawn_worker` creates a pending
   approval until you turn it on. This is a setting, not a rebuild.
 - **PR follow-through spawns skip approval (§13).** In a project with the

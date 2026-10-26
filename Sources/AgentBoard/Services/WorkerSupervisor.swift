@@ -257,11 +257,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var resuming: Set<String> = []
     /// When a human last opened a terminal on each session. `claude attach` resumes a stopped one.
     @ObservationIgnored private var attachRequestedAt: [String: Int64] = [:]
+    /// When each session was last sent `SleepCutTurn.continuation`, on the wall clock (SPEC §8).
+    @ObservationIgnored private var sleepContinuedAt: [String: Int64] = [:]
     /// The last integration each project's `origin` resolved to, kept for when git fails to read it.
     @ObservationIgnored private var integrationDefaults: [String: StandaloneIntegration] = [:]
 
     nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
+    /// A second sleep-cut turn within this much awake time of the first is left to the idle cap (SPEC §8).
+    static let sleepContinuationWindowMillis: Int64 = 5 * 60 * 1000
     /// The archive policies are day-granular, so they ride the metering tick at a far coarser
     /// cadence rather than paying for a scan every 5 seconds — or a second timer.
     static let archiveSweepIntervalMillis: Int64 = 5 * 60 * 1000
@@ -4582,6 +4586,31 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 taskId: taskId, sessionId: sessionId, kind: .status,
                 text: "Claude Code resumed \(session.displayShortId), which Agent Board had already ended "
                     + "(\(session.state.rawValue)); it was stopped again."
+            )
+        }
+    }
+
+    /// SPEC §8: one continuation per stall. A lid closed through powernap dark wakes cuts every
+    /// request within seconds, so a repeat inside the window is the idle cap's, not another resume.
+    func workerTurnCutBySleep(projectId: String, sessionId: String) async {
+        let awake = sleepLedger.reading()
+        if let last = sleepContinuedAt[sessionId], awake.millisAwake(since: last) < Self.sleepContinuationWindowMillis {
+            return
+        }
+        guard let session = try? sessions.get(sessionId), session.projectId == projectId,
+              session.role == .worker, session.state.isActive, let taskId = session.taskId
+        else { return }
+        sleepContinuedAt[sessionId] = awake.nowMillis
+        do {
+            try await resume(session, prompt: SleepCutTurn.continuation)
+            _ = try? ProgressStore(db).append(
+                taskId: taskId, sessionId: sessionId, kind: .status,
+                text: "System sleep cut off \(session.displayShortId)'s turn; Agent Board sent it one continuation."
+            )
+        } catch {
+            _ = try? ProgressStore(db).append(
+                taskId: taskId, sessionId: sessionId, kind: .error,
+                text: "System sleep cut off \(session.displayShortId)'s turn, and the continuation failed: \(describe(error))"
             )
         }
     }

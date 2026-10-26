@@ -97,6 +97,10 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         await target?.endedSessionRestarted(projectId: projectId, sessionId: sessionId)
     }
 
+    func workerTurnCutBySleep(projectId: String, sessionId: String) async {
+        await target?.workerTurnCutBySleep(projectId: projectId, sessionId: sessionId)
+    }
+
     func coordinatorReportQueued() async {
         await target?.coordinatorReportQueued()
     }

@@ -35,7 +35,7 @@ public struct JSONObjectString: Sendable, Equatable, ExpressibleByStringLiteral 
 
 public enum SessionConfigWriter {
     public static let httpHookEvents = [
-        "UserPromptSubmit", "PostToolUse", "Notification", "Stop", "SubagentStop",
+        "UserPromptSubmit", "PostToolUse", "Notification", "Stop", "StopFailure", "SubagentStop",
         "PreCompact", "SessionEnd",
     ]
     /// `PreToolUse` is the app-side half of the push/PR block (§8), of the `git commit` block a
