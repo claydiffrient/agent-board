@@ -242,6 +242,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("pr_item_dismissal") { db in
             try db.execute(sql: Schema.prItemDismissal)
         }
+        migrator.registerMigration("pr_watch_body") { db in
+            try db.execute(sql: Schema.prWatchBody)
+        }
         return migrator
     }
 }

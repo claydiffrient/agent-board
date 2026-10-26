@@ -26,7 +26,7 @@ public struct PRWatchStore: Sendable {
             var watch = existing ?? PRWatch(
                 id: PRWatch.newId(), projectId: projectId, repoOwner: snapshot.repoOwner,
                 repoName: snapshot.repoName, number: snapshot.number, url: snapshot.url, title: snapshot.title,
-                isDraft: snapshot.isDraft, headRef: snapshot.headRef, headOid: snapshot.headOid,
+                body: snapshot.body, isDraft: snapshot.isDraft, headRef: snapshot.headRef, headOid: snapshot.headOid,
                 baseRef: snapshot.baseRef, state: .watching, round: 0, reviewDecision: snapshot.reviewDecision,
                 checksState: snapshot.checksState, mergeable: snapshot.mergeable,
                 labelsJSON: PRWatch.encodeLabels(snapshot.labels), paused: false, lastPolledAt: now,
@@ -35,6 +35,7 @@ public struct PRWatchStore: Sendable {
             if let existing {
                 watch.url = snapshot.url
                 watch.title = snapshot.title
+                watch.body = snapshot.body
                 watch.isDraft = snapshot.isDraft
                 watch.headRef = snapshot.headRef
                 if watch.headOid != snapshot.headOid { watch.headChangedAt = now }
