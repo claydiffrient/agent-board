@@ -69,24 +69,40 @@ extension Board {
 
     /// Runs a granted `pr_watch_resume` through `PRWatchStore.resume`, as the Pull Requests page's Resume
     /// does (SPEC §13.4), and tells the orchestrator how it went as a `decision` report. A watch that has
-    /// left `parked` since the request is reported, not thrown. Nil when nothing was resumed.
+    /// left `parked` since the request is reported, not thrown; any other failure is reported and rethrown.
+    /// Nil when nothing was resumed.
     @discardableResult
     public func applyWatchResume(_ approval: Approval, now: Int64 = .nowMillis) throws -> PRWatch? {
         let request = try PRWatchResumeRequest.decode(approval.payload)
-        let resumed = try PRWatchStore(db).resume(watchId: request.watchId, now: now)
-        let body: String
-        if let resumed {
-            body = "#\(request.number) resumed, now \(resumed.state.rawValue): \(request.reason)"
-        } else {
-            let state = try PRWatchStore(db).get(request.watchId)?.state.rawValue ?? "gone"
-            body = "#\(request.number) was not resumed: it is no longer parked (it is \(state))."
+        do {
+            return try db.writer.write { db in
+                let resumed = try PRWatchStore.resume(db, watchId: request.watchId, now: now)
+                let body: String
+                if let resumed {
+                    body = "#\(request.number) resumed, now \(resumed.state.rawValue): \(request.reason)"
+                } else {
+                    let state = try PRWatch.fetchOne(db, key: request.watchId)?.state.rawValue ?? "gone"
+                    body = "#\(request.number) was not resumed: it is no longer parked (it is \(state))."
+                }
+                _ = try ReportStore.insert(
+                    db, projectId: approval.projectId, taskId: nil, sessionId: nil, kind: .decision, body: body
+                )
+                return resumed
+            }
+        } catch {
+            try reportWatchNotResumed(request, projectId: approval.projectId, because: error.localizedDescription)
+            throw error
         }
+    }
+
+    /// The `decision` report for a granted resume that failed, naming why.
+    public func reportWatchNotResumed(_ request: PRWatchResumeRequest, projectId: String, because cause: String) throws {
         try db.writer.write { db in
             _ = try ReportStore.insert(
-                db, projectId: approval.projectId, taskId: nil, sessionId: nil, kind: .decision, body: body
+                db, projectId: projectId, taskId: nil, sessionId: nil, kind: .decision,
+                body: "#\(request.number) was not resumed: \(cause)"
             )
         }
-        return resumed
     }
 
     private func pendingWatchResume(_ db: Database, projectId: String, watchId: String) throws -> Approval? {

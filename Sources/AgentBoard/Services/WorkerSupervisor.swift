@@ -4042,8 +4042,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
                 try board.applyItemDismissal(approval)
             case .prWatchResume:
+                defer { announceReports(projectId: approval.projectId) }
                 try board.applyWatchResume(approval)
-                announceReports(projectId: approval.projectId)
             }
         }
     }

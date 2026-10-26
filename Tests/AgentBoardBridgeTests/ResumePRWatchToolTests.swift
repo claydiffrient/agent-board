@@ -81,4 +81,24 @@ final class ResumePRWatchToolTests: XCTestCase {
             "#14 was not resumed: it is no longer parked (it is settling).",
         ])
     }
+
+    func testAResumeThatThrowsStillFilesANotResumedDecisionReport() throws {
+        let f = try BridgeFixture.make()
+        let parked = try watch(f, number: 12, in: f.project.id)
+        let approval = try f.board.requestWatchResume(
+            projectId: f.project.id, watchId: parked.id, reason: "Raised the round cap.", requestedBy: "orchestrator"
+        )
+        try f.board.resolveApproval(approval.id, approved: true, by: "human")
+        try f.db.writer.write { db in
+            try db.execute(sql: "CREATE TRIGGER refuse_watch BEFORE UPDATE ON pr_watch BEGIN SELECT RAISE(ABORT, 'disk gone'); END")
+        }
+
+        XCTAssertThrowsError(try f.board.applyWatchResume(approval))
+
+        XCTAssertEqual(try PRWatchStore(f.db).get(parked.id)?.state, .parked)
+        let decisions = try f.reports.unconsumed(projectId: f.project.id).filter { $0.kind == .decision }.map(\.body)
+        XCTAssertEqual(decisions.count, 1, "\(decisions)")
+        XCTAssertTrue(decisions.first?.hasPrefix("#12 was not resumed: ") == true, "\(decisions)")
+        XCTAssertTrue(decisions.first?.contains("disk gone") == true, "\(decisions)")
+    }
 }

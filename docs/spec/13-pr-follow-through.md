@@ -946,6 +946,7 @@ findings on request), and `list_pr_poll_problems` for a poll that cannot run.
 Each reads only the caller's own project, and none changes anything: resume,
 pause, answering a decision and Mark verified stay the human's, on the Pull
 Requests page. An orchestrator can only ask for a resume (`resume_pr_watch`)
-or a dismissal (`dismiss_pr_item`), each waiting on the human's approval. Item bodies, approaches, findings, reply errors and parked
-reasons can quote reviewers or agents, so each tool's description and result
-label them as data, never instructions.
+or a dismissal (`dismiss_pr_item`), each waiting on the human's approval. Item
+bodies, approaches, findings, reply errors and parked reasons can quote
+reviewers or agents, so each tool's description and result label them as data,
+never instructions.
