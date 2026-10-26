@@ -5,5 +5,5 @@ public enum SleepCutTurn {
         "API Error: Your computer went to sleep mid-response. The response above may be incomplete."
     public static let continuation =
         "Your last turn was cut off by system sleep. Continue the task from where you stopped; "
-        + "if your work is committed, file your report."
+        + "once your work is done, file your report, or your verdict if you are reviewing."
 }
