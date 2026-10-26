@@ -342,6 +342,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         failInterruptedSetups()
         stopOrphanedCoordinatorSessions()
+        stopOrphanedOrchestratorSessions()
         sweepStaleFileLocks()
         await sweepLeakedAgents()
         await migrateWorktreeRoots()
@@ -978,6 +979,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         guard coordinatorConsoleInstance?.isProcessRunning != true else { return }
         for session in (try? coordinator.sessions()) ?? [] where session.state.isActive {
             _ = try? terminateSession(session.sessionId, cause: .vanished)
+        }
+    }
+
+    /// SPEC §8.2: a quit or crash kills every orchestrator console without `processExited` running,
+    /// and `reconcile` only reaches a project whose Status pane is open.
+    private func stopOrphanedOrchestratorSessions() {
+        for project in (try? projects.list()) ?? [] where consoles[project.id]?.isProcessRunning != true {
+            for session in (try? sessions.active(projectId: project.id)) ?? [] where session.role == .orchestrator {
+                _ = try? terminateSession(session.sessionId, cause: .vanished)
+            }
         }
     }
 

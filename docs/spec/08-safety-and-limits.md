@@ -257,9 +257,15 @@ the project's), under these rules:
   orchestrator's, and every project-scoped query still misses it. The metering
   tick reads its spend after the projects', with no cap. Its `Stop` and
   compaction hooks reach its own console only from the session pinned in
-  `active_session_id`; a stale session's are ignored. At launch, while no
+  `active_session_id`; a stale session's are ignored.
+- **Launch sweep.** A quit that skips the global shutdown sheet (§10), or a
+  crash, kills every console's PTY without its exit handler running, so the
+  rows it leaves stay active with no process behind them. At launch, while no
   Coordinator console is running, every active `coordinator` row is marked
-  stopped, as `reconcile` does for an orchestrator row with no console.
+  stopped; likewise every active `orchestrator` row whose project has no
+  running console. `reconcile` does the same for an orchestrator row, but only
+  for a project whose Status pane is open, so without the launch sweep a
+  project nobody looks at keeps its row active indefinitely.
 
 ### 8.3 Sleep prevention
 
@@ -275,8 +281,10 @@ their Mac awake.
 The decision reads the observed session rows and nothing else — never a
 spawn-side counter — so a worker that dies without reporting stops holding the
 Mac awake the moment `reconcile` or the leaked-agent sweep (§8.6) flips its row
-inactive. It is re-evaluated on the metering tick and immediately after `stop`,
-`pauseAll` and `reconcile`.
+inactive. An orchestrator or Coordinator row a quit left active is flipped by
+the launch sweep (§8.2), so a console that died with the app does not hold the
+next launch's assertion. It is re-evaluated on the metering tick and
+immediately after `stop`, `pauseAll` and `reconcile`.
 
 **What it does not cover.** Idle system sleep only. Display sleep has its own
 assertion type and is deliberately never asserted — a screen lit all night is
