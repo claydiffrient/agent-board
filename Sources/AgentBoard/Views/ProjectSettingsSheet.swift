@@ -365,7 +365,11 @@ struct ProjectSettingsSheet: View {
                 "Daily budget (USD)", value: $settings.prFollowThrough.dailyBudgetUSD, format: .number,
                 prompt: Text("Spawn caps")
             )
-            Text("Watches every open, non-draft pull request you author in this project. New feedback waits for the settle window to pass with nothing newer before a round starts. Left empty, the daily budget falls back to this project's spawn caps.")
+            TextField(
+                "Minimum battery to start a round (%)", value: $settings.prFollowThrough.minBatteryPercent,
+                format: .number, prompt: Text("Any")
+            )
+            Text("Watches every open, non-draft pull request you author in this project. New feedback waits for the settle window to pass with nothing newer before a round starts. Left empty, the daily budget falls back to this project's spawn caps. On battery, a round starts only at or above the minimum charge; on AC it always can.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .prVerification:
@@ -460,6 +464,7 @@ struct ProjectSettingsSheet: View {
         saved.settleMinutes = max(0, draft.settleMinutes)
         saved.roundCap = max(1, draft.roundCap)
         saved.dailyBudgetUSD = draft.dailyBudgetUSD.flatMap { $0 > 0 ? $0 : nil }
+        saved.minBatteryPercent = draft.minBatteryPercent.map { min(100, max(0, $0)) }
         saved.verificationLabel = draft.verificationLabel?.trimmingCharacters(in: .whitespaces)
         if saved.verificationLabel?.isEmpty == true { saved.verificationLabel = nil }
         saved.verifyCommand = draft.verifyCommand?.trimmingCharacters(in: .whitespaces)
