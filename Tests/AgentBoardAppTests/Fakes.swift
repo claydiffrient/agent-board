@@ -15,6 +15,7 @@ actor FakeRuntime: AgentRuntime {
     /// looks like from the outside.
     private(set) var isSettingUp = false
     private var failure: Error?
+    private var resumeFailure: Error?
     private var gate: CheckedContinuation<Void, Never>?
     private var holdNextSpawn = false
     private var entered: [CheckedContinuation<Void, Never>] = []
@@ -24,6 +25,8 @@ actor FakeRuntime: AgentRuntime {
     func holdSpawn() { holdNextSpawn = true }
 
     func failNextSpawn(_ error: Error) { failure = error }
+
+    func failNextResume(_ error: Error) { resumeFailure = error }
 
     /// Returns once the held spawn is actually inside `spawn`, so a test never races its own gate.
     func waitUntilSettingUp() async {
@@ -54,6 +57,10 @@ actor FakeRuntime: AgentRuntime {
     }
 
     func resume(sessionId: String, cwd: URL, prompt: String) async throws -> SpawnedAgent {
+        if let resumeFailure {
+            self.resumeFailure = nil
+            throw resumeFailure
+        }
         resumed.append(sessionId)
         resumePrompts.append(prompt)
         return SpawnedAgent(shortId: "short-\(sessionId)", sessionId: sessionId)

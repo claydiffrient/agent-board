@@ -77,7 +77,8 @@ Per project, overridable:
   worker, and logs it to the task's progress. A second cut within five awake
   minutes of a continuation (`sleepContinuationWindowMillis`, on the
   `SleepLedger` clock) is not resumed then, because a lid still closed would
-  cut every resume; it waits for the next full wake instead. The window is
+  cut every resume; it waits for the next full wake instead, as does a cut
+  whose continuation failed to start. The window is
   held in memory, so an app relaunch resets it.
 - **A full wake resumes a worker still stuck on a sleep-cut turn.**
   `WorkerSupervisor` observes `NSWorkspace.screensDidWakeNotification`, which
@@ -85,7 +86,8 @@ Per project, overridable:
   2026-10-23/24 lid-closed stretch logged 264 `DarkWake`s and one `Display is
   turned on`, at the lid-open `Wake`. `NSWorkspace.didWakeNotification` is
   posted on system wake and nothing documents it skipping dark wakes, so it
-  is not used. On that notification each session the window turned away gets
+  is not used. On that notification each session the window turned away, or
+  whose continuation failed, gets
   one continuation, logged to its task's progress, if it is still an active
   worker and its newest `PreToolUse`, `PostToolUse`, `Stop` or `StopFailure`
   hook is still the sleep-cut `StopFailure`; a tool call or turn end since

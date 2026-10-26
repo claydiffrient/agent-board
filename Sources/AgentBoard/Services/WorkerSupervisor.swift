@@ -259,7 +259,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var attachRequestedAt: [String: Int64] = [:]
     /// When each session was last sent `SleepCutTurn.continuation`, on the wall clock (SPEC §8).
     @ObservationIgnored private var sleepContinuedAt: [String: Int64] = [:]
-    /// Sleep-cut sessions the once-per-stall window turned away, left for the next full wake (SPEC §8).
+    /// Sleep-cut sessions the window turned away or whose continuation failed, left for the next full wake (SPEC §8).
     @ObservationIgnored private var sleepCutAwaitingWake: Set<String> = []
     /// A full wake reopens the once-per-stall window, so a cut that lands just after the lid opens is still continued.
     @ObservationIgnored private var lastFullWakeAt: Int64?
@@ -270,7 +270,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
-    /// A second sleep-cut turn within this much awake time of the first is left to the idle cap (SPEC §8).
+    /// A second sleep-cut turn within this much awake time of the first waits for the next full wake (SPEC §8).
     static let sleepContinuationWindowMillis: Int64 = 5 * 60 * 1000
     /// The archive policies are day-granular, so they ride the metering tick at a far coarser
     /// cadence rather than paying for a scan every 5 seconds — or a second timer.
@@ -4661,6 +4661,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 text: "System sleep cut off \(session.displayShortId)'s turn; Agent Board sent it one continuation\(when)."
             )
         } catch {
+            sleepCutAwaitingWake.insert(sessionId)
             _ = try? ProgressStore(db).append(
                 taskId: taskId, sessionId: sessionId, kind: .error,
                 text: "System sleep cut off \(session.displayShortId)'s turn, and the continuation\(when) failed: \(describe(error))"

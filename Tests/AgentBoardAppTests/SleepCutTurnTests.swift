@@ -70,14 +70,20 @@ final class SleepCutTurnTests: XCTestCase {
         try HookEventStore(fixture.db).append(
             sessionId: movedOn, event: "PostToolUse", payload: #"{"tool_name":"Bash"}"#
         )
+        let (_, failed, _) = try fixture.workerAtWork("Continuation failed")
+        await fixture.runtime.failNextResume(FixtureError("claude --bg --resume failed"))
+        try cutBySleep(failed)
+        await fixture.supervisor.workerTurnCutBySleep(projectId: fixture.project.id, sessionId: failed)
 
         wakeCenter.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
         wakeCenter.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
-        _ = try await resumes(reaching: 3)
-        _ = try await resumes(reaching: 4, within: .seconds(1))
+        _ = try await resumes(reaching: 4)
+        _ = try await resumes(reaching: 5, within: .seconds(1))
 
         let resumed = await fixture.runtime.resumed
-        XCTAssertEqual(resumed, [waiting, movedOn, waiting])
+        XCTAssertEqual(Array(resumed.prefix(2)), [waiting, movedOn])
+        XCTAssertEqual(resumed.count, 4)
+        XCTAssertEqual(Set(resumed.dropFirst(2)), [waiting, failed])
         let logged = try ProgressStore(fixture.db).list(taskId: task.id).filter { $0.text.contains("when the Mac woke") }
         XCTAssertEqual(logged.count, 1)
     }
