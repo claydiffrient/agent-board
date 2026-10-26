@@ -4041,6 +4041,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     throw error
                 }
                 try board.applyItemDismissal(approval)
+            case .prWatchResume:
+                defer { announceReports(projectId: approval.projectId) }
+                try board.applyWatchResume(approval)
             }
         }
     }
@@ -4103,7 +4106,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     summary: "\(verb) from \(from) into \(base).",
                     url: result.url
                 )
-            case .spawn, .integration, .prItemDismissal:
+            case .spawn, .integration, .prItemDismissal, .prWatchResume:
                 return
             }
         } catch {

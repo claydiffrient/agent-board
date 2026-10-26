@@ -219,7 +219,9 @@ struct ApprovalsSidebar: View {
             Text(describe(approval))
                 .fontWeight(.medium)
                 .lineLimit(2)
-            if let reason = approval.reason, !reason.isEmpty {
+            if approval.kind == .prWatchResume, let request = try? PRWatchResumeRequest.decode(approval.payload) {
+                resumeDetail(request)
+            } else if let reason = approval.reason, !reason.isEmpty {
                 Text(reason)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -308,6 +310,20 @@ struct ApprovalsSidebar: View {
         )
     }
 
+    /// Each part gets its own line budget, so a long parked reason cannot hide the orchestrator's (SPEC §13.4).
+    private func resumeDetail(_ request: PRWatchResumeRequest) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("#\(request.number) \(request.title)")
+                .lineLimit(2)
+            Text("Parked: \(request.parkedReason ?? "no reason recorded")")
+                .lineLimit(3)
+            Text("Reason: \(request.reason)")
+                .lineLimit(4)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
     private func describe(_ approval: Approval) -> String {
         switch approval.kind {
         case .spawn:
@@ -321,6 +337,8 @@ struct ApprovalsSidebar: View {
             return "Open a pull request from \(branchOf(approval))"
         case .prItemDismissal:
             return "Dismiss a pull request item"
+        case .prWatchResume:
+            return "Resume a parked pull request"
         }
     }
 

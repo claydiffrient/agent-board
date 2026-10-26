@@ -241,36 +241,38 @@ public struct PRWatchStore: Sendable {
     /// since their fixes sit in its unpushed commit (SPEC §13.1). Nil unless the watch is parked.
     @discardableResult
     public func resume(watchId: String, now: Int64 = .nowMillis) throws -> PRWatch? {
-        try db.writer.write { db in
-            guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .parked else { return nil }
-            if var round = try Self.round(db, watchId: watchId, number: watch.round),
-               round.outcome == PRRoundOutcome.checkUnavailable.rawValue,
-               let taskId = round.fixTaskId, try Task.fetchOne(db, key: taskId)?.column == .review {
-                round.outcome = nil
-                round.endedAt = nil
-                round.unavailableChecks = 0
-                if let checkId = round.followupTaskId, try Task.fetchOne(db, key: checkId)?.column != .done {
-                    round.followupTaskId = nil
-                    round.checkedHeadOid = nil
-                }
-                try round.update(db)
-                watch.state = .checking
-            } else {
-                try db.execute(
-                    sql: """
-                    UPDATE pr_item SET round = ?, updated_at = ?
-                    WHERE watch_id = ? AND state = 'open' AND verdict = 'fix' AND round <= ?
-                    """,
-                    arguments: [watch.round + 1, now, watchId, watch.round]
-                )
-                watch.state = .settling
+        try db.writer.write { try Self.resume($0, watchId: watchId, now: now) }
+    }
+
+    static func resume(_ db: Database, watchId: String, now: Int64) throws -> PRWatch? {
+        guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .parked else { return nil }
+        if var round = try Self.round(db, watchId: watchId, number: watch.round),
+           round.outcome == PRRoundOutcome.checkUnavailable.rawValue,
+           let taskId = round.fixTaskId, try Task.fetchOne(db, key: taskId)?.column == .review {
+            round.outcome = nil
+            round.endedAt = nil
+            round.unavailableChecks = 0
+            if let checkId = round.followupTaskId, try Task.fetchOne(db, key: checkId)?.column != .done {
+                round.followupTaskId = nil
+                round.checkedHeadOid = nil
             }
-            watch.parkedReason = nil
-            watch.resumedAt = now
-            watch.updatedAt = now
-            try watch.update(db)
-            return watch
+            try round.update(db)
+            watch.state = .checking
+        } else {
+            try db.execute(
+                sql: """
+                UPDATE pr_item SET round = ?, updated_at = ?
+                WHERE watch_id = ? AND state = 'open' AND verdict = 'fix' AND round <= ?
+                """,
+                arguments: [watch.round + 1, now, watchId, watch.round]
+            )
+            watch.state = .settling
         }
+        watch.parkedReason = nil
+        watch.resumedAt = now
+        watch.updatedAt = now
+        try watch.update(db)
+        return watch
     }
 
     /// Stop watching a parked PR (SPEC §13.4): its open items are dismissed and the watch stays, stopped,
