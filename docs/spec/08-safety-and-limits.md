@@ -281,10 +281,9 @@ their Mac awake.
 The decision reads the observed session rows and nothing else — never a
 spawn-side counter — so a worker that dies without reporting stops holding the
 Mac awake the moment `reconcile` or the leaked-agent sweep (§8.6) flips its row
-inactive. An orchestrator or Coordinator row a quit left active is flipped by
-the launch sweep (§8.2), so a console that died with the app does not hold the
-next launch's assertion. It is re-evaluated on the metering tick and
-immediately after `stop`, `pauseAll` and `reconcile`.
+inactive, and an orchestrator or Coordinator row a quit left active stops
+holding it when the launch sweep (§8.2) flips that row. It is re-evaluated on
+the metering tick and immediately after `stop`, `pauseAll` and `reconcile`.
 
 **What it does not cover.** Idle system sleep only. Display sleep has its own
 assertion type and is deliberately never asserted — a screen lit all night is
