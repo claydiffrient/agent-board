@@ -97,7 +97,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
             "a tool was added to the orchestrator surface without a cross-project test in this file"
         )
         XCTAssertEqual(classified.subtracting(surface), [], "this audit names tools that no longer exist")
-        XCTAssertEqual(surface.count, 44)
+        XCTAssertEqual(surface.count, 45)
     }
 
     func testOnlySendMessageAcceptsAnotherProjectsId() async {
