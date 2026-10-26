@@ -71,6 +71,9 @@ it again inside the mounted DMG; either failing fails the release.
 
 The artifact lands at `dist/Agent Board.app` and `dist/AgentBoard-<version>.dmg`
 — a disk image holding the app and an `Applications` symlink to drag it onto.
+It builds and mounts the image with `diskutil image` when the host has it
+(macOS 27 deprecates `hdiutil`) and falls back to `hdiutil` otherwise;
+`AGENTBOARD_DMG_TOOL=hdiutil` forces the fallback.
 `release.sh` mounts the DMG read-only and re-runs the bundle check against the
 copy inside it before deleting the mountpoint; either the assembled app or the
 mounted one failing the check deletes the DMG and fails the release.
