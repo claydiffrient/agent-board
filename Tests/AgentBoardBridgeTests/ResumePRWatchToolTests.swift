@@ -75,9 +75,10 @@ final class ResumePRWatchToolTests: XCTestCase {
         try f.board.resolveApproval(second.id, approved: true, by: "human")
         XCTAssertNil(try f.board.applyWatchResume(second))
 
-        let reports = try f.reports.unconsumed(projectId: f.project.id).filter { $0.kind == .decision }
-        XCTAssertEqual(reports.count, 2, reports.map(\.body).joined(separator: "\n"))
-        XCTAssertTrue(reports[0].body.hasPrefix("#12 resumed, now settling"), reports[0].body)
-        XCTAssertTrue(reports[1].body.contains("#14 was not resumed: it is no longer parked (it is settling)"), reports[1].body)
+        let decisions = try f.reports.unconsumed(projectId: f.project.id).filter { $0.kind == .decision }.map(\.body)
+        XCTAssertEqual(decisions, [
+            "#12 resumed, now settling: Raised the round cap.",
+            "#14 was not resumed: it is no longer parked (it is settling).",
+        ])
     }
 }
