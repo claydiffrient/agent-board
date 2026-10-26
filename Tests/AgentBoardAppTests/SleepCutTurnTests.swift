@@ -1,5 +1,6 @@
 import AgentBoardBridge
 import AgentBoardCore
+import AppKit
 import Foundation
 import XCTest
 @testable import AgentBoard
@@ -9,9 +10,10 @@ import XCTest
 @MainActor
 final class SleepCutTurnTests: XCTestCase {
     private var fixture: SupervisorFixture!
+    private let wakeCenter = NotificationCenter()
 
     override func setUp() async throws {
-        fixture = try SupervisorFixture.make()
+        fixture = try SupervisorFixture.make(wakeCenter: wakeCenter)
         await fixture.supervisor.start()
         try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
     }
@@ -53,6 +55,41 @@ final class SleepCutTurnTests: XCTestCase {
         XCTAssertEqual(prompts, [SleepCutTurn.continuation])
         let logged = try ProgressStore(fixture.db).list(taskId: task.id).filter { $0.text.contains("one continuation") }
         XCTAssertEqual(logged.count, 1)
+    }
+
+    /// With the lid closed the continuation is cut too, inside the window; only a full wake picks it up again.
+    func testAFullWakeContinuesOnlyTheWorkerWhoseLatestTurnWasCutBySleep() async throws {
+        let (task, waiting, _) = try fixture.workerAtWork("Cut off twice")
+        let (_, movedOn, _) = try fixture.workerAtWork("Cut off twice, then worked")
+        for sessionId in [waiting, movedOn] {
+            for _ in 0..<2 {
+                try cutBySleep(sessionId)
+                await fixture.supervisor.workerTurnCutBySleep(projectId: fixture.project.id, sessionId: sessionId)
+            }
+        }
+        try HookEventStore(fixture.db).append(
+            sessionId: movedOn, event: "PostToolUse", payload: #"{"tool_name":"Bash"}"#
+        )
+
+        wakeCenter.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
+        wakeCenter.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
+        _ = try await resumes(reaching: 3)
+        _ = try await resumes(reaching: 4, within: .seconds(1))
+
+        let resumed = await fixture.runtime.resumed
+        XCTAssertEqual(resumed, [waiting, movedOn, waiting])
+        let logged = try ProgressStore(fixture.db).list(taskId: task.id).filter { $0.text.contains("when the Mac woke") }
+        XCTAssertEqual(logged.count, 1)
+    }
+
+    private func cutBySleep(_ sessionId: String) throws {
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "hook_event_name": "StopFailure", "session_id": sessionId,
+            "error": "server_error", "last_assistant_message": SleepCutTurn.message,
+        ])
+        try HookEventStore(fixture.db).append(
+            sessionId: sessionId, event: "StopFailure", payload: String(decoding: payload, as: UTF8.self)
+        )
     }
 
     private func resumes(reaching count: Int, within limit: Duration = .seconds(10)) async throws -> [String] {

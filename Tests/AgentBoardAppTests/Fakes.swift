@@ -279,7 +279,7 @@ struct SupervisorFixture {
     /// spawning, worktrees, or branch teardown needs.
     static func make(
         gitRepo: Bool = false, sleepLedger: SleepLedger = SleepLedger(), sleepGuard: SleepGuard? = nil,
-        claude: ClaudeInvocation = .installed()
+        wakeCenter: NotificationCenter = NotificationCenter(), claude: ClaudeInvocation = .installed()
     ) throws -> SupervisorFixture {
         let db = try AppDatabase.inMemory()
         let supportDir = FileManager.default.temporaryDirectory
@@ -322,6 +322,7 @@ struct SupervisorFixture {
             claude: claude,
             sleepLedger: sleepLedger,
             sleepGuard: sleepGuard,
+            wakeCenter: wakeCenter,
             gh: gh
         )
         sink.target = supervisor
