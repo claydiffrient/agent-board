@@ -36,6 +36,7 @@ public final class StoreHookSink: HookSink {
         case coordinatorTurnEnded(sessionId: String)
         case coordinatorCompacted(sessionId: String, manual: Bool)
         case endedSessionRestarted(projectId: String, sessionId: String)
+        case workerTurnCutBySleep(projectId: String, sessionId: String)
     }
 
     /// A write whose file another live session holds. Carried out of `process` so the wait happens
@@ -108,6 +109,11 @@ public final class StoreHookSink: HookSink {
                 // The stop kills the very host waiting on this hook's answer, so it must not hold it.
                 _Concurrency.Task { [events] in
                     await events.endedSessionRestarted(projectId: projectId, sessionId: sessionId)
+                }
+            case .workerTurnCutBySleep(let projectId, let sessionId):
+                // The continuation is a `claude --bg --resume` of the session still waiting on this answer.
+                _Concurrency.Task { [events] in
+                    await events.workerTurnCutBySleep(projectId: projectId, sessionId: sessionId)
                 }
             }
         }
@@ -572,6 +578,13 @@ public final class StoreHookSink: HookSink {
             if identity.scope == .reviewer, let taskId,
                (try? board.reviewerStoppedWithoutVerdict(taskId: taskId, sessionId: sessionId)) != nil {
                 return .follow([.reportQueued(projectId: session.projectId)])
+            }
+
+        case "StopFailure":
+            try? sessions.clearToolCalls(sessionId)
+            if session.role == .worker, session.state.isActive, taskId != nil,
+               event.lastAssistantMessage == SleepCutTurn.message {
+                return .follow([.workerTurnCutBySleep(projectId: session.projectId, sessionId: sessionId)])
             }
 
         case "SessionEnd":

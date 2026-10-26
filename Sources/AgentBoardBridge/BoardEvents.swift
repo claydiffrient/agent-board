@@ -25,6 +25,8 @@ public protocol BoardEventSink: Sendable {
     /// A worker Agent Board already ended (its row `failed` or `completed`, or its grant revoked) heard a
     /// `SessionStart`: its process is running again without the board having resumed it (SPEC §8.5).
     func endedSessionRestarted(projectId: String, sessionId: String) async
+    /// A worker's turn ended on `SleepCutTurn.message` rather than finishing (SPEC §8).
+    func workerTurnCutBySleep(projectId: String, sessionId: String) async
     /// Something landed in the Coordinator's queue — today only a reply to one of its requests.
     func coordinatorReportQueued() async
     /// The Coordinator's counterparts of `orchestratorTurnEnded` and `orchestratorCompacted`: its
@@ -36,6 +38,7 @@ public protocol BoardEventSink: Sendable {
 extension BoardEventSink {
     public func workerCompleted(projectId: String, sessionId: String) async {}
     public func endedSessionRestarted(projectId: String, sessionId: String) async {}
+    public func workerTurnCutBySleep(projectId: String, sessionId: String) async {}
     public func coordinatorReportQueued() async {}
     public func coordinatorTurnEnded(sessionId: String) async {}
     public func coordinatorCompacted(sessionId: String, manual: Bool) async {}
