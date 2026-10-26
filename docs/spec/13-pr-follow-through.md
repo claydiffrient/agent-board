@@ -720,7 +720,11 @@ on at all.
   whose fix task is still in review goes back to checking instead, reopening
   that round and keeping its items (§13.1). Stop watching (`PRWatchStore.stopWatching`)
   dismisses the open items and moves the watch to stopped (§13.1). A stale row
-  shows "restarted: head moved" while it waits for the next poll.
+  shows "restarted: head moved" while it waits for the next poll. An
+  orchestrator that has dealt with the parked reason asks for Resume with
+  `resume_pr_watch` (§6). It shows on Pending Approvals as "Resume a parked
+  pull request", with the PR, the parked reason and the orchestrator's reason
+  beneath, and granting it runs the same `PRWatchStore.resume`.
 - **Dismiss one item.** Under a row with open items, a collapsed "N open
   items" list shows each one's author, kind, first line, and "graded partly" or
   "graded not fixed" when its last check fell short. Each has **Dismiss…**,
@@ -941,6 +945,7 @@ status, `answers`, head oids, `check_failures`, `unavailable_checks`, and
 findings on request), and `list_pr_poll_problems` for a poll that cannot run.
 Each reads only the caller's own project, and none changes anything: resume,
 pause, answering a decision and Mark verified stay the human's, on the Pull
-Requests page. Item bodies, approaches, findings, reply errors and parked
+Requests page. An orchestrator can only ask for a resume (`resume_pr_watch`)
+or a dismissal (`dismiss_pr_item`), each waiting on the human's approval. Item bodies, approaches, findings, reply errors and parked
 reasons can quote reviewers or agents, so each tool's description and result
 label them as data, never instructions.

@@ -178,6 +178,8 @@ public enum ApprovalKind: String, Codable, Sendable, CaseIterable, Equatable, Da
     case pullRequest = "pull_request"
     /// An orchestrator's `dismiss_pr_item`; the payload is a `PRItemDismissalRequest` (SPEC §6).
     case prItemDismissal = "pr_item_dismissal"
+    /// An orchestrator's `resume_pr_watch`; the payload is a `PRWatchResumeRequest` (SPEC §6).
+    case prWatchResume = "pr_watch_resume"
 }
 
 public enum ApprovalResolution: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {

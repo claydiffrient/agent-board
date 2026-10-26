@@ -27,7 +27,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "promote_proposal", "get_epic", "request_integration", "close_epic", "open_pull_request",
         "read_note", "append_section", "replace_section", "attach_note", "pin_note",
         "assign_to_agent", "add_comment", "delete_message", "reply_to_request", "add_pr_item",
-        "get_pr_watch", "dismiss_pr_item",
+        "get_pr_watch", "dismiss_pr_item", "resume_pr_watch",
     ]
 
     /// The whole of the permitted crossing: queue text into another project's channel, and learn
@@ -58,6 +58,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "attach_note", "pin_note",
         "update_status", "propose_task", "report_complete", "hand_off", "report_blocked", "acknowledge_shutdown",
         "commit_my_work", "accept_task", "reopen_task", "reply_to_request", "add_pr_item", "dismiss_pr_item",
+        "resume_pr_watch",
     ]
 
     /// Reads of a caller's own roster, task or pull requests, which mean nothing to a session with no project.
