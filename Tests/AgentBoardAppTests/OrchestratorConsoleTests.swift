@@ -31,6 +31,16 @@ final class OrchestratorConsoleTests: XCTestCase {
         return condition()
     }
 
+    func testALaunchStopsOrchestratorRowsWithNoConsole() async throws {
+        let orphan = UUID().uuidString.lowercased()
+        try fixture.sessions.insert(AgentSession(
+            sessionId: orphan, projectId: fixture.project.id, role: .orchestrator,
+            cwd: fixture.supportDir.path, state: .running
+        ))
+        await fixture.supervisor.start()
+        XCTAssertEqual(try fixture.sessions.get(orphan)?.state, .stopped)
+    }
+
     func testANonZeroExitRecordsTheDecodedCodeNotTheRawWaitStatus() async throws {
         let console = try fixture.supervisor.orchestratorConsole(projectId: fixture.project.id)
 
