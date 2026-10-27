@@ -76,9 +76,32 @@ Per project, overridable:
   `SleepCutTurn.continuation`, the same channel §8.1 uses to reach an idle
   worker, and logs it to the task's progress. A second cut within five awake
   minutes of a continuation (`sleepContinuationWindowMillis`, on the
-  `SleepLedger` clock) gets nothing: a lid still closed would cut every
-  resume, and the idle cap ends that worker as before. The window is held in
-  memory, so an app relaunch resets it.
+  `SleepLedger` clock) is not resumed then, because a lid still closed would
+  cut every resume; it waits for the next full wake instead, as does a cut
+  whose continuation failed to start. The window is
+  held in memory, so an app relaunch resets it.
+- **A full wake resumes a worker still stuck on a sleep-cut turn.**
+  `WorkerSupervisor` observes `NSWorkspace.screensDidWakeNotification`, which
+  needs a display to come on, and a dark wake never turns one on: the
+  2026-10-23/24 lid-closed stretch logged 264 `DarkWake`s and one `Display is
+  turned on`, at the lid-open `Wake`. `NSWorkspace.didWakeNotification` is
+  posted on system wake and nothing documents it skipping dark wakes, so it
+  is not used. On that notification each session the window turned away, or
+  whose continuation failed, gets
+  one continuation, logged to its task's progress, if it is still an active
+  worker and its newest `PreToolUse`, `PostToolUse`, `Stop` or `StopFailure`
+  hook is still the sleep-cut `StopFailure`; a tool call or turn end since
+  means it moved on by itself. Handling a wake clears the record, so a cut is
+  continued at most once per wake, and a full wake reopens the window, so a
+  cut that lands seconds after the lid opens goes through the bullet above
+  as normal. A display waking from display sleep also posts the notification,
+  which is harmless: it can only reach a session already waiting. The record
+  is held in memory, so an app relaunch drops it.
+  The idle cap can still get there first. Dark wakes advance
+  `CLOCK_UPTIME_RAW` like any awake time — that stretch accrued 2,198 awake
+  seconds in 20 hours, about 110 an hour — so at the default 300s idle cap a
+  sleep-cut worker is ended after roughly three hours of closed lid, before
+  any full wake.
 - **Autonomy is off on first run.** Every `spawn_worker` creates a pending
   approval until you turn it on. This is a setting, not a rebuild.
 - **PR follow-through spawns skip approval (§13).** In a project with the
