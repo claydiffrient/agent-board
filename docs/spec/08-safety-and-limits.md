@@ -97,11 +97,16 @@ Per project, overridable:
   as normal. A display waking from display sleep also posts the notification,
   which is harmless: it can only reach a session already waiting. The record
   is held in memory, so an app relaunch drops it.
-  The idle cap can still get there first. Dark wakes advance
-  `CLOCK_UPTIME_RAW` like any awake time — that stretch accrued 2,198 awake
-  seconds in 20 hours, about 110 an hour — so at the default 300s idle cap a
-  sleep-cut worker is ended after roughly three hours of closed lid, before
-  any full wake.
+- **A worker waiting for that wake is exempt from the idle cap.** Dark wakes
+  advance `CLOCK_UPTIME_RAW` like any awake time — that stretch accrued 2,198
+  awake seconds in 20 hours, about 110 an hour — so at the default 300s idle
+  cap a waiting worker would be ended after roughly three hours of closed lid,
+  before any full wake. While a session is in that record, the metering tick
+  drops its idle cap, however much awake time passes; the token and elapsed
+  caps still apply. The wake continuation is a `claude --bg --resume`, which
+  writes the session's `last_activity` and `started_at` as it resumes, so its
+  idle and elapsed clocks start from the resume, not from the cut. An app
+  relaunch drops the record, and with it the exemption.
 - **Autonomy is off on first run.** Every `spawn_worker` creates a pending
   approval until you turn it on. This is a setting, not a rebuild.
 - **PR follow-through spawns skip approval (§13).** In a project with the
