@@ -288,12 +288,23 @@ the project's), under these rules:
 
 A Mac that sleeps with workers running kills them, and the idle cap counts the
 sleeping minutes as silence — so twenty minutes of suspend reaps everything
-that was running. While at least one `agent_session` row is in an active state
-(§4), the app holds one `kIOPMAssertPreventUserIdleSystemSleep` assertion named
+that was running. While at least one `worker` `agent_session` row is in an
+active state (§4), the app holds one `kIOPMAssertPreventUserIdleSystemSleep`
+assertion named
 `Agent Board — an agent is running`, and releases it when the count reaches
 zero, when the setting goes off, or when the app quits. The name is what
 `pmset -g assertions` prints: the only place a human can see who is holding
 their Mac awake.
+
+Only `worker` rows count, which takes in reviewers and integrators, since both
+run as `worker` rows. Orchestrator and Coordinator rows never count. An
+orchestrator console is interactive and can sit open, idle, for days, and its
+row stays active after an app quit kills the console, because nothing at
+launch stops an orchestrator row the way it stops an orphaned Coordinator row
+(§8.2). Measured from `pmset -g log` and the board's session history: nine such
+rows, none with a process or a hook event, held the assertion for the whole
+67:52:15 that app process ran (2026-10-22 20:25 to 2026-10-25 16:17 local),
+while workers were active for 31 of those hours.
 
 The decision reads the observed session rows and nothing else — never a
 spawn-side counter — so a worker that dies without reporting stops holding the

@@ -169,6 +169,17 @@ final class SleepGuardSupervisorTests: XCTestCase {
         XCTAssertFalse(assertion.isHeld, "the swept session left the assertion held")
     }
 
+    func testAnOrchestratorSessionAloneHoldsNothing() async throws {
+        try fixture.sessions.insert(AgentSession(
+            sessionId: "orchestrator-\(UUID().uuidString)", projectId: fixture.project.id,
+            role: .orchestrator, cwd: fixture.supportDir.path, state: .running
+        ))
+
+        await fixture.supervisor.meterTick()
+
+        XCTAssertFalse(assertion.isHeld, "an orchestrator console held the Mac awake with no worker running")
+    }
+
     func testNothingRunningHoldsNothing() async throws {
         await fixture.supervisor.meterTick()
         XCTAssertFalse(assertion.isHeld)

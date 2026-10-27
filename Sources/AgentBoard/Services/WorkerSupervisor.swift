@@ -4806,7 +4806,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func refreshSleepAssertion(_ all: [Project]? = nil) {
         guard let sleepGuard else { return }
         let projectList = all ?? ((try? projects.list()) ?? [])
-        sleepGuard.apply(projectList.flatMap { ((try? sessions.all(projectId: $0.id)) ?? []).map(\.state) })
+        sleepGuard.apply(SleepPrevention.countedStates(projectList.flatMap { (try? sessions.all(projectId: $0.id)) ?? [] }))
     }
 
     /// A pending approval and a blocked worker each stop work outright and nothing else announces

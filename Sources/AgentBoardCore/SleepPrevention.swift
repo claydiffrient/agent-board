@@ -22,6 +22,12 @@ public enum SleepPrevention {
         states.filter(\.isActive).count
     }
 
+    /// Workers only, reviewers and integrators included. An orchestrator console can sit open for
+    /// days, and its row stays active after an app quit kills it. SPEC §8.3.
+    public static func countedStates(_ sessions: [AgentSession]) -> [SessionState] {
+        sessions.filter { $0.role == .worker }.map(\.state)
+    }
+
     public static func footerLabel(enabled: Bool, activeCount: Int) -> String {
         guard enabled else { return "Sleep prevention off" }
         guard activeCount > 0 else { return "Mac may sleep — nothing running" }
@@ -40,8 +46,8 @@ public enum SleepPrevention {
         }
         let head = activeCount > 0
             ? "Agent Board holds a system power assertion named “\(assertionName)” while \(activeCount) "
-                + "\(activeCount == 1 ? "session is" : "sessions are") live. Check it with `pmset -g assertions`."
-            : "Agent Board takes a power assertion as soon as a session starts. Nothing is running, so it holds none now."
+                + "\(activeCount == 1 ? "worker is" : "workers are") running. Check it with `pmset -g assertions`."
+            : "Agent Board takes a power assertion as soon as a worker starts. No worker is running, so it holds none now."
         return head + " It prevents idle system sleep only — the display still sleeps as usual. " + lidCaveat
     }
 }
