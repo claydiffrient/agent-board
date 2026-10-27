@@ -53,7 +53,7 @@ CREATE TABLE task (
   failed         INTEGER NOT NULL DEFAULT 0,
   failure_reason TEXT,
   ordering       REAL NOT NULL,
-  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration | triage | follow_through | fix_round | followup_check
+  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration | triage | follow_through | fix_round | followup_check | verify_session
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
@@ -120,10 +120,11 @@ CREATE TABLE token_grant (
   token       TEXT PRIMARY KEY,      -- random, per session
   session_id  TEXT REFERENCES agent_session(session_id),  -- NULL until `claude --bg` returns the id
   project_id  TEXT REFERENCES project(id),  -- NULL for the Coordinator's grant only (§8.2)
-  scope       TEXT NOT NULL,         -- orchestrator | worker | reviewer | coordinator | triager
+  scope       TEXT NOT NULL,         -- orchestrator | worker | reviewer | coordinator | triager | verifier
   task_id     TEXT,                  -- worker: the only task it may mutate
   created_at  INTEGER NOT NULL,
   revoked_at  INTEGER,
+  pr_watch_id TEXT REFERENCES pr_watch(id) ON DELETE SET NULL,  -- verifier only: the watch its Walk me through it window was opened on (§6)
   CHECK ((scope = 'coordinator') = (project_id IS NULL))
 );
 

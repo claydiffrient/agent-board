@@ -36,6 +36,22 @@ public struct TokenGrantStore: Sendable {
         return grant
     }
 
+    /// A Walk me through it window's grant (SPEC §6): bound to no session, so nothing binds it later.
+    @discardableResult
+    public func issueVerifier(projectId: String, prWatchId: String) throws -> TokenGrant {
+        let grant = TokenGrant(
+            token: Self.randomToken(),
+            sessionId: nil,
+            projectId: projectId,
+            scope: .verifier,
+            taskId: nil,
+            createdAt: .nowMillis,
+            prWatchId: prWatchId
+        )
+        try db.writer.write { db in try grant.insert(db) }
+        return grant
+    }
+
     static func randomToken() -> String {
         var generator = SystemRandomNumberGenerator()
         return (0..<16).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max, using: &generator)) }.joined()
@@ -109,6 +125,16 @@ public struct TokenGrantStore: Sendable {
             try db.execute(
                 sql: "UPDATE token_grant SET revoked_at = ? WHERE scope = ? AND revoked_at IS NULL",
                 arguments: [Int64.nowMillis, TokenScope.coordinator]
+            )
+        }
+    }
+
+    /// Every live verifier grant. No window outlives the app, so launch revokes whatever is left.
+    public func revokeVerifierGrants() throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE token_grant SET revoked_at = ? WHERE scope = ? AND revoked_at IS NULL",
+                arguments: [Int64.nowMillis, TokenScope.verifier]
             )
         }
     }

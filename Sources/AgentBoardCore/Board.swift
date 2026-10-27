@@ -1148,22 +1148,26 @@ public struct Board: Sendable {
         }
     }
 
+    /// `source` is a line saying where the proposal came from, written into its report after the id.
     @discardableResult
     public func propose(
         projectId: String, title: String, body: String?, rationale: String?, sessionId: String?,
-        epicId: String?
+        epicId: String?, acceptance: String? = nil, type: TaskType? = nil, origin: TaskOrigin = .workerProposal,
+        source: String? = nil
     ) throws -> Task {
         try db.writer.write { db in
             if let epicId {
                 _ = try Self.proposalEpic(db, epicId: epicId, projectId: projectId)
             }
             let task = try TaskStore.insert(
-                db, projectId: projectId, title: title, body: body, acceptance: nil, priority: nil,
-                column: .proposed, origin: .workerProposal, epicId: epicId
+                db, projectId: projectId, title: title, body: body, acceptance: acceptance, priority: nil,
+                column: .proposed, origin: origin, epicId: epicId, type: type
             )
             var lines = ["Proposed task: \(title)", "Task id: \(task.id)"]
+            if let source { lines.append(source) }
             if let epicId { lines.append("Proposed into epic: \(epicId)") }
             if let body, !body.isEmpty { lines.append(body) }
+            if let acceptance, !acceptance.isEmpty { lines.append("Acceptance: \(acceptance)") }
             if let rationale, !rationale.isEmpty { lines.append("Rationale: \(rationale)") }
             _ = try ReportStore.insert(
                 db, projectId: projectId, taskId: task.id, sessionId: sessionId, kind: .proposal,

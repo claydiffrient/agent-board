@@ -243,6 +243,12 @@ tool on every scope as a Coordinator read, the Coordinator's own queue and
 ledger, a plan write, an inbox refusal, a write refusal, or not offered, and
 fails on a tool it has not classified.
 
+The `verifier` grant (§6) holds the boundary the same way.
+`CrossProjectBoundaryTests` classifies its three tools — `propose_task` and
+`search_notes` as reaching only `identity.projectId`, `read_note` as refusing
+another project's id — fails when the verifier is offered a tool it has not
+classified, and asserts that every other tool on every scope is refused to it.
+
 **The Coordinator's session.** It runs in the same console machinery as an
 orchestrator (§9 — `OrchestratorConsole`, with a `CoordinatorSource` in place of
 the project's), under these rules:

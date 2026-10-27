@@ -1369,14 +1369,14 @@ public final class OrchestratorToolHandler: ToolHandler {
         return column
     }
 
-    private static let typeNames = TaskType.allCases.map(\.rawValue)
+    static let typeNames = TaskType.allCases.map(\.rawValue)
 
-    private static let typeSchema = ToolSchema.enumeration(
+    static let typeSchema = ToolSchema.enumeration(
         typeNames, "What kind of work this is; agent review routes by it. Omit for Default."
     )
 
     /// Absent, `null` and `""` all mean Default.
-    private static func parseType(in arguments: JSONValue, label: String) throws -> TaskType? {
+    static func parseType(in arguments: JSONValue, label: String) throws -> TaskType? {
         guard let value = arguments["type"], value != .null else { return nil }
         guard let raw = value.stringValue else {
             throw ToolError("\(label) must be a string: one of \(typeNames.joined(separator: ", ")), or \"\" for Default.")

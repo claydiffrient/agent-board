@@ -83,7 +83,10 @@ public final class StoreHookSink: HookSink {
         self.events = events
     }
 
+    /// A verifier token is refused before anything is recorded (SPEC §7): it belongs to a human's
+    /// session, which has no session row for a hook to describe.
     public func handle(_ event: HookEvent, identity: TokenIdentity) async -> HookDecision? {
+        guard identity.scope != .verifier else { return nil }
         let outcome: Outcome = await withCheckedContinuation { continuation in
             queue.async {
                 continuation.resume(returning: self.process(event, identity: identity))

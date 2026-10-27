@@ -11,6 +11,9 @@ public enum TokenScope: String, Sendable, Codable {
     /// Reads one watched pull request's open items and records their verdicts. No checkout writes,
     /// no `gh`.
     case triager
+    /// A human's Walk me through it session: proposes tasks and reads notes in one project. No hooks,
+    /// no resources, no prompts.
+    case verifier
 }
 
 public struct TokenIdentity: Sendable, Equatable {

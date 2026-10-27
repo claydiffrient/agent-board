@@ -41,6 +41,8 @@ public enum IntegrationGuard {
                 return "Agent Board blocks merging pull requests. Merging a pull request is the human's call and there is no tool for it."
             case (.push, .coordinator), (.pullRequestCreate, .coordinator):
                 return "Agent Board blocks pushing and opening pull requests on a project's behalf from the Coordinator. Ask that project's orchestrator."
+            case (.push, .verifier), (.pullRequestCreate, .verifier), (.pullRequestMerge, .verifier):
+                return "Agent Board takes no hooks from a Walk me through it session, so it blocks nothing there."
             case (.push, .triager), (.pullRequestCreate, .triager), (.pullRequestMerge, .triager), (.gh, _):
                 return "Agent Board blocks `gh` and every push for a triager. get_pr_items has the pull request and its items; record your verdicts with set_verdicts."
             case (.fileWrite, _):

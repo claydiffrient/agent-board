@@ -1108,7 +1108,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         case .triager:
             return SpawnRequest.triagerDisallowedTools
                 + SpawnRequest.reviewerBoardDeny(supportDir: supportDir, home: home)
-        case .worker, .orchestrator, .coordinator:
+        case .worker, .orchestrator, .coordinator, .verifier:
             return SpawnRequest.defaultDisallowedTools
         }
     }

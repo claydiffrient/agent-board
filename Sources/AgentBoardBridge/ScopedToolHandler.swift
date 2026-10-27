@@ -7,17 +7,20 @@ public struct ScopedToolHandler: ToolHandler {
     private let reviewer: any ToolHandler
     private let coordinator: any ToolHandler
     private let triager: any ToolHandler
+    private let verifier: any ToolHandler
 
-    /// With no `coordinator` or `triager` handler wired, that grant is offered no tools and refused every call.
+    /// With no `coordinator`, `triager` or `verifier` handler wired, that grant is offered no tools and
+    /// refused every call.
     public init(
         worker: any ToolHandler, orchestrator: any ToolHandler, reviewer: any ToolHandler,
-        coordinator: (any ToolHandler)? = nil, triager: (any ToolHandler)? = nil
+        coordinator: (any ToolHandler)? = nil, triager: (any ToolHandler)? = nil, verifier: (any ToolHandler)? = nil
     ) {
         self.worker = worker
         self.orchestrator = orchestrator
         self.reviewer = reviewer
         self.coordinator = coordinator ?? NoToolHandler()
         self.triager = triager ?? NoToolHandler()
+        self.verifier = verifier ?? NoToolHandler()
     }
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
@@ -35,6 +38,7 @@ public struct ScopedToolHandler: ToolHandler {
         case .reviewer: return reviewer
         case .coordinator: return coordinator
         case .triager: return triager
+        case .verifier: return verifier
         }
     }
 }

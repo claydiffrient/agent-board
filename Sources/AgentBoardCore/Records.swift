@@ -433,6 +433,8 @@ public struct TokenGrant: Codable, FetchableRecord, PersistableRecord, Identifia
     public var taskId: String?
     public var createdAt: Int64
     public var revokedAt: Int64?
+    /// Set only on a `.verifier` grant: the watch its Walk me through it window was opened on.
+    public var prWatchId: String?
 
     public enum CodingKeys: String, CodingKey {
         case token
@@ -442,9 +444,13 @@ public struct TokenGrant: Codable, FetchableRecord, PersistableRecord, Identifia
         case taskId = "task_id"
         case createdAt = "created_at"
         case revokedAt = "revoked_at"
+        case prWatchId = "pr_watch_id"
     }
 
-    public init(token: String, sessionId: String?, projectId: String?, scope: TokenScope, taskId: String?, createdAt: Int64, revokedAt: Int64? = nil) {
+    public init(
+        token: String, sessionId: String?, projectId: String?, scope: TokenScope, taskId: String?, createdAt: Int64,
+        revokedAt: Int64? = nil, prWatchId: String? = nil
+    ) {
         self.token = token
         self.sessionId = sessionId
         self.projectId = projectId
@@ -452,6 +458,7 @@ public struct TokenGrant: Codable, FetchableRecord, PersistableRecord, Identifia
         self.taskId = taskId
         self.createdAt = createdAt
         self.revokedAt = revokedAt
+        self.prWatchId = prWatchId
     }
 
     public var id: String { token }

@@ -159,7 +159,8 @@ struct BridgeFixture {
             scoped: ScopedToolHandler(
                 worker: worker, orchestrator: orchestrator, reviewer: reviewer,
                 coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: events),
-                triager: TriagerToolHandler(db: db, events: events)
+                triager: TriagerToolHandler(db: db, events: events),
+                verifier: VerifierToolHandler(db: db, events: events)
             ),
             hooks: StoreHookSink(db: db, events: events, lockWait: lockWait),
             commits: scopedCommits
