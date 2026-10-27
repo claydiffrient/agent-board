@@ -286,9 +286,11 @@ the project's), under these rules:
   rows it leaves stay active with no process behind them. At launch, while no
   Coordinator console is running, every active `coordinator` row is marked
   stopped; likewise every active `orchestrator` row whose project has no
-  running console. `reconcile` does the same for an orchestrator row, but only
-  for a project whose Status pane is open, so without the launch sweep a
-  project nobody looks at keeps its row active indefinitely.
+  running console. Those rows then stop being metered and stop showing as
+  live. `reconcile` does the same for an orchestrator row, but only for a
+  project whose Status pane is open, so without the launch sweep a project
+  nobody looks at keeps its row active indefinitely. The sweep has no effect on
+  Keep awake (§8.3), which never counts these rows.
 
 ### 8.3 Sleep prevention
 
@@ -304,20 +306,19 @@ their Mac awake.
 
 Only `worker` rows count, which takes in reviewers and integrators, since both
 run as `worker` rows. Orchestrator and Coordinator rows never count. An
-orchestrator console is interactive and can sit open, idle, for days, and its
-row stays active after an app quit kills the console, because nothing at
-launch stops an orchestrator row the way it stops an orphaned Coordinator row
-(§8.2). Measured from `pmset -g log` and the board's session history: nine such
-rows, none with a process or a hook event, held the assertion for the whole
+orchestrator console is interactive and can sit open, idle, for days, and
+before the launch sweep (§8.2) its row stayed active after an app quit killed
+the console. Measured from `pmset -g log` and the board's session history,
+back when every active role counted: nine such rows, none with a process or a
+hook event, held the assertion for the whole
 67:52:15 that app process ran (2026-10-22 20:25 to 2026-10-25 16:17 local),
 while workers were active for 31 of those hours.
 
 The decision reads the observed session rows and nothing else — never a
 spawn-side counter — so a worker that dies without reporting stops holding the
 Mac awake the moment `reconcile` or the leaked-agent sweep (§8.6) flips its row
-inactive, and an orchestrator or Coordinator row a quit left active stops
-holding it when the launch sweep (§8.2) flips that row. It is re-evaluated on
-the metering tick and immediately after `stop`, `pauseAll` and `reconcile`.
+inactive. It is re-evaluated on the metering tick and immediately after `stop`,
+`pauseAll` and `reconcile`.
 
 **What it does not cover.** Idle system sleep only. Display sleep has its own
 assertion type and is deliberately never asserted — a screen lit all night is
