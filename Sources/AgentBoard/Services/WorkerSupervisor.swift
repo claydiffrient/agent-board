@@ -4950,13 +4950,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             return
         }
         noteStall(current, lastActivity: lastActivity, stallSeconds: stallSeconds, awake: awake)
+        var limits = Self.exempting(limits, rostered: current.isRostered)
+        // SPEC §8: dark wakes keep advancing awake time while the lid is shut, so only the wake resume ends this wait.
+        if sleepCutAwaitingWake.contains(current.sessionId) { limits.maxIdleSeconds = nil }
         guard let breach = CapEvaluator.evaluate(
             totals: totals,
             startedAt: current.startedDate,
             lastActivity: lastActivity,
             toolStartedAt: current.toolStartedDate,
             awake: awake,
-            limits: Self.exempting(limits, rostered: current.isRostered),
+            limits: limits,
             state: current.state
         ) else { return }
         await enforce(breach, on: current, awake: awake)
