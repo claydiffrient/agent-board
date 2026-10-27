@@ -645,6 +645,7 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertEqual(absent.settleMinutes, 10)
         XCTAssertEqual(absent.roundCap, 3)
         XCTAssertNil(absent.dailyBudgetUSD)
+        XCTAssertEqual(absent.minBatteryPercent, 50)
         XCTAssertNil(absent.verifyCommand)
         XCTAssertFalse(absent.postFactualReplies)
         XCTAssertEqual(absent.roles, PRFollowThroughRoles())
@@ -658,7 +659,7 @@ final class PRWatchStoreTests: XCTestCase {
         var settings = ProjectSettings()
         settings.prFollowThrough = PRFollowThroughSettings(
             enabled: true, verificationLabel: "verified-example", requireApproval: false, settleMinutes: 5,
-            roundCap: 2, dailyBudgetUSD: 4.5, verifyCommand: "open {url}", postFactualReplies: true,
+            roundCap: 2, dailyBudgetUSD: 4.5, minBatteryPercent: nil, verifyCommand: "open {url}", postFactualReplies: true,
             roles: PRFollowThroughRoles(fixer: PRFollowThroughRole(rosterAgentId: "agent-1", model: "sonnet")),
             privateTerms: ["example-org"]
         )

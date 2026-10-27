@@ -611,12 +611,15 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let roleModels = ["example-triage", "example-fixer", "example-reviewer", "example-check"]
         XCTAssertEqual(
             mounted.fields.map(\.stringValue),
-            ["15", "2", "", "verified-example", "example-verify {url}", "example-verification, example-sign-off", ""]
+            ["15", "2", "", "50", "verified-example", "example-verify {url}", "example-verification, example-sign-off", ""]
                 + roleModels
         )
         XCTAssertEqual(
             mounted.fields.map(\.placeholderString),
-            [nil, nil, "Spawn caps", "e.g. verified", "e.g. open {url}", "Comma-separated check names", "Press Return to add"]
+            [
+                nil, nil, "Spawn caps", "Any", "e.g. verified", "e.g. open {url}", "Comma-separated check names",
+                "Press Return to add",
+            ]
                 + Array(repeating: "Model id", count: roleModels.count)
         )
         XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off, .on, .off])
@@ -627,10 +630,8 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let (db, project) = try storedProject(configure)
         let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
             .environment(renderEnvironment(db: db))
-        // The Replies section's new "Re-request reviews" toggle and caption push Publish guard
-        // further down than the 900pt mounts elsewhere in this file hold; this tab needs the extra
-        // room to keep Publish guard inside the captured window.
-        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 1000))
+        // Publish guard sits further down this tab than the 900pt mounts elsewhere in this file hold.
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 1100))
         defer { mount.close() }
         let wanted = ["Watch", "Verification", "Replies", "Publish guard", "Globex"]
         var lines: [String] = []
@@ -650,7 +651,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     func testPRFollowThroughSaveKeepsAPendingTermAndReloadsFromTheStore() throws {
         let draft = PRFollowThroughSettings(
             enabled: true, verificationLabel: "  ", settleMinutes: -5, roundCap: 0, dailyBudgetUSD: 0,
-            verifyCommand: " example-verify {url} ", privateTerms: ["Globex", " initech "]
+            minBatteryPercent: 150, verifyCommand: " example-verify {url} ", privateTerms: ["Globex", " initech "]
         )
         let saved = ProjectSettingsSheet.savedFollowThrough(draft, pendingTerm: "GLOBEX")
         XCTAssertEqual(saved.privateTerms, ["Globex", "initech"], "a case-variant of a listed term guards nothing new")
@@ -663,6 +664,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         XCTAssertEqual(saved.verifyCommand, "example-verify {url}")
         XCTAssertEqual(saved.settleMinutes, 0)
         XCTAssertEqual(saved.roundCap, 1)
+        XCTAssertEqual(saved.minBatteryPercent, 100)
         XCTAssertEqual(ProjectSettingsSheet.checkNames(" a / b, ,c,a / b "), ["a / b", "c"])
 
         let (_, project) = try storedProject { $0.prFollowThrough = saved }

@@ -39,6 +39,8 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
     public var roundCap: Int = 3
     /// Nil uses the project's spawn caps instead of a dollar budget.
     public var dailyBudgetUSD: Double? = nil
+    /// The charge a round needs to start on battery (SPEC §13.3); nil starts one at any charge.
+    public var minBatteryPercent: Int? = 50
     /// A command template with `{url}`, run by "Walk me through it".
     public var verifyCommand: String? = nil
     public var postFactualReplies: Bool = false
@@ -61,6 +63,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         settleMinutes: Int = 10,
         roundCap: Int = 3,
         dailyBudgetUSD: Double? = nil,
+        minBatteryPercent: Int? = 50,
         verifyCommand: String? = nil,
         postFactualReplies: Bool = false,
         reRequestReviews: Bool = false,
@@ -74,6 +77,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         self.settleMinutes = settleMinutes
         self.roundCap = roundCap
         self.dailyBudgetUSD = dailyBudgetUSD
+        self.minBatteryPercent = minBatteryPercent
         self.verifyCommand = verifyCommand
         self.postFactualReplies = postFactualReplies
         self.reRequestReviews = reRequestReviews
@@ -115,6 +119,12 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         c.isASCII && (c.isLetter || c.isNumber || ":/._-".contains(c))
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case enabled, verificationLabel, requireApproval, settleMinutes, roundCap, dailyBudgetUSD, minBatteryPercent
+        case verifyCommand, postFactualReplies, postFactualRepliesSince, reRequestReviews, roles, privateTerms
+        case checksAwaitingVerification
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = PRFollowThroughSettings()
@@ -124,6 +134,8 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         settleMinutes = try c.decodeIfPresent(Int.self, forKey: .settleMinutes) ?? defaults.settleMinutes
         roundCap = try c.decodeIfPresent(Int.self, forKey: .roundCap) ?? defaults.roundCap
         dailyBudgetUSD = try c.decodeIfPresent(Double.self, forKey: .dailyBudgetUSD)
+        minBatteryPercent = try c.contains(.minBatteryPercent)
+            ? c.decodeIfPresent(Int.self, forKey: .minBatteryPercent) : defaults.minBatteryPercent
         verifyCommand = try c.decodeIfPresent(String.self, forKey: .verifyCommand)
         postFactualReplies = try c.decodeIfPresent(Bool.self, forKey: .postFactualReplies) ?? defaults.postFactualReplies
         postFactualRepliesSince = try c.decodeIfPresent(Int64.self, forKey: .postFactualRepliesSince)
@@ -132,5 +144,24 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         privateTerms = try c.decodeIfPresent([String].self, forKey: .privateTerms) ?? defaults.privateTerms
         checksAwaitingVerification = try c.decodeIfPresent([String].self, forKey: .checksAwaitingVerification)
             ?? defaults.checksAwaitingVerification
+    }
+
+    /// Writes a nil `minBatteryPercent` as null: an absent key decodes as the default, 50.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(enabled, forKey: .enabled)
+        try c.encodeIfPresent(verificationLabel, forKey: .verificationLabel)
+        try c.encode(requireApproval, forKey: .requireApproval)
+        try c.encode(settleMinutes, forKey: .settleMinutes)
+        try c.encode(roundCap, forKey: .roundCap)
+        try c.encodeIfPresent(dailyBudgetUSD, forKey: .dailyBudgetUSD)
+        try c.encode(minBatteryPercent, forKey: .minBatteryPercent)
+        try c.encodeIfPresent(verifyCommand, forKey: .verifyCommand)
+        try c.encode(postFactualReplies, forKey: .postFactualReplies)
+        try c.encodeIfPresent(postFactualRepliesSince, forKey: .postFactualRepliesSince)
+        try c.encode(reRequestReviews, forKey: .reRequestReviews)
+        try c.encode(roles, forKey: .roles)
+        try c.encode(privateTerms, forKey: .privateTerms)
+        try c.encode(checksAwaitingVerification, forKey: .checksAwaitingVerification)
     }
 }

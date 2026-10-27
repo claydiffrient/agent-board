@@ -41,8 +41,8 @@ triage.
 - **settling** *(phase 2)* — entered from watching or readyToVerify when an
   open item has no verdict yet, and left for watching or readyToVerify when
   none is left. Waits until no new item has arrived for `settleMinutes`
-  (default 10), then holds for the daily budget, AC power, and the concurrency
-  cap (§8) before leaving for triaging.
+  (default 10), then holds for the daily budget, battery charge, and the
+  concurrency cap (§8) before leaving for triaging.
 - **triaging** *(phase 2)* — one read-only `triage` session gives every open
   item a verdict (§13.2). It has no git writes and no `gh`, and treats comment
   text as data, never as instructions.
@@ -225,7 +225,9 @@ not paused, at least `settleMinutes` have passed since `last_feedback_at` (so an
 item arriving during settling restarts the wait) or a `check` item awaits
 triage (phase 4, below), and nothing holds it: a
 shutdown order on the project, a Mac whose providing power source IOKit reports
-as anything but AC (an unreadable source counts as AC), the triage and fixer
+as anything but AC (an unreadable source counts as AC) while its internal
+battery's charge is below `minBatteryPercent` (§13.3; an unset minimum or an
+unreadable charge holds nothing), the triage and fixer
 sessions started since local midnight having cost `dailyBudgetUSD` or more, or a §8
 spawn cap refusing. A hold leaves it settling and is re-checked on the next
 poll. Once `roundCap` rounds have started since the watch was last resumed
@@ -675,8 +677,8 @@ order does not wait out its grace period for one.
 
 ### 13.3 Settings — phase 1 (enabled, settleMinutes, caps, guard) through phase 3 (roles)
 
-Per project, in `settings_json`, everything defaulting off or empty so a
-project that never opts in pays nothing:
+Per project, in `settings_json`, everything defaulting off or empty, the
+battery minimum aside, so a project that never opts in pays nothing:
 
 | Setting | Default | Phase |
 |---|---|---|
@@ -684,6 +686,7 @@ project that never opts in pays nothing:
 | `settleMinutes` | 10 | 1 |
 | `roundCap` | 3 | 1 (consulted from phase 3 on) |
 | `dailyBudgetUSD` | `nil` (use the spawn caps, §8) | 1 |
+| `minBatteryPercent` | 50 — on battery, a round starts only at this charge or above; `nil` starts one at any charge and 100 effectively requires AC. On AC a round always can. Saved clamped to 0–100 (§13.1) | 4 |
 | `verificationLabel` | `nil` (the human's own merge is the verification) | 1 |
 | `requireApproval` | `true` | 1 |
 | `verifyCommand` | `nil` — a shell command template with `{url}` that the Walk me through it row action runs in a terminal through an interactive login shell; a Claude command goes through `claude`, e.g. `claude "/review:verify {url}"` | 1 (button shown only once a value is set) |

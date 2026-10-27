@@ -2451,10 +2451,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
-    /// SPEC §13.1's settling holds: the daily budget, AC power and the §8 spawn caps, plus a
-    /// shutdown order, which refuses every spawn.
+    /// SPEC §13.1's settling holds: the daily budget, a battery below `minBatteryPercent` (§13.3) and
+    /// the §8 spawn caps, plus a shutdown order, which refuses every spawn.
     private func isFollowThroughHeld(project: Project) -> Bool {
-        if isShuttingDown(projectId: project.id) || !isOnACPower() { return true }
+        if isShuttingDown(projectId: project.id) { return true }
+        if !isOnACPower(), let minimum = project.settings.prFollowThrough.minBatteryPercent,
+           let charge = batteryPercent(), charge < minimum { return true }
         if let budget = project.settings.prFollowThrough.dailyBudgetUSD {
             let midnight = Int64(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970 * 1000)
             if ((try? prWatches.followThroughSpend(projectId: project.id, since: midnight)) ?? 0) >= budget { return true }
@@ -4458,8 +4460,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         MacNotifier.shared.post(title: $0, body: $1, route: $2)
     }
 
-    /// Read before each follow-through spawn (SPEC §13.1); a test substitutes the answer.
+    /// Both read before each follow-through spawn (SPEC §13.1); a test substitutes the answers.
     @ObservationIgnored var isOnACPower: @MainActor () -> Bool = { PowerSource.isOnAC() }
+    @ObservationIgnored var batteryPercent: @MainActor () -> Int? = { PowerSource.batteryPercent() }
 
     /// The gating decision for every banner that is not driven by the attention signal.
     /// `MacNotifier.post` is inert under `xctest`, so this is what the tests assert on.
