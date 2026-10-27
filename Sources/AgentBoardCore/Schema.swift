@@ -627,6 +627,12 @@ enum Schema {
     ALTER TABLE pr_item ADD COLUMN dismissed_at INTEGER;
     """
 
+    /// The pull request's description as of the last poll, which the triage and follow-up check prompts
+    /// carry (SPEC §13.1).
+    static let prWatchBody = """
+    ALTER TABLE pr_watch ADD COLUMN body TEXT;
+    """
+
     /// One row per pooled worktree slot that has ever been leased (SPEC §3.1 step 2, §4).
     static let worktreeSlot = """
     CREATE TABLE worktree_slot (

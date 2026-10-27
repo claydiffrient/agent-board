@@ -5,11 +5,13 @@ import Foundation
 /// in that agent's own prompt and plugins.
 public enum FollowupCheckPrompt {
     public static func compose(
-        watch: PRWatch, round: PRRound, headOid: String, workingDirectory: String, agent: AgentIdentity? = nil
+        watch: PRWatch, round: PRRound, headOid: String, workingDirectory: String, agent: AgentIdentity? = nil,
+        fenceId: String = InjectedNote.newFenceId()
     ) -> String {
         [
             agent.map(OpeningPrompt.renderIdentity) ?? identity,
             pullRequest(watch: watch, round: round, headOid: headOid, workingDirectory: workingDirectory),
+            TriagePrompt.currentText(watch: watch, fenceId: fenceId),
             TriagePrompt.dataNotInstructions,
             grades,
             howToWork,
@@ -41,7 +43,7 @@ public enum FollowupCheckPrompt {
     static func pullRequest(watch: PRWatch, round: PRRound, headOid: String, workingDirectory: String) -> String {
         """
         ## The round
-        \(watch.repoOwner)/\(watch.repoName)#\(watch.number): \(watch.title)
+        \(watch.repoOwner)/\(watch.repoName)#\(watch.number), titled as below
         \(watch.url)
         - Round \(round.number) started from the pull request's head at `\(round.baseHeadOid)`, and its fixer \
         committed on top of it up to `\(headOid)`.
@@ -61,6 +63,9 @@ public enum FollowupCheckPrompt {
     - `needs_author`: no commit can satisfy it, because only the pull request's author can do it on GitHub, \
     such as editing the description or title, changing labels or reviewers, or replying elsewhere. Say what \
     the author has to do; it goes to them as a decision.
+    An item asking for a change to the title or description is graded against their current text above, \
+    not the diff: `fixed` when that text shows the change, quoting the passage as evidence, and \
+    `needs_author` when it does not or the passage cannot be seen.
     Anything but `fixed`, `moot` or `needs_author` sends the round back to its fixer with your evidence as the \
     finding, so write it for the fixer to act on.
     """

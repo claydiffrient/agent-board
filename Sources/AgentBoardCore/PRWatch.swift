@@ -73,6 +73,8 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
     public var number: Int
     public var url: String
     public var title: String
+    /// The description as GitHub renders it, from the last poll; nil until a poll has read it (SPEC §13.1).
+    public var body: String? = nil
     public var isDraft: Bool
     public var headRef: String
     public var headOid: String
@@ -106,6 +108,7 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
         case number
         case url
         case title
+        case body
         case isDraft = "is_draft"
         case headRef = "head_ref"
         case headOid = "head_oid"
@@ -341,6 +344,8 @@ public struct PRSnapshot: Sendable, Equatable {
     public var number: Int
     public var url: String
     public var title: String
+    /// The description with its `<!-- … -->` comments removed, as GitHub renders it.
+    public var body: String
     public var isDraft: Bool
     public var headRef: String
     public var headOid: String
@@ -361,8 +366,8 @@ public struct PRSnapshot: Sendable, Equatable {
     public var failedChecks: [PRFailedCheck]
 
     public init(
-        repoOwner: String, repoName: String, number: Int, url: String, title: String, isDraft: Bool = false,
-        headRef: String, headOid: String, baseRef: String, reviewDecision: String? = nil,
+        repoOwner: String, repoName: String, number: Int, url: String, title: String, body: String = "",
+        isDraft: Bool = false, headRef: String, headOid: String, baseRef: String, reviewDecision: String? = nil,
         approvedBy: [String] = [], changesRequestedBy: [String] = [],
         checksState: String? = nil, mergeable: String? = nil, labels: [String] = [], items: [PRSnapshotItem] = [],
         isCrossRepository: Bool = false, headRepository: String? = nil, failedChecks: [PRFailedCheck] = []
@@ -372,6 +377,7 @@ public struct PRSnapshot: Sendable, Equatable {
         self.number = number
         self.url = url
         self.title = title
+        self.body = body
         self.isDraft = isDraft
         self.headRef = headRef
         self.headOid = headOid

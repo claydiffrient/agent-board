@@ -259,12 +259,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var attachRequestedAt: [String: Int64] = [:]
     /// When each session was last sent `SleepCutTurn.continuation`, on the wall clock (SPEC §8).
     @ObservationIgnored private var sleepContinuedAt: [String: Int64] = [:]
+    /// Sleep-cut sessions the window turned away or whose continuation failed, left for the next full wake (SPEC §8).
+    @ObservationIgnored private var sleepCutAwaitingWake: Set<String> = []
+    /// A full wake reopens the once-per-stall window, so a cut that lands just after the lid opens is still continued.
+    @ObservationIgnored private var lastFullWakeAt: Int64?
+    @ObservationIgnored private let wakeCenter: NotificationCenter
+    @ObservationIgnored private var wakeObserver: (any NSObjectProtocol)?
     /// The last integration each project's `origin` resolved to, kept for when git fails to read it.
     @ObservationIgnored private var integrationDefaults: [String: StandaloneIntegration] = [:]
 
     nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
-    /// A second sleep-cut turn within this much awake time of the first is left to the idle cap (SPEC §8).
+    /// A second sleep-cut turn within this much awake time of the first waits for the next full wake (SPEC §8).
     static let sleepContinuationWindowMillis: Int64 = 5 * 60 * 1000
     /// The archive policies are day-granular, so they ride the metering tick at a far coarser
     /// cadence rather than paying for a scan every 5 seconds — or a second timer.
@@ -288,6 +294,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         claude: ClaudeInvocation = .installed(),
         sleepLedger: SleepLedger = .shared,
         sleepGuard: SleepGuard? = nil,
+        wakeCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         gh: any GhRunning = SystemGh()
     ) {
         self.db = db
@@ -302,6 +309,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         coordinator = CoordinatorStore(db)
         self.sleepLedger = sleepLedger
         self.sleepGuard = sleepGuard
+        self.wakeCenter = wakeCenter
         projects = ProjectStore(db)
         tasks = TaskStore(db)
         sessions = SessionStore(db)
@@ -348,6 +356,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         await migrateWorktreeRoots()
         refreshSleepAssertion()
         lastOrphanReap = sleepLedger.reading().nowMillis
+        observeFullWakes()
         startMetering()
     }
 
@@ -358,6 +367,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func stop() async {
         meteringTask?.cancel()
         meteringTask = nil
+        if let wakeObserver { wakeCenter.removeObserver(wakeObserver) }
+        wakeObserver = nil
         await server.stop()
     }
 
@@ -2462,10 +2473,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
-    /// SPEC §13.1's settling holds: the daily budget, AC power and the §8 spawn caps, plus a
-    /// shutdown order, which refuses every spawn.
+    /// SPEC §13.1's settling holds: the daily budget, a battery below `minBatteryPercent` (§13.3) and
+    /// the §8 spawn caps, plus a shutdown order, which refuses every spawn.
     private func isFollowThroughHeld(project: Project) -> Bool {
-        if isShuttingDown(projectId: project.id) || !isOnACPower() { return true }
+        if isShuttingDown(projectId: project.id) { return true }
+        if !isOnACPower(), let minimum = project.settings.prFollowThrough.minBatteryPercent,
+           let charge = batteryPercent(), charge < minimum { return true }
         if let budget = project.settings.prFollowThrough.dailyBudgetUSD {
             let midnight = Int64(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970 * 1000)
             if ((try? prWatches.followThroughSpend(projectId: project.id, since: midnight)) ?? 0) >= budget { return true }
@@ -4469,8 +4482,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         MacNotifier.shared.post(title: $0, body: $1, route: $2)
     }
 
-    /// Read before each follow-through spawn (SPEC §13.1); a test substitutes the answer.
+    /// Both read before each follow-through spawn (SPEC §13.1); a test substitutes the answers.
     @ObservationIgnored var isOnACPower: @MainActor () -> Bool = { PowerSource.isOnAC() }
+    @ObservationIgnored var batteryPercent: @MainActor () -> Int? = { PowerSource.batteryPercent() }
 
     /// The gating decision for every banner that is not driven by the attention signal.
     /// `MacNotifier.post` is inert under `xctest`, so this is what the tests assert on.
@@ -4605,26 +4619,66 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// SPEC §8: one continuation per stall. A lid closed through powernap dark wakes cuts every
-    /// request within seconds, so a repeat inside the window is the idle cap's, not another resume.
+    /// request within seconds, so a repeat inside the window waits for the next full wake instead.
     func workerTurnCutBySleep(projectId: String, sessionId: String) async {
         let awake = sleepLedger.reading()
-        if let last = sleepContinuedAt[sessionId], awake.millisAwake(since: last) < Self.sleepContinuationWindowMillis {
+        if let last = sleepContinuedAt[sessionId], awake.millisAwake(since: last) < Self.sleepContinuationWindowMillis,
+           (lastFullWakeAt ?? 0) <= last {
+            sleepCutAwaitingWake.insert(sessionId)
             return
         }
-        guard let session = try? sessions.get(sessionId), session.projectId == projectId,
-              session.role == .worker, session.state.isActive, let taskId = session.taskId
-        else { return }
-        sleepContinuedAt[sessionId] = awake.nowMillis
+        guard let session = try? sessions.get(sessionId), session.projectId == projectId else { return }
+        await continueSleepCutTurn(session, now: awake.nowMillis, when: "")
+    }
+
+    /// SPEC §8: `screensDidWakeNotification` needs a lit display, which a dark wake never turns on;
+    /// `NSWorkspace.didWakeNotification` marks any system wake, and nothing documents it skipping dark ones.
+    private func observeFullWakes() {
+        guard wakeObserver == nil else { return }
+        wakeObserver = wakeCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            _Concurrency.Task { @MainActor [weak self] in await self?.screensDidWake() }
+        }
+    }
+
+    /// SPEC §8: each session still waiting on a sleep-cut turn gets one continuation per full wake.
+    func screensDidWake() async {
+        let now = sleepLedger.reading().nowMillis
+        lastFullWakeAt = now
+        let waiting = sleepCutAwaitingWake
+        sleepCutAwaitingWake = []
+        for sessionId in waiting where latestTurnWasCutBySleep(sessionId) {
+            guard let session = try? sessions.get(sessionId) else { continue }
+            await continueSleepCutTurn(session, now: now, when: " when the Mac woke")
+        }
+    }
+
+    /// Any tool call or turn end after the cut means the session moved on without help.
+    private func latestTurnWasCutBySleep(_ sessionId: String) -> Bool {
+        let turnEvents: Set<String> = ["PreToolUse", "PostToolUse", "Stop", "StopFailure"]
+        guard let latest = try? hookEvents.recent(sessionId: sessionId, limit: 50)
+            .first(where: { turnEvents.contains($0.event) })
+        else { return false }
+        return latest.event == "StopFailure"
+            && Self.payloadString("last_assistant_message", in: latest.payload) == SleepCutTurn.message
+    }
+
+    private func continueSleepCutTurn(_ session: AgentSession, now: Int64, when: String) async {
+        guard session.role == .worker, session.state.isActive, let taskId = session.taskId else { return }
+        let sessionId = session.sessionId
+        sleepContinuedAt[sessionId] = now
         do {
             try await resume(session, prompt: SleepCutTurn.continuation)
             _ = try? ProgressStore(db).append(
                 taskId: taskId, sessionId: sessionId, kind: .status,
-                text: "System sleep cut off \(session.displayShortId)'s turn; Agent Board sent it one continuation."
+                text: "System sleep cut off \(session.displayShortId)'s turn; Agent Board sent it one continuation\(when)."
             )
         } catch {
+            sleepCutAwaitingWake.insert(sessionId)
             _ = try? ProgressStore(db).append(
                 taskId: taskId, sessionId: sessionId, kind: .error,
-                text: "System sleep cut off \(session.displayShortId)'s turn, and the continuation failed: \(describe(error))"
+                text: "System sleep cut off \(session.displayShortId)'s turn, and the continuation\(when) failed: \(describe(error))"
             )
         }
     }
@@ -4763,7 +4817,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func refreshSleepAssertion(_ all: [Project]? = nil) {
         guard let sleepGuard else { return }
         let projectList = all ?? ((try? projects.list()) ?? [])
-        sleepGuard.apply(projectList.flatMap { ((try? sessions.all(projectId: $0.id)) ?? []).map(\.state) })
+        sleepGuard.apply(SleepPrevention.countedStates(projectList.flatMap { (try? sessions.all(projectId: $0.id)) ?? [] }))
     }
 
     /// A pending approval and a blocked worker each stop work outright and nothing else announces

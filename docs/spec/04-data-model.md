@@ -318,6 +318,7 @@ CREATE TABLE pr_watch (
   number           INTEGER NOT NULL,
   url              TEXT NOT NULL,
   title            TEXT NOT NULL,
+  body             TEXT,              -- the description as rendered, from the last poll; null until one reads it (§13.1)
   is_draft         INTEGER NOT NULL DEFAULT 0,
   head_ref         TEXT NOT NULL,
   head_oid         TEXT NOT NULL,

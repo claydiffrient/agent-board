@@ -76,9 +76,32 @@ Per project, overridable:
   `SleepCutTurn.continuation`, the same channel §8.1 uses to reach an idle
   worker, and logs it to the task's progress. A second cut within five awake
   minutes of a continuation (`sleepContinuationWindowMillis`, on the
-  `SleepLedger` clock) gets nothing: a lid still closed would cut every
-  resume, and the idle cap ends that worker as before. The window is held in
-  memory, so an app relaunch resets it.
+  `SleepLedger` clock) is not resumed then, because a lid still closed would
+  cut every resume; it waits for the next full wake instead, as does a cut
+  whose continuation failed to start. The window is
+  held in memory, so an app relaunch resets it.
+- **A full wake resumes a worker still stuck on a sleep-cut turn.**
+  `WorkerSupervisor` observes `NSWorkspace.screensDidWakeNotification`, which
+  needs a display to come on, and a dark wake never turns one on: the
+  2026-10-23/24 lid-closed stretch logged 264 `DarkWake`s and one `Display is
+  turned on`, at the lid-open `Wake`. `NSWorkspace.didWakeNotification` is
+  posted on system wake and nothing documents it skipping dark wakes, so it
+  is not used. On that notification each session the window turned away, or
+  whose continuation failed, gets
+  one continuation, logged to its task's progress, if it is still an active
+  worker and its newest `PreToolUse`, `PostToolUse`, `Stop` or `StopFailure`
+  hook is still the sleep-cut `StopFailure`; a tool call or turn end since
+  means it moved on by itself. Handling a wake clears the record, so a cut is
+  continued at most once per wake, and a full wake reopens the window, so a
+  cut that lands seconds after the lid opens goes through the bullet above
+  as normal. A display waking from display sleep also posts the notification,
+  which is harmless: it can only reach a session already waiting. The record
+  is held in memory, so an app relaunch drops it.
+  The idle cap can still get there first. Dark wakes advance
+  `CLOCK_UPTIME_RAW` like any awake time — that stretch accrued 2,198 awake
+  seconds in 20 hours, about 110 an hour — so at the default 300s idle cap a
+  sleep-cut worker is ended after roughly three hours of closed lid, before
+  any full wake.
 - **Autonomy is off on first run.** Every `spawn_worker` creates a pending
   approval until you turn it on. This is a setting, not a rebuild.
 - **PR follow-through spawns skip approval (§13).** In a project with the
@@ -271,12 +294,23 @@ the project's), under these rules:
 
 A Mac that sleeps with workers running kills them, and the idle cap counts the
 sleeping minutes as silence — so twenty minutes of suspend reaps everything
-that was running. While at least one `agent_session` row is in an active state
-(§4), the app holds one `kIOPMAssertPreventUserIdleSystemSleep` assertion named
+that was running. While at least one `worker` `agent_session` row is in an
+active state (§4), the app holds one `kIOPMAssertPreventUserIdleSystemSleep`
+assertion named
 `Agent Board — an agent is running`, and releases it when the count reaches
 zero, when the setting goes off, or when the app quits. The name is what
 `pmset -g assertions` prints: the only place a human can see who is holding
 their Mac awake.
+
+Only `worker` rows count, which takes in reviewers and integrators, since both
+run as `worker` rows. Orchestrator and Coordinator rows never count. An
+orchestrator console is interactive and can sit open, idle, for days, and its
+row stays active after an app quit kills the console, because nothing at
+launch stops an orchestrator row the way it stops an orphaned Coordinator row
+(§8.2). Measured from `pmset -g log` and the board's session history: nine such
+rows, none with a process or a hook event, held the assertion for the whole
+67:52:15 that app process ran (2026-10-22 20:25 to 2026-10-25 16:17 local),
+while workers were active for 31 of those hours.
 
 The decision reads the observed session rows and nothing else — never a
 spawn-side counter — so a worker that dies without reporting stops holding the

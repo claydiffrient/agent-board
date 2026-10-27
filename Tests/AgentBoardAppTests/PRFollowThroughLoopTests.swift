@@ -16,6 +16,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
     private var fixture: SupervisorFixture!
     private var head = ""
     private var onAC = true
+    private var charge: Int?
     private var reviews: [[String: Any]] = []
     private let repository = "example-org/app"
     private var url: String { "https://github.com/\(repository)/pull/12" }
@@ -47,7 +48,9 @@ final class PRFollowThroughLoopTests: XCTestCase {
         _ = try fixture.git(["checkout", "-q", "main"])
         _ = try fixture.git(["push", "-q", remote.path, "add-widgets"])
         onAC = true
+        charge = nil
         fixture.supervisor.isOnACPower = { [unowned self] in self.onAC }
+        fixture.supervisor.batteryPercent = { [unowned self] in self.charge }
         fixture.supervisor.pollsPRWatchesOnTick = false
         await fixture.supervisor.start()
         try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
@@ -333,9 +336,11 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(spawned, PRWatchStore.failedSessionsBeforePark)
     }
 
-    func testBatteryPowerAndASpentDailyBudgetKeepASettledWatchSettling() async throws {
+    /// `minBatteryPercent` is the default, 50.
+    func testABatteryBelowTheMinimumAndASpentDailyBudgetKeepASettledWatchSettling() async throws {
         try enable()
         onAC = false
+        charge = 49
         answer(threads: [thread("T_1")])
         await poll()
         await poll()
@@ -358,10 +363,12 @@ final class PRFollowThroughLoopTests: XCTestCase {
         let overBudget = await spawnCount
         XCTAssertEqual(overBudget, 1)
 
+        onAC = false
+        charge = 50
         try enable(budget: 10)
         await poll()
-        let underBudget = await spawnCount
-        XCTAssertEqual(underBudget, 2)
+        let atTheMinimum = await spawnCount
+        XCTAssertEqual(atTheMinimum, 2)
     }
 
     func testAShutdownOrderStopsARunningTriagerAtOnceAndItsRoundIsRetriedUncountedAfterward() async throws {
