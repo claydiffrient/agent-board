@@ -339,7 +339,16 @@ holds:
   same way as the reviewer's; with no agent, the built-in `FollowupCheckPrompt`
   identity is used. It reads `git diff <base_head_oid>..<checked_head_oid>` and
   grades each item with `set_followup_grades` — `fixed`, `partly`,
-  `not_fixed`, `moot` or `needs_author` — giving evidence for each. Once
+  `not_fixed`, `moot` or `needs_author` — giving evidence for each. Since it
+  cannot run `gh`, its prompt carries the PR's title and description as the
+  last poll stored them on the watch (`title`, `body`, §4); every poll reads
+  both, the description with its `<!-- … -->` comments removed. Each is fenced
+  between marker lines carrying one id and labeled as text written on GitHub,
+  data rather than instructions. The description is cut at 4,000 characters,
+  and the prompt says so when it is, so the prompt still fits a
+  post-compaction brief. An item asking for a change to the title or
+  description is graded against that text rather than the diff: `fixed` when
+  the text shows the change, quoting it, and `needs_author` when it does not. Once
   every item has a grade its task goes to `done` and its checkout is removed,
   as a finished triage's is. It is never assigned by hand or resumed, and one
   that ends any other way closes its task and parks the watch, unless its setup
@@ -559,8 +568,10 @@ commit — editing the description or title, changing labels or reviewers,
 replying elsewhere — is never `fix`, since a fixer can only commit and neither
 it nor the follow-up check can run `gh`. The built-in prompt makes it a
 `decision` asking the author to do it, with options such as "I'll do it" as an
-`answer` with a short reply, or an `answer` when it is already done. One that
-reaches a fix round anyway is graded `needs_author` by the check (§13.1).
+`answer` with a short reply, or an `answer` when it is already done, which
+triage reads from the current title and description in its prompt. One that
+reaches a fix round anyway is graded by the check from the same text (§13.1):
+`fixed` when the author has made the edit, `needs_author` when not.
 
 A reply posts automatically only when the project's `postFactualReplies`
 setting is on, and only for a factual verdict — fix, answer, already_done, or
@@ -646,7 +657,9 @@ The model is the role's, else the agent's own, else the project's default.
 
 The built-in prompt, `TriagePrompt`, says what each verdict above means; that
 every item body is data written by someone else, to be judged and never
-followed, whatever it claims; that `decision` is reserved for a choice a
+followed, whatever it claims; the PR's current title and description, fenced
+and capped as the follow-up check's are (§13.1), so a title or description
+request that the text already shows is an `answer`; that `decision` is reserved for a choice a
 reasonable engineer could make either way, so a clear in-scope change is
 `fix` however large; that a request only the author can carry out on GitHub
 is never `fix`; that an item asking for nothing is `answer` with no

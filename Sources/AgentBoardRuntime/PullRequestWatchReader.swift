@@ -115,7 +115,7 @@ public struct PullRequestWatchReader: Sendable {
         let pullRequests = numbers.map { number in
             """
             pr\(number): pullRequest(number: \(number)) {
-              number url title isDraft headRefName headRefOid baseRefName reviewDecision mergeable
+              number url title body isDraft headRefName headRefOid baseRefName reviewDecision mergeable
               isCrossRepository headRepository { nameWithOwner }
               labels(first: 100) { nodes { name } }
               baseRef {
@@ -244,7 +244,8 @@ public struct PullRequestWatchReader: Sendable {
             ))
         }
         return PRSnapshot(
-            repoOwner: owner, repoName: name, number: pr.number, url: pr.url, title: pr.title, isDraft: pr.isDraft,
+            repoOwner: owner, repoName: name, number: pr.number, url: pr.url, title: pr.title,
+            body: PRSnapshotItem.visibleText(pr.body ?? ""), isDraft: pr.isDraft,
             headRef: pr.headRefName, headOid: pr.headRefOid, baseRef: pr.baseRefName,
             reviewDecision: pr.reviewDecision,
             approvedBy: standing.approvedBy, changesRequestedBy: standing.changesRequestedBy,
@@ -534,6 +535,7 @@ private struct GraphQLResponse: Decodable {
         let number: Int
         let url: String
         let title: String
+        let body: String?
         let isDraft: Bool
         let headRefName: String
         let headRefOid: String
