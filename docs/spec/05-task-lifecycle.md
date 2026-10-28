@@ -98,8 +98,8 @@ nobody reviewed.
   resume and is never resolved by the board: the worker wakes in the
   conflicted tree, and the resume prompt says before anything else that the
   epic branch was merged, which files conflicted, that resolving them is part
-  of the task, and that it is not done until the tree builds and the suite
-  passes. A clean merge names the commits and files it brought in; a merge
+  of the task (D21), and that it is not done until the tree builds and the
+  suite passes. A clean merge names the commits and files it brought in; a merge
   still unresolved from an earlier resume is reported again rather than
   retried; a merge git refused tells the worker to merge the epic branch
   itself. The prompt names any commit made of the worker's uncommitted work.
@@ -545,6 +545,19 @@ than one that is finished; they merge nothing and are not part of this sequence.
    workflow and the approval is already a human gate; the approval row names
    how many tasks are unfinished, so the mistake is visible to the person
    deciding rather than pre-empted for them.
+
+**The epic branch's lifecycle, in one place.** An epic branch is cut from the
+project's base branch the first time one of its tasks is spawned or accepted
+(§3.1 step 1); every task branch inside it is cut from the epic branch, never
+from the base directly (§3.1 step 2). A task branch catches the epic branch
+back up only on resume (above), and only with the epic branch — never with the
+project's base branch directly. D21 is the rule everything else here follows
+from: an agent working a ticket owns making its work mergeable into the epic
+branch, including a conflict a sibling's already-accepted work left in its
+path. The board never resolves one for it — a resumed worker wakes inside the
+conflict rather than having the resume refused (above) — and nothing here
+defers that job to a timer or waits for the epic's later integrator to pick it
+up.
 
 **Drift and refresh.** An epic branch advances only when a task is accepted
 into it or when you ask the orchestrator to refresh it — never on spawn, never
