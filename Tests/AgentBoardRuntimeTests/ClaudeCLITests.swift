@@ -146,6 +146,33 @@ final class ClaudeCLITests: XCTestCase {
         XCTAssertEqual(args.last, "/cfg/s.json")
     }
 
+    /// The board fails the setup and never learns the session id, so a session left running is an
+    /// untracked agent working in the task's worktree, as a reviewer did alongside its own retry.
+    func testASpawnWhoseListingCannotBeReadStopsTheSessionItStarted() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claude-spawn-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let stopped = dir.appendingPathComponent("stopped")
+        let claude = dir.appendingPathComponent("claude")
+        try """
+        #!/bin/sh
+        case "$1" in
+          agents) exit 0 ;;
+          stop) echo "$2" > '\(stopped.path)' ;;
+          *) echo "backgrounded · abc12345 · task-1" ;;
+        esac
+        """.write(to: claude, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claude.path)
+        let runtime = BackgroundSessionRuntime(registrationTimeout: 1, claudeCandidates: [claude.path])
+        let files = SessionConfigFiles(settingsURL: dir.appendingPathComponent("s.json"), mcpConfigURL: dir.appendingPathComponent("m.json"))
+
+        do {
+            _ = try await runtime.spawn(SpawnRequest(cwd: dir, name: "task-1", prompt: "p", configFiles: files))
+            XCTFail("a spawn with no listed session reported one")
+        } catch {}
+        XCTAssertEqual(try? String(contentsOf: stopped, encoding: .utf8), "abc12345\n")
+    }
+
     /// SPEC §6: `stop_worker` waits on `claude stop` inside Claude Code's 60s wait for its answer.
     func testStopGivesUpOnAClaudeThatDoesNotAnswer() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claude-stop-\(UUID().uuidString)")
