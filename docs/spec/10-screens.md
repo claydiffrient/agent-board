@@ -242,7 +242,9 @@ show "From Walk me through it · `owner/repo#N`". The pull request is read back
 from the line the verifier's `propose_task` writes into the proposal report,
 which names the grant's `pr_watch_id` watch, so it survives that watch being
 deleted; when the watch was already gone the line reads "From Walk me through
-it" alone. Every other origin, a worker's proposal included, shows no such line.
+it" alone. Only that line, at the position `propose_task` writes it, is read:
+a matching line anywhere else in the report, which the session wrote after
+reading untrusted pull request text, names nothing. Every other origin, a worker's proposal included, shows no such line.
 
 The task inspector shows a **Comments** thread above the Progress log, oldest
 first. Each comment names its author in words — `You`, `Orchestrator`,

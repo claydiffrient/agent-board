@@ -16,14 +16,15 @@ public enum ProposalProvenance {
         "\(owner)/\(repo)#\(number)"
     }
 
-    /// The `owner/repo#N` a proposal report's `reportLine` names, if it names one.
+    /// The `owner/repo#N` a proposal report's `reportLine` names. Only the third paragraph, where
+    /// `Board.propose` writes `source`, is read: the rest is verifier-written text that may echo the line.
     public static func pullRequest(inReport body: String) -> String? {
-        for line in body.split(whereSeparator: \.isNewline) {
-            if let match = line.wholeMatch(of: #/From Walk me through it on ([^\s/]+/[^\s#]+#\d+)\./#) {
-                return String(match.1)
-            }
-        }
-        return nil
+        let paragraphs = body.components(separatedBy: "\n\n")
+        guard paragraphs.count > 2,
+              paragraphs[0].hasPrefix("Proposed task: "), paragraphs[1].hasPrefix("Task id: "),
+              let match = paragraphs[2].wholeMatch(of: #/From Walk me through it on ([^\s/]+/[^\s#]+#\d+)\./#)
+        else { return nil }
+        return String(match.1)
     }
 
     /// The card and detail line, or nil for every origin but `verify_session`.

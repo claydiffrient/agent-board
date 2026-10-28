@@ -199,7 +199,7 @@ write is one more row in Proposed, which a human promotes.
 
 | Tool | Effect |
 |---|---|
-| `propose_task(title, body, acceptance, type, rationale)` | Inserts a task into `proposed` in the grant's project with `origin = verify_session`, carrying `acceptance` and `type`. `type` is validated as `create_task`'s is, and any other value is refused with the valid list. The proposal report names the pull request as `owner/repo#N`, read off the grant's `pr_watch_id`, never off the arguments; the board's Proposed card and task inspector read it back from there (§10). The description names Agent Board as the native macOS app that manages this project's board, and says the task waits in Proposed for the human to promote it |
+| `propose_task(title, body, acceptance, type, rationale)` | Inserts a task into `proposed` in the grant's project with `origin = verify_session`, carrying `acceptance` and `type`. A `title` containing a line break (`\n` or `\r`) is refused, so no title can put a line ahead of the report's source line. `type` is validated as `create_task`'s is, and any other value is refused with the valid list. The proposal report names the pull request as `owner/repo#N`, read off the grant's `pr_watch_id`, never off the arguments; the board's Proposed card and task inspector read it back from there (§10). The description names Agent Board as the native macOS app that manages this project's board, and says the task waits in Proposed for the human to promote it |
 | `search_notes(query)`, `read_note(id)` | The worker's note reads, over the grant's project only. A note of another project reads as not in this project |
 
 Every other tool name is refused as unknown. `list_tasks`, `get_task`,
