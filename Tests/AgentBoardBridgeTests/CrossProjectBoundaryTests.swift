@@ -66,6 +66,12 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "list_roster_agents", "get_my_task", "list_pr_watches", "get_pr_watch", "list_pr_poll_problems",
     ]
 
+    /// A verifier's tools that reach only `identity.projectId`: the proposal lands there, the search covers only it.
+    static let verifierScopedByIdentity: Set<String> = ["propose_task", "search_notes"]
+
+    /// A verifier's tools that take an id and must refuse one from another project.
+    static let verifierRefusesForeignId: Set<String> = ["read_note"]
+
     override func setUpWithError() throws {
         f = try BridgeFixture.make()
         try f.session(try XCTUnwrap(f.orchestratorIdentity.sessionId), role: .orchestrator)
@@ -598,7 +604,8 @@ final class CrossProjectBoundaryTests: XCTestCase {
     func testEveryToolOnEveryScopeIsClassifiedForTheCoordinator() async {
         let everyTool = Set(
             (OrchestratorToolHandler.descriptors + WorkerToolHandler.descriptors + [WorkerToolHandler.commitDescriptor]
-                + ReviewerToolHandler.descriptors + CoordinatorToolHandler.descriptors).map(\.name)
+                + ReviewerToolHandler.descriptors + CoordinatorToolHandler.descriptors
+                + VerifierToolHandler.descriptors).map(\.name)
         )
         let classified = Self.coordinatorReads
             .union(Self.coordinatorOwn)
@@ -704,6 +711,40 @@ final class CrossProjectBoundaryTests: XCTestCase {
             containing: "No project has id"
         )
         await XCTAssertToolError(try await f.call("list_tasks", [:], as: f.coordinatorIdentity), containing: "project_id")
+    }
+
+    // MARK: The verifier: proposes and reads notes in its own project, nothing else
+
+    private var verifierIdentity: TokenIdentity {
+        TokenIdentity(token: "verifier", scope: .verifier, projectId: f.project.id)
+    }
+
+    func testTheVerifierIsOfferedOnlyItsClassifiedToolsAndRefusedEveryOther() async throws {
+        let offered = Set(await f.scoped.tools(for: verifierIdentity).map(\.name))
+        XCTAssertEqual(
+            offered, Self.verifierScopedByIdentity.union(Self.verifierRefusesForeignId),
+            "a tool was added to the verifier surface without a cross-project test in this file"
+        )
+        let everyTool = Set(
+            (OrchestratorToolHandler.descriptors + WorkerToolHandler.descriptors + [WorkerToolHandler.commitDescriptor]
+                + ReviewerToolHandler.descriptors + CoordinatorToolHandler.descriptors + TriagerToolHandler.descriptors
+                + TriagerToolHandler.followupCheckDescriptors).map(\.name)
+        )
+        for name in everyTool.subtracting(offered).sorted() {
+            await XCTAssertToolError(try await f.call(name, [:], as: verifierIdentity), containing: "Unknown tool")
+        }
+    }
+
+    func testTheVerifierNeitherReadsNorFindsAnotherProjectsNote() async throws {
+        let theirs = try f.note("Theirs", sections: [(heading: "H", body: "their private text")], in: other.id)
+        let ours = try f.note("Ours", sections: [(heading: "H", body: "our private text")])
+
+        await XCTAssertToolError(
+            try await f.call("read_note", ["id": .string(theirs.id)], as: verifierIdentity), containing: "not in this project"
+        )
+        let found = try await f.call("search_notes", ["query": .string("private")], as: verifierIdentity).text
+        XCTAssertTrue(found.contains(ours.id), found)
+        XCTAssertFalse(found.contains(theirs.id), found)
     }
 
     // MARK: An unknown id reads the same as a foreign one, deliberately

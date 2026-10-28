@@ -633,6 +633,12 @@ enum Schema {
     ALTER TABLE pr_watch ADD COLUMN body TEXT;
     """
 
+    /// The watch a `verifier` grant's Walk me through it window was opened on, named in its proposals
+    /// (SPEC §4, §6). Set null with the watch, so deleting a watch never trips on a grant.
+    static let tokenGrantPRWatch = """
+    ALTER TABLE token_grant ADD COLUMN pr_watch_id TEXT REFERENCES pr_watch(id) ON DELETE SET NULL;
+    """
+
     /// One row per pooled worktree slot that has ever been leased (SPEC §3.1 step 2, §4).
     static let worktreeSlot = """
     CREATE TABLE worktree_slot (

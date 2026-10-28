@@ -4,10 +4,11 @@ Served at `http://127.0.0.1:<port>/mcp`. Scope comes from the bearer token, not
 from the request. A worker calling an orchestrator tool gets a tool-not-found
 error, because the tool list is rendered per scope. Resources and prompts are
 not scoped this way — any valid token in the project sees the full resource
-and prompt lists, worker and orchestrator alike — with two exceptions: a
+and prompt lists, worker and orchestrator alike — with three exceptions: a
 `reviewer` token sees no `note://` resource and is refused a read of one
-(§5.1), and neither does a `triager` token, which is offered no briefing
-resource either. `initialize`'s advertised `capabilities` includes `resources` and `prompts` only when a handler for it is
+(§5.1), neither does a `triager` token, which is offered no briefing
+resource either, and a `verifier` token is offered no resource and no prompt
+at all and is refused a read or a get of any. `initialize`'s advertised `capabilities` includes `resources` and `prompts` only when a handler for it is
 wired, so `tools: {}` alone still means what it used to.
 
 ### No tool call holds its answer past 60 seconds
@@ -187,6 +188,24 @@ their kind), so a write subcommand git adds later is denied by default.
 Other Bash file writes (`sed -i`, a `>` redirect, `tee`) are not denied, so the
 scope withholds the file-write tools, `gh` and git writes rather than every
 change to its disposable checkout.
+
+### Verifier scope
+
+Held by a human's Walk me through it session (§13.4), not by a worker: the
+grant has `session_id` NULL, no `agent_session` row, and its `pr_watch_id`
+names the watch the window was opened on. Nothing about it is metered,
+rostered, capped or idle-capped, and `/hooks` refuses it (§7). Its whole
+write is one more row in Proposed, which a human promotes.
+
+| Tool | Effect |
+|---|---|
+| `propose_task(title, body, acceptance, type, rationale)` | Inserts a task into `proposed` in the grant's project with `origin = verify_session`, carrying `acceptance` and `type`. `type` is validated as `create_task`'s is, and any other value is refused with the valid list. The proposal report names the pull request as `owner/repo#N`, read off the grant's `pr_watch_id`, never off the arguments. The description names Agent Board as the native macOS app that manages this project's board, and says the task waits in Proposed for the human to promote it |
+| `search_notes(query)`, `read_note(id)` | The worker's note reads, over the grant's project only. A note of another project reads as not in this project |
+
+Every other tool name is refused as unknown. `list_tasks`, `get_task`,
+comments, note writes, `create_task` and `add_pr_item` are withheld on
+purpose: duplicate-checking happens at promotion, and nothing written after
+reading untrusted pull request text skips the human's gate.
 
 ### Orchestrator scope
 

@@ -18,6 +18,11 @@ A hook on a revoked token is still accepted, where an MCP call on one gets a
 `SessionStart` has the supervisor stop the session again (§8.5). Every other
 event on a revoked token changes nothing.
 
+A `verifier` token (§6) is refused outright: it belongs to a human's Walk me
+through it session, which has no `agent_session` row and is given no hooks.
+The answer is `{}`, and nothing is recorded — no `hook_event` row, no grant
+binding, no session.
+
 The handler must be synchronous and trivial — `PostToolUse` fires on every tool
 call, and a slow handler is felt directly as agent latency. Anything expensive
 goes on a queue. `PreToolUse` is matched to `Bash` alone so the round trip is

@@ -245,6 +245,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("pr_watch_body") { db in
             try db.execute(sql: Schema.prWatchBody)
         }
+        migrator.registerMigration("token_grant_pr_watch") { db in
+            try db.execute(sql: Schema.tokenGrantPRWatch)
+        }
         return migrator
     }
 }

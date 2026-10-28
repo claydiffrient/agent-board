@@ -109,6 +109,8 @@ public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, Data
     case fixRound = "fix_round"
     /// The synthetic task a round's follow-up check is bound to (SPEC §13.1). Only the supervisor spawns onto it.
     case followupCheck = "followup_check"
+    /// A proposal filed through a `verifier` grant from Walk me through it (SPEC §6).
+    case verifySession = "verify_session"
 
     /// A read-only session over a pull request under a triager grant: never assigned, resumed or landed.
     public var isPullRequestReader: Bool { self == .triage || self == .followupCheck }
@@ -204,6 +206,9 @@ public enum TokenScope: String, Codable, Sendable, CaseIterable, Equatable, Data
     case coordinator
     /// A PR triager (SPEC §6): reads its own watch's items and writes their verdicts, nothing else.
     case triager
+    /// A human's Walk me through it session (SPEC §6): proposes tasks into its project and reads its
+    /// notes. It has no session row and is never heard at `/hooks`.
+    case verifier
 }
 
 /// How much human acceptance a finished task needs before it reaches `done`.
