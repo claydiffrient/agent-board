@@ -933,8 +933,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 lastError = describe(error)
                 // The placeholder may already have been resolved into a real session, in which case
                 // that is the row to end — the placeholder no longer exists to be reported against.
-                let live = ((try? sessions.forTask(plan.taskId)) ?? [])
-                    .first { $0.state.isActive }?.sessionId ?? sessionId
+                let live = (error as? AgentStartedThenStopped)?.sessionId
+                    ?? ((try? sessions.forTask(plan.taskId)) ?? []).first { $0.state.isActive }?.sessionId
+                    ?? sessionId
                 failSetup(sessionId: live, projectId: plan.project.id, error: error)
             } catch {}
             placing.subtract(placingMarks)
@@ -956,7 +957,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func failSetup(sessionId: String, projectId: String, error: Error) {
         let detail = describe(error)
-        let queued = (try? terminateSession(sessionId, cause: .setupFailed(detail))) ?? nil
+        let started = error is AgentStartedThenStopped
+        let cause: SessionTermination = started ? .setupFailedAfterStart(detail) : .setupFailed(detail)
+        let queued = (try? terminateSession(sessionId, cause: cause)) ?? nil
         guard queued != nil else { return }
         announceReports(projectId: projectId)
         // `sessionId` always names a real row (`assign` writes it before setup runs), so this could
@@ -964,7 +967,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         // because the Status row it would land on carries no diagnosis — no transcript, no spend, a
         // bare `failed` state — while `detail` is the actual worktree-prep failure, which only the
         // queued report on the Orchestrator screen shows.
-        post("Worker never started", body: detail, projectId: projectId, category: .workerFailures)
+        post(
+            started ? "Worker started, then stopped" : "Worker never started",
+            body: detail, projectId: projectId, category: .workerFailures
+        )
     }
 
     private func reportSetupEnded(_ plan: LaunchPlan, sessionId: String) {
@@ -1099,16 +1105,34 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             } catch {
                 // Something ended the setup row while the agent was starting, so nothing owns the
                 // agent that just came up. Leaving it running would be an untracked worker.
-                try? await runtime.stop(shortId: spawned.shortId)
-                throw error
+                let stopFailure = await stopFailure { try await self.runtime.stop(shortId: spawned.shortId) }
+                throw AgentStartedThenStopped(shortId: spawned.shortId, reason: describe(error), stopFailure: stopFailure)
             }
-            // §3.1 step 8: the grant binds after the session row exists, or the foreign key rejects it.
-            try grants.bind(token: grant.token, sessionId: spawned.sessionId)
-            try replayEarlyHooks(sessionId: spawned.sessionId)
+            do {
+                // §3.1 step 8: the grant binds after the session row exists, or the foreign key rejects it.
+                try grants.bind(token: grant.token, sessionId: spawned.sessionId)
+                try replayEarlyHooks(sessionId: spawned.sessionId)
+            } catch {
+                // SPEC §3.1: stopped before the grant is revoked below, so no agent runs on a dead token.
+                let stopFailure = await stopFailure { try await self.stopAgent(recorded, shortId: spawned.shortId) }
+                throw AgentStartedThenStopped(
+                    shortId: spawned.shortId, sessionId: spawned.sessionId, reason: describe(error),
+                    stopFailure: stopFailure
+                )
+            }
             return recorded
         } catch {
             try? grants.revoke(token: grant.token)
             throw error
+        }
+    }
+
+    private func stopFailure(_ stop: () async throws -> Void) async -> String? {
+        do {
+            try await stop()
+            return nil
+        } catch {
+            return describe(error)
         }
     }
 
@@ -2564,7 +2588,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         do {
             if round.reviewVerdict == nil, try sessions.activeHolder(taskId: taskId) == nil {
                 let reviewers = try sessions.forTask(taskId).filter { $0.reviewHead != nil }
-                let neverRan = reviewers.filter { $0.stopReason?.hasPrefix(SessionTermination.setupFailedLead) == true }
+                let neverRan = reviewers.filter { SessionTermination.isSetupFailure($0.stopReason) }
                 if reviewers.count - neverRan.count > round.checkFailures {
                     try board.parkCheck(
                         watchId: watch.id, reason: "Round \(round.number)'s reviewer ended without a verdict."
@@ -2583,7 +2607,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard try prWatches.get(watch.id)?.state == .checking else { return }
             if let checkId = round.followupTaskId {
                 if let check = try tasks.get(checkId), check.column == .closed {
-                    if check.closedReason?.hasPrefix(SessionTermination.setupFailedLead) == true {
+                    if SessionTermination.isSetupFailure(check.closedReason) {
                         try board.recordUnavailableCheck(
                             watchId: watch.id, tip: await roundTip(branch, manager: manager), dropFollowupCheck: true,
                             reason: "Round \(round.number)'s follow-up check never started: \(check.closedReason ?? "")"

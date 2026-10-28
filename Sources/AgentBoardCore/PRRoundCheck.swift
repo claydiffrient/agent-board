@@ -402,9 +402,13 @@ extension Board {
                 db,
                 sql: """
                 SELECT COUNT(*) FROM agent_session
-                WHERE task_id = ? AND review_head IS NOT NULL AND stop_reason LIKE ? AND started_at >= ?
+                WHERE task_id = ? AND review_head IS NOT NULL AND (stop_reason LIKE ? OR stop_reason LIKE ?)
+                  AND started_at >= ?
                 """,
-                arguments: [taskId, SessionTermination.setupFailedLead + "%", watch.resumedAt ?? 0]
+                arguments: [
+                    taskId, SessionTermination.setupFailedLead + "%", SessionTermination.setupFailedAfterStartLead + "%",
+                    watch.resumedAt ?? 0,
+                ]
             ) ?? 0
             let attempts = round.unavailableChecks + setupFailures
             guard attempts >= PRWatchStore.unavailableChecksBeforePark else { return watch.state }

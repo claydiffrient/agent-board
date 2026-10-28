@@ -60,6 +60,9 @@ public enum SessionTermination: Sendable, Equatable {
     /// Preparing the worktree failed after `spawn_worker` had already answered, so the session
     /// never became an agent. Nothing ran, but the task is in `running` with a row attached.
     case setupFailed(String)
+    /// Setup failed after `claude --bg` had started the agent, and the agent was stopped before the
+    /// task went back to `ready` (SPEC §3.1), so it never ran alongside a retry.
+    case setupFailedAfterStart(String)
     /// The worker was told to wind down, committed, and answered. Neither a kill nor a cap breach:
     /// the task is unfinished work with a note on it, so it must not read as failed or accepted.
     case shutdownAcknowledged(note: String?)
@@ -70,12 +73,19 @@ public enum SessionTermination: Sendable, Equatable {
     /// stop neither moves the task nor reports.
     case taskClosing(by: BoardActor)
 
-    /// Opens the stop reason of every session whose setup failed, so nothing it launched ever ran.
+    /// Opens the stop reason of every session whose setup failed before `claude --bg` started anything.
     public static let setupFailedLead = "setting up the worktree failed before the worker started:"
+    public static let setupFailedAfterStartLead = "setup failed after the worker started, so Agent Board stopped it:"
+
+    /// Whether a stop reason is either kind of setup failure: a session that never did any work.
+    public static func isSetupFailure(_ stopReason: String?) -> Bool {
+        guard let stopReason else { return false }
+        return stopReason.hasPrefix(setupFailedLead) || stopReason.hasPrefix(setupFailedAfterStartLead)
+    }
 
     var sessionState: SessionState {
         switch self {
-        case .capBreach, .setupFailed: return .failed
+        case .capBreach, .setupFailed, .setupFailedAfterStart: return .failed
         case .stopped, .vanished, .shutdownAcknowledged, .taskSettled, .taskClosing: return .stopped
         }
     }
@@ -86,13 +96,13 @@ public enum SessionTermination: Sendable, Equatable {
     var salvagesBranchWork: Bool {
         switch self {
         case .capBreach, .vanished, .stopped: return true
-        case .setupFailed, .shutdownAcknowledged, .taskSettled, .taskClosing: return false
+        case .setupFailed, .setupFailedAfterStart, .shutdownAcknowledged, .taskSettled, .taskClosing: return false
         }
     }
 
     var flagsTaskFailed: Bool {
         switch self {
-        case .capBreach, .vanished, .setupFailed: return true
+        case .capBreach, .vanished, .setupFailed, .setupFailedAfterStart: return true
         case .stopped, .shutdownAcknowledged, .taskSettled, .taskClosing: return false
         }
     }
@@ -103,6 +113,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .stopped(let actor): return "stopped from Agent Board by \(actor.described)"
         case .vanished: return "the session is no longer running and Agent Board did not stop it"
         case .setupFailed(let detail): return "\(Self.setupFailedLead) \(detail)"
+        case .setupFailedAfterStart(let detail): return "\(Self.setupFailedAfterStartLead) \(detail)"
         case .shutdownAcknowledged: return "wound down for the project shutdown order and acknowledged"
         case .taskSettled: return "claude agents still listed it as running on a task with no work left for it"
         case .taskClosing(let actor): return "stopped from Agent Board by \(actor.described) to close its task for a dismissed item"
@@ -112,7 +123,7 @@ public enum SessionTermination: Sendable, Equatable {
     var reportKind: ReportKind {
         switch self {
         case .shutdownAcknowledged, .taskSettled, .taskClosing: return .decision
-        case .capBreach, .stopped, .vanished, .setupFailed: return .failed
+        case .capBreach, .stopped, .vanished, .setupFailed, .setupFailedAfterStart: return .failed
         }
     }
 
@@ -120,6 +131,7 @@ public enum SessionTermination: Sendable, Equatable {
         switch self {
         case .shutdownAcknowledged: return "Worker wound down for the shutdown order: \(reason)"
         case .setupFailed: return "Worker never started: \(reason)"
+        case .setupFailedAfterStart: return "Worker started, then stopped: \(reason)"
         case .capBreach, .stopped, .vanished: return "Worker session ended without reporting: \(reason)"
         case .taskSettled: return "Session ended after its task was settled: \(reason)"
         case .taskClosing: return "Session ended so its task could close: \(reason)"
@@ -132,7 +144,8 @@ public enum SessionTermination: Sendable, Equatable {
         case .shutdownAcknowledged(let note):
             guard let note, !note.isEmpty else { return nil }
             return note
-        case .capBreach, .stopped, .vanished, .setupFailed, .taskSettled, .taskClosing: return nil
+        case .capBreach, .stopped, .vanished, .setupFailed, .setupFailedAfterStart, .taskSettled, .taskClosing:
+            return nil
         }
     }
 }

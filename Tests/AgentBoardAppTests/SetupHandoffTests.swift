@@ -133,6 +133,29 @@ final class SetupHandoffTests: XCTestCase {
         XCTAssertTrue(try fixture.grants.forSession(session.sessionId).isEmpty)
     }
 
+    /// SPEC §3.1: a retry must not share the worktree with an agent whose token was revoked.
+    func testASetupStepFailingAfterTheAgentStartedStopsTheAgentAndSaysItStarted() async throws {
+        let task = try readyTask()
+        await fixture.runtime.holdSpawn()
+        try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.runtime.waitUntilSettingUp()
+        try await fixture.db.writer.write { try $0.execute(sql: "ALTER TABLE hook_event RENAME TO hook_event_gone") }
+
+        await fixture.runtime.releaseSpawn()
+        await fixture.supervisor.waitForSetup()
+
+        let session = try XCTUnwrap(sessions(for: task).first)
+        XCTAssertEqual(session.shortId, "short-1")
+        XCTAssertFalse(try fixture.grants.hasLiveGrant(sessionId: session.sessionId))
+        let stopped = await fixture.runtime.stopped
+        XCTAssertEqual(stopped, ["short-1"], "the agent kept running on a revoked token")
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .ready)
+
+        let report = try XCTUnwrap(reports.unconsumed(projectId: fixture.project.id).first)
+        XCTAssertTrue(report.body.contains("Worker started, then stopped"), report.body)
+        XCTAssertFalse(report.body.contains("never started"), report.body)
+    }
+
     /// The background half of a spawn dies with the process, so the row it was going to resolve
     /// would otherwise hold its task in `running` forever.
     func testASetupInterruptedByAQuitIsFailedOnNextLaunch() async throws {

@@ -475,7 +475,9 @@ is where `task` review would have parked it anyway.
 The spawn answers once the reviewer's setup row exists, so a setup that fails
 after that, launching `claude` or reading back its session, takes the same
 route as a worker's (§3.1): the row ends `failed` with a "Worker never started"
-report to the orchestrator and a notification. The task stays in `review`, and
+report to the orchestrator and a notification, or "Worker started, then stopped"
+when the failure came after `claude --bg` launched it. Both count as a setup
+failure wherever §13 counts one. The task stays in `review`, and
 because the failed row is the newest session and names the reviewer, its Pending
 reviews row reads `<reviewer> stopped without a verdict` and offers Re-run
 review (§10), the one way it is retried; nothing retries it automatically. A session `claude --bg`

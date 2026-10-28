@@ -255,7 +255,16 @@ clock is measuring setup, not the agent), and is skipped by `reconcile`, whose
 join against `claude agents --json` cannot see a placeholder id. A failure in
 steps 3-8 has nowhere to be thrown: it terminates the session, puts the task
 back in `ready` flagged failed, and queues a `failed` report, which is also what
-happens to a setup still running when Agent Board quits.
+happens to a setup still running when Agent Board quits. The report and its
+notification read "Worker never started" when the failure came before `claude
+--bg` launched anything. A failure after the launch — `claude agents --json`
+never listing the short id, or step 8's promotion, grant binding or hook replay
+throwing — first stops the agent it launched (the full §8.5 stop once the row is
+promoted), then revokes its grant, and reads "Worker started, then stopped",
+with any stop error named. Stopping first is what keeps an agent from running
+on in the worktree with a revoked token, invisible to the board, while the
+orchestrator retries into the same worktree. Keeping such an agent tracked
+instead is not offered: the failed step is the one that would have tracked it.
 
 **Removing a worktree.** Every path that removes a task or epic worktree goes
 through `WorktreeManager.remove`: accepting a task, discarding one, the
