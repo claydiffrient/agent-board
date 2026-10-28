@@ -99,7 +99,9 @@ public final class VerifierToolHandler: ToolHandler {
     private func source(_ identity: TokenIdentity) throws -> String {
         guard let watchId = try grants.lookup(token: identity.token)?.prWatchId,
               let watch = try watches.get(watchId), watch.projectId == identity.projectId
-        else { return "From Walk me through it; its pull request is no longer watched." }
-        return "From Walk me through it on \(watch.repoOwner)/\(watch.repoName)#\(watch.number)."
+        else { return ProposalProvenance.reportLine(pullRequest: nil) }
+        return ProposalProvenance.reportLine(pullRequest: ProposalProvenance.pullRequest(
+            owner: watch.repoOwner, repo: watch.repoName, number: watch.number
+        ))
     }
 }

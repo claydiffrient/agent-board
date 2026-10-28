@@ -236,6 +236,14 @@ The inspector's **Type** picker (Default plus the five types) saves through the
 same task update as its body and model. Changing it doesn't touch a review
 already under way; the task's next completion routes by the new type.
 
+A task proposed through a `verifier` grant (origin `verify_session`, §6) says
+where it came from: its card in `proposed`, and its inspector in any column,
+show "From Walk me through it · `owner/repo#N`". The pull request is read back
+from the line the verifier's `propose_task` writes into the proposal report,
+which names the grant's `pr_watch_id` watch, so it survives that watch being
+deleted; when the watch was already gone the line reads "From Walk me through
+it" alone. Every other origin, a worker's proposal included, shows no such line.
+
 The task inspector shows a **Comments** thread above the Progress log, oldest
 first. Each comment names its author in words — `You`, `Orchestrator`,
 `Rita · reviewer`, `Rita · worker`, or `Worker 3f9a1c2e` / `Reviewer 3f9a1c2e`
