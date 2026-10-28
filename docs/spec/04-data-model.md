@@ -739,6 +739,15 @@ inactive state deletes its locks in the same transaction — a report, a
 termination, a hand-off, an acceptance, `update_status(failed)`, a discard —
 rather than leaving them to `SessionEnd`, and deleting a project deletes its
 `file_lock` rows, which reference `project(id)` with no cascade.
+
+Deleting a project (`ProjectStore.delete`) is one transaction that removes or
+unlinks every row referencing the project, its tasks, its epics or its
+sessions, because most of those foreign keys are `NO ACTION` and are left that
+way rather than rebuilt to cascade. That reaches other projects' rows: messages
+either project sent the other are deleted, as are another project's note links
+to this one's tasks or epics; a reference from another project's row to one of
+this project's sessions or reports is set to null instead. Approvals, shutdown
+orders with their deliveries, and task comments go with the project.
 `agent_session.blocked_on_path` records what a session is waiting on while it
 holds (§8.4). `task_commit` is the
 companion ledger for a branch several tasks commit to — the only way, once
