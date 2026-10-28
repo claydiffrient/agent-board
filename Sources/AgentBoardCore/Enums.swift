@@ -7,6 +7,9 @@ public enum TaskColumn: String, Codable, Sendable, CaseIterable, Equatable, Data
     case running
     case review
     case done
+    /// Retired without being finished (SPEC §5): never satisfies a dependency, lands nothing, and is
+    /// entered only through `Board.close` with a reason.
+    case closed
 
     public var index: Int { Self.allCases.firstIndex(of: self)! }
 
@@ -31,6 +34,10 @@ public enum EpicState: String, Codable, Sendable, CaseIterable, Equatable, Datab
     case planning
     case active
     case integrating
+    /// The integrator finished in a project that ships epics by pull request (SPEC §5.2): the task
+    /// branches are in the epic branch, nothing has reached the base branch, and the epic still takes
+    /// tasks until its pull request is recorded.
+    case integrated
     /// A pull request from the epic branch is recorded and has not merged or closed (SPEC §5.2).
     /// The epic still takes tasks; the merge check moves it to `done`, or back to `active`.
     case pullRequestOpen = "pull_request_open"
@@ -42,15 +49,14 @@ public enum EpicState: String, Codable, Sendable, CaseIterable, Equatable, Datab
     public var isTerminal: Bool {
         switch self {
         case .done, .abandoned: return true
-        case .planning, .active, .integrating, .pullRequestOpen: return false
+        case .planning, .active, .integrating, .integrated, .pullRequestOpen: return false
         }
     }
 }
 
 public enum SessionState: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
-    /// The worktree exists and the row is written, but no agent process has been launched yet:
-    /// the repository is still being prepared. A session here holds a concurrency slot and can do
-    /// no work.
+    /// The row is written, but no agent process has been launched yet: the worktree is still being
+    /// created and prepared. A session here holds a concurrency slot and can do no work.
     case setup
     case starting
     case running
@@ -95,6 +101,19 @@ public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, Data
     case workerProposal = "worker_proposal"
     /// The synthetic task an epic's integrator worker is bound to (§5.2 step 3).
     case integration
+    /// The synthetic task a PR's triager is bound to (SPEC §13.2). Only the supervisor spawns onto it.
+    case triage
+    /// A backlog task follow-through created from a triaged PR item (SPEC §13.2).
+    case followThrough = "follow_through"
+    /// The task a PR round's fixer is bound to (SPEC §13.1), worked on the round's branch.
+    case fixRound = "fix_round"
+    /// The synthetic task a round's follow-up check is bound to (SPEC §13.1). Only the supervisor spawns onto it.
+    case followupCheck = "followup_check"
+    /// A proposal filed through a `verifier` grant from Walk me through it (SPEC §6).
+    case verifySession = "verify_session"
+
+    /// A read-only session over a pull request under a triager grant: never assigned, resumed or landed.
+    public var isPullRequestReader: Bool { self == .triage || self == .followupCheck }
 }
 
 /// What kind of work a task is. Under `agent` review it picks the task's row in the project's
@@ -137,6 +156,8 @@ public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, Data
     case reply
     /// How a `refresh_epic` that returned before its build and tests ran came out (SPEC §5.2).
     case refresh
+    /// PR follow-through reached a milestone on one of the project's pull requests (SPEC §13.6).
+    case prFollowThrough = "pr_follow_through"
 }
 
 /// Where a Coordinator request stands in the ledger (SPEC §9.4). `sent` and `accepted` are open;
@@ -159,6 +180,10 @@ public enum ApprovalKind: String, Codable, Sendable, CaseIterable, Equatable, Da
     case integration
     case push
     case pullRequest = "pull_request"
+    /// An orchestrator's `dismiss_pr_item`; the payload is a `PRItemDismissalRequest` (SPEC §6).
+    case prItemDismissal = "pr_item_dismissal"
+    /// An orchestrator's `resume_pr_watch`; the payload is a `PRWatchResumeRequest` (SPEC §6).
+    case prWatchResume = "pr_watch_resume"
 }
 
 public enum ApprovalResolution: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
@@ -181,6 +206,11 @@ public enum TokenScope: String, Codable, Sendable, CaseIterable, Equatable, Data
     /// The Coordinator (SPEC §8.2): belongs to no project, so its grant has no `project_id`. It reads
     /// every project's board and writes to none.
     case coordinator
+    /// A PR triager (SPEC §6): reads its own watch's items and writes their verdicts, nothing else.
+    case triager
+    /// A human's Walk me through it session (SPEC §6): proposes tasks into its project, records verify
+    /// failures on its own watch, and reads its notes. It has no session row and is never heard at `/hooks`.
+    case verifier
 }
 
 /// How much human acceptance a finished task needs before it reaches `done`.

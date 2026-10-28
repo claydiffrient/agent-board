@@ -42,11 +42,16 @@ enum Wiring {
 
     static func tools(db: AppDatabase, sink: LateBoundSink, scopedCommits: (any ScopedCommitting)?) -> ScopedToolHandler {
         let orchestrator = OrchestratorToolHandler(db: db, control: sink, events: sink)
+        let commitsInFlight = CommitsInFlight()
         return ScopedToolHandler(
-            worker: WorkerToolHandler(db: db, control: sink, events: sink, scopedCommits: scopedCommits),
+            worker: WorkerToolHandler(
+                db: db, control: sink, events: sink, scopedCommits: scopedCommits, commitsInFlight: commitsInFlight
+            ),
             orchestrator: orchestrator,
-            reviewer: ReviewerToolHandler(db: db, control: sink, events: sink),
-            coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: sink)
+            reviewer: ReviewerToolHandler(db: db, control: sink, events: sink, commitsInFlight: commitsInFlight),
+            coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: sink),
+            triager: TriagerToolHandler(db: db, events: sink),
+            verifier: VerifierToolHandler(db: db, events: sink)
         )
     }
 }
@@ -87,6 +92,14 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
 
     func workerCompleted(projectId: String, sessionId: String) async {
         await target?.workerCompleted(projectId: projectId, sessionId: sessionId)
+    }
+
+    func endedSessionRestarted(projectId: String, sessionId: String) async {
+        await target?.endedSessionRestarted(projectId: projectId, sessionId: sessionId)
+    }
+
+    func workerTurnCutBySleep(projectId: String, sessionId: String) async {
+        await target?.workerTurnCutBySleep(projectId: projectId, sessionId: sessionId)
     }
 
     func coordinatorReportQueued() async {

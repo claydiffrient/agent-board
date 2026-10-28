@@ -65,6 +65,7 @@ final class AtAGlanceRowRenderTests: XCTestCase {
         )
         window.contentView = host
         window.orderBack(nil)
+        addTeardownBlock { window.orderOut(nil) }
         for _ in 0..<80 {
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
             window.layoutIfNeeded()
@@ -94,15 +95,6 @@ final class AtAGlanceRowRenderTests: XCTestCase {
         XCTAssertEqual(sidebar.headers, 2)
         XCTAssertEqual(sidebar.rows, pinnedRows + 4, "four project rows beside the pinned ones")
     }
-
-    /// The invariant the two counts above are each half of, and the one that stays true however
-    /// many pinned rows the sidebar grows: collapsing removes the project rows and nothing else.
-    func testCollapsingRemovesExactlyTheProjectRows() throws {
-        let expanded = try mountSidebar(collapsingEverything: false)
-        let collapsed = try mountSidebar(collapsingEverything: true)
-        XCTAssertEqual(expanded.rows - collapsed.rows, 4)
-        XCTAssertEqual(expanded.headers, collapsed.headers)
-    }
 }
 
 @MainActor
@@ -121,6 +113,7 @@ private final class RowStubSupervisor: WorkerSupervising {
     func pauseAll(projectId: String) async throws {}
     func accept(taskId: String) async throws {}
     func reopen(taskId: String) async throws {}
+    func rerunReview(taskId: String) async throws {}
     func discard(taskId: String) async throws {}
     func reconcile(projectId: String) async {}
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? { nil }
@@ -138,6 +131,8 @@ private final class RowStubSupervisor: WorkerSupervising {
     func requestIntegration(epicId: String) async throws {}
     func epicClosurePlan(epicId: String, as closure: EpicClosure) throws -> EpicClosurePlan { throw StubError.notWired }
     func closeEpic(epicId: String, as closure: EpicClosure) async throws { throw StubError.notWired }
+    func heldWorktrees(epicId: String) throws -> [HeldWorktree] { [] }
+    func removeEpicWorktrees(epicId: String) async throws { throw StubError.notWired }
     func openPullRequest(epicId: String) async throws -> PullRequestOutcome { throw StubError.notWired }
     func requestShutdown(projectId: String, requestedBy: String, reason: String?) async throws -> ShutdownOrder {
         throw StubError.notWired

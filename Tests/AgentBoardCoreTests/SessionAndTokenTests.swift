@@ -108,6 +108,37 @@ final class TokenGrantStoreTests: XCTestCase {
         XCTAssertEqual(seen.count, 50)
     }
 
+    /// SPEC §6: the window's grant names its watch and no session, and deleting the watch or its
+    /// project still works with the grant on it.
+    func testAVerifierGrantNamesItsWatchAndNeitherBlocksDeletingTheWatchNorItsProject() throws {
+        let f = try Fixture.make()
+        let watches = PRWatchStore(f.db)
+        let watch = try watches.upsert(projectId: f.project.id, snapshot: PRSnapshot(
+            repoOwner: "example-org", repoName: "app", number: 7, url: "https://github.com/example-org/app/pull/7",
+            title: "Add a widget", headRef: "feature/widget", headOid: "abc123", baseRef: "main", items: []
+        ))
+        let worker = try f.tokens.issue(projectId: f.project.id, scope: .worker, taskId: nil)
+        let grant = try f.tokens.issueVerifier(projectId: f.project.id, prWatchId: watch.id)
+        XCTAssertEqual(grant.scope, .verifier)
+        XCTAssertNil(grant.sessionId)
+        XCTAssertEqual(try f.tokens.resolve(token: grant.token)?.prWatchId, watch.id)
+
+        try watches.delete(watchId: watch.id)
+        XCTAssertNil(try f.tokens.lookup(token: grant.token)?.prWatchId)
+
+        try f.tokens.revokeVerifierGrants()
+        XCTAssertNil(try f.tokens.resolve(token: grant.token))
+        XCTAssertEqual(try f.tokens.resolve(token: worker.token)?.scope, .worker)
+
+        let second = try watches.upsert(projectId: f.project.id, snapshot: PRSnapshot(
+            repoOwner: "example-org", repoName: "app", number: 8, url: "https://github.com/example-org/app/pull/8",
+            title: "Add another", headRef: "feature/other", headOid: "def456", baseRef: "main", items: []
+        ))
+        try f.tokens.issueVerifier(projectId: f.project.id, prWatchId: second.id)
+        try f.projects.delete(f.project.id)
+        XCTAssertNil(try f.projects.get(f.project.id))
+    }
+
     func testBindUnknownTokenThrows() throws {
         let f = try Fixture.make()
         try f.sessions.insert(f.session("s1"))

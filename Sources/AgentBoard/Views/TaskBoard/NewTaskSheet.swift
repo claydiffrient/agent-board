@@ -32,7 +32,7 @@ struct NewTaskSheet: View {
                         }
                     }
                     Picker("Column", selection: $column) {
-                        ForEach(TaskColumn.allCases, id: \.self) { Text($0.title).tag($0) }
+                        ForEach(TaskColumn.allCases.filter { $0 != .closed }, id: \.self) { Text($0.title).tag($0) }
                     }
                     ModelPicker(label: "Model", inheritLabel: "Project default", model: $model)
                 }

@@ -443,12 +443,221 @@ enum Schema {
     );
     """
 
+    /// SPEC §8.6. The trigger, not each writer, clears the mark, so no revival path can forget to.
+    /// A rebuild of `agent_session` drops it and must recreate it.
+    static var sessionAgentStoppedAt: String {
+        """
+        ALTER TABLE agent_session ADD COLUMN agent_stopped_at INTEGER;
+
+        CREATE TRIGGER agent_session_alive_again
+        AFTER UPDATE OF state, last_activity ON agent_session
+        WHEN NEW.agent_stopped_at IS NOT NULL
+          AND (NEW.state IN (\(SessionStore.activeStatesSQL)) OR NEW.last_activity > NEW.agent_stopped_at)
+        BEGIN
+          UPDATE agent_session SET agent_stopped_at = NULL WHERE session_id = NEW.session_id;
+        END;
+        """
+    }
+
+    static let taskClosed = """
+    ALTER TABLE task ADD COLUMN closed_at INTEGER;
+    ALTER TABLE task ADD COLUMN closed_reason TEXT;
+    ALTER TABLE task ADD COLUMN closed_by TEXT;
+    """
+
+    /// PR follow-through (SPEC §4). Items are keyed by GitHub node id so a poll is idempotent.
+    static let prFollowThrough = """
+    CREATE TABLE pr_watch (
+      id               TEXT PRIMARY KEY,
+      project_id       TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+      repo_owner       TEXT NOT NULL,
+      repo_name        TEXT NOT NULL,
+      number           INTEGER NOT NULL,
+      url              TEXT NOT NULL,
+      title            TEXT NOT NULL,
+      is_draft         INTEGER NOT NULL DEFAULT 0,
+      head_ref         TEXT NOT NULL,
+      head_oid         TEXT NOT NULL,
+      base_ref         TEXT NOT NULL,
+      state            TEXT NOT NULL,
+      round            INTEGER NOT NULL DEFAULT 0,
+      review_decision  TEXT,
+      checks_state     TEXT,
+      mergeable        TEXT,
+      labels_json      TEXT NOT NULL DEFAULT '[]',
+      paused           INTEGER NOT NULL DEFAULT 0,
+      last_polled_at   INTEGER,
+      last_feedback_at INTEGER,
+      verified_at      INTEGER,
+      est_cost_usd     REAL NOT NULL DEFAULT 0,
+      created_at       INTEGER NOT NULL,
+      updated_at       INTEGER NOT NULL,
+      UNIQUE (project_id, repo_owner, repo_name, number)
+    );
+    CREATE INDEX pr_watch_state ON pr_watch(state);
+
+    CREATE TABLE pr_item (
+      id                    INTEGER PRIMARY KEY,
+      watch_id              TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+      github_node_id        TEXT NOT NULL,
+      kind                  TEXT NOT NULL,
+      author                TEXT,
+      body                  TEXT NOT NULL,
+      path                  TEXT,
+      line                  INTEGER,
+      url                   TEXT,
+      state                 TEXT NOT NULL,
+      verdict               TEXT,
+      approach              TEXT,
+      decision_question     TEXT,
+      decision_options_json TEXT,
+      decision_answer       TEXT,
+      fix_task_id           TEXT REFERENCES task(id) ON DELETE SET NULL,
+      followup_grade        TEXT,
+      reply_body            TEXT,
+      reply_url             TEXT,
+      round                 INTEGER NOT NULL DEFAULT 0,
+      created_at            INTEGER NOT NULL,
+      updated_at            INTEGER NOT NULL,
+      UNIQUE (watch_id, github_node_id)
+    );
+    CREATE INDEX pr_item_watch_state ON pr_item(watch_id, state);
+
+    CREATE TABLE pr_round (
+      id              INTEGER PRIMARY KEY,
+      watch_id        TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+      number          INTEGER NOT NULL,
+      base_head_oid   TEXT NOT NULL,
+      pushed_head_oid TEXT,
+      outcome         TEXT,
+      started_at      INTEGER NOT NULL,
+      ended_at        INTEGER,
+      UNIQUE (watch_id, number)
+    );
+    """
+
+    /// One row per enabled project whose last PR poll could not run `gh` (SPEC §13.1).
+    static let prPollProblem = """
+    CREATE TABLE pr_poll_problem (
+      project_id TEXT PRIMARY KEY REFERENCES project(id) ON DELETE CASCADE,
+      detail     TEXT NOT NULL,
+      since      INTEGER NOT NULL
+    );
+    """
+
+    /// When a watched PR's head last moved, and the head whose Ready to verify banner already fired.
+    static let prWatchHead = """
+    ALTER TABLE pr_watch ADD COLUMN head_changed_at INTEGER;
+    ALTER TABLE pr_watch ADD COLUMN ready_notified_oid TEXT;
+    """
+
+    /// The task a triager session is bound to, the watch it triages, and the diff it was given.
+    static let prTriage = """
+    CREATE TABLE pr_triage (
+      task_id    TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
+      watch_id   TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+      base_oid   TEXT NOT NULL,
+      head_oid   TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX pr_triage_watch ON pr_triage(watch_id);
+    """
+
+    /// The round each triage was spawned for, and why a watch is parked.
+    static let prTriageRound = """
+    ALTER TABLE pr_triage ADD COLUMN round INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE pr_watch ADD COLUMN parked_reason TEXT;
+    """
+
+    static let prItemDecisionNotified = """
+    ALTER TABLE pr_item ADD COLUMN decision_notified_at INTEGER;
+    """
+
+    /// The fixer task a round's fix items went to.
+    static let prRoundFixTask = """
+    ALTER TABLE pr_round ADD COLUMN fix_task_id TEXT REFERENCES task(id) ON DELETE SET NULL;
+    """
+
+    /// A round's check (SPEC §13.1): the reviewer's verdict, the follow-up check task, the head they
+    /// judged, how many checks have failed, and each item's grade note.
+    static let prRoundCheck = """
+    ALTER TABLE pr_round ADD COLUMN check_failures INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE pr_round ADD COLUMN review_verdict TEXT;
+    ALTER TABLE pr_round ADD COLUMN review_findings TEXT;
+    ALTER TABLE pr_round ADD COLUMN followup_task_id TEXT REFERENCES task(id) ON DELETE SET NULL;
+    ALTER TABLE pr_round ADD COLUMN checked_head_oid TEXT;
+    ALTER TABLE pr_item ADD COLUMN followup_note TEXT;
+    """
+
+    /// When an item became handled, which bounds the replies turning `postFactualReplies` on may post,
+    /// and the last failed post, with when one was given up on (SPEC §13.2).
+    static let prItemReplyBounds = """
+    ALTER TABLE pr_item ADD COLUMN handled_at INTEGER;
+    ALTER TABLE pr_item ADD COLUMN reply_error TEXT;
+    ALTER TABLE pr_item ADD COLUMN reply_abandoned_at INTEGER;
+    """
+
+    /// When the human last resumed a parked watch (SPEC §13.1).
+    static let prWatchResumed = """
+    ALTER TABLE pr_watch ADD COLUMN resumed_at INTEGER;
+    """
+
+    /// A pushed round's review re-request (SPEC §13.2): when it was claimed, the logins it asked for as a
+    /// JSON array, and the error that stopped it.
+    static let prRoundReviewRequests = """
+    ALTER TABLE pr_round ADD COLUMN review_requests_at INTEGER;
+    ALTER TABLE pr_round ADD COLUMN review_requests_json TEXT;
+    ALTER TABLE pr_round ADD COLUMN review_request_error TEXT;
+    """
+
+    /// The review node id or reviewer login a hand-added item answers (SPEC §13.1).
+    static let prItemAnswers = """
+    ALTER TABLE pr_item ADD COLUMN answers TEXT;
+    """
+
+    /// A round's checks that never ran (SPEC §13.1 checking), which do not count as failed checks.
+    static let prRoundUnavailableChecks = """
+    ALTER TABLE pr_round ADD COLUMN unavailable_checks INTEGER NOT NULL DEFAULT 0;
+    """
+
+    /// Why, by whom and when a human retired one item (SPEC §13.1 dismissed items).
+    static let prItemDismissal = """
+    ALTER TABLE pr_item ADD COLUMN dismiss_reason TEXT;
+    ALTER TABLE pr_item ADD COLUMN dismissed_by TEXT;
+    ALTER TABLE pr_item ADD COLUMN dismissed_at INTEGER;
+    """
+
+    /// The pull request's description as of the last poll, which the triage and follow-up check prompts
+    /// carry (SPEC §13.1).
+    static let prWatchBody = """
+    ALTER TABLE pr_watch ADD COLUMN body TEXT;
+    """
+
+    /// The watch a `verifier` grant's Walk me through it window was opened on, named in its proposals
+    /// (SPEC §4, §6). Set null with the watch, so deleting a watch never trips on a grant.
+    static let tokenGrantPRWatch = """
+    ALTER TABLE token_grant ADD COLUMN pr_watch_id TEXT REFERENCES pr_watch(id) ON DELETE SET NULL;
+    """
+
+    /// One row per pooled worktree slot that has ever been leased (SPEC §3.1 step 2, §4).
+    static let worktreeSlot = """
+    CREATE TABLE worktree_slot (
+      project_id TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+      slot       INTEGER NOT NULL,
+      task_id    TEXT,
+      leased_at  INTEGER,
+      PRIMARY KEY (project_id, slot)
+    );
+    CREATE UNIQUE INDEX worktree_slot_task ON worktree_slot(task_id) WHERE task_id IS NOT NULL;
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
         "approval", "shutdown_order", "shutdown_delivery", "workspace", "file_lock", "message",
         "task_commit",
         "roster_agent", "project_roster_agent", "task_comment", "comment_delivery", "coordinator",
-        "coordinator_request", "request_event", "request_epic",
+        "coordinator_request", "request_event", "request_epic", "pr_watch", "pr_item", "pr_round",
+        "pr_poll_problem", "pr_triage", "worktree_slot",
     ]
 }

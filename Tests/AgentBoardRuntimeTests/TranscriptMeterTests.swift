@@ -153,8 +153,28 @@ final class TranscriptMeterTests: XCTestCase {
         _ = try tailer.poll()
 
         let b = assistantLine(requestId: "req_B", timestamp: "2026-09-11T10:00:02Z", input: 1, output: 1)
-        try (b + "\n").write(to: file, atomically: true, encoding: .utf8)
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: Data((b + "\n").utf8))
+        try handle.close()
         XCTAssertEqual(try tailer.poll(), UsageTotals(inputTokens: -9, outputTokens: -4))
         XCTAssertEqual(tailer.summary.totals, UsageTotals(inputTokens: 1, outputTokens: 1))
+    }
+
+    /// A replacement at least as long as what was read leaves the offset in range, so only the
+    /// file's identity shows it is a different transcript.
+    func testTailerRestartsWhenTheFileIsReplaced() throws {
+        let a = assistantLine(requestId: "req_A", timestamp: "2026-09-11T10:00:01Z", input: 10, output: 5)
+        try (a + "\n").write(to: file, atomically: true, encoding: .utf8)
+        var tailer = TranscriptTailer(url: file)
+        _ = try tailer.poll()
+
+        let lines = [
+            assistantLine(requestId: "req_B", timestamp: "2026-09-11T10:00:02Z", input: 1, output: 1),
+            assistantLine(requestId: "req_C", timestamp: "2026-09-11T10:00:03Z", input: 2, output: 3),
+        ]
+        try lines.map { $0 + "\n" }.joined().write(to: file, atomically: true, encoding: .utf8)
+        _ = try tailer.poll()
+        XCTAssertEqual(tailer.summary, try TranscriptMeter.summarize(transcriptAt: file))
     }
 }

@@ -83,7 +83,7 @@ extension Board {
                 _ = try ArchiveSweep.archiveEpic(db, epicId: epicId, at: .nowMillis)
             }
             let unfinished = try Task.fetchAll(
-                db, sql: "SELECT * FROM task WHERE epic_id = ? AND column_name != 'done' ORDER BY ordering", arguments: [epicId]
+                db, sql: "SELECT * FROM task WHERE epic_id = ? AND column_name NOT IN ('done', 'closed') ORDER BY ordering", arguments: [epicId]
             )
             var text = "Epic \(epicId) (\(epic.title)) is done: pull request #\(pullRequest.number) merged"
                 + (commit.map { " as \($0)" } ?? "") + " (\(pullRequest.url))."
@@ -101,6 +101,9 @@ extension Board {
             if !carriage.unverified.isEmpty {
                 text += " Could not verify whether it carried " + carriage.unverified.joined(separator: ", ")
                     + ": \(unverifiedReason)."
+            }
+            if let held = HeldWorktree.paragraph(try Self.heldWorktrees(db, epicId: epicId)) {
+                text += "\n\n" + held
             }
             try Self.recordOnEpic(db, epic: epic, text: text, kind: .status)
             return true
@@ -129,8 +132,32 @@ extension Board {
         return epic
     }
 
+    static func announceIntegrated(_ db: Database, epic: Epic) throws {
+        let base = try Project.fetchOne(db, key: epic.projectId)?.baseBranch ?? "the base branch"
+        var integrated = epic
+        integrated.state = .integrated
+        let text = "Epic \(epic.id) (\(epic.title)) is integrated into `\(epic.branch)`; nothing has reached "
+            + "`\(base)`. This project ships epics by pull request, so the epic stays open: it still takes tasks, "
+            + "none of them is archived, and it becomes done when its pull request merges. Next step: "
+            + (Self.nextStep(for: integrated) ?? "")
+        try recordOnEpic(db, epic: epic, text: text, kind: .status)
+    }
+
+    /// What the orchestrator does next with an epic waiting on a pull request (SPEC §5.2); nil otherwise.
+    public static func nextStep(for epic: Epic) -> String? {
+        switch epic.state {
+        case .integrated:
+            return "Open its pull request with `open_pull_request(epic_id: \"\(epic.id)\", title: …)`."
+        case .pullRequestOpen:
+            return "Wait for its pull request to merge, which closes the epic. Tasks accepted into it meanwhile "
+                + "reach the pull request only after `push_branch(branch: \"\(epic.branch)\")`."
+        case .planning, .active, .integrating, .done, .abandoned:
+            return nil
+        }
+    }
+
     @discardableResult
-    private static func recordOnEpic(_ db: Database, epic: Epic, text: String, kind: ProgressKind) throws -> Report {
+    static func recordOnEpic(_ db: Database, epic: Epic, text: String, kind: ProgressKind) throws -> Report {
         if let taskId = try epicCardTask(db, epicId: epic.id) {
             _ = try ProgressStore.append(db, taskId: taskId, sessionId: nil, kind: kind, text: text)
         }

@@ -7,7 +7,7 @@ import SwiftTerm
 
 /// Every byte the user types reaches the child through `send(source:data:)`; the console's own
 /// notice goes through the same path, so it flags itself to stay out of its own bookkeeping.
-final class OrchestratorTerminalView: LocalProcessTerminalView {
+final class OrchestratorTerminalView: BoardTerminalView {
     private(set) var promptIsDirty = false
     var isInjecting = false
     /// `submitted` is true for Enter and false for a cancel: only the former starts a turn.
@@ -94,9 +94,7 @@ final class OrchestratorConsole: ReportAnnouncing {
         sessions = SessionStore(db)
         self.currentPort = currentPort
         terminal = OrchestratorTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
-        terminal.nativeForegroundColor = .white
-        terminal.nativeBackgroundColor = NSColor(calibratedRed: 0x1e / 255, green: 0x1e / 255, blue: 0x2e / 255, alpha: 1)
-        terminal.caretColor = .systemGreen
+        TerminalAppearanceStore.shared.attach(terminal)
         terminal.processDelegate = processObserver
         processObserver.console = self
         noticeGate = ReportNoticeGate(
@@ -114,6 +112,11 @@ final class OrchestratorConsole: ReportAnnouncing {
 
     var isProcessRunning: Bool {
         terminal.process.running
+    }
+
+    var processPID: pid_t? {
+        let pid = terminal.process.shellPid
+        return isProcessRunning && pid > 0 ? pid : nil
     }
 
     // MARK: - Lifecycle

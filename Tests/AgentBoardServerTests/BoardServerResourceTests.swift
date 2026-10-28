@@ -37,7 +37,7 @@ final class BoardServerResourceTests: XCTestCase {
     func testAServerWithNoResourceHandlerAdvertisesToolsOnlyAndRefusesTheResourceMethods() async throws {
         let bare = BoardServer(tokens: InMemoryTokenResolver([Self.worker]), hooks: RecordingHookSink(), tools: FakeToolHandler())
         let barePort = try await bare.start()
-        defer { Task { await bare.stop() } }
+        addTeardownBlock { await bare.stop() }
 
         let initialized = try await result(of: rpc("initialize", id: 1, params: [:]), port: barePort)
         XCTAssertEqual((initialized["capabilities"] as? [String: Any])?.keys.sorted(), ["tools"])

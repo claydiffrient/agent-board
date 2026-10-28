@@ -31,7 +31,15 @@ struct AgentBoardApp: App {
             CommandGroup(after: .textEditing) {
                 FindCommand()
             }
+            CommandGroup(after: .appInfo) {
+                SweepPreviewMenuItem()
+            }
         }
+
+        Window(SweepPreviewScene.title, id: SweepPreviewScene.id) {
+            SweepPreviewWindow(preview: appEnvironment.sweepPreview)
+        }
+        .defaultSize(width: 760, height: 480)
 
         Window(ReleaseNotesScene.title, id: ReleaseNotesScene.id) {
             ReleaseNotesWindow(state: appEnvironment.releaseNotes.state)
@@ -57,6 +65,20 @@ struct AgentBoardApp: App {
             }
         }
         .defaultSize(width: 1000, height: 700)
+
+        WindowGroup("Verify Pull Request", id: PRVerifyScene.id, for: String.self) { $watchId in
+            if let watchId {
+                PRVerifyWindow(watchId: watchId)
+                    .environment(appEnvironment)
+            } else {
+                ContentUnavailableView("No pull request", systemImage: "apple.terminal")
+            }
+        }
+        .defaultSize(width: 1000, height: 700)
+
+        Settings {
+            SettingsView(terminalAppearance: .shared)
+        }
     }
 }
 

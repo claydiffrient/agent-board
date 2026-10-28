@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import XCTest
 @testable import AgentBoardCore
 
@@ -47,6 +48,7 @@ final class ProjectStoreTests: XCTestCase {
         try f.tokens.issue(projectId: f.project.id, scope: .worker, taskId: t.id)
         try f.progress.append(taskId: t.id, sessionId: s.sessionId, kind: .note, text: "hi")
         try f.reports.insert(projectId: f.project.id, taskId: t.id, sessionId: s.sessionId, kind: .complete, body: "done")
+        try FileLockStore(f.db).acquire(projectId: f.project.id, path: "a.swift", sessionId: s.sessionId, taskId: t.id)
 
         try f.projects.delete(f.project.id)
 
@@ -54,6 +56,42 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertNil(try f.tasks.get(t.id))
         XCTAssertNil(try f.sessions.get(s.sessionId))
         XCTAssertEqual(try f.progress.list(taskId: t.id).count, 0)
+    }
+
+    func testDeleteRemovesRowsOtherProjectsPointAtAndKeepsTheirOwn() throws {
+        let f = try Fixture.make()
+        let other = try f.otherProject()
+        let t = try f.task("a")
+        let epic = try EpicStore(f.db).create(projectId: f.project.id, title: "e", goal: nil)
+        try f.sessions.insert(f.session(taskId: t.id))
+        let approvals = ApprovalStore(f.db)
+        try approvals.create(projectId: f.project.id, kind: .spawn, taskId: t.id, epicId: nil, requestedBy: "orchestrator", reason: nil)
+        try approvals.create(projectId: f.project.id, kind: .pullRequest, taskId: t.id, epicId: nil, requestedBy: "orchestrator", reason: nil)
+        try f.messages.send(fromProjectId: other.id, fromSessionId: nil, toProjectId: f.project.id, body: "hi")
+        let otherNote = try f.notes.create(projectId: other.id, title: "n", sections: [("h", "b")])
+        try f.notes.attach(noteId: otherNote.id, epicId: epic.id)
+        let otherTask = try f.tasks.create(
+            projectId: other.id, title: "b", body: nil, acceptance: nil, priority: nil,
+            column: .backlog, origin: .human, epicId: nil
+        )
+        try f.notes.attach(noteId: otherNote.id, taskId: otherTask.id)
+        try approvals.create(projectId: other.id, kind: .spawn, taskId: otherTask.id, epicId: nil, requestedBy: "orchestrator", reason: nil)
+        let otherRows = """
+            SELECT 'project', id FROM project WHERE id = :id
+            UNION ALL SELECT 'task', id FROM task WHERE project_id = :id
+            UNION ALL SELECT 'approval', id FROM approval WHERE project_id = :id
+            UNION ALL SELECT 'note', id FROM note WHERE project_id = :id
+            UNION ALL SELECT 'note_section', heading FROM note_section WHERE note_id = '\(otherNote.id)'
+            UNION ALL SELECT 'note_link', task_id FROM note_link WHERE task_id = '\(otherTask.id)'
+            """
+        let before = try f.db.reader.read { try Row.fetchAll($0, sql: otherRows, arguments: ["id": other.id]) }
+
+        try f.projects.delete(f.project.id)
+
+        XCTAssertNil(try f.projects.get(f.project.id))
+        XCTAssertEqual(try f.db.reader.read { try Row.fetchAll($0, sql: "PRAGMA foreign_key_check") }, [])
+        XCTAssertEqual(try f.db.reader.read { try Row.fetchAll($0, sql: otherRows, arguments: ["id": other.id]) }, before)
+        XCTAssertEqual(before.count, 6)
     }
 
     func testDeletedProjectsNotesDoNotMatchANoteReusingTheirRowid() throws {

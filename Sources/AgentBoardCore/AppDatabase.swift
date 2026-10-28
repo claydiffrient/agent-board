@@ -166,6 +166,88 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("task_type") { db in
             try db.execute(sql: "ALTER TABLE task ADD COLUMN type TEXT")
         }
+        migrator.registerMigration("session_agent_stopped_at") { db in
+            try db.execute(sql: Schema.sessionAgentStoppedAt)
+        }
+        migrator.registerMigration("session_review_base") { db in
+            try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN review_base TEXT")
+        }
+        migrator.registerMigration("epic_ships_by_pull_request") { db in
+            try db.execute(sql: "ALTER TABLE epic ADD COLUMN ships_by_pull_request INTEGER")
+        }
+        migrator.registerMigration("task_closed") { db in
+            try db.execute(sql: Schema.taskClosed)
+        }
+        migrator.registerMigration("pr_follow_through") { db in
+            try db.execute(sql: Schema.prFollowThrough)
+        }
+        migrator.registerMigration("pr_poll_problem") { db in
+            try db.execute(sql: Schema.prPollProblem)
+        }
+        migrator.registerMigration("pr_watch_head") { db in
+            try db.execute(sql: Schema.prWatchHead)
+        }
+        migrator.registerMigration("roster_plugin_dirs") { db in
+            try db.execute(sql: "ALTER TABLE roster_agent ADD COLUMN plugin_dirs TEXT NOT NULL DEFAULT '[]'")
+        }
+        migrator.registerMigration("pr_triage") { db in
+            try db.execute(sql: Schema.prTriage)
+        }
+        migrator.registerMigration("pr_triage_round") { db in
+            try db.execute(sql: Schema.prTriageRound)
+        }
+        migrator.registerMigration("pr_item_decision_notified") { db in
+            try db.execute(sql: Schema.prItemDecisionNotified)
+        }
+        migrator.registerMigration("pr_round_fix_task") { db in
+            try db.execute(sql: Schema.prRoundFixTask)
+        }
+        migrator.registerMigration("pr_round_check") { db in
+            try db.execute(sql: Schema.prRoundCheck)
+        }
+        migrator.registerMigration("pr_item_reply_bounds") { db in
+            try db.execute(sql: Schema.prItemReplyBounds)
+            try db.execute(
+                sql: """
+                UPDATE project SET settings_json = json_set(settings_json, '$.prFollowThrough.postFactualRepliesSince', ?)
+                WHERE json_extract(settings_json, '$.prFollowThrough.postFactualReplies') = 1
+                """,
+                arguments: [Int64.nowMillis]
+            )
+        }
+        migrator.registerMigration("pr_watch_resumed") { db in
+            try db.execute(sql: Schema.prWatchResumed)
+        }
+        migrator.registerMigration("pr_item_failed_checks") { db in
+            try db.execute(
+                sql: """
+                UPDATE pr_item SET state = 'dismissed', updated_at = ?
+                WHERE kind = 'check' AND github_node_id LIKE 'checks:%' AND state = 'open'
+                """,
+                arguments: [Int64.nowMillis]
+            )
+        }
+        migrator.registerMigration("worktree_slot") { db in
+            try db.execute(sql: Schema.worktreeSlot)
+        }
+        migrator.registerMigration("pr_round_review_requests") { db in
+            try db.execute(sql: Schema.prRoundReviewRequests)
+        }
+        migrator.registerMigration("pr_item_answers") { db in
+            try db.execute(sql: Schema.prItemAnswers)
+        }
+        migrator.registerMigration("pr_round_unavailable_checks") { db in
+            try db.execute(sql: Schema.prRoundUnavailableChecks)
+        }
+        migrator.registerMigration("pr_item_dismissal") { db in
+            try db.execute(sql: Schema.prItemDismissal)
+        }
+        migrator.registerMigration("pr_watch_body") { db in
+            try db.execute(sql: Schema.prWatchBody)
+        }
+        migrator.registerMigration("token_grant_pr_watch") { db in
+            try db.execute(sql: Schema.tokenGrantPRWatch)
+        }
         return migrator
     }
 }

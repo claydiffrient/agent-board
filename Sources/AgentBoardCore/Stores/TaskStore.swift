@@ -118,9 +118,13 @@ public struct TaskStore: Sendable {
         }
     }
 
+    /// Refuses `closed`: only `close` enters it, because only `close` writes the reason (SPEC §5).
     static func move(_ db: Database, _ id: String, to column: TaskColumn, before: String?) throws {
         guard let task = try Task.fetchOne(db, key: id) else {
             throw BoardError.taskNotFound(id)
+        }
+        guard column != .closed else {
+            throw BoardError.invalidTransition(taskId: id, from: task.column, to: .closed)
         }
         let ordering: Double
         if let before, before != id, let anchor = try Task.fetchOne(db, key: before), anchor.column == column {
@@ -145,8 +149,8 @@ public struct TaskStore: Sendable {
     }
 
     /// `done_at` is the only reliable measure of time-in-done: reordering inside `done`, archiving
-    /// and every other edit move `updated_at`. Leaving `done` clears it along with the manual
-    /// unarchive, so a reopened task starts the policy clock — and the policy itself — from scratch.
+    /// and every other edit move `updated_at`. Leaving `done` or `closed` clears it, the closure and
+    /// the manual unarchive, so a reopened task starts the policy clock — and the policy itself — from scratch.
     ///
     /// Entering `done` also arms `landing` at `.pending`, here rather than in `Board.accept`, so
     /// that every route into the column is covered — a human dragging a card across the board is
@@ -166,12 +170,29 @@ public struct TaskStore: Sendable {
         default:
             try db.execute(
                 sql: """
-                UPDATE task SET done_at = NULL, unarchived_at = NULL, landing = NULL, landing_detail = NULL
+                UPDATE task SET done_at = NULL, unarchived_at = NULL, landing = NULL, landing_detail = NULL,
+                  closed_at = NULL, closed_reason = NULL, closed_by = NULL
                 WHERE id = ?
                 """,
                 arguments: [id]
             )
         }
+    }
+
+    static func close(_ db: Database, _ id: String, reason: String, by: String, at: Int64) throws {
+        guard let task = try Task.fetchOne(db, key: id) else {
+            throw BoardError.taskNotFound(id)
+        }
+        let ordering = try endOrdering(db, projectId: task.projectId, column: .closed, excluding: id)
+        try db.execute(
+            sql: """
+            UPDATE task SET column_name = ?, ordering = ?, updated_at = ?, closed_at = ?, closed_reason = ?,
+              closed_by = ?, done_at = NULL, unarchived_at = NULL, landing = NULL, landing_detail = NULL,
+              blocked = 0, blocked_reason = NULL, reviewer_agent_id = NULL
+            WHERE id = ?
+            """,
+            arguments: [TaskColumn.closed, ordering, at, at, reason, by, id]
+        )
     }
 
     static func endOrdering(_ db: Database, projectId: String, column: TaskColumn, excluding id: String?) throws -> Double {
@@ -384,15 +405,15 @@ public struct TaskStore: Sendable {
         }
     }
 
-    /// Hides a done task from the board by stamping `archived_at`. Nothing else changes:
+    /// Hides a done or closed task from the board by stamping `archived_at`. Nothing else changes:
     /// the task's branch, worktree, sessions, reports and progress rows are all left in place —
     /// archiving is a view filter, not cleanup, and reaping those belongs elsewhere.
-    /// Throws `BoardError.archiveRequiresDone` for a task outside `done`.
+    /// Throws `BoardError.archiveRequiresDone` for a task outside `done` and `closed`.
     public func archive(_ id: String) throws {
         try archive(ids: [id])
     }
 
-    /// Archives every task in one transaction; if any is not in `done`, none are archived.
+    /// Archives every task in one transaction; if any is not in `done` or `closed`, none are archived.
     public func archive(ids: [String]) throws {
         try db.writer.write { db in
             let at = Int64.nowMillis
@@ -406,7 +427,7 @@ public struct TaskStore: Sendable {
         guard let task = try Task.fetchOne(db, key: id) else {
             throw BoardError.taskNotFound(id)
         }
-        guard task.column == .done else {
+        guard task.column == .done || task.column == .closed else {
             throw BoardError.archiveRequiresDone(taskId: id, column: task.column)
         }
         guard task.archivedAt == nil else { return }
@@ -473,13 +494,15 @@ public enum BoardError: Error, Equatable, Sendable {
     case taskAlreadyHeld(taskId: String, sessionId: String)
     /// An active session already holds the worktree the new session was about to be launched into.
     case worktreeAlreadyHeld(path: String, sessionId: String)
+    /// Every pooled worktree slot is leased or unusable; the caller falls back to a worktree of the task's own.
+    case noFreeWorktreeSlot(projectId: String)
     /// The session is not the one currently working the task it is acting on.
     case sessionNotOnTask(sessionId: String, taskId: String)
     case workspaceNotFound(String)
     /// `createEpic` was handed a `dependsOn` index that is out of range or points at the task itself.
     case invalidEpicDependency(taskIndex: Int, dependsOn: Int)
     case noShutdownOrder(String)
-    /// Only a task in `done` may be archived; archiving live work would hide it from the board.
+    /// Only a task in `done` or `closed` may be archived; archiving live work would hide it from the board.
     case archiveRequiresDone(taskId: String, column: TaskColumn)
     case archiveRequiresDoneEpic(epicId: String, state: EpicState)
     /// A setup row was resolved twice, or something ended it while its worktree was being prepared.
@@ -488,4 +511,6 @@ public enum BoardError: Error, Equatable, Sendable {
     case epicAlreadyClosed(epicId: String, state: EpicState)
     /// Closing would have left these sessions running against a closed epic.
     case epicHasRunningWorkers(epicId: String, sessionIds: [String])
+    /// `Board.close` refused; the reason says why in words an orchestrator can act on.
+    case closeRefused(taskId: String, reason: String)
 }

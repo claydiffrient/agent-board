@@ -4,11 +4,11 @@ import XCTest
 final class ClaudeProjectPathsTests: XCTestCase {
     private var root: URL!
     private var canonical: URL!
-    private let worktree = "/Users/x/Derivita/.claude/worktrees/a"
+    private let worktree = "/Users/x/ExampleApp/.claude/worktrees/a"
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("projects-\(UUID().uuidString)")
-        canonical = root.appendingPathComponent("-Users-x-Derivita/memory")
+        canonical = root.appendingPathComponent("-Users-x-ExampleApp/memory")
         try FileManager.default.createDirectory(at: canonical, withIntermediateDirectories: true)
     }
 
@@ -17,13 +17,13 @@ final class ClaudeProjectPathsTests: XCTestCase {
     }
 
     func testSlug() {
-        XCTAssertEqual(ClaudeProjectPaths.slug(forPath: worktree), "-Users-x-Derivita--claude-worktrees-a")
-        XCTAssertEqual(ClaudeProjectPaths.slug(forPath: "/Users/x/Derivita"), "-Users-x-Derivita")
+        XCTAssertEqual(ClaudeProjectPaths.slug(forPath: worktree), "-Users-x-ExampleApp--claude-worktrees-a")
+        XCTAssertEqual(ClaudeProjectPaths.slug(forPath: "/Users/x/ExampleApp"), "-Users-x-ExampleApp")
         XCTAssertEqual(ClaudeProjectPaths.slug(forPath: "/tmp/agent.board/v1.2"), "-tmp-agent-board-v1-2")
     }
 
     func testProjectAndMemoryDirs() {
-        XCTAssertEqual(ClaudeProjectPaths.projectDir(forPath: worktree, projectsRoot: root).path, root.appendingPathComponent("-Users-x-Derivita--claude-worktrees-a").path)
+        XCTAssertEqual(ClaudeProjectPaths.projectDir(forPath: worktree, projectsRoot: root).path, root.appendingPathComponent("-Users-x-ExampleApp--claude-worktrees-a").path)
         XCTAssertEqual(ClaudeProjectPaths.memoryDir(forPath: worktree, projectsRoot: root).lastPathComponent, "memory")
         XCTAssertTrue(ClaudeProjectPaths.projectDir(forPath: "/a").path.hasSuffix(".claude/projects/-a"))
     }

@@ -86,7 +86,7 @@ final class WorkspaceStoreTests: XCTestCase {
         let f = try Fixture.make()
         let personal = try f.workspaces.create(name: "Personal")
         let work = try f.workspaces.create(name: "Work")
-        let second = try f.otherProject("derivita-ui")
+        let second = try f.otherProject("example-ui")
         try f.workspaces.assign(projectId: f.project.id, workspaceId: personal.id)
         try f.workspaces.assign(projectId: second.id, workspaceId: work.id)
 

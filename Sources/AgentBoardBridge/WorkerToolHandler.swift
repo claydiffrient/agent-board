@@ -15,11 +15,14 @@ public final class WorkerToolHandler: ToolHandler {
     private let locks: FileLockStore
     private let taskCommits: TaskCommitStore
     private let scopedCommits: (any ScopedCommitting)?
+    private let commitsInFlight: CommitsInFlight
+    private let commitAnswerWithin: Duration
     private let events: any BoardEventSink
 
     public init(
         db: AppDatabase, control: any WorkerControl, events: any BoardEventSink,
-        scopedCommits: (any ScopedCommitting)? = nil
+        scopedCommits: (any ScopedCommitting)? = nil, commitsInFlight: CommitsInFlight = CommitsInFlight(),
+        commitAnswerWithin: Duration = .seconds(30)
     ) {
         tasks = TaskStore(db)
         sessions = SessionStore(db)
@@ -33,6 +36,8 @@ public final class WorkerToolHandler: ToolHandler {
         locks = FileLockStore(db)
         taskCommits = TaskCommitStore(db)
         self.scopedCommits = scopedCommits
+        self.commitsInFlight = commitsInFlight
+        self.commitAnswerWithin = commitAnswerWithin
         self.events = events
     }
 
@@ -199,8 +204,13 @@ public final class WorkerToolHandler: ToolHandler {
         case "commit_my_work":
             return try await commitMyWork(task, arguments: arguments, identity: identity)
         case "report_complete":
+            try await requireNoCommitInFlight(identity)
             let outcome = try reportComplete(task, arguments: arguments, identity: identity)
             guard !outcome.wasAlreadyComplete else { return Self.completionResult(outcome) }
+            if outcome.endedSessionState != nil || outcome.closedUnderSession {
+                await events.reportQueued(projectId: identity.projectId)
+                return stoppingAfterwards(Self.completionResult(outcome), identity: identity)
+            }
             let result = await routeCompletion(task, outcome: outcome)
             await events.reportQueued(projectId: identity.projectId)
             return stoppingAfterwards(result, identity: identity)
@@ -363,7 +373,7 @@ public final class WorkerToolHandler: ToolHandler {
             }
         case "failed":
             try tasks.setFailed(task.id, true, reason: detail)
-            if let sessionId { try sessions.setState(sessionId, .failed) }
+            if let sessionId { try board.endSession(sessionId, .failed) }
         default:
             throw ToolError("Unknown state '\(state)'. Use working, blocked, failed, or unblocked.")
         }
@@ -409,36 +419,65 @@ public final class WorkerToolHandler: ToolHandler {
         }
         let message = try ToolArguments.requiredString("message", in: arguments)
         let paths = CommitScope.paths(try locks.held(projectId: identity.projectId), sessionId: sessionId)
-        guard !paths.isEmpty else { throw ToolError(ScopedCommitError.noPathsHeld.description) }
-
-        let outcome = try await runner.commit(
-            ScopedCommitRequest(
-                repoPath: project.repoPath,
-                branch: session.branch ?? SharedCheckoutGroup.branch(epicId: task.epicId),
-                taskId: task.id,
-                paths: paths,
-                message: message
-            )
+        let request = ScopedCommitRequest(
+            repoPath: project.repoPath,
+            branch: session.branch ?? SharedCheckoutGroup.branch(epicId: task.epicId),
+            taskId: task.id,
+            paths: paths,
+            message: message
         )
-        switch outcome {
+        let (taskCommits, progress) = (taskCommits, progress)
+        let branchName = session.branch ?? "the shared branch"
+        let (commit, commitId, started) = await commitsInFlight.commit(sessionId: sessionId, taskId: task.id) {
+            guard !paths.isEmpty else { throw ToolError(ScopedCommitError.noPathsHeld.description) }
+            let outcome = try await runner.commit(request)
+            // The ledger row is written here rather than by whichever call reports the commit: the
+            // caller may have its answer already, and a commit with no row has lost its attribution.
+            if case .committed(let sha, let committed) = outcome {
+                try taskCommits.record(taskId: task.id, sha: sha)
+                try progress.append(
+                    taskId: task.id, sessionId: sessionId, kind: .status,
+                    text: "Committed \(String(sha.prefix(8))) on \(branchName), recorded as this task's, "
+                        + "containing only: " + committed.joined(separator: ", ")
+                )
+            }
+            return outcome
+        }
+        guard let result = await CommitsInFlight.outcome(of: commit, within: commitAnswerWithin) else {
+            let which = started ? "This commit" : "Your earlier commit_my_work call"
+            return ToolResult(
+                text: "\(which) is still running, most likely in the repository's commit hooks. Nothing is "
+                    + "committed yet as far as this call knows. Call commit_my_work again to get its outcome; "
+                    + "that call starts no second commit and ignores its message."
+            )
+        }
+        await commitsInFlight.delivered(sessionId: sessionId, id: commitId)
+        let earlier = started ? "" : "This is the outcome of your earlier commit_my_work call; this call "
+            + "committed nothing new, so call it again if you have more to commit. "
+        switch try result.get() {
         case .committed(let sha, let committed):
-            // The ledger row is written here rather than swept up later: a crash between the commit
-            // and a later pass would lose the attribution with nothing in the commit to rebuild it from.
-            try taskCommits.record(taskId: task.id, sha: sha)
-            let text = "Committed \(String(sha.prefix(8))) on \(session.branch ?? "the shared branch"), "
-                + "recorded as this task's, containing only: "
-                + committed.joined(separator: ", ")
-            try progress.append(taskId: task.id, sessionId: sessionId, kind: .status, text: text)
-            return .json(.object([
+            var answer: [String: JSONValue] = [
                 "commit": .string(sha),
                 "paths": .array(committed.map { .string($0) }),
-            ]))
+            ]
+            if !started { answer["note"] = .string(earlier.trimmingCharacters(in: .whitespaces)) }
+            return .json(.object(answer))
         case .nothingToCommit(let claimed):
             return ToolResult(
-                text: "Nothing to commit: the files you have claimed (\(claimed.joined(separator: ", "))) "
+                text: earlier + "Nothing to commit: the files you have claimed (\(claimed.joined(separator: ", "))) "
                     + "hold no change git would record."
             )
         }
+    }
+
+    /// SPEC §6: an accept can land a shared branch in the checkout that commit still holds.
+    private func requireNoCommitInFlight(_ identity: TokenIdentity) async throws {
+        guard let sessionId = identity.sessionId, await commitsInFlight.holds(sessionId: sessionId) else { return }
+        throw ToolError(
+            "Your commit_my_work has not delivered its outcome yet, so report_complete changed nothing: accepting "
+                + "the task now could land its branch while that commit holds the checkout. Call commit_my_work "
+                + "again first to get the outcome, then call report_complete."
+        )
     }
 
     private func reportComplete(
@@ -455,9 +494,15 @@ public final class WorkerToolHandler: ToolHandler {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(body)
-        return try board.complete(
-            taskId: task.id, sessionId: try requiredSession(identity), summary: String(decoding: data, as: UTF8.self)
-        )
+        let sessionId = try requiredSession(identity)
+        do {
+            return try board.complete(taskId: task.id, sessionId: sessionId, summary: String(decoding: data, as: UTF8.self))
+        } catch BoardError.sessionNotOnTask {
+            throw ToolError(
+                "Session \(sessionId) is not the agent currently working task \(task.id); another session holds it. "
+                    + "Nothing was recorded. Stop here."
+            )
+        }
     }
 
     /// Reached only by a first `report_complete`. A resend is answered before it gets here, because
@@ -465,6 +510,12 @@ public final class WorkerToolHandler: ToolHandler {
     /// would put a second agent on a task the first reviewer already holds.
     private func routeCompletion(_ task: BoardTask, outcome: Board.CompletionOutcome) async -> ToolResult {
         let recorded = Self.recordedLine(outcome)
+        if task.origin == .fixRound {
+            return ToolResult(
+                text: "\(recorded) The round is now being checked: a reviewer reviews it and a follow-up check grades "
+                    + "each item, and Agent Board pushes it only if both pass. Stop here; do not start further work."
+            )
+        }
         guard outcome.autoAccept else {
             if case .agentReview(let agentId, let agentName) = outcome.routing {
                 return await spawnReviewer(task, recorded: recorded, agentId: agentId, agentName: agentName)
@@ -487,16 +538,36 @@ public final class WorkerToolHandler: ToolHandler {
             )
         }
         return ToolResult(
-            text: "\(recorded) \(noReview), so the task went straight to Done and its "
-                + "worktree has been removed. Stop here; do not start further work."
+            text: "\(recorded) \(noReview), so the task went straight to Done. Agent Board lands its branch and "
+                + "removes its worktree after this answer. \(Self.awaitingPullRequestLine(outcome))Stop here; do not start further work."
         )
     }
 
     private static func completionResult(_ outcome: Board.CompletionOutcome) -> ToolResult {
-        ToolResult(
+        if outcome.closedUnderSession {
+            return ToolResult(
+                text: "\(Self.recordedLine(outcome)) The task was closed while you worked on it, so the report "
+                    + "changed nothing and it stays Closed. Stop here; do not start further work."
+            )
+        }
+        if let ended = outcome.endedSessionState {
+            return ToolResult(
+                text: "\(Self.recordedLine(outcome)) Agent Board had already ended this session (\(ended.rawValue)) "
+                    + "before this call, so the report changed nothing on the task: it stays in "
+                    + "\(outcome.column.rawValue.capitalized). Stop here; do not start further work."
+            )
+        }
+        return ToolResult(
             text: "\(Self.recordedLine(outcome)) The task is now in \(outcome.column.rawValue.capitalized). "
-                + "Stop here; do not start further work."
+                + "\(awaitingPullRequestLine(outcome))Stop here; do not start further work."
         )
+    }
+
+    private static func awaitingPullRequestLine(_ outcome: Board.CompletionOutcome) -> String {
+        outcome.awaitingPullRequest.map {
+            "Epic \($0.id) is integrated but stays open until its pull request merges; the orchestrator "
+                + "has been told to open it. "
+        } ?? ""
     }
 
     private static func recordedLine(_ outcome: Board.CompletionOutcome) -> String {

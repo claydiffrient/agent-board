@@ -5,13 +5,23 @@ Generated into each managed session's `--settings`. All post to
 
 | Event | Agent Board's reaction |
 |---|---|
-| `SessionStart` | Mark `agent_session.state = running`, unless its task is in `done`, or in `ready` with no other session on it; record transcript path |
+| `SessionStart` | Mark `agent_session.state = running`, unless its task is in `done`, or in `ready` with no other session on it; a worker the board ended (its grant revoked, or its row `failed` or `completed`) is not revived, and the supervisor stops its process again (§8.5); record transcript path |
 | `PreToolUse` (matcher `Bash`) | Deny `git push`, `gh pr create`, `gh pr merge`; append an `error` progress row (§8) |
 | `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row; reply with a worker's post-compaction brief or queued human comments as `additionalContext` |
 | `Notification` | Set `blocked` + reason on the task and session; the task appears in the orchestrator's **Blocked** section (§10) and raises the project's attention signal, which posts the banner |
-| `Stop` | Mark session idle. **On the orchestrator, this is the trigger for the report notice** (§9) |
+| `Stop` | Mark session idle. **On the orchestrator, this is the trigger for the report notice** (§9). On a reviewer whose task is still in `review`, the first one in the session replies with `additionalContext` asking for the verdict, which continues the turn; a later one raises "Reviewer stopped without a verdict" (§5.1) |
 | `SessionEnd` | Mark stopped/completed; reconcile final spend from the transcript |
 | `WorktreeRemove` | Chain to the user's existing hook, then clear the worktree row |
+
+A hook on a revoked token is still accepted, where an MCP call on one gets a
+401. It does two things only: `PreToolUse` keeps the push guard, and
+`SessionStart` has the supervisor stop the session again (§8.5). Every other
+event on a revoked token changes nothing.
+
+A `verifier` token (§6) is refused outright: it belongs to a human's Walk me
+through it session, which has no `agent_session` row and is given no hooks.
+The answer is `{}`, and nothing is recorded — no `hook_event` row, no grant
+binding, no session.
 
 The handler must be synchronous and trivial — `PostToolUse` fires on every tool
 call, and a slow handler is felt directly as agent latency. Anything expensive
@@ -24,7 +34,11 @@ legacy `decision: "block"`/`reason` pair — so the block lands whichever the
 installed CLI reads. Every other event replies `{}`.
 
 Spend metering tails the session's JSONL transcript rather than relying on
-hooks, since hooks do not carry `usage`.
+hooks, since hooks do not carry `usage`. Each metered session keeps one
+`TranscriptTailer` from its first tick until it is no longer metered (its final
+spend read, 15s after it ends), so a tick reads only the bytes appended since the
+last. A transcript that shrinks below the tailer's offset, or whose path now names
+a different file (device and inode), is re-read from the start.
 
 **Human comments reach a running session.** A `--bg` session cannot be written
 to, so a human comment is queued in `comment_delivery` for every live worker and
@@ -63,8 +77,9 @@ per-project signal behind the sidebar badge — on the metering tick, and
 keyed by project and reason. A queue nobody has answered does not banner every
 5s; a growing queue is a bigger badge, not a second banner. The key clears when
 the condition clears, so the same condition occurring again notifies again, and
-a relaunch re-announces whatever is still waiting. Stranded reports and an
-unacknowledged shutdown badge without interrupting. Nothing notifies for the
+a relaunch re-announces whatever is still waiting. Stranded reports, an
+unacknowledged shutdown, and a PR follow-through poll that cannot run `gh`
+(§13.1) badge without interrupting. Nothing notifies for the
 project the human has open while Agent Board is frontmost. Every banner Agent
 Board raises names its project.
 

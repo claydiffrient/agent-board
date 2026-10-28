@@ -38,7 +38,7 @@ final class NotificationRouteTests: XCTestCase {
     func testEveryPayloadRoundTrips() throws {
         let subjects: [NotificationRoute.Subject] = [
             .approvals, .blockedTask("t-1"), .blockedTask(nil), .session("s-1"), .reports,
-            .shutdown, .epic("e-1"), .project,
+            .shutdown, .epic("e-1"), .pullRequest("w-1"), .project,
         ]
         for subject in subjects {
             let original = NotificationRoute(projectId: "p-alpha", subject: subject)
@@ -82,6 +82,9 @@ final class NotificationRouteTests: XCTestCase {
             .blockedWorker: .blockedTask(nil),
             .strandedReports: .reports,
             .overdueShutdown: .shutdown,
+            .prPollUnavailable: .project,
+            .parkedPullRequest: .project,
+            .pullRequestDecision: .project,
         ]
         for reason in AttentionReason.allCases {
             XCTAssertEqual(NotificationRoute.subject(for: reason), expected[reason], "\(reason)")

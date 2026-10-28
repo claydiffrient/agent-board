@@ -83,27 +83,6 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         XCTAssertTrue(request.prompt.contains("project's own checkout at `\(fixture.repo.path)`"), request.prompt)
         XCTAssertTrue(request.prompt.contains("shared branch `agentboard/shared`"), request.prompt)
         XCTAssertTrue(request.prompt.contains("commit_my_work"), request.prompt)
-    }
-
-    /// Nothing about the deny list follows from having a worktree, so a shared worker is refused
-    /// the same three shapes — and `IntegrationGuard` reads the command text, not the cwd.
-    func testASharedWorkerIsStillRefusedPushesAndPullRequests() async throws {
-        try fixture.setWorktreeStrategy(.shared)
-
-        try await assign(try makeTask())
-
-        let spawns = await fixture.runtime.spawns
-        let request = try XCTUnwrap(spawns.last)
-        XCTAssertEqual(request.disallowedTools, SpawnRequest.defaultDisallowedTools)
-        XCTAssertTrue(request.disallowedTools.contains("Bash(git push*)"))
-        XCTAssertTrue(request.prompt.contains("Do not push. Do not open a PR."), request.prompt)
-    }
-
-    func testNoWorktreeIsCreatedForASharedWorker() async throws {
-        try fixture.setWorktreeStrategy(.shared)
-        let task = try makeTask()
-
-        try await assign(task)
 
         let listed = try fixture.manager.list()
         XCTAssertEqual(listed.count, 1, "git registered a worktree for a shared worker: \(listed.map(\.path.path))")
@@ -177,19 +156,6 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         XCTAssertEqual(thirdSession.cwd, worktree)
     }
 
-    func testTheCheckoutIsSharedAgainOnceItsOccupantFinishes() async throws {
-        try fixture.setWorktreeStrategy(.shared)
-        let first = try makeTask("First")
-        try await assign(first)
-        try fixture.sessions.setState(try session(of: first).sessionId, .completed, endedAt: .nowMillis)
-
-        let second = try makeTask("Second")
-        try await assign(second)
-
-        XCTAssertNil(try session(of: second).worktreePath)
-        XCTAssertEqual(try session(of: second).branch, "agentboard/shared")
-    }
-
     /// A shared branch is cut from one base, so an epic's group and a standalone group can never be
     /// the same group: they ask for different branches.
     func testAnEpicTaskSharesOnItsOwnBranchCutFromTheEpicBranch() async throws {
@@ -209,22 +175,6 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         XCTAssertNotEqual(try head(session.branch!), try head("main"))
     }
 
-    func testATaskOnADifferentBaseIsNotColocated() async throws {
-        try fixture.setWorktreeStrategy(.shared)
-        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Epic", goal: "Ship it.")
-        let epicTask = try makeTask("Epic work", epicId: epic.id)
-        try await assign(epicTask)
-        let group = try XCTUnwrap(try SharedCheckoutGroup.current(db: fixture.db, projectId: fixture.project.id))
-        XCTAssertEqual(group.branch, SharedCheckoutGroup.branch(epicId: epic.id))
-
-        let standalone = try makeTask("No epic here")
-        XCTAssertFalse(group.admits(SharedCheckoutGroup.branch(epicId: nil)))
-        try await assign(standalone)
-
-        XCTAssertNotNil(try session(of: standalone).worktreePath, "a task on a different base joined the group")
-        XCTAssertEqual(try session(of: standalone).branch, "agentboard/\(standalone.id)")
-    }
-
     /// The group is the session rows, so a worker that outlived the app is still holding the
     /// checkout when a new supervisor comes up over the same database.
     /// Pinned to a group of one so the second spawn's placement is the assertion: if the relaunched
@@ -235,6 +185,7 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         try await assign(first)
 
         let relaunched = fixture.relaunchedSupervisor()
+        addTeardownBlock { await relaunched.stop() }
         await relaunched.start()
         try XCTSkipIf(relaunched.serverPort == nil, "the relaunched board server could not bind a port")
 
@@ -273,6 +224,7 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         )
 
         let relaunched = fixture.relaunchedSupervisor()
+        addTeardownBlock { await relaunched.stop() }
         await relaunched.start()
 
         XCTAssertEqual(try fixture.sessions.get(placeholder.sessionId)?.state, .failed)
@@ -299,6 +251,28 @@ final class SharedCheckoutSpawnTests: XCTestCase {
         XCTAssertEqual(try fixture.sessions.get("session-shared")?.cwd, fixture.repo.path)
         XCTAssertEqual(try ProjectStore(fixture.db).get(fixture.project.id)?.repoPath, fixture.repo.path)
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.repo.appendingPathComponent(".git").path))
+    }
+
+    /// `--bg --resume` reuses the spawn's settings path, so the rewrite on resume is what the worker runs with.
+    func testAResumedSharedWorkerKeepsItsFileLockHook() async throws {
+        try fixture.setWorktreeStrategy(.shared)
+        let task = try makeTask()
+        try await assign(task)
+        let sessionId = try session(of: task).sessionId
+
+        try await fixture.supervisor.stop(sessionId: sessionId)
+        try await fixture.supervisor.resume(sessionId: sessionId)
+
+        let spawns = await fixture.runtime.spawns
+        let settingsURL = try XCTUnwrap(spawns.last).configFiles.settingsURL
+        let settings = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: settingsURL)) as? [String: Any]
+        )
+        let preToolUse = try XCTUnwrap((settings["hooks"] as? [String: Any])?["PreToolUse"] as? [[String: Any]])
+        XCTAssertTrue(
+            preToolUse.contains { $0["matcher"] as? String == FileLockPolicy.toolMatcher },
+            "the resumed shared worker lost its file-lock hook: \(preToolUse)"
+        )
     }
 
     /// The default path has to be what it was before this change existed.

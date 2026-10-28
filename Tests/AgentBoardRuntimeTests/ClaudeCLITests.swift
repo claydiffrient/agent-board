@@ -110,6 +110,7 @@ final class ClaudeCLITests: XCTestCase {
             name: "task-1",
             prompt: "Do the thing",
             configFiles: files,
+            tools: ["Read", "Bash(git push*)"],
             appendSystemPrompt: "You are a worker.",
             model: "claude-sonnet-5"
         )
@@ -125,8 +126,9 @@ final class ClaudeCLITests: XCTestCase {
             "--settings", "/cfg/settings-x.json",
             "--append-system-prompt", "You are a worker.",
             "--model", "claude-sonnet-5",
+            "--tools", "Read,Bash(git push*)",
             "--disallowedTools", "Bash(git push*)", "Bash(gh pr create*)", "Bash(gh pr merge*)",
-        ])
+        ], "an archetype naming `Bash(git push*)` still gets the default deny for it")
         XCTAssertEqual(args.firstIndex(of: "--disallowedTools").map { args.count - $0 }, 4)
     }
 
@@ -139,8 +141,58 @@ final class ClaudeCLITests: XCTestCase {
         let args = BackgroundSessionRuntime.arguments(for: request)
         XCTAssertFalse(args.contains("--append-system-prompt"))
         XCTAssertFalse(args.contains("--model"))
+        XCTAssertFalse(args.contains("--tools"), "no list inherits every tool; `--tools \"\"` would grant none")
         XCTAssertFalse(args.contains("--disallowedTools"))
         XCTAssertEqual(args.last, "/cfg/s.json")
+    }
+
+    /// The board fails the setup and never learns the session id, so a session left running is an
+    /// untracked agent working in the task's worktree, as a reviewer did alongside its own retry.
+    func testASpawnWhoseListingCannotBeReadStopsTheSessionItStarted() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claude-spawn-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let stopped = dir.appendingPathComponent("stopped")
+        let claude = dir.appendingPathComponent("claude")
+        try """
+        #!/bin/sh
+        case "$1" in
+          agents) exit 0 ;;
+          stop) echo "$2" > '\(stopped.path)' ;;
+          *) echo "backgrounded · abc12345 · task-1" ;;
+        esac
+        """.write(to: claude, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claude.path)
+        let runtime = BackgroundSessionRuntime(registrationTimeout: 1, claudeCandidates: [claude.path])
+        let files = SessionConfigFiles(settingsURL: dir.appendingPathComponent("s.json"), mcpConfigURL: dir.appendingPathComponent("m.json"))
+
+        do {
+            _ = try await runtime.spawn(SpawnRequest(cwd: dir, name: "task-1", prompt: "p", configFiles: files))
+            XCTFail("a spawn with no listed session reported one")
+        } catch {}
+        XCTAssertEqual(try? String(contentsOf: stopped, encoding: .utf8), "abc12345\n")
+    }
+
+    /// SPEC §6: `stop_worker` waits on `claude stop` inside Claude Code's 60s wait for its answer.
+    func testStopGivesUpOnAClaudeThatDoesNotAnswer() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("claude-stop-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let gate = dir.appendingPathComponent("gate")
+        let claude = dir.appendingPathComponent("claude")
+        try """
+        #!/bin/sh
+        i=0; while [ ! -e '\(gate.path)' ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+        """.write(to: claude, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claude.path)
+        let runtime = BackgroundSessionRuntime(queryTimeout: 1, claudeCandidates: [claude.path])
+
+        do {
+            try await runtime.stop(shortId: "abc12345")
+            XCTFail("claude stop was waited on for as long as it took")
+        } catch {
+            XCTAssertTrue("\(error)".contains("did not finish within 1s"), "\(error)")
+        }
     }
 
     func testAttachCommandTargetsClaude() {

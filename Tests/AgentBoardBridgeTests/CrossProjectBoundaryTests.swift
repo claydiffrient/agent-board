@@ -17,16 +17,17 @@ final class CrossProjectBoundaryTests: XCTestCase {
     static let scopedByIdentity: Set<String> = [
         "list_tasks", "create_task", "list_agents", "list_reports", "list_approvals",
         "create_epic", "list_epics", "push_branch", "search_notes", "create_note",
-        "list_roster_agents",
+        "list_roster_agents", "list_pr_watches", "list_pr_poll_problems",
     ]
 
     /// Tools that accept an id and must throw a `ToolError` when it belongs to another project.
     static let refusesForeignId: Set<String> = [
-        "get_task", "update_task", "move_task", "set_epic", "set_deps", "log_progress",
+        "get_task", "update_task", "move_task", "close_task", "set_epic", "set_deps", "log_progress",
         "spawn_worker", "stop_worker", "archive_task", "unarchive_task", "get_report",
         "promote_proposal", "get_epic", "request_integration", "close_epic", "refresh_epic", "open_pull_request",
         "read_note", "append_section", "replace_section", "attach_note", "pin_note",
-        "assign_to_agent", "add_comment", "delete_message", "reply_to_request",
+        "assign_to_agent", "add_comment", "delete_message", "reply_to_request", "add_pr_item",
+        "get_pr_watch", "dismiss_pr_item", "resume_pr_watch",
     ]
 
     /// The whole of the permitted crossing: queue text into another project's channel, and learn
@@ -51,17 +52,29 @@ final class CrossProjectBoundaryTests: XCTestCase {
 
     /// Every tool on any scope that writes a board. The Coordinator must be refused each one.
     static let refusedToCoordinatorAsWrite: Set<String> = [
-        "create_task", "update_task", "move_task", "set_epic", "set_deps", "log_progress", "add_comment",
+        "create_task", "update_task", "move_task", "close_task", "set_epic", "set_deps", "log_progress", "add_comment",
         "spawn_worker", "assign_to_agent", "stop_worker", "archive_task", "unarchive_task", "promote_proposal",
         "create_epic", "request_integration", "close_epic", "refresh_epic", "push_branch", "open_pull_request",
         "send_message",
         "attach_note", "pin_note",
         "update_status", "propose_task", "report_complete", "hand_off", "report_blocked", "acknowledge_shutdown",
-        "commit_my_work", "accept_task", "reopen_task", "reply_to_request",
+        "commit_my_work", "accept_task", "reopen_task", "reply_to_request", "add_pr_item", "dismiss_pr_item",
+        "resume_pr_watch",
     ]
 
-    /// Reads of a caller's own roster or task, which mean nothing to a session with no project.
-    static let notOfferedToCoordinator: Set<String> = ["list_roster_agents", "get_my_task"]
+    /// Reads of a caller's own roster, task or pull requests, which mean nothing to a session with no project.
+    static let notOfferedToCoordinator: Set<String> = [
+        "list_roster_agents", "get_my_task", "list_pr_watches", "get_pr_watch", "list_pr_poll_problems",
+    ]
+
+    /// A verifier's tools that reach only `identity.projectId`: the proposal lands there, the search covers only it.
+    static let verifierScopedByIdentity: Set<String> = ["propose_task", "search_notes"]
+
+    /// A verifier's tools that take an id and must refuse one from another project.
+    static let verifierRefusesForeignId: Set<String> = ["read_note"]
+
+    /// A verifier's tools that reach only the grant's own watch, whatever URL they are handed.
+    static let verifierReachesOnlyItsWatch: Set<String> = ["add_pr_item"]
 
     override func setUpWithError() throws {
         f = try BridgeFixture.make()
@@ -94,7 +107,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
             "a tool was added to the orchestrator surface without a cross-project test in this file"
         )
         XCTAssertEqual(classified.subtracting(surface), [], "this audit names tools that no longer exist")
-        XCTAssertEqual(surface.count, 39)
+        XCTAssertEqual(surface.count, 46)
     }
 
     func testOnlySendMessageAcceptsAnotherProjectsId() async {
@@ -123,6 +136,10 @@ final class CrossProjectBoundaryTests: XCTestCase {
         )
         await XCTAssertToolError(
             try await f.call("move_task", ["id": .string(foreign.id), "column": .string("review")]),
+            containing: "not in this project"
+        )
+        await XCTAssertToolError(
+            try await f.call("close_task", ["task_id": .string(foreign.id), "reason": .string("seized")]),
             containing: "not in this project"
         )
         await XCTAssertToolError(
@@ -418,6 +435,47 @@ final class CrossProjectBoundaryTests: XCTestCase {
         XCTAssertNil(ours.first?.epicId)
     }
 
+    // MARK: PR follow-through
+
+    func testAddPRItemRefusesAPullRequestAnotherProjectWatches() async throws {
+        let watches = PRWatchStore(f.db)
+        let theirs = try watches.upsert(projectId: other.id, snapshot: PRSnapshot(
+            repoOwner: "example-org", repoName: "app", number: 7,
+            url: "https://github.com/example-org/app/pull/7", title: "Theirs",
+            headRef: "feature-7", headOid: String(repeating: "c", count: 40), baseRef: "main"
+        ))
+        try watches.setState(.readyToVerify, watchId: theirs.id)
+
+        await XCTAssertToolError(
+            try await f.call("add_pr_item", ["pr_url": .string(theirs.url), "body": .string("Broken.")]),
+            containing: "not an open pull request this project watches"
+        )
+
+        XCTAssertEqual(try watches.items(watchId: theirs.id), [])
+        XCTAssertEqual(try watches.get(theirs.id)?.state, .readyToVerify)
+    }
+
+    func testPRWatchReadsAnswerNotFoundForAnotherProjectsWatch() async throws {
+        let watches = PRWatchStore(f.db)
+        let theirs = try watches.upsert(projectId: other.id, snapshot: PRSnapshot(
+            repoOwner: "example-org", repoName: "app", number: 8,
+            url: "https://github.com/example-org/app/pull/8", title: "Theirs",
+            headRef: "feature-8", headOid: String(repeating: "d", count: 40), baseRef: "main"
+        ))
+        try watches.addPollProblem(projectId: other.id, detail: "their gh is logged out")
+
+        await XCTAssertToolError(
+            try await f.call("get_pr_watch", ["watch_id": .string(theirs.id)]), containing: "not found in this project"
+        )
+        await XCTAssertToolError(
+            try await f.call("get_pr_watch", ["number": .number(8)]), containing: "not found in this project"
+        )
+        let listed = try await f.callJSON("list_pr_watches")
+        XCTAssertEqual(listed["watches"]?.arrayValue, [])
+        let problems = try await f.callJSON("list_pr_poll_problems")
+        XCTAssertEqual(problems["poll_problems"]?.arrayValue, [])
+    }
+
     // MARK: The permitted crossing, and its edges
 
     func testTheOnlyThingListProjectsRevealsIsIdAndName() async throws {
@@ -554,7 +612,8 @@ final class CrossProjectBoundaryTests: XCTestCase {
     func testEveryToolOnEveryScopeIsClassifiedForTheCoordinator() async {
         let everyTool = Set(
             (OrchestratorToolHandler.descriptors + WorkerToolHandler.descriptors + [WorkerToolHandler.commitDescriptor]
-                + ReviewerToolHandler.descriptors + CoordinatorToolHandler.descriptors).map(\.name)
+                + ReviewerToolHandler.descriptors + CoordinatorToolHandler.descriptors
+                + VerifierToolHandler.descriptors).map(\.name)
         )
         let classified = Self.coordinatorReads
             .union(Self.coordinatorOwn)
@@ -660,6 +719,70 @@ final class CrossProjectBoundaryTests: XCTestCase {
             containing: "No project has id"
         )
         await XCTAssertToolError(try await f.call("list_tasks", [:], as: f.coordinatorIdentity), containing: "project_id")
+    }
+
+    // MARK: The verifier: proposes and reads notes in its own project, nothing else
+
+    private var verifierIdentity: TokenIdentity {
+        TokenIdentity(token: "verifier", scope: .verifier, projectId: f.project.id)
+    }
+
+    func testTheVerifierIsOfferedOnlyItsClassifiedToolsAndRefusedEveryOther() async throws {
+        let offered = Set(await f.scoped.tools(for: verifierIdentity).map(\.name))
+        XCTAssertEqual(
+            offered,
+            Self.verifierScopedByIdentity.union(Self.verifierRefusesForeignId).union(Self.verifierReachesOnlyItsWatch),
+            "a tool was added to the verifier surface without a cross-project test in this file"
+        )
+        let everyTool = Set(
+            (OrchestratorToolHandler.descriptors + WorkerToolHandler.descriptors + [WorkerToolHandler.commitDescriptor]
+                + ReviewerToolHandler.descriptors + CoordinatorToolHandler.descriptors + TriagerToolHandler.descriptors
+                + TriagerToolHandler.followupCheckDescriptors).map(\.name)
+        )
+        for name in everyTool.subtracting(offered).sorted() {
+            await XCTAssertToolError(try await f.call(name, [:], as: verifierIdentity), containing: "Unknown tool")
+        }
+    }
+
+    func testTheVerifierNeitherReadsNorFindsAnotherProjectsNote() async throws {
+        let theirs = try f.note("Theirs", sections: [(heading: "H", body: "their private text")], in: other.id)
+        let ours = try f.note("Ours", sections: [(heading: "H", body: "our private text")])
+
+        await XCTAssertToolError(
+            try await f.call("read_note", ["id": .string(theirs.id)], as: verifierIdentity), containing: "not in this project"
+        )
+        let found = try await f.call("search_notes", ["query": .string("private")], as: verifierIdentity).text
+        XCTAssertTrue(found.contains(ours.id), found)
+        XCTAssertFalse(found.contains(theirs.id), found)
+    }
+
+    func testTheVerifiersAddPRItemLandsOnItsOwnWatchWhateverURLItIsHanded() async throws {
+        let watches = PRWatchStore(f.db)
+        func watch(_ number: Int, in projectId: String) throws -> PRWatch {
+            let url = "https://github.com/example-org/app/pull/\(number)"
+            let watch = try watches.upsert(projectId: projectId, snapshot: PRSnapshot(
+                repoOwner: "example-org", repoName: "app", number: number, url: url, title: "PR \(number)",
+                headRef: "b\(number)", headOid: String(repeating: "c", count: 40), baseRef: "main"
+            ))
+            try watches.setState(.readyToVerify, watchId: watch.id)
+            return watch
+        }
+        let ours = try watch(1, in: f.project.id)
+        let sibling = try watch(2, in: f.project.id)
+        let theirs = try watch(3, in: other.id)
+        let grant = try TokenGrantStore(f.db).issueVerifier(projectId: f.project.id, prWatchId: ours.id)
+        let identity = TokenIdentity(token: grant.token, scope: .verifier, projectId: f.project.id)
+
+        for target in [sibling, theirs] {
+            _ = try await f.call("add_pr_item", [
+                "pr_url": .string(target.url), "body": .string("Broken."),
+            ], as: identity)
+        }
+
+        XCTAssertEqual(try watches.items(watchId: ours.id).count, 2)
+        XCTAssertEqual(try watches.items(watchId: sibling.id), [])
+        XCTAssertEqual(try watches.items(watchId: theirs.id), [])
+        XCTAssertEqual(try watches.get(theirs.id)?.state, .readyToVerify)
     }
 
     // MARK: An unknown id reads the same as a foreign one, deliberately

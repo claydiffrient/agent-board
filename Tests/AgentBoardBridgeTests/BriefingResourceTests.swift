@@ -167,6 +167,15 @@ final class BriefingResourceTests: XCTestCase {
         XCTAssertFalse(after.contains("claude-sonnet-5"), "the briefing still carries the old default model")
     }
 
+    func testTheBriefingNamesTheProjectsWorktreeStrategyAndWhereASharedPlacementChecksOut() async throws {
+        try setSettings { $0.worktreeStrategy = .shared }
+
+        let briefing = try await read(BriefingResourceURI.orchestrator, as: f.orchestratorIdentity)
+
+        XCTAssertTrue(briefing.contains("this project uses `shared`"), briefing)
+        XCTAssertTrue(briefing.contains("primary checkout at \(f.project.repoPath)"), briefing)
+    }
+
     func testModelGuidanceTheHumanAddsAfterLaunchReachesTheServedBriefing() async throws {
         let before = try await read(BriefingResourceURI.orchestrator, as: f.orchestratorIdentity)
         XCTAssertFalse(before.contains("Model guidance from the human"))

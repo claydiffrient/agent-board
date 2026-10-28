@@ -11,6 +11,8 @@ proposed ──promote──> backlog ──deps met──> ready ──assign�
                           │      no review / epic review:        │
                           │      complete goes straight here     │
                           └──────────── reopen ──────────────────┘
+
+any column but running/done ──close_task(reason)──> closed ──human Reopen──> ready
 ```
 
 Which of those two edges a completed task takes is the **review level** (§4), a
@@ -73,7 +75,7 @@ nobody reviewed.
   worker stopped and what remains"), not a `failed` report. A worker that
   vanishes or is cap-killed still gets the old `failed` shape; only an
   acknowledged wind-down gets this one.
-- **Handed off** — a rostered agent that did only the portion matching its
+- **Handed off** — a session spawned from an archetype that did only the portion matching its
   specialty calls `hand_off` (§6) instead of `report_complete`. Like a
   wind-down, the task goes back to `ready`, **never to `review`**, and
   `failed` is never set; unlike a wind-down, nothing asked it to stop — it
@@ -121,16 +123,69 @@ nobody reviewed.
   whose process is already gone — absent from `claude agents`, or `starting`
   with no short id and nothing listed under its id — is ended as vanished and
   does not block the decision; only an agent still listed as live that refuses
-  to stop aborts the accept or reopen before anything is written. The accept
-  then lands the task's branch, below, and only after that is every attempt's
-  worktree removed (firing the
-  existing `WorktreeRemove` hook, which reclaims Bazel `output_base` on
-  Derivita), with `agentboard/<task-id>` deleted once it is merged into the
-  base or epic branch. An unmerged branch, or a worktree with uncommitted
-  changes, is kept and the reason surfaced in the status bar. Landing comes
+  to stop aborts the accept or reopen before anything is written. An accept a
+  tool call makes (`report_complete` under no review, `accept_task`) is the
+  exception to that order: it moves the task to `done` and revokes every
+  session's grant before answering, and stops the live sessions after the
+  answer (§6). There a session that refuses to stop leaves the task in `done`
+  with `landing` `unlanded` and its worktree kept, reported as a `decision`.
+  The accept then lands the task's branch, below, and only after that is every attempt's
+  worktree removed, running the project's teardown hook first (§3.1, "Removing
+  a worktree") and then any `WorktreeRemove` hook in `~/.claude/settings.json`,
+  with `agentboard/<task-id>` deleted once it is merged into the
+  base or epic branch. An unmerged branch is kept and the reason surfaced in
+  the status bar. Landing comes
   first because removing a large worktree can take over a minute, and until the
-  merge runs a dependent cut from the target branch lacks this work. A member of
-  a shared branch has no worktree to remove, so its teardown still runs first.
+  merge runs a dependent cut from the target branch lacks this work. A task's
+  newest attempt that carries a branch decides which branch lands: a task whose
+  newest attempt ran on a shared branch lands as that branch's member, and one
+  retried from a shared branch into a worktree lands `agentboard/<task-id>`. A
+  shared member has no worktree of its own on that branch, so the removal of
+  any earlier attempt's worktree starts first.
+
+  A worktree with uncommitted changes is kept — the teardown hook does not run
+  in it — and so is one git refuses to remove. Whenever that happens, for any
+  reason, or a teardown hook fails or times out, the acceptance's `decision`
+  report says so under **Worktree cleanup:**, naming the worktree and, for a
+  dirty one, its uncommitted paths (the first 20, then a count), so the
+  orchestrator can act on a leftover like a `yarn.lock` its setup wrote. The
+  same lines go on the task's progress. An accept that answers an MCP call
+  (`report_complete` under a no-review level, a rostered reviewer's
+  `accept_task`) returns once the task is in `done` and its grants are
+  revoked; the landing and the removal run after it (§6). Landing a shared
+  branch moves the project's checkout off it with `git checkout`, which runs
+  the repository's `post-checkout` hook, and removal runs `WorktreeRemove`
+  hooks, so neither has a bound the answer could wait out. The worktrees are
+  claimed before the answer, so no reap takes one for an orphan while the
+  landing runs, and a landing that goes wrong still arrives as its `decision`
+  report. A human's Accept lands inline. With a teardown hook set, the
+  removal runs after the accept returns in every case, on a shared branch too,
+  because the hook may run for minutes. Its findings are appended to the acceptance
+  report while the orchestrator has not read it, and otherwise queued as a
+  `decision` report of their own. With no hook, a human's Accept removes the
+  worktrees inside the accept. Discarding a task removes its worktrees the same
+  way before the task is deleted; the task's progress goes with it, so its
+  findings are kept only in the discard's `decision` report. A discard that
+  lands while a spawn of the task is still setting up (§3.1) cancels that setup
+  and waits for it to end before looking for worktrees: a setup cancelled before
+  `git worktree add` creates nothing, and one already running its hook finishes,
+  so the removal finds its worktree. That setup's end queues no report. A spawn
+  that is still computing its checkout when the discard begins has no session
+  for the discard to find, so the spawn checks for the discard itself: it is
+  refused if the discard is under way when it would write its `setup` row, and
+  a reviewer's spawn, which creates its worktree before any row, is refused if
+  the task is being discarded or gone once it is past the teardown's claim.
+
+  A task leased a worktree slot (§3.1 step 2) has it *released* instead of
+  removed, by accept and discard alike: `git switch --detach` at its last
+  commit, so its branch is no longer checked out and can be merged or deleted
+  like any other, then `git clean -fd` — never `-x`, which would delete the
+  ignored build output the slot is kept for. No teardown hook runs, and the
+  repository's `post-checkout` hook is skipped for the detach, which changes
+  no file. A slot with uncommitted changes stays leased, out of the pool,
+  reported under **Worktree cleanup:** like a kept worktree, until a person
+  resolves it; `reconcile` then releases it, as it does any lease an accept
+  or discard did not get to.
 
   The merge takes the task's branch into the branch meant to carry it:
   `agentboard/epic-<id>` for a task in an epic (§5.2), so the next sibling
@@ -144,7 +199,7 @@ nobody reviewed.
   makes the merge commit with both parents, and `update-ref` moves the target
   only if it is still where the merge started. `merge-tree --write-tree` needs
   git 2.38; macOS 14, the oldest the app supports, ships 2.39. A temporary
-  worktree was used before, and it fired `post-checkout`: Derivita's runs its
+  worktree was used before, and it fired `post-checkout`: on a work project this runs its
   setup script, which fails under launchd's `PATH`, so every non-fast-forward
   merge there failed and left its worktree holding the epic branch. Merges into
   one target branch run one at a time, in the order their accepts arrived, so
@@ -192,7 +247,11 @@ nobody reviewed.
   a working tree holds, which is the ordinary case for the base branch: the
   human's own checkout is on it. `git update-ref` does not refuse such a branch;
   it moves the ref and leaves that working tree reporting every newly-merged
-  file as deleted. So the accept defers instead.
+  file as deleted. So the accept defers instead. "Holds" is decided the way the
+  reaper below decides it, from git's admin files: a worktree whose `HEAD`, an
+  in-progress rebase or an in-progress bisect names the branch. When any of
+  those files cannot be read the merge refuses, and the task is `unlanded` with
+  the unreadable directory named, rather than trusting `git worktree list`.
 
   Because the accept therefore cannot always land the work, every task carries a
   **landing**, written by the accept and cleared when the task leaves `done`:
@@ -214,13 +273,19 @@ nobody reviewed.
     merged. `landing_detail` leads with its URL.
 
   **Integrating standalone tasks by pull request.** Workflow → Publishing's
-  "Integrate standalone tasks by" is *Pull request* or *Local merge*. A project
+  "Integrate standalone tasks and epics by" is *Pull request* or *Local merge*. A project
   that never chose stores neither, and the accept resolves it by running
   `git remote get-url origin` off the main actor: a repository with an `origin`
-  integrates by pull request, and one without — or a missing repository or
-  git — by local merge. The picker's first entry is that default, labelled with
+  integrates by pull request, and one git reports has none (exit 2, "No such
+  remote") by local merge. Any other git failure — no repository, no git, an
+  unreadable config — never means local merge: the accept keeps the answer it
+  last resolved for that project in this run, and with none it merges nothing,
+  leaving the task `unlanded` with git's exit status and stderr in its detail;
+  an integrator spawn fails with the same error. The picker's first entry is that default, labelled with
   what it resolved to ("Pull request (default: has origin)"); a stored choice
-  always wins. Only `gh` opens and checks pull requests, so an `origin` on a
+  always wins. The same resolved choice decides whether an integrated epic
+  waits on its pull request (§5.2 step 4), which is why the picker reads
+  "Integrate standalone tasks and epics by". Only `gh` opens and checks pull requests, so an `origin` on a
   host other than GitHub still resolves to *Pull request*: its tasks wait at
   `awaiting_pull_request`, and an approved `open_pull_request` pushes the
   branch to that `origin` and then fails with `gh`'s "none of the git remotes
@@ -271,15 +336,123 @@ nobody reviewed.
 
   A landing recorded before this existed is `NULL`, which claims nothing either
   way; it is not rendered as an alarm.
+- `closed` — a terminal column beside `done` for a task retired without being
+  finished: its work was done some other way, it was superseded, or it is no
+  longer wanted. Only the orchestrator's `close_task(task_id, reason)` (§6)
+  enters it, through `Board.close`, and the reason is required. The reason, the
+  time and who closed it are written to `closed_reason`, `closed_at` and
+  `closed_by` (§4) and to a `progress` row, so the history keeps them after a
+  reopen. Nothing else moves: no branch, worktree, session row, report or
+  comment is touched, as with `close_epic`.
+
+  `closed` is not `done` and nothing that reads `done` reads it. A closed task
+  does **not** satisfy a dependency — readiness asks for `done`, so a dependent
+  stays in `backlog` — and `close_task`'s answer names every unfinished
+  dependent so the orchestrator can `set_deps` it or close it too. There is
+  deliberately no option to let a closed task satisfy its dependents: whether a
+  dependent still needs the work is a per-dependent judgement that `set_deps`
+  already records exactly, and a second meaning of `closed` would be one more
+  thing every reader of the dependency graph has to check. A closed task never
+  has a landing (`landing` is cleared on leaving `done` and never armed for
+  `closed`), is never merged by the accept path or listed for the integrator,
+  is not in At a Glance's counts, and never counts towards an epic's done
+  tally. An epic is ready for integration (§5.2) when every task it holds is
+  `done` or `closed` and at least one is `done`, so a retired task cannot hold
+  an epic open.
+
+  Refused, by `Board.close`: a blank reason; a task in `done` (it is already
+  finished — accepted work is not retired after the fact); a task already
+  `closed`; an epic's integration task (`origin = integration`), which only
+  §5.2's own path ends; and any task an active session holds, worker or
+  rostered reviewer — stop it first. A stranded task in `running` with no live
+  session can be closed. No spawn takes a closed task, and a session on one is
+  settled: `reconcile` and `SessionStart` never revive it (§7). A spawn
+  approval still waiting for the task is resolved `denied` in the same
+  transaction, so the human queue does not keep an item nobody can approve.
+
+  Closing needs no human approval, with autonomy on or off. It deletes,
+  publishes and spends nothing, a human reverses it in one click, and the card
+  stays on the board in its own column with the reason on it rather than being
+  hidden. Gating it would put back the problem it solves — obsolete tasks sitting
+  in `ready`, one mistaken spawn from running — until a human got to the queue.
+
+  A human reopens a closed task from the board (the card's or inspector's
+  **Reopen**). `Board.reopen` clears the `closed_*` fields and any archive, moves it to `ready`
+  — or `backlog`, if a dependency is no longer `done` — and queues a `decision`
+  report quoting the reason it had been closed for. The orchestrator cannot
+  reopen one: `move_task` refuses a closed task, so the human stays the judge of
+  retired work. Neither a human drag nor `move_task` can enter `closed`; only
+  `close_task` writes a reason.
 - `archived` — also a flag, not a column, with `blocked` and `failed` as the
-  precedent: D7's six columns (`proposed`/`backlog`/`ready`/`running`/`review`/
-  `done`) are unchanged by the archive feature. Only a `done` task can be
-  archived (§4), and archiving does not move it — an archived task is still a
-  `done` task, just hidden from the default board query.
+  precedent: D7's columns are unchanged by the archive feature. Only a `done`
+  or `closed` task can be archived (§4), and archiving does not move it — an
+  archived task is still in its terminal column, just hidden from the default
+  board query.
 
 Reconcile also reaps worktrees under the project's worktree root that no active
 session owns, and deletes merged `agentboard/*` branches that no longer have a
-worktree. Anything dirty or unmerged is left alone and reported. Epic
+worktree. Reconcile runs only while a project's Status view is open, so the
+supervisor's metering tick runs the same reap on every project every three
+minutes as well, the first one three minutes after launch, keeping the
+worktrees of the sessions whose rows are active. The two are serialized per
+project: a reconcile waits for a tick reap in progress, and the tick skips a
+project whose reconcile is running. The tick starts each project's reap and
+does not wait for it, so metering, cap and stall checks are never held up by
+git removals. A spawn's new worktree is clean and at its base until its
+worker commits. The spawn marks the worktree's path before it touches git and
+clears the mark when its setup ends (§3.1), and a reap keeps every marked path
+as well as every path an active row names, the `setup` row included. Because a
+reap's list of active sessions predates its git scan, it rereads the active
+rows and the marks after the scan and claims its orphans in the same step, with
+no suspension point between, so a spawn or resume either marked its path first
+or waits on the claim. Resuming a stopped session marks its worktree the same
+way until the session is active again, and is refused when a reap or teardown
+has already claimed that worktree: the removal is already running, and a
+session resumed there would lose its checkout. A resume is also refused while
+another active session holds the task or the worktree, as a spawn is: resuming
+a worker whose rostered reviewer is still reviewing would put two agents in one
+checkout. A resumed session keeps what it was spawned as, read from its grant's
+scope rather than its row's role: a reviewer gets a `reviewer` grant back and its
+task stays in `review`, where a worker's task moves to `running`. A reviewer whose
+task has left `review` since it stopped is refused, since its verdict would land
+on a task nobody asked it to judge. The other direction holds as well: a respawn
+reuses the task's worktree when it is still on disk, but not one a reap or
+teardown has already claimed for removal (§3.1). The spawn waits for that
+removal to finish and then creates a fresh worktree at the same path. It waits
+only on a claim for its own path, so it is never held up by removals of other
+worktrees. Anything dirty or unmerged is left alone and reported. A task branch
+cut moments ago sits exactly at its base, so it reads as merged until its
+worker's first commit. Once its worktree exists the worktree check protects it;
+before that, the branch sweep skips `agentboard/<task-id>` while the spawn's
+mark is on `<root>/<task-id>`, and claims that path, as a teardown would, for
+every other task branch with no worktree there until its delete is done, so a
+spawn that marks the path afterwards waits on the claim before `git worktree
+add`. Without the claim, a worktree added between the sweep's check and its
+delete would lose its new branch. The worktree check
+reads each worktree's `HEAD` (and an in-progress rebase's `head-name` or
+bisect's `BISECT_START`) from git's own admin files and keeps the branch when
+any of them cannot be read: `git worktree list` exits 0 in that case while
+leaving the worktree, or its branch, out of the list, and a sweep that trusted
+it deleted a running task's branch. A dead registration holds nothing and is
+pruned before the check: one that is not locked and whose `gitdir` is missing
+or names a `.git` file that is gone, which is what `git worktree prune` removes.
+Left in place, git would keep refusing to delete its branch or check it out
+anywhere else. A `gitdir` that cannot be read is not dead but unreadable, since
+whether its worktree is gone is unknown. The same holds when the admin entry or
+the worktree directory cannot be searched, and when `.git/worktrees` can be
+listed but not searched, so its entries cannot be told apart from stray files:
+only a positive "no such file" makes a registration dead or drops an entry. A linked entry with no `HEAD`
+names no branch, as git reads it. One unreadable record blocks every branch's
+check, so the sweep names that directory once in the status bar, with how many
+branches it kept. The delete itself is guarded by the tip that was checked. The teardown
+hook runs before each removal (§3.1); a failure goes on the progress of the
+task whose session held the worktree, in a `decision` report of its own, since
+no other report marks the removal. A kept orphan stays a status-bar notice:
+the reaper finds it again on every pass. With a hook set, the removals run in
+the background after `reconcile` has decided what to remove, so a pass that
+finds orphans returns at once instead of waiting up to the hook timeout for
+each; the next pass skips whatever is still being removed (§3.1, "A hook runs
+at most once"). Epic
 integration worktrees and `agentboard/epic-*` branches are out of scope. So is
 a shared branch (`agentboard/shared*`): it has no worktree under this reaping
 either way, and it is deleted only by acceptance finding it fully accepted and
@@ -319,6 +492,19 @@ its own `accept_task` has nothing to decide. A reviewer that cannot be started
 leaves the task in `review` for a person and says so in a `progress` row, which
 is where `task` review would have parked it anyway.
 
+The spawn answers once the reviewer's setup row exists, so a setup that fails
+after that, launching `claude` or reading back its session, takes the same
+route as a worker's (§3.1): the row ends `failed` with a "Worker never started"
+report to the orchestrator and a notification. The task stays in `review`, and
+because the failed row is the newest session and names the reviewer, its Pending
+reviews row reads `<reviewer> stopped without a verdict` and offers Re-run
+review (§10), the one way it is retried; nothing retries it automatically. A session `claude --bg`
+started whose id `claude agents --json` then does not return is stopped before
+setup fails, because the board never records it and it would otherwise review
+the same worktree alongside the retry. `attempt` counts every session on the
+task, worker and reviewer alike, so a reviewer's attempt number is not a count
+of reviews.
+
 The stop comes after the answer, not before it. `workerCompleted` runs `claude
 stop` on the session that is waiting on this very call, so awaiting it inline
 killed the MCP client mid-request: measured on the live board 2026-09-21, 64 of
@@ -338,6 +524,25 @@ spawn are reached — so a resend inserts no second row, moves no task, sets no
 reviewer, starts no second reviewer and fires no second event. The answer names
 the first report's id and the column the task actually sits in.
 
+**A report from a session Agent Board already ended moves nothing.** A session
+the board failed, stopped or completed can still be running, because Claude Code
+resumes a stopped `--bg` session by itself (§8.5), and by the time it reports
+another session may have finished the task. A session `Board.terminate` ended
+has its grant revoked, so its `report_complete` gets a 401 and never reaches
+the board. For the rest, `Board.complete` reads the session row inside the same
+transaction. When the row is no longer active, the report is
+kept as a `decision` headed "Late report_complete from a session Agent Board had
+already ended", and the task's column, landing, archive state, review routing and
+epic are left as they are. The answer says the session had already ended and
+names the column the task stays in, and the stop still follows it. A resend finds
+that decision report and inserts no second one. A session whose row is still
+active but which no longer holds the task, because a newer active session is
+working it, is refused outright: the call errors, nothing is recorded, and the
+task stays where the newer session has it. On 2026-10-07 the idle-capped
+first integrator of task 006dfd78 reported two minutes after the second
+integrator had closed the epic and archived the task, and pulled the archived
+task back into `review` with its landing cleared.
+
 A rostered reviewer under `agent` review gets its own token scope (§6), narrower
 than a worker's: `get_my_task`, `log_progress`, `accept_task(verdict)` and
 `reopen_task(findings)` over the one task its token names, and nothing else — no
@@ -351,11 +556,31 @@ task is the point: a person reading a task that reached `done` without them can
 see who approved it and why.
 
 A reviewer whose turn ends (its `Stop` hook) with the task still in `review` gave
-no verdict. Nothing accepts the task: its Pending reviews row reads `<reviewer>
-stopped without a verdict` (§10), and one `blocked` report per reviewer session
-tells the orchestrator. The session is left idle, not stopped, because a turn can
-end while a build the reviewer started in the background still runs; the
-orchestrator can message it or `stop_worker` it.
+no verdict. The first time that happens in a reviewer session, the hook answers
+with `hookSpecificOutput.additionalContext` carrying `ReviewPrompt.verdictOwed`,
+which continues the turn: give the verdict now, read whatever a background
+command has written instead of waiting for it, and name what did not finish.
+A `status` row headed "Reviewer's turn ended without a verdict." records the
+reminder and makes it once per session (`Board.remindReviewerOfVerdict`). If the
+turn ends again with no verdict, nothing accepts the task: its Pending reviews
+row reads `<reviewer> stopped without a verdict` (§10), and one `blocked` report
+per reviewer session tells the orchestrator. The session is left idle, not
+stopped; the orchestrator can message it or `stop_worker` it, and the human can
+Accept, Re-run review or Reopen from the row.
+
+Every missing verdict measured before the reminder existed had one cause. Seven
+reviews between 2026-09-29 and 2026-10-08 each ended on a text-only "still
+waiting on the tests" message while a `swift test` ran in the background: started with
+`run_in_background`, or a foreground run that outlasted the Bash timeout (120 s
+default, 600 s maximum) and was moved to the background, after which the
+reviewer waited with `ScheduleWakeup`, a `Monitor` or `sleep`. A full run of this
+suite outlasts the 600 s ceiling, so "run it in the foreground" alone cannot
+hold a full run in one tool call. `ReviewPrompt` therefore tells the reviewer to
+run builds and tests in the foreground, filtered to the suites that cover the
+diff and never the whole suite, never to wait on a backgrounded command, and to
+give the verdict and name what did not finish when a check cannot finish; the
+reviewer's `--disallowedTools` also denies `ScheduleWakeup`, `Monitor` and
+`CronCreate`.
 
 A session that ends on a task already in `done`, or back in `ready` with a
 reviewer's findings or with no other session on it, left nothing unfinished:
@@ -391,7 +616,11 @@ A reviewer's inputs are the task — title, body, acceptance criteria and its
 comment thread — and the diff on the task's branch. Nothing else: not the
 worker's report, not the task's `progress` rows (the worker's own notes and any
 hand-off summary), not project notes, not the board database. It checks the
-worker's claims by reading and running the code. `ReviewPrompt` says so; its
+worker's claims by reading and running the code. The report is withheld on
+purpose, so the review does not lean on the worker's own account; because the
+reviewer cannot see what the report disclosed, `ReviewPrompt` and the reviewer's
+`get_my_task` description tell it never to file a finding about what the worker
+did or did not disclose. `ReviewPrompt` says so; its
 `get_my_task` returns the task and its comments and nothing from `report` or
 `progress`; its scope has no note tools, and `NoteResourceHandler` lists no
 `note://` resource to a `reviewer` token and refuses to read one.
@@ -415,7 +644,12 @@ one whose whole deliverable is an Agent Board note, such as release notes — ha
 nothing for it to decide, and `reopen_task` would send correct work back.
 `assignAgent(scope: .reviewer)` runs `git diff --quiet <base>...HEAD` in the
 worktree before it writes a session row and throws `NothingToReview` when it
-is empty. `report_complete` then leaves the task in `review` for a person
+is empty. For a standalone task `<base>` is `WorktreeManager.diffBase`: the
+recorded cut point while local base is still behind it (§3.1 step 1), so a
+branch cut from the remote's base is not read as carrying the remote's
+commits. The same `<base>` goes into the reviewer's prompt and is stored in
+`agent_session.review_base`, which `briefing://reviewer` and the
+post-compaction brief rebuild from. `report_complete` then leaves the task in `review` for a person
 (`Board.leaveReviewToPerson`: `reviewer_agent_id` cleared, the reason in a
 `status` row, exactly as `humanReview` routing parks it) and tells the worker
 so. No reviewer starts and nothing is flagged as an error.
@@ -425,8 +659,9 @@ so. No reviewer starts and nothing is flagged as an error.
 Integration is gated on your approval regardless of the autonomy setting, and
 can be requested two ways that land on the same row: the orchestrator's
 `request_integration(epic_id)` tool, or the epic lane's **Request integration**
-button. The tool refuses until `epicReadyForIntegration` holds — the epic is
-non-empty and every task in it is `done` — naming how many tasks remain; the
+button. The tool refuses until `epicReadyForIntegration` holds — every task in
+the epic is `done` or `closed` (§5) and at least one is `done` — naming how many
+tasks remain; the
 button only appears once that is already true, so neither path can jump the
 gate. Either call reaches `Board.requestIntegration`; a repeat request while
 one is already pending returns the existing approval rather than queuing a
@@ -436,11 +671,15 @@ This is the path that ends an epic by *finishing* it. §10's **Close as done**
 and **Abandon** are the other way out, for an epic you are finished with rather
 than one that is finished; they merge nothing and are not part of this sequence.
 
-1. All tasks in the epic reach `done`.
+1. All tasks in the epic reach `done`, or are retired to `closed`. A closed
+   task's branch is not listed for the integrator.
 2. Orchestrator calls `request_integration(epic_id)`. This creates an approval
    row and a macOS notification. Nothing proceeds until you approve.
 3. On approval, Agent Board creates an integration worktree on
-   `agentboard/epic-<id>` and spawns an integrator worker. The epic moves to
+   `agentboard/epic-<id>` and spawns an integrator worker. As for any task
+   (§3.1), the worktree is created in setup, after the spawn has answered, so
+   `spawn_worker` on an integration task does not wait out the repository's
+   `post-checkout` hook. The epic moves to
    `integrating` in `WorkerSupervisor.spawnIntegrator`, after the integrator's
    session row is written and before its process is launched, so a spawn that
    throws leaves the epic `active` rather than stranded mid-integration. An
@@ -470,6 +709,11 @@ than one that is finished; they merge nothing and are not part of this sequence.
    drop verification: it tells the integrator to work out how this project
    builds and tests itself, run both, and name in its report exactly what it
    ran. Nothing in the prompt assumes a language or a build tool.
+   It tells the integrator never to end its turn to wait for a command, and
+   ends with the same *How your turns end* section a worker's prompt does
+   (§3.1 step 6). Without them an integrator with nothing to merge started its
+   full test run in the background, ended its turn to wait, and was stopped by
+   the idle cap four times without ever reporting.
    `spawnIntegrator` runs the same launch path as any task worker (§3.1 steps
    3-8: memory symlink, generated `--settings`/`--mcp-config`, a worker-scoped
    token, `--permission-mode auto`, `--strict-mcp-config`, the push/PR
@@ -483,7 +727,51 @@ than one that is finished; they merge nothing and are not part of this sequence.
    integrator gets a real board card, token scope and report channel like any
    worker; if the spawn fails, that task is deleted and the epic is left where
    it was.
-4. The integrator reports. Under the default `afterEpicMerge` archive policy
+   Respawning that task — `spawn_worker` on it once an idle cap or a stop has
+   ended its integrator, or a spawn approval for it — goes through
+   `spawnIntegrator` too, never the ordinary task spawn: the same epic
+   checkout on the epic branch, the same task with the next attempt number,
+   and a prompt recomposed from the branches as they stand. A failed respawn
+   keeps the task. `assign_to_agent` on an integration task is refused, with
+   guidance to call `spawn_worker` or `request_integration` instead:
+   integrators are not rostered, and a roster spawn would take the ordinary
+   path. Before `git worktree add`, `WorktreeManager` prunes a dead
+   registration (§5) of the path it is about to create, since git refuses
+   that path and does not prune it itself; an epic checkout whose directory
+   is gone but still registered is recreated rather than refused.
+4. The integrator reports. What its report does to the epic depends on how
+   the project ships an epic to its base branch. That is the same choice that
+   decides standalone tasks (§5, "Integrating standalone tasks by pull
+   request"): the stored setting, or, when none is stored, whether the
+   repository has an `origin`. `spawnIntegrator` resolves it — the `origin`
+   check runs git, which `Board` cannot — and records it on the epic as
+   `ships_by_pull_request` (§4), so the report is settled by what was true when
+   the integrator started.
+
+   **A project that ships epics by pull request.** Integration only merged the
+   task branches into the epic branch; nothing has reached the base branch and
+   nobody has reviewed it. `Board.complete` moves the epic to `integrated`, not
+   `done`, and archives nothing. The integration task goes to `review` and is
+   routed like any other completion. An `integrated` epic is open in every
+   sense a `pull_request_open` one is: `create_task` and `set_epic` accept it,
+   its new tasks branch from the epic branch, accepting one merges into that
+   branch, its lane stays on the board, and it can be integrated again. The
+   orchestrator is told the next step in two places: a `decision` report from
+   the same transaction says the epic is integrated, that it stays open, and
+   to call `open_pull_request(epic_id)`; and `get_epic` returns that step as
+   `next_step` for as long as the epic is `integrated` (for a
+   `pull_request_open` epic, `next_step` says to wait for the merge and to
+   `push_branch` anything accepted since). The integrator's own
+   `report_complete` answer says the epic stays open. Step 5 takes it from
+   there: recording the pull request moves it to `pull_request_open`, and the
+   merge makes it `done` and runs the `afterEpicMerge` archive. The lane offers
+   **Open PR** on an `integrated` epic. Before this, integration closed the
+   epic in these projects too: it refused new tasks before its branch was
+   pushed, archived tasks that had not reached `main`, and hid the lane.
+
+   **A project that merges epics locally**, and any epic whose integrator
+   predates `ships_by_pull_request`, behaves as follows. Under the default
+   `afterEpicMerge` archive policy
    (§4), the epic's merge is itself the trigger: `Board.complete` moves the
    epic to `done` and archives every `done` task of it, the synthetic
    `origin=integration` task included, inside the same transaction. **That
@@ -495,8 +783,8 @@ than one that is finished; they merge nothing and are not part of this sequence.
    leaves it in `review` for a human, exactly as before this feature existed.
    `Board.complete` does this only for an epic still `integrating`; an
    integrator finishing on a `pull_request_open` epic leaves the epic there and
-   its task in `review`, so approving integration never marks an epic `done`
-   while its pull request is unmerged.
+   its task in `review`, whichever way the project ships, so approving
+   integration never marks an epic `done` while its pull request is unmerged.
 5. The PR from the epic branch → base is opened either **by you**, from
    the button on the epic, or by the orchestrator calling `open_pull_request`
    (§6) — which does not open one either. It creates an approval row, exactly
@@ -507,7 +795,8 @@ than one that is finished; they merge nothing and are not part of this sequence.
    reading a terminal, and reaches the orchestrator as a `decision` report.
    It is also kept on the approval (`published_url`), and recording it moves
    the epic to `pull_request_open` from any state but `abandoned` — whether or
-   not `request_integration` ran first, and including a `done` epic.
+   not `request_integration` ran first, and including an `integrated` or a
+   `done` epic.
 
    A `pull_request_open` epic is not closed. `create_task` and `set_epic`
    accept it, its new tasks branch from the epic branch, and accepting one
@@ -636,3 +925,27 @@ runtime on every check, inside the same timeout.
 be set up (including a failing or timed-out hook) and Agent Board quitting
 mid-check both report that the refresh did not finish, that the branch did not
 move, and that no build or test failed — never that the merge is broken.
+
+**Worktrees a closed epic leaves behind.** Nothing reaps an epic's integration
+worktree (`<worktree-root>/epic-<epic-id>`, on the epic branch), and a task
+worktree kept for uncommitted changes stays where it is. Once an epic is
+`done` or `abandoned` nothing will push from its branch again, so whatever is
+still on disk for it is a leak: on a work project, an integration worktree whose work
+moved to another epic held an 11.5 GB output base. `Board.heldWorktrees`
+lists them: every recorded `worktree_path` of a session on a task in the epic,
+its integration task included, plus the epic's integration checkout, each kept
+only while the directory exists and never the project's own checkout. The
+`decision` report `close_epic` and the lane's close write, the one the
+merge check writes when the epic's pull request merges, and the one an
+integration task's `report_complete` writes when it takes the epic to `done`
+by direct merge, list them with their paths and owning tasks. That last report
+leaves out the integration checkout while the integration task goes to
+`review`, because accepting it removes that checkout and reports anything it
+keeps; under `afterEpicMerge` the task is archived instead of accepted, so the
+checkout is listed. `get_epic` returns them as `held_worktrees` for a
+`done` or `abandoned` epic. The human removes them with **Remove worktrees** on
+the epic lane's menu (§10): each goes through `WorktreeManager.remove`, so the
+teardown hook runs first. One a live session holds, or one with uncommitted
+changes, is kept and named; no branch is deleted. A `decision` report lists
+what was removed and what was not, and each finding also goes on its task's
+progress.

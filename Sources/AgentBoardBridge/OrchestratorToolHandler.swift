@@ -18,6 +18,7 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let roster: RosterStore
     private let notes: NoteTools
     private let comments: CommentTools
+    private let pullRequests: PRWatchTools
     private let control: any WorkerControl
     private let events: any BoardEventSink
 
@@ -36,6 +37,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         roster = RosterStore(db)
         notes = NoteTools(db: db)
         comments = CommentTools(db: db)
+        pullRequests = PRWatchTools(db: db)
         self.control = control
         self.events = events
     }
@@ -64,7 +66,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             description: "Full detail for one task: body, acceptance criteria, flags, dependencies, the most recent "
                 + "worker report on it if any, and its comment thread oldest first — each comment's author kind "
                 + "(human, orchestrator, worker, reviewer), name, rostered agent, time and body. Archived tasks are "
-                + "returned too, carrying `archived: true` and the `archived_at` timestamp. "
+                + "returned too, carrying `archived: true` and the `archived_at` timestamp. A closed task carries "
+                + "`closed_reason`, `closed_at` and `closed_by`. "
                 + CommentTools.authority,
             inputSchema: ToolSchema.object(properties: ["id": ToolSchema.string()], required: ["id"])
         ),
@@ -115,8 +118,9 @@ public final class OrchestratorToolHandler: ToolHandler {
         ),
         ToolDescriptor(
             name: "move_task",
-            description: "Move a task to another column. `running` is entered only through spawn_worker and `done` only "
-                + "when a human accepts the work, so those two are refused. Moving into `backlog` or `ready` is "
+            description: "Move a task to another column. `running` is entered only through spawn_worker, `done` only "
+                + "when a human accepts the work, and `closed` only through close_task, so those three are refused. "
+                + "A `closed` task cannot be moved: a human reopens it. Moving into `backlog` or `ready` is "
                 + "subject to the dependency check, and the response tells you where the task actually ended up. "
                 + "Moving an archived task out of `done` unarchives it, so it does not sit hidden in a live column.",
             inputSchema: ToolSchema.object(
@@ -125,6 +129,25 @@ public final class OrchestratorToolHandler: ToolHandler {
                     "column": ToolSchema.enumeration(["proposed", "backlog", "ready", "review"]),
                 ],
                 required: ["id", "column"]
+            )
+        ),
+        ToolDescriptor(
+            name: "close_task",
+            description: "Retire a task nobody needs to finish: its work was done some other way, it was superseded, "
+                + "or it is no longer wanted. The task moves to `closed` with your reason recorded on it, on its card "
+                + "and in its history, so it leaves `ready` and cannot be spawned by mistake. `closed` is not `done`: "
+                + "it never counts as landed work, and it does not satisfy a dependency — every unfinished task that "
+                + "depends on it stays blocked and is named in the answer, so you can `set_deps` it or close it too. "
+                + "Nothing is deleted and no branch or worktree is touched. An epic with closed tasks is ready for "
+                + "integration once the rest are done. Only a human can reopen a closed task, from the board. Refused "
+                + "for a blank reason, a task in `done` or already `closed`, an epic's integration task, and a task a "
+                + "worker or reviewer session is still running on — stop it first.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "task_id": ToolSchema.string(),
+                    "reason": ToolSchema.string("Why the task no longer needs doing. Shown on the card and kept in its history."),
+                ],
+                required: ["task_id", "reason"]
             )
         ),
         ToolDescriptor(
@@ -179,8 +202,8 @@ public final class OrchestratorToolHandler: ToolHandler {
         ToolDescriptor(
             name: "spawn_worker",
             description: "Assign a `ready` task to a new worker session in its own worktree. Subject to the project's "
-                + "concurrency caps. Returns as soon as the worktree exists and the task is running, while the "
-                + "repository is still being set up — a worker in `setup` holds a concurrency slot but cannot work "
+                + "concurrency caps. Returns as soon as the task is running, while its worktree is still being created "
+                + "and set up, post-checkout hook included — a worker in `setup` holds a concurrency slot but cannot work "
                 + "yet, and a setup that fails puts the task back in ready with a failed report. When autonomy is "
                 + "off, this creates an approval the human must grant; you will learn the decision through "
                 + "list_reports, so do not call again for the same task in the meantime.",
@@ -295,10 +318,13 @@ public final class OrchestratorToolHandler: ToolHandler {
         ToolDescriptor(
             name: "get_epic",
             description: "One epic in full: its goal, integration branch, newest pull request, its tasks grouped by column, "
-                + "whether it is ready for integration, and `base_drift`: how many commits the epic branch is behind "
-                + "and ahead of the project's base branch, or why that cannot be counted (`behind` and `ahead` are "
-                + "null and `unavailable` says why). Drift is information for the human, not an alarm: raise it "
-                + "when it bears on a decision, and never refresh on your own because of it.",
+                + "whether it is ready for integration, `next_step` when the epic is waiting on you to open its "
+                + "pull request or on that pull request to merge (null otherwise), and `base_drift`: how many commits "
+                + "the epic branch is behind and ahead of the project's base branch, or why that cannot be counted "
+                + "(`behind` and `ahead` are null and `unavailable` says why). Drift is information for the human, "
+                + "not an alarm: raise it when it bears on a decision, and never refresh on your own because of it. "
+                + "A done or abandoned epic also lists `held_worktrees`: the worktrees of it and its integration task "
+                + "still on disk, which only a human removes.",
             inputSchema: ToolSchema.object(properties: ["id": ToolSchema.string()], required: ["id"])
         ),
         ToolDescriptor(
@@ -318,9 +344,12 @@ public final class OrchestratorToolHandler: ToolHandler {
         ),
         ToolDescriptor(
             name: "request_integration",
-            description: "Ask the human to integrate an epic. Refused until every task in the epic is `done`. Integration "
+            description: "Ask the human to integrate an epic. Refused until every task in the epic is `done` or `closed`, "
+                + "with at least one `done`. Integration "
                 + "always requires human approval regardless of the autonomy setting; you will learn the decision "
-                + "through list_reports.",
+                + "through list_reports. In a project that ships epics by pull request, a finished integration leaves "
+                + "the epic `integrated`, not `done`: it still takes tasks, and the next step is `open_pull_request`. "
+                + "In a project that merges locally, a finished integration makes the epic `done`.",
             inputSchema: ToolSchema.object(properties: ["epic_id": ToolSchema.string()], required: ["epic_id"])
         ),
         ToolDescriptor(
@@ -387,8 +416,9 @@ public final class OrchestratorToolHandler: ToolHandler {
         ),
         ToolDescriptor(
             name: "archive_task",
-            description: "Hide a `done` task from the board without deleting it. Archived tasks stay readable through "
-                + "get_task and reappear in list_tasks with `include_archived`. Only `done` tasks can be archived.",
+            description: "Hide a `done` or `closed` task from the board without deleting it. Archived tasks stay readable "
+                + "through get_task and reappear in list_tasks with `include_archived`. Only `done` and `closed` tasks "
+                + "can be archived.",
             inputSchema: ToolSchema.object(properties: ["task_id": ToolSchema.string()], required: ["task_id"])
         ),
         ToolDescriptor(
@@ -458,7 +488,31 @@ public final class OrchestratorToolHandler: ToolHandler {
                 required: ["request_id", "state", "body"]
             )
         ),
-    ] + NoteTools.orchestratorDescriptors
+        ToolDescriptor(
+            name: "add_pr_item",
+            description: "Report a failure found while verifying a watched pull request by hand, so PR follow-through "
+                + "fixes it. The body becomes a `verify_failure` item on that pull request and goes through triage "
+                + "like review feedback. A pull request that is ready to verify goes back to settling; one already "
+                + "verified is frozen, so the failure waits as a decision for the human instead of starting a fix "
+                + "round. Refused for a pull request this project does not watch, and for a merged or closed one. "
+                + "Say what you did, what you expected and what happened. When the body carries a reviewer's "
+                + "requests that never became an item, such as a change request whose text is in an older "
+                + "conversation comment, set `answers` so triage ties the two together.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "pr_url": ToolSchema.string("The pull request's GitHub URL."),
+                    "body": ToolSchema.string(
+                        "The failure, as a reviewer would write it.", maxLength: PRWatchStore.maxVerifyFailureLength
+                    ),
+                    "answers": ToolSchema.string(
+                        "Optional: the review this item answers, as its GraphQL node id, or the reviewer's login. "
+                            + "Nothing is read from the body."
+                    ),
+                ],
+                required: ["pr_url", "body"]
+            )
+        ),
+    ] + PRWatchTools.descriptors + NoteTools.orchestratorDescriptors
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
         Self.descriptors
@@ -468,12 +522,16 @@ public final class OrchestratorToolHandler: ToolHandler {
         if Self.noteToolNames.contains(name) {
             return try notes.call(name, arguments: arguments, identity: identity)
         }
+        if PRWatchTools.names.contains(name) {
+            return try pullRequests.call(name, arguments: arguments, identity: identity)
+        }
         switch name {
         case "list_tasks": return try listTasks(arguments, identity: identity)
         case "get_task": return try getTask(arguments, identity: identity)
         case "create_task": return try createTask(arguments, identity: identity)
         case "update_task": return try updateTask(arguments, identity: identity)
         case "move_task": return try moveTask(arguments, identity: identity)
+        case "close_task": return try closeTask(arguments, identity: identity)
         case "set_epic": return try setEpic(arguments, identity: identity)
         case "set_deps": return try setDeps(arguments, identity: identity)
         case "archive_task": return try archiveTask(arguments, identity: identity)
@@ -501,6 +559,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "send_message": return try await sendMessage(arguments, identity: identity)
         case "delete_message": return try deleteMessage(arguments, identity: identity)
         case "reply_to_request": return try await replyToRequest(arguments, identity: identity)
+        case "add_pr_item": return try addPRItem(arguments, identity: identity)
         default: throw ToolError("Unknown tool: \(name)")
         }
     }
@@ -568,6 +627,9 @@ public final class OrchestratorToolHandler: ToolHandler {
             "updated_at": .millis(task.updatedAt),
             "archived": .bool(task.isArchived),
             "archived_at": .millis(task.archivedAt),
+            "closed_reason": .optional(task.closedReason),
+            "closed_at": .millis(task.closedAt),
+            "closed_by": .optional(task.closedBy),
             "deps": .array(deps),
             "active_session": try activeSession(for: task.id),
             "latest_report": .null,
@@ -629,6 +691,12 @@ public final class OrchestratorToolHandler: ToolHandler {
         let task = try projectTask(try ToolArguments.requiredString("id", in: arguments), identity: identity)
         let column = try parseColumn(try ToolArguments.requiredString("column", in: arguments))
         try refuseTerminalColumns(column, verb: "move a task into")
+        if task.column == .closed {
+            throw ToolError(
+                "Task \(task.id) is closed (\(task.closedReason ?? "no reason recorded")). Only a human reopens a "
+                    + "closed task, from the board."
+            )
+        }
         try tasks.move(task.id, to: column)
         if task.isArchived {
             try tasks.unarchive(task.id)
@@ -644,6 +712,27 @@ public final class OrchestratorToolHandler: ToolHandler {
             )
         }
         return ToolResult(text: "Task \(task.id) is now in \(final.rawValue).\(unarchived)")
+    }
+
+    private func closeTask(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let task = try projectTask(try ToolArguments.requiredString("task_id", in: arguments), identity: identity)
+        let reason = ToolArguments.optionalString("reason", in: arguments) ?? ""
+        let closure: TaskClosure
+        do {
+            closure = try board.close(taskId: task.id, reason: reason, by: .orchestrator(sessionId: identity.sessionId))
+        } catch BoardError.closeRefused(_, let refusal) {
+            throw ToolError(refusal)
+        }
+        var text = "Task \(task.id) is closed, moved from \(task.column.rawValue). It is not done: it lands nothing "
+            + "and satisfies no dependency. Nothing was deleted, and its branch and worktree are untouched."
+        if closure.waitingDependents.isEmpty {
+            text += " No unfinished task depends on it."
+        } else {
+            let listed = closure.waitingDependents.map { "- \($0.id) (\($0.title)) in \($0.column.rawValue)" }
+                .joined(separator: "\n")
+            text += " These tasks depend on it and stay blocked until you set_deps them or close them too:\n\(listed)"
+        }
+        return ToolResult(text: text)
     }
 
     private func setEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
@@ -715,8 +804,10 @@ public final class OrchestratorToolHandler: ToolHandler {
         if task.isArchived {
             return ToolResult(text: "Task \(task.id) is already archived.")
         }
-        guard task.column == .done else {
-            throw ToolError("Task \(task.id) is in \(task.column.rawValue), not done: only done tasks can be archived.")
+        guard task.column == .done || task.column == .closed else {
+            throw ToolError(
+                "Task \(task.id) is in \(task.column.rawValue): only done tasks and closed tasks can be archived."
+            )
         }
         try tasks.archive(task.id)
         return ToolResult(text: "Task \(task.id) archived. It is hidden from list_tasks but still readable with get_task.")
@@ -742,7 +833,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             let warnings = spawn.warnings.isEmpty ? "" : "\n\n" + spawn.warnings.joined(separator: "\n")
             let site = spawn.sharesCheckout
                 ? "It runs in the project's own checkout at \(spawn.worktreePath)"
-                : "Its worktree is ready at \(spawn.worktreePath)"
+                : "Its worktree is being set up at \(spawn.worktreePath)"
             return ToolResult(text: """
             Worker dispatched for \(task.id); the task is now running. \(site) on branch \
             \(spawn.branch), but setup is still running, so the worker cannot do anything yet and \
@@ -760,13 +851,18 @@ public final class OrchestratorToolHandler: ToolHandler {
     }
 
     private func listRosterAgents(identity: TokenIdentity) throws -> ToolResult {
-        .json(.array(try roster.usableAgents(forProject: identity.projectId).map { agent in
-            .object([
+        .json(.array(try roster.usableArchetypes(forProject: identity.projectId).map { archetype in
+            let agent = archetype.agent
+            return .object([
                 "id": .string(agent.id),
                 "name": .string(agent.name),
                 "role": .string(agent.role),
+                "source": .string(archetype.source.label),
+                "definition_path": .optional(archetype.source.path),
+                "description": .optional(archetype.description.isEmpty ? nil : archetype.description),
                 "system_prompt": .string(agent.systemPrompt),
                 "model": .optional(agent.model),
+                "tools": agent.tools.map { .array($0.map(JSONValue.string)) } ?? .null,
             ])
         }))
     }
@@ -786,7 +882,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             let warnings = spawn.warnings.isEmpty ? "" : "\n\n" + spawn.warnings.joined(separator: "\n")
             let site = spawn.sharesCheckout
                 ? "It runs in the project's own checkout at \(spawn.worktreePath)"
-                : "Its worktree is ready at \(spawn.worktreePath)"
+                : "Its worktree is being set up at \(spawn.worktreePath)"
             return ToolResult(text: """
             \(agent.name) was assigned \(task.id); the task is now running. \(site) on branch \
             \(spawn.branch), but setup is still running, so the agent cannot do anything yet and \
@@ -947,6 +1043,37 @@ public final class OrchestratorToolHandler: ToolHandler {
         return ToolResult(text: "Deleted message \(id) for both projects.")
     }
 
+    // MARK: PR follow-through (SPEC §13.1)
+
+    private func addPRItem(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let url = try ToolArguments.requiredString("pr_url", in: arguments)
+        let body = try ToolArguments.requiredString("body", in: arguments)
+        let watches = PRWatchStore(db)
+        guard let watch = try watches.liveWatch(url: url, projectId: identity.projectId) else {
+            throw ToolError("\(url) is not an open pull request this project watches.")
+        }
+        return try Self.recordVerifyFailure(on: watch, body: body, arguments: arguments, watches: watches)
+    }
+
+    /// The one path both `add_pr_item`s take, so the orchestrator's and a verifier's call move a watch the same way.
+    static func recordVerifyFailure(
+        on watch: PRWatch, body: String, arguments: JSONValue, watches: PRWatchStore
+    ) throws -> ToolResult {
+        let item: PRItem
+        do {
+            item = try watches.addVerifyFailure(
+                watchId: watch.id, body: body, answers: ToolArguments.optionalString("answers", in: arguments)
+            )
+        } catch let rejection as PRVerdictRejection {
+            throw ToolError("\(rejection.reason) Nothing was recorded.")
+        }
+        let state = try watches.get(watch.id)?.state ?? watch.state
+        let outcome = item.verdict == .decision
+            ? "It is verified, so the failure waits as a decision for the human; no fix round starts."
+            : "It is \(state.rawValue); triage picks the failure up with the next round."
+        return ToolResult(text: "Recorded on #\(watch.number). \(outcome)")
+    }
+
     // MARK: Coordinator requests (SPEC §9.4)
 
     private func replyToRequest(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
@@ -1047,6 +1174,7 @@ public final class OrchestratorToolHandler: ToolHandler {
                 "branch": .string(epic.branch),
                 "pull_request": try renderPullRequest(epic),
                 "done_tasks": .number(Double(counts.done)),
+                "closed_tasks": .number(Double(counts.closed)),
                 "total_tasks": .number(Double(counts.total)),
             ])
         }))
@@ -1060,7 +1188,17 @@ public final class OrchestratorToolHandler: ToolHandler {
             columns[column.rawValue] = .array(try epicTasks.filter { $0.column == column }.map(renderTaskSummary))
         }
         let counts = try taskCounts(epic)
-        return .json(.object([
+        var held: [String: JSONValue] = [:]
+        if epic.state.isTerminal {
+            held["held_worktrees"] = .array(try board.heldWorktrees(epicId: epic.id).map { worktree in
+                .object([
+                    "path": .string(worktree.path),
+                    "task_id": .optional(worktree.taskId),
+                    "integration": .bool(worktree.isIntegration),
+                ])
+            })
+        }
+        return .json(.object(held.merging([
             "id": .string(epic.id),
             "title": .string(epic.title),
             "goal": .optional(epic.goal),
@@ -1069,11 +1207,13 @@ public final class OrchestratorToolHandler: ToolHandler {
             "created_at": .millis(epic.createdAt),
             "pull_request": try renderPullRequest(epic),
             "done_tasks": .number(Double(counts.done)),
+            "closed_tasks": .number(Double(counts.closed)),
             "total_tasks": .number(Double(counts.total)),
             "ready_for_integration": .bool(try board.epicReadyForIntegration(epicId: epic.id)),
             "base_drift": try await renderDrift(epic),
+            "next_step": .optional(Board.nextStep(for: epic)),
             "columns": .object(columns),
-        ]))
+        ]) { $1 }))
     }
 
     private func renderDrift(_ epic: Epic) async throws -> JSONValue {
@@ -1121,9 +1261,12 @@ public final class OrchestratorToolHandler: ToolHandler {
             guard counts.total > 0 else {
                 throw ToolError("Epic \(epic.id) has no tasks, so there is nothing to integrate.")
             }
-            let unfinished = counts.total - counts.done
+            guard counts.unfinished > 0 else {
+                throw ToolError("Every task in epic \(epic.id) is closed, so there is nothing to integrate.")
+            }
             throw ToolError(
-                "Epic \(epic.id) is not ready for integration: \(unfinished) of \(counts.total) task(s) are not done yet."
+                "Epic \(epic.id) is not ready for integration: \(counts.unfinished) of \(counts.total - counts.closed) "
+                    + "task(s) are not done yet."
             )
         }
         let approval = try board.requestIntegration(
@@ -1206,7 +1349,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             let counts = try taskCounts(epic)
             reason += counts.total == 0
                 ? "\nThis epic has no tasks yet."
-                : "\nThis epic is not ready for integration: \(counts.total - counts.done) of \(counts.total) task(s) are not done."
+                : "\nThis epic is not ready for integration: \(counts.unfinished) of \(counts.total - counts.closed) task(s) are not done."
         }
 
         let approval = try board.requestPublish(
@@ -1276,9 +1419,9 @@ public final class OrchestratorToolHandler: ToolHandler {
         return epic
     }
 
-    private func taskCounts(_ epic: Epic) throws -> (done: Int, total: Int) {
+    private func taskCounts(_ epic: Epic) throws -> EpicTaskCount {
         let list = try tasks.list(projectId: epic.projectId, epicId: epic.id, includeArchived: true)
-        return (done: list.filter { $0.column == .done }.count, total: list.count)
+        return EpicLane.taskCount(columns: list.map(\.column))
     }
 
     private func projectTask(_ id: String, identity: TokenIdentity) throws -> BoardTask {
@@ -1295,14 +1438,14 @@ public final class OrchestratorToolHandler: ToolHandler {
         return column
     }
 
-    private static let typeNames = TaskType.allCases.map(\.rawValue)
+    static let typeNames = TaskType.allCases.map(\.rawValue)
 
-    private static let typeSchema = ToolSchema.enumeration(
+    static let typeSchema = ToolSchema.enumeration(
         typeNames, "What kind of work this is; agent review routes by it. Omit for Default."
     )
 
     /// Absent, `null` and `""` all mean Default.
-    private static func parseType(in arguments: JSONValue, label: String) throws -> TaskType? {
+    static func parseType(in arguments: JSONValue, label: String) throws -> TaskType? {
         guard let value = arguments["type"], value != .null else { return nil }
         guard let raw = value.stringValue else {
             throw ToolError("\(label) must be a string: one of \(typeNames.joined(separator: ", ")), or \"\" for Default.")
@@ -1322,6 +1465,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             throw ToolError("Cannot \(verb) running: a task enters running only when spawn_worker assigns it to a worker.")
         case .done:
             throw ToolError("Cannot \(verb) done: only a human accepts work into done.")
+        case .closed:
+            throw ToolError("Cannot \(verb) closed: use close_task, which records why.")
         default:
             break
         }

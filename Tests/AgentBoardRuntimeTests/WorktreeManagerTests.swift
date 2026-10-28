@@ -16,12 +16,8 @@ final class WorktreeManagerTests: XCTestCase {
         repo = sandbox.appendingPathComponent("repo")
         worktrees = sandbox.appendingPathComponent("worktrees")
         hookSettings = sandbox.appendingPathComponent("settings.json")
-        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-
-        try git(["init", "-q", "-b", "main"], cwd: repo)
-        try "hello\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
-        try git(["add", "."], cwd: repo)
-        try commit("Initial commit", cwd: repo)
+        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: Self.repoTemplate, to: repo)
 
         manager = WorktreeManager(
             repoPath: repo, worktreeRoot: worktrees, hookSettingsURL: hookSettings,
@@ -31,6 +27,33 @@ final class WorktreeManagerTests: XCTestCase {
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: sandbox)
+    }
+
+    /// Built once per `swift test` process and copied into place for every test, rather than paying
+    /// `git init`/`add`/`commit` per test. `copyItem` relocates cleanly: nothing here sets an
+    /// absolute path inside `.git`.
+    private static let repoTemplate: URL = {
+        let template = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agent-board-wt-template-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: template, withIntermediateDirectories: true)
+        try! templateGit(["init", "-q", "-b", "main"], cwd: template)
+        try! "hello\n".write(to: template.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try! templateGit(["add", "."], cwd: template)
+        try! templateGit(
+            ["-c", "user.email=test@example.com", "-c", "user.name=Test", "-c", "commit.gpgsign=false",
+             "commit", "-q", "-m", "Initial commit"],
+            cwd: template
+        )
+        return template
+    }()
+
+    @discardableResult
+    private static func templateGit(_ args: [String], cwd: URL) throws -> String {
+        let result = try ProcessRunner.run(executable: URL(fileURLWithPath: "/usr/bin/git"), arguments: args, cwd: cwd)
+        guard result.status == 0 else {
+            throw AgentRuntimeError("git \(args) failed: \(result.stderr)")
+        }
+        return result.stdout
     }
 
     @discardableResult
@@ -115,6 +138,29 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: second.appendingPathComponent("wip.txt").path))
     }
 
+    /// A task branch still at its base reads as merged, so only the holder check protects it, and
+    /// `git worktree list` drops the holder whenever it cannot read that worktree's admin files.
+    func testABranchAWorktreeHoldsIsKeptWhenGitCannotReadThatWorktree() throws {
+        for unreadable in ["HEAD", "gitdir"] {
+            let branch = "agentboard/task-held-\(unreadable.lowercased())"
+            let worktree = try manager.create(name: "held-\(unreadable.lowercased())", branch: branch, base: "main")
+            let admin = URL(fileURLWithPath: try git(["rev-parse", "--absolute-git-dir"], cwd: worktree)
+                .trimmingCharacters(in: .whitespacesAndNewlines))
+            let file = admin.appendingPathComponent(unreadable).path
+            try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: file)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file) }
+            XCTAssertNil(try manager.list().first { $0.branch == branch }, "git listed the holder, so nothing here is unreadable")
+
+            let outcome = try manager.deleteBranchIfMerged(branch, into: ["main"])
+
+            guard case .keptUnreadable = outcome else {
+                XCTFail("unreadable \(unreadable): \(outcome)")
+                continue
+            }
+            XCTAssertTrue(try manager.branchExists(branch), "unreadable \(unreadable)")
+        }
+    }
+
     // MARK: - The ledger a reaped branch leaves behind
 
     func testDeletingAMergedBranchRecordsWhereItStood() throws {
@@ -181,6 +227,19 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(try git(["branch", "--format=%(refname:short)"], cwd: repo), before)
     }
 
+    func testCreateForBranchRecreatesACheckoutWhoseDirectoryIsGoneButStillRegistered() throws {
+        try manager.ensureBranch("agentboard/epic-7", from: "main")
+        let path = try manager.createForBranch(name: "epic-7", branch: "agentboard/epic-7")
+        try FileManager.default.removeItem(at: path)
+
+        let again = try manager.createForBranch(name: "epic-7", branch: "agentboard/epic-7")
+
+        XCTAssertEqual(
+            try git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: again).trimmingCharacters(in: .whitespacesAndNewlines),
+            "agentboard/epic-7"
+        )
+    }
+
     func testCreateForBranchFailsForMissingBranch() {
         XCTAssertThrowsError(try manager.createForBranch(name: "epic-none", branch: "agentboard/epic-none")) { error in
             XCTAssertTrue("\(error)".contains("agentboard/epic-none"), "\(error)")
@@ -204,7 +263,7 @@ final class WorktreeManagerTests: XCTestCase {
         try git(["-c", "user.email=test@example.com", "-c", "user.name=Test", "-c", "commit.gpgsign=false", "merge", "--no-ff", "-q", "-m", "Merge task", "agentboard/task-merged"], cwd: epic)
 
         let status = try manager.mergeStatus(
-            worktree: epic,
+            into: "refs/heads/agentboard/epic-8",
             branches: ["agentboard/task-merged", "agentboard/task-unmerged", "agentboard/task-ghost"]
         )
         XCTAssertEqual(status, [
@@ -320,6 +379,143 @@ final class WorktreeManagerTests: XCTestCase {
             return XCTFail("expected the merge to defer to the checkout, got \(outcome)")
         }
         XCTAssertTrue(WorktreeManager.samePath(URL(fileURLWithPath: path), integration), path)
+    }
+
+    func testMergeRefusesToAdvanceATargetWhoseWorktreeGitCannotRead() throws {
+        let integration = try epicWithMergeableTask()
+        let head = try adminDirectory(of: integration).appendingPathComponent("HEAD").path
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: head)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: head) }
+        let epicBefore = try revParse("agentboard/epic-1")
+
+        XCTAssertThrowsError(try manager.merge(
+            taskBranch: "agentboard/task", into: "agentboard/epic-1", taskTitle: "Add the widget", targetTitle: "Widgets"
+        )) { error in
+            XCTAssertTrue(error is UnreadableWorktreeRecord, "\(error)")
+        }
+        XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore, "merge moved a branch under a worktree it could not read")
+    }
+
+    /// `FileManager.fileExists` reads a file under a directory it cannot search as absent, which
+    /// would make a live registration look dead and get pruned.
+    func testARegistrationBehindADirectoryThatCannotBeSearchedIsNotDead() throws {
+        let integration = try epicWithMergeableTask()
+        let admin = try adminDirectory(of: integration)
+        let epicBefore = try revParse("agentboard/epic-1")
+        for sealed in [admin, integration] {
+            try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: sealed.path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sealed.path) }
+
+            XCTAssertThrowsError(try manager.merge(
+                taskBranch: "agentboard/task", into: "agentboard/epic-1", taskTitle: "Add the widget", targetTitle: "Widgets"
+            ), sealed.path) { error in
+                XCTAssertTrue(error is UnreadableWorktreeRecord, "\(error)")
+            }
+            guard case .keptUnreadable = try manager.deleteBranchIfMerged("agentboard/epic-1", into: ["main"]) else {
+                return XCTFail("the sweep did not fail closed on \(sealed.path)")
+            }
+        }
+        XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: admin.appendingPathComponent("HEAD").path), "a live registration was pruned")
+    }
+
+    func testMergeFailsClosedWhenTheWorktreesDirectoryCanBeListedButNotSearched() throws {
+        let integration = try epicWithMergeableTask()
+        let linkedRoot = try adminDirectory(of: integration).deletingLastPathComponent()
+        let epicBefore = try revParse("agentboard/epic-1")
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: linkedRoot.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: linkedRoot.path) }
+
+        XCTAssertThrowsError(try manager.merge(
+            taskBranch: "agentboard/task", into: "agentboard/epic-1", taskTitle: "Add the widget", targetTitle: "Widgets"
+        )) { error in
+            XCTAssertTrue(error is UnreadableWorktreeRecord, "\(error)")
+        }
+        XCTAssertEqual(try revParse("agentboard/epic-1"), epicBefore)
+    }
+
+    func testMergeTreatsATargetBeingBisectedAsCheckedOut() throws {
+        let integration = try epicWithMergeableTask()
+        try git(["bisect", "start"], cwd: integration)
+        try git(["checkout", "-q", "--detach"], cwd: integration)
+
+        let outcome = try manager.merge(
+            taskBranch: "agentboard/task", into: "agentboard/epic-1", taskTitle: "Add the widget", targetTitle: "Widgets"
+        )
+
+        guard case .skippedCheckedOut = outcome else {
+            return XCTFail("a branch under bisect was treated as free: \(outcome)")
+        }
+    }
+
+    func testGitReadersThrowWhenGitFailsRatherThanAnsweringAbsent() throws {
+        let notARepo = sandbox.appendingPathComponent("not-a-repo")
+        try FileManager.default.createDirectory(at: notARepo, withIntermediateDirectories: true)
+        let lost = WorktreeManager(
+            repoPath: notARepo, worktreeRoot: worktrees, hookSettingsURL: hookSettings, attribution: .unattributable
+        )
+        XCTAssertThrowsError(try lost.refCommit("refs/heads/main"))
+        XCTAssertThrowsError(try lost.commitExists("main"))
+        XCTAssertThrowsError(try manager.currentBranch(at: notARepo))
+        XCTAssertNil(try manager.refCommit("refs/heads/missing"))
+
+        try git(["remote", "add", "origin", sandbox.appendingPathComponent("gone.git").path], cwd: repo)
+        XCTAssertThrowsError(try manager.fetchCommitIfMissing(String(repeating: "a", count: 40), from: "origin")) { error in
+            XCTAssertTrue("\(error)".contains("does not appear to be a git repository"), "\(error)")
+        }
+    }
+
+    func testFreshestBaseWarnsWhenGitCannotReadTheRemote() throws {
+        try git(["remote", "add", "origin", sandbox.appendingPathComponent("origin.git").path], cwd: repo)
+        let config = try FileHandle(forWritingTo: repo.appendingPathComponent(".git/config"))
+        try config.seekToEnd()
+        try config.write(contentsOf: Data("[remote \"origin\"]\n\turl\n".utf8))
+        try config.close()
+
+        let start = manager.freshestBase("main")
+
+        XCTAssertEqual(start.ref, "main")
+        XCTAssertTrue(start.warning?.contains("remote.origin.url") == true, "\(String(describing: start.warning))")
+    }
+
+    /// A registration whose directory is gone is what `git worktree prune` removes, and one with no
+    /// HEAD names no branch, so neither holds the epic branch it was created on.
+    func testARegistrationWhoseDirectoryOrHeadIsGoneDoesNotStopAFastForward() throws {
+        for lost in ["directory", "head"] {
+            let epic = "agentboard/epic-\(lost)"
+            try manager.ensureBranch(epic, from: "main")
+            let work = try manager.create(name: "task-\(lost)", branch: "agentboard/task-\(lost)", base: epic)
+            try addCommit("\(lost).txt", in: work)
+            let taskHead = try manager.headCommit(worktree: work)
+            try manager.remove(path: work)
+            let integration = try manager.createForBranch(name: "epic-\(lost)", branch: epic)
+            let admin = try adminDirectory(of: integration)
+            try FileManager.default.removeItem(at: lost == "head" ? admin.appendingPathComponent("HEAD") : integration)
+
+            let outcome = try manager.merge(
+                taskBranch: "agentboard/task-\(lost)", into: epic, taskTitle: "Add the widget", targetTitle: "Widgets"
+            )
+
+            XCTAssertEqual(outcome, .fastForwarded(head: taskHead), lost)
+            XCTAssertEqual(
+                FileManager.default.fileExists(atPath: admin.path), lost == "head",
+                "only the registration whose directory is gone is pruned (\(lost))"
+            )
+        }
+    }
+
+    /// `agentboard/epic-1` checked out in its integration worktree, behind a task branch that would fast-forward it.
+    private func epicWithMergeableTask() throws -> URL {
+        try manager.ensureBranch("agentboard/epic-1", from: "main")
+        let work = try manager.create(name: "task", branch: "agentboard/task", base: "agentboard/epic-1")
+        try addCommit("feature.txt", in: work)
+        try manager.remove(path: work)
+        return try manager.createForBranch(name: "epic-1", branch: "agentboard/epic-1")
+    }
+
+    private func adminDirectory(of worktree: URL) throws -> URL {
+        URL(fileURLWithPath: try git(["rev-parse", "--absolute-git-dir"], cwd: worktree)
+            .trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     func testMergeReportsAMissingTargetBranchRatherThanCuttingIt() throws {
@@ -444,6 +640,45 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertEqual(payload["hook_event_name"], "WorktreeRemove")
         XCTAssertEqual(payload["worktree_path"], path.path)
         XCTAssertEqual(payload["cwd"], repo.path)
+    }
+
+    /// SPEC §3.1 "Removing a worktree": with no hook set, removal is never forced.
+    func testWithNoTeardownHookADirtyWorktreeIsStillRefused() throws {
+        let path = try manager.create(name: "dirty", branch: "agentboard/dirty", base: "main")
+        try "line\n".write(to: path.appendingPathComponent("stray.txt"), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try manager.remove(path: path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.appendingPathComponent("stray.txt").path))
+    }
+
+    /// SPEC §3.1 "Removing a worktree": a failing hook that also dirties the worktree still cannot keep it.
+    func testAFailingTeardownHookIsReportedAndTheWorktreeStillGoes() throws {
+        let path = try manager.create(name: "torn", branch: "agentboard/torn", base: "main")
+        manager.teardown = WorktreeTeardownCommand(command: "touch stray.txt; echo boom; exit 7")
+
+        let report = try manager.remove(path: path)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        let failure = try XCTUnwrap(report.teardownFailure)
+        XCTAssertTrue(failure.contains("exited 7"), failure)
+        XCTAssertTrue(failure.contains("boom"), failure)
+    }
+
+    func testATimedOutTeardownHookIsKilledWithItsProcessGroupAndTheWorktreeStillGoes() throws {
+        let path = try manager.create(name: "slow", branch: "agentboard/slow", base: "main")
+        let pidFile = sandbox.appendingPathComponent("grandchild.pid")
+        manager.teardown = WorktreeTeardownCommand(
+            command: "sleep 60 & echo $! > '\(pidFile.path)'; wait", timeoutSeconds: 1
+        )
+
+        let report = try manager.remove(path: path)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        XCTAssertTrue(try XCTUnwrap(report.teardownFailure).contains("did not finish within 1s"))
+        let pid = try XCTUnwrap(pid_t(String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        let deadline = Date().addingTimeInterval(5)
+        while kill(pid, 0) == 0, Date() < deadline { usleep(50_000) }
+        XCTAssertNotEqual(kill(pid, 0), 0, "the hook's background child outlived the timeout")
     }
 
     func testMissingHookSettingsRunsNoHooks() throws {

@@ -6,6 +6,20 @@ import AppKit
 import Foundation
 import Observation
 
+struct PRWatchRefreshFailure: LocalizedError, Equatable {
+    let failures: [String]
+
+    var errorDescription: String? { failures.joined(separator: "\n") }
+}
+
+/// One read failure from a PR watch poll. `projectId` names the project it is about, for filtering
+/// down to a scoped Refresh's own projects when it joins a wider poll; nil for a failure that affects
+/// every enabled project alike (`gh search prs` itself failing), which no scope filters out.
+struct PRWatchPollFailure: Equatable {
+    let projectId: String?
+    let message: String
+}
+
 enum SupervisorError: LocalizedError {
     case notAGitRepository(String)
     case projectNotFound(String)
@@ -14,6 +28,8 @@ enum SupervisorError: LocalizedError {
     case sessionNotFound(String)
     case sessionHasNoShortId(String)
     case taskNotAssignable(title: String, column: TaskColumn)
+    case noReviewToRerun(title: String)
+    case integrationNotRosterable(title: String)
     case capRefused(String)
     case taskAlreadyHeld(title: String, sessionId: String)
     case worktreeAlreadyHeld(path: String, sessionId: String)
@@ -22,18 +38,42 @@ enum SupervisorError: LocalizedError {
     case serverNotRunning
     case spawnFailed(worktree: String, underlying: String)
     case setupInterrupted
+    case setupStillRunning(title: String, path: String)
+    case taskBeingDiscarded(taskId: String)
+    case worktreeBeingRemoved(path: String)
+    case reviewTaskNotInReview(title: String, column: TaskColumn)
     case approvalNotFound(String)
     case rosterAgentNotUsable(id: String, projectName: String)
     case epicCloseRefused(String)
+    case epicStillOpen(String)
     case globalShutdownIncomplete([String])
     case dependencyNotOnBranch(dependencyId: String, title: String, commit: String, branch: String, landing: TaskLanding?)
+    case watchNotFound(String)
+    case triageTaskNotAssignable(title: String)
+    case triageNotResumable(title: String)
+    case pullRequestNotFetched(String)
+    case fixRoundNotFound(title: String)
+    case fixRoundNotAcceptable(title: String)
 
     var errorDescription: String? {
         switch self {
         case .approvalNotFound(let id): return "approval \(id) not found"
+        case .watchNotFound(let id): return "watched pull request \(id) not found"
+        case .triageTaskNotAssignable(let title):
+            return "\"\(title)\" is a pull request triage or follow-up check; only Agent Board's follow-through starts one"
+        case .triageNotResumable(let title):
+            return "\"\(title)\" is a pull request triage or follow-up check, which is not resumed; follow-through "
+                + "starts a fresh one"
+        case .pullRequestNotFetched(let reason): return "the pull request could not be fetched: \(reason)"
+        case .fixRoundNotFound(let title): return "\"\(title)\" is not a pull request round's fix task"
+        case .fixRoundNotAcceptable(let title):
+            return "\"\(title)\" is a pull request fix round; its check accepts it, and Agent Board pushes it to the "
+                + "pull request rather than merging it"
         case .rosterAgentNotUsable(let id, let projectName):
             return "roster agent \(id) is not in \(projectName)'s usable set; enable it for this project first"
         case .epicCloseRefused(let reason): return reason
+        case .epicStillOpen(let id):
+            return "epic \(id) is still open; only a done or abandoned epic's worktrees are removed from its lane"
         case .epicNotFound(let id): return "epic \(id) not found"
         case .notAGitRepository(let path): return "\(path) is not a git repository"
         case .projectNotFound(let id): return "project \(id) not found"
@@ -41,6 +81,11 @@ enum SupervisorError: LocalizedError {
         case .sessionNotFound(let id): return "session \(id) not found"
         case .sessionHasNoShortId(let id): return "session \(id) has no claude short id yet; reconcile first"
         case .taskNotAssignable(let title, let column): return "\"\(title)\" is in \(column.rawValue) and cannot be assigned"
+        case .noReviewToRerun(let title):
+            return "\"\(title)\" is not in review with a rostered reviewer, so there is no review to re-run"
+        case .integrationNotRosterable(let title):
+            return "\"\(title)\" is an integration task, which a roster agent cannot run; call spawn_worker "
+                + "to respawn its integrator on the epic checkout, or request_integration to start a new one"
         case .capRefused(let reason): return "spawn refused: \(reason)"
         case .taskAlreadyHeld(let title, let sessionId):
             return "\"\(title)\" is still held by session \(sessionId); a second agent would share its worktree"
@@ -53,6 +98,18 @@ enum SupervisorError: LocalizedError {
             return "spawn failed; worktree kept at \(worktree) for retry.\n\(underlying)"
         case .setupInterrupted:
             return "Agent Board quit while the worktree was still being set up"
+        case .setupStillRunning(let title, let path):
+            return "an earlier attempt at \"\(title)\" is still setting up \(path), running the repository's "
+                + "post-checkout hook or removing what a failed one left; spawn again once a report says that "
+                + "setup has ended: the attempt's failed report, or, for an attempt that was stopped, a report "
+                + "saying its setup ended. If its worker starts instead, the task is held and needs no retry"
+        case .taskBeingDiscarded(let id): return "task \(id) is being discarded, so no agent is started for it"
+        case .worktreeBeingRemoved(let path):
+            return "\(path) is being removed by a cleanup that claimed it first, so a session resumed there would "
+                + "lose its checkout; spawn the task again instead, which waits for the removal and creates a fresh worktree"
+        case .reviewTaskNotInReview(let title, let column):
+            return "\"\(title)\" is in \(column.rawValue), no longer in review, so its reviewer is not resumed: "
+                + "a verdict from it would land on a task nobody asked it to judge"
         case .globalShutdownIncomplete(let failures):
             return "some projects could not be wound down:\n" + failures.joined(separator: "\n")
         case .dependencyNotOnBranch(let id, let title, let commit, let branch, let landing):
@@ -120,8 +177,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let messages: MessageStore
     @ObservationIgnored private let requests: RequestStore
     @ObservationIgnored private let fileLocks: FileLockStore
+    @ObservationIgnored private let slots: WorktreeSlotStore
     @ObservationIgnored private let attention: ProjectAttentionStore
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
+    @ObservationIgnored private let pullRequestWatch: PullRequestWatchReader
+    @ObservationIgnored private let pullRequestReplies: PullRequestReplier
+    @ObservationIgnored private let pullRequestReviewRequests: PullRequestReviewRequester
+    @ObservationIgnored private let prWatches: PRWatchStore
+    /// Millis of the last PR follow-through poll; 0 means none yet.
+    @ObservationIgnored private var lastPRWatchPoll: Int64 = 0
+    /// The running poll and the watch ids it is scoped to; nil scope polls every watch.
+    @ObservationIgnored private var prWatchPoll: (scope: Set<String>?, task: _Concurrency.Task<[PRWatchPollFailure], Never>)?
+    private(set) var isPollingPRWatches = false
+    @ObservationIgnored private var prWatchSearchFailures = 0
+    /// Consecutive polls on which git could not read a project's `origin`, by project id.
+    @ObservationIgnored private var prWatchRemoteFailures: [String: Int] = [:]
+    /// Watches whose pull request could not be read after a reply to it came back not found (SPEC
+    /// §13.2), with their project and detail. Each stays among the poll's problems until a poll reads it.
+    @ObservationIgnored private var prReplyReadFailures: [String: (projectId: String, detail: String)] = [:]
     /// Millis of the last pull request merge check; 0 means none yet, so the first tick after
     /// launch checks.
     @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
@@ -139,8 +212,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Millis of the last archive sweep; 0 means none yet, so the first tick after launch sweeps
     /// and picks up whatever came due while the app was closed.
     @ObservationIgnored private var lastArchiveSweep: Int64 = 0
+    /// Millis of the last orphan reap on the tick. `start()` sets it, so the first one waits an interval.
+    @ObservationIgnored private var lastOrphanReap: Int64 = 0
+    /// One `reconcile` or tick reap per project at a time, so two passes never choose orphans at once (SPEC §5).
+    @ObservationIgnored private var worktreeSweeps: [String: _Concurrency.Task<Void, Never>] = [:]
     /// Sessions already announced as stalled, so the tick notifies on the transition, not every 5s.
     @ObservationIgnored private var stallNotified: Set<String> = []
+    /// One per metered session, so a tick reads only what each transcript appended since the last (SPEC §7).
+    @ObservationIgnored private var transcriptTailers: [String: TranscriptTailer] = [:]
     /// `<project-id>\u{01}<branch>` for each shared branch whose pre-ledger `Agent-Board-Task`
     /// trailers have already been read back this run.
     @ObservationIgnored private var trailersBackfilled: Set<String> = []
@@ -154,6 +233,25 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Keyed by setup session id, so a test — or a human stopping a worker mid-setup — can wait on
     /// or cancel the half of a spawn that outlives the call.
     @ObservationIgnored private var setupTasks: [String: _Concurrency.Task<Void, Never>] = [:]
+    /// Teardowns running behind a project's teardown hook, which outlast the call that started them (SPEC §5).
+    @ObservationIgnored private var teardownTasks: [UUID: _Concurrency.Task<Void, Never>] = [:]
+    /// Resolved paths of worktrees some teardown is removing now. No other removal touches them, so
+    /// a teardown hook never runs twice in one worktree (SPEC §3.1).
+    @ObservationIgnored private var tearingDown: Set<String> = []
+    @ObservationIgnored private var teardownWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    /// Worktree paths a spawn is setting up, from before it touches git until setup ends. A reap keeps
+    /// them, since a new worktree is clean and at its base, and a second spawn for the task is refused (SPEC §5).
+    @ObservationIgnored private var placing: Set<String> = []
+    /// Runs once a spawn's worktree exists and before its agent launches, so a test can act in that gap.
+    @ObservationIgnored var afterCheckoutCreated: @MainActor () async -> Void = {}
+    /// Runs while a spawn holds its mark and before `git worktree add`, so a test can act in that gap.
+    @ObservationIgnored var beforeCheckoutCreated: @MainActor () async -> Void = {}
+    /// Off in a test that drives every `pollPRWatches()` itself, so the tick's poll cannot advance a watch between two of its own.
+    @ObservationIgnored var pollsPRWatchesOnTick = true
+    /// Whether a pid runs `claude`, the only process a stop signals as a session's host; a test swaps in a stand-in.
+    @ObservationIgnored var isClaudeHost: (pid_t) -> Bool = SessionProcessReaper.isClaudeExecutable
+    /// Tasks a discard is waiting out the setup of; that setup's end is not a cue to retry.
+    @ObservationIgnored private var discarding: Set<String> = []
     /// A resume starts the process before it moves the task back to `running`, so until then its
     /// session looks like a stray one on a settled task to `reconcile`.
     @ObservationIgnored private var resuming: Set<String> = []
@@ -163,13 +261,30 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// (`VerificationCommands.timeoutRange` floors at 60s), so a test can drive the timeout path
     /// without a build that actually runs a minute.
     @ObservationIgnored var refreshCheckTimeoutOverride: Int?
+    /// When a human last opened a terminal on each session. `claude attach` resumes a stopped one.
+    @ObservationIgnored private var attachRequestedAt: [String: Int64] = [:]
+    /// When each session was last sent `SleepCutTurn.continuation`, on the wall clock (SPEC §8).
+    @ObservationIgnored private var sleepContinuedAt: [String: Int64] = [:]
+    /// Sleep-cut sessions the window turned away or whose continuation failed, left for the next full wake (SPEC §8).
+    @ObservationIgnored private var sleepCutAwaitingWake: Set<String> = []
+    /// A full wake reopens the once-per-stall window, so a cut that lands just after the lid opens is still continued.
+    @ObservationIgnored private var lastFullWakeAt: Int64?
+    @ObservationIgnored private let wakeCenter: NotificationCenter
+    @ObservationIgnored private var wakeObserver: (any NSObjectProtocol)?
+    /// The last integration each project's `origin` resolved to, kept for when git fails to read it.
+    @ObservationIgnored private var integrationDefaults: [String: StandaloneIntegration] = [:]
 
     nonisolated static let taskBranchPrefix = TaskStore.branchPrefix
     static let meteringInterval: Duration = .seconds(5)
+    /// A second sleep-cut turn within this much awake time of the first waits for the next full wake (SPEC §8).
+    static let sleepContinuationWindowMillis: Int64 = 5 * 60 * 1000
     /// The archive policies are day-granular, so they ride the metering tick at a far coarser
     /// cadence rather than paying for a scan every 5 seconds — or a second timer.
     static let archiveSweepIntervalMillis: Int64 = 5 * 60 * 1000
+    static let orphanReapIntervalMillis: Int64 = 3 * 60 * 1000
     static let pullRequestCheckIntervalMillis: Int64 = 10 * 60 * 1000
+    static let prWatchPollIntervalMillis: Int64 = 60 * 1000
+    static let prWatchFailuresBeforeAttention = 10
     /// Sessions that ended this recently still get one more transcript read so final spend lands.
     static let finalSpendWindowMillis: Int64 = 15_000
 
@@ -185,6 +300,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         claude: ClaudeInvocation = .installed(),
         sleepLedger: SleepLedger = .shared,
         sleepGuard: SleepGuard? = nil,
+        wakeCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         gh: any GhRunning = SystemGh()
     ) {
         self.db = db
@@ -199,6 +315,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         coordinator = CoordinatorStore(db)
         self.sleepLedger = sleepLedger
         self.sleepGuard = sleepGuard
+        self.wakeCenter = wakeCenter
         projects = ProjectStore(db)
         tasks = TaskStore(db)
         sessions = SessionStore(db)
@@ -209,17 +326,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         deliveries = ShutdownDeliveryStore(db)
         epics = EpicStore(db)
         notes = NoteStore(db)
-        roster = RosterStore(db)
+        roster = RosterStore(db, definitions: AgentDefinitionDirectories(home: home))
         board = Board(db)
         archives = ArchiveSweep(db)
         messages = MessageStore(db)
         requests = RequestStore(db)
         fileLocks = FileLockStore(db)
+        slots = WorktreeSlotStore(db)
         attention = ProjectAttentionStore(db)
         pullRequestStates = PullRequestStateReader(gh: gh)
+        pullRequestWatch = PullRequestWatchReader(gh: gh)
+        pullRequestReplies = PullRequestReplier(gh: gh)
+        pullRequestReviewRequests = PullRequestReviewRequester(gh: gh)
+        prWatches = PRWatchStore(db)
     }
 
-    private var sessionConfigDir: URL { appSupportDir.appendingPathComponent("sessions") }
+    private var sessionConfigDir: URL { SessionConfigWriter.configDir(supportDir: appSupportDir) }
 
     func start() async {
         do {
@@ -232,13 +354,28 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             lastError = describe(error)
         }
+        sweepVerifierGrants()
         failInterruptedSetups()
         stopOrphanedCoordinatorSessions()
+        stopOrphanedOrchestratorSessions()
         sweepStaleFileLocks()
         await sweepLeakedAgents()
         await migrateWorktreeRoots()
         refreshSleepAssertion()
+        lastOrphanReap = sleepLedger.reading().nowMillis
+        observeFullWakes()
         startMetering()
+    }
+
+    /// No Walk me through it window outlives the app (SPEC §13.4), so every verifier grant and config
+    /// file still here is a leftover. Runs before `startup` completes, which the window awaits.
+    func sweepVerifierGrants() {
+        do {
+            try grants.revokeVerifierGrants()
+        } catch {
+            lastError = describe(error)
+        }
+        SessionConfigWriter.removeVerifierMCPConfigs(configDir: sessionConfigDir)
     }
 
     /// The other half of `start()`: releases the real port `server` bound and cancels the metering
@@ -251,22 +388,23 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let running = refreshes.values
         running.forEach { $0.cancel() }
         for run in running { await run.task?.value }
+        if let wakeObserver { wakeCenter.removeObserver(wakeObserver) }
+        wakeObserver = nil
         await server.stop()
     }
 
-    /// Idempotent: a project whose root is already space-free is left alone, so the second launch
-    /// is a no-op.
+    /// A project kept on its old root is reported on every launch until its worktrees are gone (SPEC §4).
     @discardableResult
     func migrateWorktreeRoots() async -> WorktreeRootMigration.Outcome {
-        let migration = WorktreeRootMigration(db: db, worktreeBase: worktreeBase)
+        let migration = WorktreeRootMigration(db: db, worktreeBase: worktreeBase, home: home)
         let outcome = await _Concurrency.Task.detached(priority: .userInitiated) { migration.run() }.value
         for line in outcome.migrated {
             FileHandle.standardError.write(Data("worktree root migrated: \(line)\n".utf8))
         }
-        for line in outcome.skipped + outcome.notices {
+        for line in outcome.skipped {
             FileHandle.standardError.write(Data("worktree root not migrated: \(line)\n".utf8))
         }
-        report(outcome.skipped + outcome.notices)
+        report(outcome.skipped)
         return outcome
     }
 
@@ -322,8 +460,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         taskId: String, rosterAgentId: String? = nil, scope: AgentBoardCore.TokenScope = .worker
     ) async throws -> WorkerSpawn {
         guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
-        guard task.column != .running, task.column != .done else {
+        // A worker or reviewer grant on a triage or follow-up check task would hold authority over the PR's
+        // checkout that the triager scope exists to withhold.
+        guard !task.origin.isPullRequestReader else { throw SupervisorError.triageTaskNotAssignable(title: task.title) }
+        guard task.column != .running, task.column != .done, task.column != .closed else {
             throw SupervisorError.taskNotAssignable(title: task.title, column: task.column)
+        }
+        // SPEC §5.2 step 3: a respawned integrator runs where the first one did, on the epic branch.
+        if task.origin == .integration, scope == .worker, rosterAgentId != nil {
+            throw SupervisorError.integrationNotRosterable(title: task.title)
+        }
+        if task.origin == .integration, let epicId = task.epicId, scope == .worker {
+            let placeholder = try await spawnIntegrator(epicId: epicId, retrying: task)
+            return WorkerSpawn(
+                setupSessionId: placeholder.sessionId, worktreePath: placeholder.cwd,
+                branch: placeholder.branch ?? ""
+            )
         }
         guard let project = try projects.get(task.projectId) else {
             throw SupervisorError.projectNotFound(task.projectId)
@@ -332,6 +484,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try requireNoShutdown(projectId: project.id)
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
+        }
+        if task.origin == .fixRound, scope == .worker {
+            return try await spawnFixer(task: task, rosterAgentId: rosterAgentId, project: project, port: port)
+        }
+        if task.origin == .fixRound, scope == .reviewer, let rosterAgentId {
+            return try await spawnRoundReviewer(task: task, rosterAgentId: rosterAgentId, project: project, port: port)
         }
         let agent = try rosterAgentId.map { id -> RosterAgent in
             guard let agent = try roster.usableAgent(id, forProject: project.id) else {
@@ -348,6 +506,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
         let attempt = try sessions.forTask(taskId).count + 1
         let manager = worktreeManager(for: project)
+        // SPEC §3.1: an earlier attempt's checkout may still be running its hook or its rollback,
+        // and this attempt would adopt that worktree only to have the rollback delete it.
+        let pendingWorktree = manager.worktreeRoot.appendingPathComponent(taskId).path
+        guard !placing.contains(pendingWorktree) else {
+            throw SupervisorError.setupStillRunning(title: task.title, path: pendingWorktree)
+        }
+        placing.insert(pendingWorktree)
+        var placingMarks = [pendingWorktree]
+        var setupHoldsMark = false
+        defer { if !setupHoldsMark { placing.subtract(placingMarks) } }
         let epic = try task.epicId.flatMap { try epics.get($0) }
         // A reviewer reads the worker's own worktree. A task worked in the shared checkout never
         // reaches agent review (SPEC §5.1), so the strategy has no say here.
@@ -363,10 +531,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             ? preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
             : clearedWorktreePathWarning()
         let base: String
+        var baseWarnings: [String] = []
         if let epic {
             let epicBranch = epic.branch
             let projectBase = project.baseBranch
-            try await offMain { try manager.ensureBranch(epicBranch, from: projectBase) }
+            // SPEC §3.1 step 1: only a new epic branch looks at the remote; an existing one is local
+            // integration state its tasks branch from as it stands.
+            let cut = try await offMain { () -> String? in
+                guard try !manager.branchExists(epicBranch) else { return nil }
+                let start = manager.freshestBase(projectBase)
+                try manager.ensureBranch(epicBranch, from: start.ref)
+                return start.warning
+            }
+            baseWarnings += [cut].compactMap { $0 }
             base = epicBranch
             if scope != .reviewer, placement.sharedBranch == nil {
                 try await requireDependenciesOnEpicBranch(task: task, epic: epic, manager: manager)
@@ -374,10 +551,25 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } else {
             base = project.baseBranch
         }
-        let site = try await checkoutSite(
-            project: project, taskId: taskId, placement: placement, base: base, manager: manager,
-            warnings: warnings
+        var site = try await checkoutSite(
+            project: project, taskId: taskId, placement: placement, base: base,
+            cutsFromProjectBase: epic == nil, occupiesSlot: scope != .reviewer, manager: manager, warnings: warnings
         )
+        if let pending = site.pending, pending.slot != nil {
+            guard !placing.contains(pending.path) else {
+                throw SupervisorError.setupStillRunning(title: task.title, path: pending.path)
+            }
+            placing.insert(pending.path)
+            placingMarks.append(pending.path)
+        }
+        // A reviewer judges the checkout before its session exists, so it cannot wait for setup.
+        if scope == .reviewer, let pending = site.pending {
+            try await createWorktree(pending)
+            site.pending = nil
+            await afterCheckoutCreated()
+        }
+        report(baseWarnings)
+        site.warnings += baseWarnings
         let branch = site.branch
         // A handed-off task keeps its worktree on disk, so a second agent could otherwise be launched
         // into a checkout someone is still working in. Co-resident agents in a shared checkout are
@@ -385,12 +577,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if let path = site.worktreePath, let holder = try sessions.activeHolder(worktreePath: path) {
             throw SupervisorError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
         }
+        // SPEC §3.1 step 1: a standalone branch cut from the remote's base diffs against that cut
+        // point while local base is behind it, or the remote's commits read as the task's work.
+        let reviewBase = scope == .reviewer && epic == nil
+            ? try await offMain { manager.diffBase(taskId: taskId, base: base) }
+            : base
         // SPEC §5.1: a reviewer judges the diff and nothing else, so an empty one — a task whose
         // deliverable is a note, say — goes to a person rather than to a reviewer that could only reopen it.
         if scope == .reviewer {
             let cwd = site.cwd
-            guard try await offMain({ try ReviewCheckout.hasDiff(against: base, in: cwd) }) else {
-                throw NothingToReview(reason: "Branch `\(branch)` has no diff against `\(base)`, so there is no "
+            guard try await offMain({ try ReviewCheckout.hasDiff(against: reviewBase, in: cwd) }) else {
+                throw NothingToReview(reason: "Branch `\(branch)` has no diff against `\(reviewBase)`, so there is no "
                     + "code for a rostered reviewer to judge. A task whose deliverable is not code, such as an "
                     + "Agent Board note, needs a person to review it.")
             }
@@ -400,15 +597,29 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let reviewHead = scope == .reviewer
                 ? try await offMain { try ReviewCheckout.baseline(in: site.cwd) }
                 : nil
-            let row = Self.setupRow(
-                projectId: project.id, taskId: taskId, site: site, attempt: attempt,
-                rosterAgentId: agent?.id, reviewHead: reviewHead
-            )
+            let row = { (site: CheckoutSite) in
+                Self.setupRow(
+                    projectId: project.id, taskId: taskId, site: site, attempt: attempt,
+                    rosterAgentId: agent?.id, reviewHead: reviewHead, reviewBase: scope == .reviewer ? reviewBase : nil
+                )
+            }
+            // SPEC §5: a discard that began during this spawn's awaits saw no session to stop, and
+            // would delete the task under a worktree this setup goes on to create.
+            guard !discarding.contains(taskId) else { throw SupervisorError.taskBeingDiscarded(taskId: taskId) }
             // A reviewer holds a task that is already in `review`; `assign` would move it to
             // `running` and take it out of the queue its own accept_task reads.
-            let placeholder = scope == .reviewer
-                ? try board.assignReviewer(taskId: taskId, session: row)
-                : try board.assign(taskId: taskId, session: row)
+            let placeholder: AgentSession
+            if scope == .reviewer {
+                placeholder = try board.assignReviewer(taskId: taskId, session: row(site))
+            } else {
+                let assigned = try assignWorker(taskId: taskId, site: site, row: row)
+                placeholder = assigned.session
+                site = assigned.site
+                if let pending = site.pending, pending.slot != nil, !placingMarks.contains(pending.path) {
+                    placing.insert(pending.path)
+                    placingMarks.append(pending.path)
+                }
+            }
             if let epic, epic.state == .planning {
                 try epics.setState(epic.id, .active)
             }
@@ -423,7 +634,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     name: Self.sessionName(for: task),
                     prompt: scope == .reviewer
                         ? ReviewPrompt.compose(
-                            task: task, branch: branch, base: base,
+                            task: task, branch: branch, base: reviewBase,
                             verification: project.settings.verification,
                             workingDirectory: site.cwd.path,
                             agent: agent?.identity,
@@ -449,12 +660,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     scope: scope
                 ),
                 placeholder: placeholder,
-                port: port
+                port: port,
+                checkout: site.pending,
+                placingMarks: placingMarks
             )
+            setupHoldsMark = true
             return WorkerSpawn(
                 setupSessionId: placeholder.sessionId, worktreePath: site.cwd.path, branch: branch,
                 sharesCheckout: site.placement.sharedBranch != nil, warnings: site.warnings
             )
+        } catch SupervisorError.taskBeingDiscarded(let id) {
+            throw SupervisorError.taskBeingDiscarded(taskId: id)
         } catch {
             throw SupervisorError.spawnFailed(worktree: site.cwd.path, underlying: describe(error))
         }
@@ -663,14 +879,37 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var worktreePath: String?
         var branch: String
         var warnings: [String]
+        /// Set until `Board.assign` leases this worker a slot from it; `cwd` is the worktree root until then.
+        var slotPool: WorktreeSlotPool? = nil
+        /// A worktree still to be created at `worktreePath`, or a slot still to be put on `branch`,
+        /// which setup does after `spawn` answers.
+        var pending: PendingCheckout?
+    }
+
+    /// `git worktree add` runs the repository's `post-checkout` hook, which can outlast an MCP call
+    /// many times over (SPEC §3.1).
+    private struct PendingCheckout: Sendable {
+        var manager: WorktreeManager
+        var taskId: String
+        var name: String
+        var branch: String
+        /// Nil checks out `branch` as it stands, as the epic integrator's worktree does.
+        var base: String?
+        /// The pooled slot to occupy instead of a worktree named for the task (SPEC §3.1 step 2).
+        var slot: Int? = nil
+
+        var path: String {
+            manager.worktreeRoot.appendingPathComponent(slot.map(WorktreeSlot.name) ?? name).path
+        }
     }
 
     /// Carries out the placement. A `shared` one that git will not accept — a dirty checkout, or a
     /// branch another worktree holds — degrades to a worktree with a notice rather than failing the
-    /// spawn.
+    /// spawn. A task keeps the slot or worktree an earlier attempt left it; otherwise a worker is
+    /// offered the project's slot pool, and a reviewer, which never leases one, gets a worktree.
     private func checkoutSite(
         project: Project, taskId: String, placement: WorkerPlacement, base: String,
-        manager: WorktreeManager, warnings: [String]
+        cutsFromProjectBase: Bool, occupiesSlot: Bool, manager: WorktreeManager, warnings: [String]
     ) async throws -> CheckoutSite {
         if let sharedBranch = placement.sharedBranch {
             let repo = URL(fileURLWithPath: project.repoPath)
@@ -687,13 +926,110 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let fallbackWarnings = placement == .worktree
             ? warnings
             : preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(taskId))
-        let worktree = try await offMain {
-            try Self.existingWorktree(manager, name: taskId) ?? manager.create(name: taskId, branch: branch, base: base)
+        let slotCount = occupiesSlot ? project.settings.worktreeSlots : 0
+        let leased = try slots.lease(taskId: taskId)
+        let leasedSlots = Set(try slots.slots(projectId: project.id).compactMap { $0.taskId == nil ? nil : $0.slot })
+        // SPEC §3.1 step 1: a reused task branch keeps whatever it was cut from.
+        let (start, ownExists, unusable) = try await offMain { () -> (BaseStartPoint, Bool, Set<Int>) in
+            let start = try cutsFromProjectBase && !manager.branchExists(branch)
+                ? manager.freshestBase(base)
+                : BaseStartPoint(ref: base)
+            guard leased == nil else { return (start, false, []) }
+            if try Self.existingWorktree(manager, name: taskId) != nil { return (start, true, []) }
+            return (start, false, slotCount > 0 ? Self.unusableSlots(manager, count: slotCount, leased: leasedSlots) : [])
         }
+        if let warning = start.warning { report([warning]) }
+        let startWarnings = fallbackWarnings + [start.warning].compactMap { $0 }
+        let pending = PendingCheckout(manager: manager, taskId: taskId, name: taskId, branch: branch, base: start.ref, slot: leased?.slot)
+        if leased != nil {
+            let slot = URL(fileURLWithPath: pending.path)
+            return CheckoutSite(
+                placement: .worktree, cwd: slot, worktreePath: slot.path, branch: branch, warnings: startWarnings,
+                pending: pending
+            )
+        }
+        if !ownExists, slotCount > 0 {
+            return CheckoutSite(
+                placement: .worktree, cwd: manager.worktreeRoot, worktreePath: nil, branch: branch,
+                warnings: startWarnings,
+                slotPool: WorktreeSlotPool(root: manager.worktreeRoot.path, count: slotCount, unusable: unusable),
+                pending: pending
+            )
+        }
+        return Self.ownWorktree(pending, warnings: startWarnings)
+    }
+
+    private static func ownWorktree(_ pending: PendingCheckout, warnings: [String]) -> CheckoutSite {
+        let worktree = URL(fileURLWithPath: pending.path)
         return CheckoutSite(
-            placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch,
-            warnings: fallbackWarnings
+            placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: pending.branch,
+            warnings: warnings, pending: pending
         )
+    }
+
+    /// A free slot whose directory is not a worktree of this repository, or holds uncommitted
+    /// changes, cannot be switched to a new task.
+    private nonisolated static func unusableSlots(_ manager: WorktreeManager, count: Int, leased: Set<Int>) -> Set<Int> {
+        let registered = Set(((try? manager.registeredWorktreePaths()) ?? []).map { resolved($0.path) })
+        return Set((1...count).filter { slot in
+            guard !leased.contains(slot) else { return false }
+            let path = manager.worktreeRoot.appendingPathComponent(WorktreeSlot.name(slot))
+            guard FileManager.default.fileExists(atPath: path.path) else { return false }
+            guard registered.contains(resolved(path.path)) else { return true }
+            return (try? manager.hasUncommittedChanges(worktree: path)) != false
+        })
+    }
+
+    /// SPEC §3.1 step 2: the slot is chosen inside `Board.assign`'s transaction. With every slot
+    /// leased or unusable, the worker gets a worktree of its own rather than waiting for one.
+    private func assignWorker(
+        taskId: String, site: CheckoutSite, row: (CheckoutSite) -> AgentSession
+    ) throws -> (session: AgentSession, site: CheckoutSite) {
+        guard let pool = site.slotPool, var pending = site.pending else {
+            return (try board.assign(taskId: taskId, session: row(site)), site)
+        }
+        do {
+            let placeholder = try board.assign(taskId: taskId, session: row(site), leasingSlotFrom: pool)
+            var leased = site
+            leased.slotPool = nil
+            leased.cwd = URL(fileURLWithPath: placeholder.cwd)
+            leased.worktreePath = placeholder.worktreePath
+            pending.slot = placeholder.worktreePath.flatMap { WorktreeSlot.index(ofPath: $0, root: pool.root) }
+            leased.pending = pending
+            return (placeholder, leased)
+        } catch BoardError.noFreeWorktreeSlot {
+            let own = Self.ownWorktree(pending, warnings: site.warnings)
+            return (try board.assign(taskId: taskId, session: row(own)), own)
+        }
+    }
+
+    private func createWorktree(_ pending: PendingCheckout) async throws {
+        // SPEC §5: a worktree a reap or teardown has claimed is about to be deleted, so it is not reused.
+        await awaitTeardown(of: pending.path)
+        // The merged-branch sweep claims the task-named path while it deletes the branch a slot switches to.
+        if pending.slot != nil {
+            await awaitTeardown(of: pending.manager.worktreeRoot.appendingPathComponent(pending.name).path)
+        }
+        // A reviewer creates its worktree before any session row exists, so a discard cannot cancel it.
+        // `tasks.get` is allowed to throw here — a read failure is reported as itself, not folded
+        // into "discarded" just because both read as "no task came back."
+        guard !discarding.contains(pending.taskId), try tasks.get(pending.taskId) != nil else {
+            throw SupervisorError.taskBeingDiscarded(taskId: pending.taskId)
+        }
+        await beforeCheckoutCreated()
+        try _Concurrency.Task.checkCancellation()
+        try await offMain {
+            if let slot = pending.slot {
+                _ = try pending.manager.occupySlot(slot, branch: pending.branch, start: pending.base ?? pending.branch)
+                return
+            }
+            guard try Self.existingWorktree(pending.manager, name: pending.name) == nil else { return }
+            if let base = pending.base {
+                _ = try pending.manager.create(name: pending.name, branch: pending.branch, base: base)
+            } else {
+                _ = try pending.manager.createForBranch(name: pending.name, branch: pending.branch)
+            }
+        }
     }
 
     /// A shared placement creates no path, so a warning left over from an earlier spawn would be
@@ -705,7 +1041,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private static func setupRow(
         projectId: String, taskId: String, site: CheckoutSite, attempt: Int,
-        rosterAgentId: String? = nil, reviewHead: String? = nil
+        rosterAgentId: String? = nil, reviewHead: String? = nil, reviewBase: String? = nil
     ) -> AgentSession {
         AgentSession(
             sessionId: "setup-\(UUID().uuidString)",
@@ -718,26 +1054,44 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             state: .setup,
             attempt: attempt,
             rosterAgentId: rosterAgentId,
-            reviewHead: reviewHead
+            reviewHead: reviewHead,
+            reviewBase: reviewBase
         )
     }
 
     /// The failure has nowhere to be thrown once `spawn` has answered, so it reaches the
     /// orchestrator the way every other asynchronous worker outcome does: as a queued report, with
     /// the task put back in `ready` rather than left in `running` behind a session that never ran.
-    private func beginSetup(_ plan: LaunchPlan, placeholder: AgentSession, port: Int) {
+    /// `placingMarks` are released once setup ends, not when `spawn` answers, so no retry adopts the
+    /// worktree while this attempt's hook or its rollback is still running in it (SPEC §3.1). A cancelled
+    /// setup is ended by whoever cancelled it; if that happened before setup ended, its end queues a
+    /// report of its own, since a retry refused meanwhile has no other cue.
+    private func beginSetup(
+        _ plan: LaunchPlan, placeholder: AgentSession, port: Int,
+        checkout: PendingCheckout? = nil, placingMarks: [String] = []
+    ) {
         let sessionId = placeholder.sessionId
         setupTasks[sessionId] = _Concurrency.Task { [weak self] in
             guard let self else { return }
             do {
+                if let checkout {
+                    try await createWorktree(checkout)
+                    await afterCheckoutCreated()
+                    try _Concurrency.Task.checkCancellation()
+                }
                 _ = try await launch(plan, port: port, placeholder: placeholder)
-            } catch {
+            } catch where !_Concurrency.Task.isCancelled {
                 lastError = describe(error)
                 // The placeholder may already have been resolved into a real session, in which case
                 // that is the row to end — the placeholder no longer exists to be reported against.
                 let live = ((try? sessions.forTask(plan.taskId)) ?? [])
                     .first { $0.state.isActive }?.sessionId ?? sessionId
                 failSetup(sessionId: live, projectId: plan.project.id, error: error)
+            } catch {}
+            placing.subtract(placingMarks)
+            if _Concurrency.Task.isCancelled, !discarding.contains(plan.taskId),
+               (try? sessions.get(sessionId))?.state.isActive == false {
+                reportSetupEnded(plan, sessionId: sessionId)
             }
             setupTasks[sessionId] = nil
         }
@@ -753,7 +1107,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func failSetup(sessionId: String, projectId: String, error: Error) {
         let detail = describe(error)
-        let queued = (try? board.terminate(sessionId: sessionId, cause: .setupFailed(detail))) ?? nil
+        let queued = (try? terminateSession(sessionId, cause: .setupFailed(detail))) ?? nil
         guard queued != nil else { return }
         announceReports(projectId: projectId)
         // `sessionId` always names a real row (`assign` writes it before setup runs), so this could
@@ -762,6 +1116,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         // bare `failed` state — while `detail` is the actual worktree-prep failure, which only the
         // queued report on the Orchestrator screen shows.
         post("Worker never started", body: detail, projectId: projectId, category: .workerFailures)
+    }
+
+    private func reportSetupEnded(_ plan: LaunchPlan, sessionId: String) {
+        guard let task = try? tasks.get(plan.taskId) else { return }
+        let lines = [
+            "Setup ended for an attempt that was stopped while it set up",
+            "Task: \(task.id) (\(task.title))",
+            "Session: \(sessionId) (attempt \(plan.attempt))",
+            "Nothing is setting up this task any more, so a spawn refused with \"still setting up\" can be sent again.",
+        ]
+        _ = try? ReportStore(db).insert(
+            projectId: plan.project.id, taskId: task.id, sessionId: nil, kind: .decision,
+            body: lines.joined(separator: "\n")
+        )
+        announceReports(projectId: plan.project.id)
     }
 
     /// A lock held by a session the last run of the app never saw end — a killed process, a crash —
@@ -783,7 +1152,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func stopOrphanedCoordinatorSessions() {
         guard coordinatorConsoleInstance?.isProcessRunning != true else { return }
         for session in (try? coordinator.sessions()) ?? [] where session.state.isActive {
-            _ = try? board.terminate(sessionId: session.sessionId, cause: .vanished)
+            _ = try? terminateSession(session.sessionId, cause: .vanished)
+        }
+    }
+
+    /// SPEC §8.2: a quit or crash kills every orchestrator console without `processExited` running,
+    /// and `reconcile` only reaches a project whose Status pane is open.
+    private func stopOrphanedOrchestratorSessions() {
+        for project in (try? projects.list()) ?? [] where consoles[project.id]?.isProcessRunning != true {
+            for session in (try? sessions.active(projectId: project.id)) ?? [] where session.role == .orchestrator {
+                _ = try? terminateSession(session.sessionId, cause: .vanished)
+            }
         }
     }
 
@@ -819,6 +1198,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         /// `--permission-mode auto`, the worker deny list, and at most a worker's token scope.
         var rosterAgent: RosterAgent? = nil
         var scope: AgentBoardCore.TokenScope = .worker
+        var extraDisallowedTools: [String] = []
+    }
+
+    /// `claude` is spawned without a shell, so nothing else would expand a `~` the user typed.
+    private func expandingHome(_ path: String) -> String {
+        guard path == "~" || path.hasPrefix("~/") else { return path }
+        return home.path + path.dropFirst()
     }
 
     /// §3.1 steps 3-8, shared by task workers and the epic integrator, and the whole of what runs
@@ -839,7 +1225,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 token: grant.token,
                 autoModeJSON: project.settings.autoModeJSON,
                 extraMcpServers: nil,
-                fileLocks: plan.worktreePath == nil
+                fileLocks: plan.worktreePath == nil,
+                readOnly: plan.scope == .triager
             )
             let request = SpawnRequest(
                 cwd: plan.cwd,
@@ -848,13 +1235,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 configFiles: configFiles,
                 // A deny-list, layered on: a rostered agent can only ever have less authority than a
                 // plain worker, and an empty list is exactly a plain worker's.
-                disallowedTools: SpawnRequest.defaultDisallowedTools
-                    + (plan.scope == .reviewer
-                        ? SpawnRequest.reviewerDisallowedTools
-                            + SpawnRequest.reviewerBoardDeny(supportDir: appSupportDir, home: home)
-                        : [])
-                    + (plan.rosterAgent?.disallowedTools ?? []),
-                model: plan.model
+                disallowedTools: Self.disallowedTools(scope: plan.scope, supportDir: appSupportDir, home: home)
+                    + plan.extraDisallowedTools + (plan.rosterAgent?.disallowedTools ?? []),
+                tools: plan.rosterAgent?.tools,
+                model: plan.model,
+                pluginDirs: (plan.rosterAgent?.pluginDirs ?? []).map(expandingHome)
             )
             let spawned = try await runtime.spawn(request)
             let recorded: AgentSession
@@ -878,10 +1263,351 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    nonisolated static func disallowedTools(scope: AgentBoardCore.TokenScope, supportDir: URL, home: URL) -> [String] {
+        switch scope {
+        case .reviewer:
+            return SpawnRequest.defaultDisallowedTools + SpawnRequest.reviewerDisallowedTools
+                + SpawnRequest.reviewerBoardDeny(supportDir: supportDir, home: home)
+        case .triager:
+            return SpawnRequest.triagerDisallowedTools
+                + SpawnRequest.reviewerBoardDeny(supportDir: supportDir, home: home)
+        case .worker, .orchestrator, .coordinator, .verifier:
+            return SpawnRequest.defaultDisallowedTools
+        }
+    }
+
+    /// SPEC §13.2. The triager is an ordinary worker session, so every §8 cap counts it, in a
+    /// detached checkout of the PR head fetched from origin, bound to a synthetic `triage` task so its
+    /// card and progress log are real. Nothing but the supervisor calls this.
+    @discardableResult
+    func spawnTriager(watchId: String) async throws -> AgentSession {
+        guard let watch = try prWatches.get(watchId) else { throw SupervisorError.watchNotFound(watchId) }
+        guard let project = try projects.get(watch.projectId) else {
+            throw SupervisorError.projectNotFound(watch.projectId)
+        }
+        guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        try requireNoShutdown(projectId: project.id)
+        if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
+            throw SupervisorError.capRefused(reason)
+        }
+        let role = project.settings.prFollowThrough.roles.triage
+        let agent = try role?.rosterAgentId.map { id -> RosterAgent in
+            guard let agent = try roster.usableAgent(id, forProject: project.id) else {
+                throw SupervisorError.rosterAgentNotUsable(id: id, projectName: project.name)
+            }
+            return agent
+        }
+
+        let manager = worktreeManager(for: project)
+        let headOid = watch.headOid
+        let baseRef = watch.baseRef
+        let baseOid: String
+        do {
+            baseOid = try await offMain { () -> String in
+                guard try manager.fetchCommitIfMissing(headOid, from: "origin") else {
+                    throw AgentRuntimeError("origin has no commit \(headOid)")
+                }
+                return try manager.fetchRemoteTip(baseRef)
+            }
+        } catch {
+            throw SupervisorError.pullRequestNotFetched(describe(error))
+        }
+
+        let task = try board.createTriageTask(watchId: watch.id, baseOid: baseOid, headOid: headOid)
+        let triage = PRTriage(
+            taskId: task.id, watchId: watch.id, baseOid: baseOid, headOid: headOid, round: watch.round,
+            createdAt: task.createdAt
+        )
+        _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(task.id))
+        var assigned: AgentSession?
+        do {
+            let worktree = try await offMain { try manager.createDetached(name: task.id, commit: headOid) }
+            let placeholder = try board.assign(
+                taskId: task.id,
+                session: AgentSession(
+                    sessionId: "setup-\(UUID().uuidString)", projectId: project.id, taskId: task.id, role: .worker,
+                    worktreePath: worktree.path, cwd: worktree.path, state: .setup, attempt: 1,
+                    rosterAgentId: agent?.id
+                )
+            )
+            assigned = placeholder
+            beginSetup(
+                LaunchPlan(
+                    project: project,
+                    taskId: task.id,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
+                    branch: headOid,
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: TriagePrompt.compose(
+                        watch: watch, triage: triage, workingDirectory: worktree.path, agent: agent?.identity
+                    ),
+                    model: role?.model ?? agent?.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    scope: .triager
+                ),
+                placeholder: placeholder,
+                port: port
+            )
+            return placeholder
+        } catch {
+            if assigned == nil { try? tasks.delete(task.id) }
+            throw SupervisorError.spawnFailed(
+                worktree: manager.worktreeRoot.appendingPathComponent(task.id).path, underlying: describe(error)
+            )
+        }
+    }
+
+    /// SPEC §13.1 fixing: an ordinary worker on the round's branch, cut at the head its triage read
+    /// once the PR's head ref is fetched from origin, in a worktree named for the task. A retry reuses
+    /// both. A round holding a conflict also fetches the base, which its fixer merges. The role's roster
+    /// agent and model apply unless the caller names an agent.
+    private func spawnFixer(
+        task: BoardTask, rosterAgentId: String?, project: Project, port: Int
+    ) async throws -> WorkerSpawn {
+        guard let round = try prWatches.round(fixTaskId: task.id), let watch = try prWatches.get(round.watchId) else {
+            throw SupervisorError.fixRoundNotFound(title: task.title)
+        }
+        let role = project.settings.prFollowThrough.roles.fixer
+        let agent = try (rosterAgentId ?? role?.rosterAgentId).map { id -> RosterAgent in
+            guard let agent = try roster.usableAgent(id, forProject: project.id) else {
+                throw SupervisorError.rosterAgentNotUsable(id: id, projectName: project.name)
+            }
+            return agent
+        }
+        if let holder = try sessions.activeHolder(taskId: task.id) {
+            throw SupervisorError.taskAlreadyHeld(title: task.title, sessionId: holder.sessionId)
+        }
+
+        let manager = worktreeManager(for: project)
+        let headRef = watch.headRef
+        let baseHeadOid = round.baseHeadOid
+        let mergeBase = try prWatches.items(watchId: watch.id)
+            .contains { $0.fixTaskId == task.id && $0.kind == .conflict && $0.state == .open } ? watch.baseRef : nil
+        do {
+            try await offMain {
+                _ = try manager.fetchRemoteTip(headRef)
+                guard try manager.fetchCommitIfMissing(baseHeadOid, from: "origin") else {
+                    throw AgentRuntimeError("origin has no commit \(baseHeadOid)")
+                }
+                if let mergeBase { _ = try manager.fetchRemoteTip(mergeBase) }
+            }
+        } catch {
+            throw SupervisorError.pullRequestNotFetched(describe(error))
+        }
+
+        let name = task.id
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let warnings = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(name))
+        let worktree: URL
+        do {
+            worktree = try await offMain {
+                try Self.existingWorktree(manager, name: name)
+                    ?? manager.create(name: name, branch: branch, base: baseHeadOid)
+            }
+        } catch {
+            throw SupervisorError.spawnFailed(
+                worktree: manager.worktreeRoot.appendingPathComponent(name).path, underlying: describe(error)
+            )
+        }
+        if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
+            throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
+        }
+
+        do {
+            let site = CheckoutSite(
+                placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch, warnings: warnings
+            )
+            let placeholder = try board.assign(
+                taskId: task.id,
+                session: Self.setupRow(
+                    projectId: project.id, taskId: task.id, site: site,
+                    attempt: try sessions.forTask(task.id).count + 1, rosterAgentId: agent?.id
+                )
+            )
+            beginSetup(
+                LaunchPlan(
+                    project: project,
+                    taskId: task.id,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
+                    branch: branch,
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: Self.openingPrompt(
+                        task: task, branch: branch, attempt: placeholder.attempt, epicGoal: nil,
+                        notes: try notes.notesForSpawn(projectId: project.id, taskId: task.id, epicId: nil),
+                        verification: project.settings.verification,
+                        placement: .worktree,
+                        workingDirectory: worktree.path,
+                        agent: agent?.identity,
+                        reviewFindings: try ProgressStore(db).openReviewFindings(taskId: task.id),
+                        comments: try CommentStore(db).list(taskId: task.id)
+                    ),
+                    model: task.model ?? agent?.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    extraDisallowedTools: SpawnRequest.fixerDisallowedTools
+                ),
+                placeholder: placeholder,
+                port: port
+            )
+            return WorkerSpawn(
+                setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch,
+                sharesCheckout: false, warnings: warnings
+            )
+        } catch {
+            throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
+        }
+    }
+
+    /// SPEC §13.1 checking: a round's reviewer reads `base_head_oid...HEAD` on the round branch, in the
+    /// fixer's own worktree, never a task branch against the project's base. A branch with nothing on it
+    /// beyond the pull request's head is a round that fixed nothing.
+    private func spawnRoundReviewer(
+        task: BoardTask, rosterAgentId: String, project: Project, port: Int
+    ) async throws -> WorkerSpawn {
+        guard let round = try prWatches.round(fixTaskId: task.id), let watch = try prWatches.get(round.watchId) else {
+            throw SupervisorError.fixRoundNotFound(title: task.title)
+        }
+        guard let agent = try roster.usableAgent(rosterAgentId, forProject: project.id) else {
+            throw SupervisorError.rosterAgentNotUsable(id: rosterAgentId, projectName: project.name)
+        }
+        if let holder = try sessions.activeHolder(taskId: task.id) {
+            throw SupervisorError.taskAlreadyHeld(title: task.title, sessionId: holder.sessionId)
+        }
+        let manager = worktreeManager(for: project)
+        let name = task.id
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let worktree: URL
+        if let existing = try await offMain({ try Self.existingWorktree(manager, name: name) }) {
+            worktree = existing
+        } else {
+            _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(name))
+            worktree = try await offMain { try manager.createForBranch(name: name, branch: branch) }
+        }
+        if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
+            throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
+        }
+        let base = round.baseHeadOid
+        guard try await offMain({ try ReviewCheckout.hasDiff(against: base, in: worktree) }) else {
+            throw NothingToReview(reason: "Branch `\(branch)` has no change beyond the pull request's head `\(base)`, "
+                + "so the round fixed nothing.")
+        }
+
+        do {
+            let reviewHead = try await offMain { try ReviewCheckout.baseline(in: worktree) }
+            let site = CheckoutSite(placement: .worktree, cwd: worktree, worktreePath: worktree.path, branch: branch, warnings: [])
+            let placeholder = try board.assignReviewer(
+                taskId: task.id,
+                session: Self.setupRow(
+                    projectId: project.id, taskId: task.id, site: site, attempt: try sessions.forTask(task.id).count + 1,
+                    rosterAgentId: agent.id, reviewHead: reviewHead, reviewBase: base
+                )
+            )
+            let role = project.settings.prFollowThrough.roles.reviewer
+            beginSetup(
+                LaunchPlan(
+                    project: project,
+                    taskId: task.id,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
+                    branch: branch,
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: ReviewPrompt.compose(
+                        task: task, branch: branch, base: base, verification: project.settings.verification,
+                        workingDirectory: worktree.path, agent: agent.identity,
+                        comments: try CommentStore(db).list(taskId: task.id)
+                    ),
+                    model: role?.model ?? agent.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    scope: .reviewer
+                ),
+                placeholder: placeholder,
+                port: port
+            )
+            return WorkerSpawn(
+                setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch,
+                sharesCheckout: false, warnings: []
+            )
+        } catch {
+            throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
+        }
+    }
+
+    /// SPEC §13.1 checking: the follow-up checker holds a triager grant, so it reads and grades and
+    /// changes nothing, in a detached checkout of the round branch's tip, bound to a synthetic
+    /// `followup_check` task. `roles.followupCheck` picks the roster agent, whose plugin dirs it runs with.
+    private func spawnFollowupCheck(_ watch: PRWatch, round: PRRound, project: Project) async throws {
+        guard let port = serverPort else { throw SupervisorError.serverNotRunning }
+        try requireNoShutdown(projectId: project.id)
+        if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
+            throw SupervisorError.capRefused(reason)
+        }
+        let role = project.settings.prFollowThrough.roles.followupCheck
+        let agent = try role?.rosterAgentId.map { id -> RosterAgent in
+            guard let agent = try roster.usableAgent(id, forProject: project.id) else {
+                throw SupervisorError.rosterAgentNotUsable(id: id, projectName: project.name)
+            }
+            return agent
+        }
+        let manager = worktreeManager(for: project)
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        guard let headOid = try await offMain({ try manager.refCommit("refs/heads/\(branch)") }) else {
+            throw AgentRuntimeError("the round branch `\(branch)` does not exist")
+        }
+        guard let task = try board.createFollowupCheckTask(watchId: watch.id, headOid: headOid) else { return }
+        _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(task.id))
+        var assigned: AgentSession?
+        do {
+            let worktree = try await offMain { try manager.createDetached(name: task.id, commit: headOid) }
+            let placeholder = try board.assign(
+                taskId: task.id,
+                session: AgentSession(
+                    sessionId: "setup-\(UUID().uuidString)", projectId: project.id, taskId: task.id, role: .worker,
+                    worktreePath: worktree.path, cwd: worktree.path, state: .setup, attempt: 1,
+                    rosterAgentId: agent?.id
+                )
+            )
+            assigned = placeholder
+            beginSetup(
+                LaunchPlan(
+                    project: project,
+                    taskId: task.id,
+                    cwd: worktree,
+                    worktreePath: worktree.path,
+                    branch: headOid,
+                    configId: Self.configId(taskId: task.id, attempt: placeholder.attempt),
+                    name: Self.sessionName(for: task),
+                    prompt: FollowupCheckPrompt.compose(
+                        watch: watch, round: round, headOid: headOid, workingDirectory: worktree.path,
+                        agent: agent?.identity
+                    ),
+                    model: role?.model ?? agent?.model ?? project.settings.defaultModel,
+                    attempt: placeholder.attempt,
+                    rosterAgent: agent,
+                    scope: .triager
+                ),
+                placeholder: placeholder,
+                port: port
+            )
+        } catch {
+            if assigned == nil { try? tasks.delete(task.id) }
+            throw SupervisorError.spawnFailed(
+                worktree: manager.worktreeRoot.appendingPathComponent(task.id).path, underlying: describe(error)
+            )
+        }
+    }
+
     /// §5.2 step 3. The integrator is an ordinary worker on a worktree checked out on the epic
     /// branch, bound to a synthetic task so its token scope, report channel and board card are real.
+    /// `retrying` is an earlier integration task of this epic, respawned instead of creating another.
     @discardableResult
-    private func spawnIntegrator(epicId: String) async throws -> AgentSession {
+    private func spawnIntegrator(epicId: String, retrying existing: BoardTask? = nil) async throws -> AgentSession {
         guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
         guard let project = try projects.get(epic.projectId) else {
             throw SupervisorError.projectNotFound(epic.projectId)
@@ -891,21 +1617,26 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
         }
+        let shipsByPullRequest = try await standaloneIntegration(of: project) == .pullRequest
 
         let manager = worktreeManager(for: project)
-        let worktreeName = "epic-\(epicId)"
-        _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(worktreeName))
+        let worktreeName = HeldWorktree.epicWorktreeName(epicId: epicId)
+        let worktree = manager.worktreeRoot.appendingPathComponent(worktreeName)
+        _ = preflightWorktreePath(worktree)
         let epicBranch = epic.branch
-        let worktree = try await offMain {
-            try Self.existingWorktree(manager, name: worktreeName)
-                ?? manager.createForBranch(name: worktreeName, branch: epicBranch)
+        // SPEC §3.1: the epic worktree is created in setup, after this answers, like any task's.
+        guard !placing.contains(worktree.path) else {
+            throw SupervisorError.setupStillRunning(title: existing?.title ?? epic.title, path: worktree.path)
         }
         if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
             throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
         }
+        placing.insert(worktree.path)
+        var setupHoldsMark = false
+        defer { if !setupHoldsMark { placing.remove(worktree.path) } }
 
         let members = try tasks.list(projectId: project.id, epicId: epicId, includeArchived: true)
-            .filter { $0.origin != .integration }
+            .filter { $0.origin != .integration && $0.column != .closed }
         var deps: [String: [String]] = [:]
         for member in members {
             deps[member.id] = try tasks.deps(of: member.id)
@@ -919,7 +1650,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         let projectBase = project.baseBranch
         let facts = try await offMain { () -> [String: TaskBranchFacts] in
-            let merged = try manager.mergeStatus(worktree: worktree, branches: branchNames)
+            guard try manager.branchExists(epicBranch) else {
+                throw AgentRuntimeError("epic branch \(epicBranch) does not exist in \(manager.repoPath.path)")
+            }
+            let merged = try manager.mergeStatus(into: "refs/heads/\(epicBranch)", branches: branchNames)
             return try Self.branchFacts(
                 manager, taskIds: taskIds, epicBranch: epicBranch, baseBranch: projectBase,
                 sharedBranches: shared, merged: merged, dispatched: dispatched
@@ -927,7 +1661,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         let branches = IntegrationPlan.classify(ordered, facts: facts)
 
-        let task = try board.createIntegrationTask(epicId: epicId)
+        if let existing, let holder = try sessions.activeHolder(taskId: existing.id) {
+            throw SupervisorError.taskAlreadyHeld(title: existing.title, sessionId: holder.sessionId)
+        }
+        let task = try existing ?? board.createIntegrationTask(epicId: epicId)
+        let attempt = try sessions.forTask(task.id).count + 1
         var assigned: AgentSession?
         do {
             let placeholder = try board.assign(
@@ -939,10 +1677,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         placement: .worktree, cwd: worktree, worktreePath: worktree.path,
                         branch: epicBranch, warnings: []
                     ),
-                    attempt: 1
+                    attempt: attempt
                 )
             )
             assigned = placeholder
+            try epics.setShipsByPullRequest(epicId, shipsByPullRequest)
             // A PR-open epic stays so: its pull request, not this integrator, decides when it is done.
             if epic.state != .pullRequestOpen { try epics.setState(epicId, .integrating) }
             beginSetup(
@@ -964,12 +1703,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     attempt: placeholder.attempt
                 ),
                 placeholder: placeholder,
-                port: port
+                port: port,
+                checkout: PendingCheckout(
+                    manager: manager, taskId: task.id, name: worktreeName, branch: epicBranch, base: nil
+                ),
+                placingMarks: [worktree.path]
             )
+            setupHoldsMark = true
             return placeholder
         } catch {
             // A task with a session row on it cannot be deleted; the failure path below owns it.
-            if assigned == nil { try? tasks.delete(task.id) }
+            if assigned == nil, existing == nil { try? tasks.delete(task.id) }
             throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
         }
     }
@@ -978,7 +1722,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         try await recording { try await stopSession(sessionId, by: .human) }
     }
 
-    private func stopSession(_ sessionId: String, by actor: BoardActor) async throws {
+    private func stopSession(_ sessionId: String, by actor: BoardActor, cause: SessionTermination? = nil) async throws {
         let session = try requireSession(sessionId)
         if let shortId = session.shortId {
             try await stopAgent(session, shortId: shortId)
@@ -989,25 +1733,70 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.sessionHasNoShortId(sessionId)
         }
         let salvage = await branchSalvage(taskId: session.taskId)
-        try board.terminate(sessionId: sessionId, cause: .stopped(by: actor), salvage: salvage)
+        try terminateSession(sessionId, cause: cause ?? .stopped(by: actor), salvage: salvage)
         try grants.revokeAll(sessionId: sessionId)
         announceReports(projectId: session.projectId)
         refreshSleepAssertion()
     }
 
-    /// SPEC §8.5: no process a session started outlives it. The host's tree is read before
-    /// `claude stop`, which leaves a `run_in_background` command running under launchd.
-    private func stopAgent(_ session: AgentSession, shortId: String, listing: [AgentInfo]? = nil) async throws {
-        let listed = await listingOrFetch(listing)
+    /// SPEC §8.5: no process a session started outlives it, the host included. The host's tree is
+    /// read before `claude stop`, which leaves a `run_in_background` command running under launchd.
+    private func stopAgent(_ session: AgentSession, shortId: String, listing: AgentListing? = nil) async throws {
+        let listed = await agentListing(listing)
+        let hostPID = Self.hostPID(of: session, in: listed.agents)
+        let host = verifiedHost(hostPID, in: listed)
         var tree: Set<PIDIdentity> = []
-        if let host = Self.hostPID(of: session, in: listed) { tree = await SessionProcessReaper.tree(ofHost: host) }
+        if let hostPID { tree = await SessionProcessReaper.tree(ofHost: hostPID) }
         do {
             try await runtime.stop(shortId: shortId)
         } catch {
-            await reapProcesses(of: session, tree: tree, listing: listed)
+            await reapProcesses(of: session, tree: tree, listing: listed.agents)
+            await endHost(host, of: session, listed: listed.agents, stopError: describe(error))
             throw error
         }
-        await reapProcesses(of: session, tree: tree, listing: listed)
+        try? sessions.markAgentStopped(session.sessionId)
+        await reapProcesses(of: session, tree: tree, listing: listed.agents)
+        await endHost(host, of: session, listed: listed.agents, stopError: nil)
+    }
+
+    private func verifiedHost(_ pid: pid_t?, in listing: AgentListing) -> PIDIdentity? {
+        pid.flatMap { SessionProcessReaper.host($0, listedAtMicros: listing.readAtMicros, isClaude: isClaudeHost) }
+    }
+
+    /// SPEC §8.5: `claude stop` answering is not proof its host ended. One that outlives the signals
+    /// as well is reported by pid, since git commits never pass through the board. An empty `listed`
+    /// is what a `claude agents` that failed under load looks like, so the host is looked up again.
+    private func endHost(
+        _ captured: PIDIdentity?, of session: AgentSession, listed: [AgentInfo], stopError: String?
+    ) async {
+        var host = captured
+        if host == nil, listed.isEmpty {
+            let relisted = await agentListing(nil)
+            host = verifiedHost(Self.hostPID(of: session, in: relisted.agents), in: relisted)
+        }
+        guard let host, !(await SessionProcessReaper.end(host: host)) else { return }
+        let title = (try? session.taskId.flatMap { try tasks.get($0) })?.title
+        var lines = [
+            "A stopped session's claude process is still running",
+            "Task: \(session.taskId ?? "none")\(title.map { " (\($0))" } ?? "")",
+            "Session: \(session.sessionId) (attempt \(session.attempt))",
+            "Process: pid \(host.pid) survived `claude stop`, SIGTERM and SIGKILL.",
+        ]
+        if let stopError { lines.append("`claude stop` failed: \(stopError)") }
+        lines.append(
+            "Its board tools are refused once the session is ended, but it can still edit files and commit"
+                + (session.worktreePath.map { " in \($0)" } ?? "") + ". End it by hand: `kill -9 \(host.pid)`."
+        )
+        _ = try? ReportStore(db).insert(
+            projectId: session.projectId, taskId: session.taskId, sessionId: session.sessionId, kind: .failed,
+            body: lines.joined(separator: "\n")
+        )
+        announceReports(projectId: session.projectId)
+        post(
+            "Stopped worker still running",
+            body: "\(session.displayShortId) (pid \(host.pid)) survived claude stop and SIGKILL.",
+            projectId: session.projectId, category: .workerFailures, subject: .session(session.sessionId)
+        )
     }
 
     /// SPEC §8.5. The worktree rule is off for a shared checkout, and while another live session
@@ -1036,6 +1825,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return (try? await runtime.listSessions()) ?? []
     }
 
+    private func agentListing(_ listing: AgentListing?) async -> AgentListing {
+        if let listing { return listing }
+        return AgentListing(await listingOrFetch(nil))
+    }
+
+    /// A `claude agents` read and when it returned, which no host it names can have started after.
+    private struct AgentListing {
+        var agents: [AgentInfo]
+        var readAtMicros: Int64
+
+        init(_ agents: [AgentInfo]) {
+            self.agents = agents
+            readAtMicros = Int64(Date().timeIntervalSince1970 * 1_000_000)
+        }
+    }
+
     private static func hostPID(of session: AgentSession, in listing: [AgentInfo]) -> pid_t? {
         listing.first { info in
             info.sessionId == session.sessionId || (session.shortId != nil && info.id == session.shortId)
@@ -1059,6 +1864,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     ) async throws {
         do {
             let sessionId = session.sessionId
+            // SPEC §5: until the row is active again only this mark keeps a reap out of the worktree.
+            if let path = session.worktreePath {
+                if tearingDown.contains(Self.resolved(path)) { throw SupervisorError.worktreeBeingRemoved(path: path) }
+                if placing.contains(path) {
+                    let title = (try? session.taskId.flatMap { try tasks.get($0) })?.title ?? path
+                    throw SupervisorError.setupStillRunning(title: title, path: path)
+                }
+                placing.insert(path)
+            }
+            defer { if let path = session.worktreePath { placing.remove(path) } }
             resuming.insert(sessionId)
             defer { resuming.remove(sessionId) }
             guard let port = serverPort else { throw SupervisorError.serverNotRunning }
@@ -1066,12 +1881,31 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(session.projectId) else {
                 throw SupervisorError.projectNotFound(session.projectId)
             }
+            if let holder = try sessions.activeHolder(taskId: taskId), holder.sessionId != sessionId {
+                let title = (try? tasks.get(taskId))??.title ?? taskId
+                throw SupervisorError.taskAlreadyHeld(title: title, sessionId: holder.sessionId)
+            }
+            if let path = session.worktreePath, let holder = try sessions.activeHolder(worktreePath: path),
+               holder.sessionId != sessionId {
+                throw SupervisorError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
+            }
+            // SPEC §5.1: a reviewer's row says `worker`; only its grant records what it was spawned as.
+            let granted = try grants.forSession(sessionId)
+            let live = granted.first { !$0.isRevoked }
+            let scope = (live ?? granted.last)?.scope ?? .worker
+            if scope == .reviewer, let task = try tasks.get(taskId), task.column != .review {
+                throw SupervisorError.reviewTaskNotInReview(title: task.title, column: task.column)
+            }
+            // SPEC §13.2: the grant and config below are a worker's, and a triage is cheap to start over.
+            if let task = try tasks.get(taskId), task.origin.isPullRequestReader {
+                throw SupervisorError.triageNotResumable(title: task.title)
+            }
             let merge = mergingEpic ? try await epicMerge(for: session, taskId: taskId, project: project) : nil
             let token: String
-            if let grant = try grants.forSession(sessionId).first(where: { !$0.isRevoked }) {
+            if let grant = live {
                 token = grant.token
             } else {
-                let grant = try grants.issue(projectId: project.id, scope: .worker, taskId: taskId)
+                let grant = try grants.issue(projectId: project.id, scope: scope, taskId: taskId)
                 try grants.bind(token: grant.token, sessionId: sessionId)
                 token = grant.token
             }
@@ -1081,7 +1915,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 port: port,
                 token: token,
                 autoModeJSON: project.settings.autoModeJSON,
-                extraMcpServers: nil
+                extraMcpServers: nil,
+                fileLocks: SharedCheckoutGroup.isMember(session, of: project)
             )
             let resumed = try await runtime.resume(
                 sessionId: sessionId,
@@ -1094,7 +1929,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             try sessions.markResumed(sessionId)
             if let task = try tasks.get(taskId) {
                 if task.failed { try tasks.setFailed(taskId, false, reason: nil) }
-                if task.column != .running { try tasks.move(taskId, to: .running) }
+                if scope != .reviewer, task.column != .running { try tasks.move(taskId, to: .running) }
             }
         } catch {
             lastError = describe(error)
@@ -1131,7 +1966,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     } else {
                         throw SupervisorError.sessionHasNoShortId(session.sessionId)
                     }
-                    try board.terminate(sessionId: session.sessionId, cause: .stopped(by: .human))
+                    try terminateSession(session.sessionId, cause: .stopped(by: .human))
                 } catch {
                     firstFailure = firstFailure ?? error
                 }
@@ -1143,47 +1978,112 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func accept(taskId: String) async throws {
-        try await accept(taskId: taskId, acceptedBy: .human)
+        try await accept(taskId: taskId, acceptedBy: .human, landsAfterReturning: false)
     }
 
+    /// The accept a tool call makes. Landing a shared branch runs the repository's `post-checkout`
+    /// hook and teardown runs `WorktreeRemove` hooks, so both finish after the caller has its answer (SPEC §6).
     func accept(taskId: String, acceptedBy: TaskAcceptance) async throws {
+        try await accept(taskId: taskId, acceptedBy: acceptedBy, landsAfterReturning: true)
+    }
+
+    private func accept(taskId: String, acceptedBy: TaskAcceptance, landsAfterReturning: Bool) async throws {
         try await recording {
             guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
             guard let project = try projects.get(task.projectId) else {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
-            try await stopLiveSessions(onTask: taskId, sparing: acceptedBy.acceptingSessionId, by: acceptedBy.actor)
+            // SPEC §13.1: a round's branch is pushed onto its pull request, never merged as a task branch.
+            if task.origin == .fixRound { throw SupervisorError.fixRoundNotAcceptable(title: task.title) }
+            let sparing = acceptedBy.acceptingSessionId
+            if !landsAfterReturning {
+                try await stopLiveSessions(onTask: taskId, sparing: sparing, by: acceptedBy.actor)
+            }
             try board.accept(taskId: taskId, acceptedBy: acceptedBy)
+            let acceptanceReport = try? ReportStore(db).latest(taskId: taskId)?.id
             let taskSessions = try sessions.forTask(taskId)
             for session in taskSessions {
                 try grants.revokeAll(sessionId: session.sessionId)
                 try fileLocks.releaseAll(sessionId: session.sessionId)
             }
-            // SPEC §5: a task branch lands before its worktree is removed, which can take a minute
-            // on a large repository while a dependent cut from the target lacks this work. A shared
-            // branch has no worktree to wait on and lands only once every member is accepted.
-            if sharedBranch(of: task) != nil {
-                report(await tearDownWorktrees(of: taskSessions, task: task, project: project))
-                await landAcceptedBranch(task: task, project: project)
-            } else {
-                let before = lastError
-                await landAcceptedBranch(task: task, project: project)
-                let landingNotice = lastError == before ? nil : lastError
-                let notices = await tearDownWorktrees(of: taskSessions, task: task, project: project)
-                if !notices.isEmpty { report([landingNotice].compactMap { $0 } + notices) }
+            // Claimed now, so no reap takes the worktree for an orphan while the landing runs (SPEC §5).
+            let claim = claimTeardown(of: ownWorktreePaths(task.id, sessions: taskSessions, project: project))
+            guard landsAfterReturning else {
+                await landAndTearDown(task: task, project: project, claim: claim, report: acceptanceReport)
+                return
             }
-            announceReports(projectId: task.projectId)
+            // SPEC §6: `claude stop` is bounded at 15s per step, which a few live sessions add past 60s.
+            inBackground { supervisor in
+                do {
+                    try await supervisor.stopLiveSessions(onTask: taskId, sparing: sparing, by: acceptedBy.actor)
+                } catch {
+                    supervisor.keepUnlanded(task: task, claim: claim, stopFailure: error)
+                    return
+                }
+                await supervisor.landAndTearDown(task: task, project: project, claim: claim, report: acceptanceReport)
+            }
+        }
+    }
+
+    private func landAndTearDown(task: BoardTask, project: Project, claim: TeardownClaim, report: Int64?) async {
+        // SPEC §5: a task branch lands before its worktree is removed, which can take a minute
+        // on a large repository while a dependent cut from the target lacks this work. A shared
+        // branch has no worktree to wait on and lands only once every member is accepted.
+        if sharedBranch(of: task) != nil {
+            await startTeardown(claim, task: task, project: project, report: report, landingNotice: nil)
+            await landAcceptedBranch(task: task, project: project)
+        } else {
+            let before = lastError
+            await landAcceptedBranch(task: task, project: project)
+            let landingNotice = lastError == before ? nil : lastError
+            await startTeardown(claim, task: task, project: project, report: report, landingNotice: landingNotice)
+        }
+        announceReports(projectId: task.projectId)
+    }
+
+    /// A session that could not be stopped may still be working in the checkout, so nothing lands or is removed under it.
+    private func keepUnlanded(task: BoardTask, claim: TeardownClaim, stopFailure: Error) {
+        releaseTeardown(claim)
+        let branch = sharedBranch(of: task) ?? Self.taskBranchPrefix + task.id
+        recordLanding(
+            task: task, epic: task.epicId.flatMap { try? epics.get($0) }, landing: .unlanded,
+            detail: "`\(branch)` was not landed and its worktree was kept: a session on the task could not be "
+                + "stopped (\(describe(stopFailure))).",
+            advice: "Stop that session, then merge `\(branch)` by hand."
+        )
+        announceReports(projectId: task.projectId)
+    }
+
+    /// A teardown hook may run for minutes, and an accept may be answering an MCP call, so behind a
+    /// hook the teardown runs after the caller returns. `claim` is taken before this is called, so a
+    /// reconcile scheduled ahead of the background task already sees those worktrees as taken.
+    private func startTeardown(
+        _ claim: TeardownClaim, task: BoardTask, project: Project, report reportId: Int64?, landingNotice: String?
+    ) async {
+        guard project.settings.worktreeTeardown != nil else {
+            await finishTeardown(claim, task: task, project: project, report: reportId, landingNotice: landingNotice)
+            return
+        }
+        inBackground { supervisor in
+            if await supervisor.finishTeardown(
+                claim, task: task, project: project, report: reportId, landingNotice: landingNotice
+            ) {
+                supervisor.announceReports(projectId: task.projectId)
+            }
         }
     }
 
     /// SPEC §5: a rostered reviewer runs in the worker's own worktree, so a decision taken over its
     /// head must end it before anything removes that checkout. Only an agent `claude agents` still
     /// lists as live can abort the decision; a row whose process is gone is ended as vanished.
-    private func stopLiveSessions(onTask taskId: String, sparing: String? = nil, by actor: BoardActor) async throws {
+    private func stopLiveSessions(
+        onTask taskId: String, sparing: String? = nil, by actor: BoardActor, closing: Bool = false
+    ) async throws {
+        let closingCause: SessionTermination? = closing ? .taskClosing(by: actor) : nil
         var listing: [AgentInfo]?
         for session in try sessions.forTask(taskId) where session.state.isActive && session.sessionId != sparing {
             do {
-                try await stopSession(session.sessionId, by: actor)
+                try await stopSession(session.sessionId, by: actor, cause: closingCause)
             } catch {
                 if listing == nil {
                     guard let listed = try? await runtime.listSessions() else { throw error }
@@ -1191,7 +2091,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
                 guard let info = Self.liveListing(of: session, in: listing ?? []) else {
                     let salvage = await branchSalvage(taskId: session.taskId)
-                    try board.terminate(sessionId: session.sessionId, cause: .vanished, salvage: salvage)
+                    try terminateSession(session.sessionId, cause: closingCause ?? .vanished, salvage: salvage)
                     await reapProcesses(of: session, listing: listing)
                     try grants.revokeAll(sessionId: session.sessionId)
                     announceReports(projectId: session.projectId)
@@ -1200,8 +2100,36 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
                 guard session.shortId == nil, let shortId = info.id else { throw error }
                 try sessions.setShortId(session.sessionId, shortId)
-                try await stopSession(session.sessionId, by: actor)
+                try await stopSession(session.sessionId, by: actor, cause: closingCause)
             }
+        }
+    }
+
+    /// True when it wrote a report the orchestrator has to be told about.
+    @discardableResult
+    private func finishTeardown(
+        _ claim: TeardownClaim, task: BoardTask, project: Project, report reportId: Int64?, landingNotice: String?
+    ) async -> Bool {
+        let cleanup = await tearDownWorktrees(claim, task: task, project: project)
+        if !cleanup.notices.isEmpty { report([landingNotice].compactMap { $0 } + cleanup.notices) }
+        let findings = cleanup.findings.map(\.text)
+        return (try? board.recordWorktreeCleanup(taskId: task.id, reportId: reportId, findings: findings)) ?? false
+    }
+
+    /// Waits for teardowns still running behind a teardown hook, and for the landing of an accept
+    /// a tool call made.
+    func waitForTeardowns() async {
+        while let task = teardownTasks.values.first {
+            await task.value
+        }
+    }
+
+    private func inBackground(_ body: @escaping @MainActor (WorkerSupervisor) async -> Void) {
+        let id = UUID()
+        teardownTasks[id] = _Concurrency.Task { [weak self] in
+            guard let self else { return }
+            await body(self)
+            teardownTasks[id] = nil
         }
     }
 
@@ -1235,6 +2163,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    /// SPEC §5: the stored choice, else what `origin` resolves to. A git failure keeps this project's
+    /// last resolved answer and, with none, throws rather than guess local merge.
+    private func standaloneIntegration(of project: Project) async throws -> StandaloneIntegration {
+        if let stored = project.settings.standaloneIntegration { return stored }
+        let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
+        do {
+            let resolved = try await offMain { try publisher.defaultStandaloneIntegration() }
+            integrationDefaults[project.id] = resolved
+            return resolved
+        } catch {
+            guard let previous = integrationDefaults[project.id] else { throw error }
+            return previous
+        }
+    }
+
     private func mergeTaskBranch(task: BoardTask, epic: Epic?, project: Project, into target: String) async {
         let manager = worktreeManager(for: project)
         let taskBranch = Self.taskBranchPrefix + task.id
@@ -1244,9 +2187,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let epicBranch = epic?.branch
         var byPullRequest = false
         if epic == nil {
-            let settings = project.settings
-            let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
-            byPullRequest = (try? await offMain { publisher.standaloneIntegration(settings) }) == .pullRequest
+            do {
+                byPullRequest = try await standaloneIntegration(of: project) == .pullRequest
+            } catch {
+                recordLanding(
+                    task: task, epic: epic, landing: .unlanded,
+                    detail: "`\(taskBranch)` was not merged into `\(target)`: Agent Board could not read the "
+                        + "project's origin remote to choose between pull request and local merge. \(describe(error))",
+                    advice: "Merge `\(taskBranch)` into `\(target)` by hand or open a pull request for it, and "
+                        + "choose an integration in the project's Publishing settings so the next accept need not ask git."
+                )
+                return
+            }
         }
         let outcome: BranchMerge?
         do {
@@ -1405,6 +2357,645 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         for projectId in touched { announceReports(projectId: projectId) }
     }
 
+    /// SPEC §13.1: watches the user's open, non-draft pull requests in every project with PR
+    /// follow-through on, mapping each repository to the project whose `origin` names it, then
+    /// advances each watch through settling and triaging. No project enabled means no `gh` call at all.
+    /// A call made while a poll runs waits for it and then polls again, so it always reads state
+    /// written before the call.
+    func pollPRWatches() async {
+        while let inFlight = prWatchPoll { _ = await inFlight.task.value }
+        _ = await startPRWatchPoll(scope: nil)
+    }
+
+    /// SPEC §13.4 Refresh: the same poll and advance, for only these watches. A poll already running
+    /// that covers them is joined rather than overlapped; one that does not is waited out first. A
+    /// joined poll's failures are filtered to these watches' own projects first, so a wider poll's
+    /// failure on another project's watches never surfaces here.
+    /// Throws what kept the poll from reading them.
+    func pollPRWatches(watchIds: Set<String>) async throws {
+        while let inFlight = prWatchPoll {
+            let failures = await inFlight.task.value
+            if inFlight.scope.map({ watchIds.isSubset(of: $0) }) ?? true {
+                let scoped = scopedToOwnProjects(failures, watchIds: watchIds)
+                if scoped.isEmpty { return }
+                throw PRWatchRefreshFailure(failures: scoped.map(\.message))
+            }
+        }
+        let failures = await startPRWatchPoll(scope: watchIds)
+        if !failures.isEmpty { throw PRWatchRefreshFailure(failures: failures.map(\.message)) }
+    }
+
+    /// Keeps only the failures that belong to `watchIds`' own projects, plus any failure with no
+    /// project (one that affects every enabled project alike, such as `gh search prs` itself failing).
+    private func scopedToOwnProjects(_ failures: [PRWatchPollFailure], watchIds: Set<String>) -> [PRWatchPollFailure] {
+        let projectIds = Set(watchIds.compactMap { try? prWatches.get($0)?.projectId })
+        return failures.filter { $0.projectId == nil || projectIds.contains($0.projectId!) }
+    }
+
+    private func startPRWatchPoll(scope: Set<String>?) async -> [PRWatchPollFailure] {
+        let poll = _Concurrency.Task {
+            let failures = await runPRWatchPoll(scope: scope)
+            prWatchPoll = nil
+            isPollingPRWatches = false
+            return failures
+        }
+        prWatchPoll = (scope, poll)
+        isPollingPRWatches = true
+        return await poll.value
+    }
+
+    private func runPRWatchPoll(scope: Set<String>?) async -> [PRWatchPollFailure] {
+        let enabled = ((try? projects.list()) ?? []).filter { $0.settings.prFollowThrough.enabled }
+        guard !enabled.isEmpty else {
+            setPRPollProblems([:], enabled: [])
+            return []
+        }
+        let failures = await refreshPRWatches(enabled, scope: scope)
+        await advancePRWatches(enabled, scope: scope)
+        for project in enabled { announceReports(projectId: project.id) }
+        return failures
+    }
+
+    /// Writes each poll through `PRWatchStore` and moves a watch among watching, settling,
+    /// readyToVerify and verified, bannering a PR's arrival in readyToVerify once per head oid
+    /// (§13.4); a watch whose PR left the open list settles to merged or closed by `gh pr view`,
+    /// and one whose PR went back to draft is deleted. A `scope` limits the reads and writes to those
+    /// watches. Returns what could not be read for the watches in scope, each keyed to the project
+    /// it is about (SPEC §13.4): a Refresh that joins a wider poll filters this down to its own
+    /// projects, so another project's unreadable `origin` never shows in a section that does not hold it.
+    private func refreshPRWatches(_ enabled: [Project], scope: Set<String>?) async -> [PRWatchPollFailure] {
+        func key(_ repository: String, _ number: Int) -> String { "\(repository.lowercased())#\(number)" }
+        let scoped = scope.map { ids in ids.compactMap { try? prWatches.get($0) } }
+        let scopedKeys = scoped.map { Set($0.map { key("\($0.repoOwner)/\($0.repoName)", $0.number) }) }
+        let scopedProjects = scoped.map { Set($0.map(\.projectId)) }
+        var unread: [PRWatchPollFailure] = []
+        var projectByRepo: [String: Project] = [:]
+        var problems: [String: String] = [:]
+        for project in enabled {
+            let repo = URL(fileURLWithPath: project.repoPath)
+            let remote: String
+            do {
+                remote = try await offMain { try BranchPublisher(repoPath: repo).requireRemote() }
+                prWatchRemoteFailures[project.id] = nil
+            } catch PublishFailure.noRemote {
+                prWatchRemoteFailures[project.id] = nil
+                continue
+            } catch {
+                let failures = (prWatchRemoteFailures[project.id] ?? 0) + 1
+                prWatchRemoteFailures[project.id] = failures
+                NSLog("PR watch could not read %@'s origin (%d in a row): %@", project.name, failures, describe(error))
+                if failures >= Self.prWatchFailuresBeforeAttention {
+                    problems[project.id] = "Reading `origin` has failed \(failures) times in a row: \(describe(error))"
+                }
+                if scopedProjects?.contains(project.id) ?? true {
+                    unread.append(PRWatchPollFailure(
+                        projectId: project.id, message: "Could not read \(project.name)'s `origin`: \(describe(error))"
+                    ))
+                }
+                continue
+            }
+            guard let slug = PullRequestLaunch.githubSlug(remoteURL: remote)?.lowercased(),
+                  projectByRepo[slug] == nil
+            else { continue }
+            projectByRepo[slug] = project
+        }
+        guard let anyProject = projectByRepo.values.first else {
+            setPRPollProblems(problems, enabled: enabled)
+            return unread
+        }
+
+        let reader = pullRequestWatch
+        let authored: [AuthoredPullRequest]
+        do {
+            let cwd = URL(fileURLWithPath: anyProject.repoPath)
+            authored = try await offMain { try reader.authored(cwd: cwd) }
+            prWatchSearchFailures = 0
+        } catch let failure as PullRequestWatchFailure where failure.ghUnavailable {
+            for project in enabled { problems[project.id] = failure.description }
+            setPRPollProblems(problems, enabled: enabled)
+            return unread + [PRWatchPollFailure(projectId: nil, message: failure.description)]
+        } catch {
+            prWatchSearchFailures += 1
+            NSLog("PR watch poll failed (%d in a row): %@", prWatchSearchFailures, describe(error))
+            if prWatchSearchFailures >= Self.prWatchFailuresBeforeAttention {
+                for project in enabled {
+                    problems[project.id] =
+                        "`gh search prs` has failed \(prWatchSearchFailures) times in a row: \(describe(error))"
+                }
+                setPRPollProblems(problems, enabled: enabled)
+            }
+            return unread + [PRWatchPollFailure(projectId: nil, message: "`gh search prs` failed: \(describe(error))")]
+        }
+
+        let drafts = Set(authored.filter(\.isDraft).map { key($0.repository, $0.number) })
+        let open = authored.filter {
+            !$0.isDraft && projectByRepo[$0.repository.lowercased()] != nil
+                && scopedKeys?.contains(key($0.repository, $0.number)) ?? true
+        }
+        let stillOpen = Set(open.map { key($0.repository, $0.number) })
+        for (slug, prs) in Dictionary(grouping: open, by: { $0.repository.lowercased() }) {
+            guard let project = projectByRepo[slug] else { continue }
+            let parts = prs[0].repository.split(separator: "/").map(String.init)
+            guard parts.count == 2 else { continue }
+            let cwd = URL(fileURLWithPath: project.repoPath)
+            let numbers = prs.map(\.number)
+            let ignoring = Set(project.settings.prFollowThrough.checksAwaitingVerification)
+            let snapshots: [PRSnapshot]
+            do {
+                snapshots = try await offMain {
+                    try reader.snapshots(owner: parts[0], name: parts[1], numbers: numbers, ignoring: ignoring, cwd: cwd)
+                }
+            } catch {
+                unread.append(PRWatchPollFailure(
+                    projectId: project.id, message: "Could not read \(prs[0].repository)'s pull requests: \(describe(error))"
+                ))
+                continue
+            }
+            for snapshot in snapshots
+            where scopedKeys?.contains(key("\(snapshot.repoOwner)/\(snapshot.repoName)", snapshot.number)) ?? true {
+                await applyPRSnapshot(snapshot, project: project)
+            }
+        }
+
+        let states = pullRequestStates
+        for project in enabled {
+            for watch in (try? prWatches.live(projectId: project.id)) ?? [] where scope?.contains(watch.id) ?? true {
+                let watchKey = key("\(watch.repoOwner)/\(watch.repoName)", watch.number)
+                if stillOpen.contains(watchKey) { continue }
+                if drafts.contains(watchKey) {
+                    try? prWatches.delete(watchId: watch.id)
+                    continue
+                }
+                let cwd = URL(fileURLWithPath: project.repoPath)
+                let url = watch.url
+                switch try? await offMain({ try states.state(of: url, cwd: cwd) }) {
+                case .merged: try? prWatches.setState(.merged, watchId: watch.id)
+                case .closed: try? prWatches.setState(.closed, watchId: watch.id)
+                case .open, nil: break
+                }
+            }
+        }
+        setPRPollProblems(problems, enabled: enabled)
+        return unread
+    }
+
+    /// The failed checks on an awaitingCI watch's pushed head that have no item yet, each GitHub Actions
+    /// run with the end of its failed-step log (SPEC §13.1). Empty in any other state, so a log is read
+    /// once per run.
+    private func newFailedChecks(_ snapshot: PRSnapshot, watch: PRWatch, project: Project) async throws -> [PRFailedCheck] {
+        guard watch.state == .awaitingCI, !snapshot.failedChecks.isEmpty,
+              try prWatches.currentRound(watchId: watch.id)?.pushedHeadOid == watch.headOid
+        else { return [] }
+        let known = Set(try prWatches.items(watchId: watch.id).map(\.githubNodeId))
+        let reader = pullRequestWatch
+        let cwd = URL(fileURLWithPath: project.repoPath)
+        var checks: [PRFailedCheck] = []
+        for var check in snapshot.failedChecks where !known.contains(check.githubNodeId) {
+            if let jobId = check.jobId {
+                let owner = snapshot.repoOwner, name = snapshot.repoName
+                check.logTail = await offMainResult {
+                    reader.failedLogTail(owner: owner, name: name, jobId: jobId, cwd: cwd)
+                }
+            }
+            checks.append(check)
+        }
+        return checks
+    }
+
+    /// `problems` plus each live watch's unreadable pull request from posting replies.
+    private func setPRPollProblems(_ problems: [String: String], enabled: [Project]) {
+        if !prReplyReadFailures.isEmpty {
+            let live = Set(enabled.flatMap { (try? prWatches.live(projectId: $0.id)) ?? [] }.map(\.id))
+            prReplyReadFailures = prReplyReadFailures.filter { live.contains($0.key) }
+        }
+        let all = prReplyReadFailures.values.reduce(into: problems) { $0[$1.projectId] = $0[$1.projectId] ?? $1.detail }
+        try? prWatches.setPollProblems(all)
+    }
+
+    private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) async {
+        do {
+            var watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
+            prReplyReadFailures[watch.id] = nil
+            let failed = try await newFailedChecks(snapshot, watch: watch, project: project)
+            if let settled = try prWatches.settleAwaitingCI(watchId: watch.id, failedChecks: failed) {
+                watch.state = settled
+            }
+            let open = try prWatches.openItems(watchId: watch.id)
+            if let next = PRWatchTransition.next(
+                from: watch, snapshot: snapshot, openItems: open.count,
+                itemsAwaitingRound: open.filter { $0.verdict == nil || ($0.verdict == .fix && $0.round > watch.round) }.count,
+                settings: project.settings.prFollowThrough
+            ) {
+                try prWatches.setState(next, watchId: watch.id)
+            }
+            try prWatches.applyVerifiedFreeze(watchId: watch.id)
+            // SPEC §13.4: a paused watch claims its banner without showing it, so resuming replays nothing.
+            if let ready = try prWatches.claimReadyNotification(watchId: watch.id), !ready.paused {
+                post(
+                    "Pull request ready to verify", body: "#\(ready.number) \(ready.title)",
+                    projectId: project.id, category: .prReadyToVerify, subject: .pullRequest(ready.id)
+                )
+            }
+        } catch {
+            report(["could not record \(snapshot.url): \(describe(error))"])
+        }
+    }
+
+    /// SPEC §13.1 and §13.2: a settling watch starts one triager per round once no item has arrived
+    /// for `settleMinutes` and nothing holds it, a triaging one moves on once that triage ends, a
+    /// fixing one starts its round's fixer, a checking one its reviewer and follow-up check, and a
+    /// publishing one pushes its round. Then each open decision not yet announced banners once (§13.4).
+    private func advancePRWatches(_ enabled: [Project], scope: Set<String>?) async {
+        for project in enabled {
+            for watch in (try? prWatches.live(projectId: project.id)) ?? [] where scope?.contains(watch.id) ?? true {
+                switch watch.state {
+                case .settling: await startTriageIfSettled(watch, project: project)
+                case .triaging: await settleTriageRound(watch, project: project)
+                case .fixing: await startFixRound(watch, project: project)
+                case .checking: await advanceCheck(watch, project: project)
+                case .publishing: await publishRound(watch, project: project)
+                case .stale:
+                    if let restarted = try? prWatches.restartStale(watchId: watch.id) {
+                        await startTriageIfSettled(restarted, project: project)
+                    }
+                default: break
+                }
+                announceDecisions(watchId: watch.id, project: project)
+            }
+        }
+    }
+
+    private func announceDecisions(watchId: String, project: Project) {
+        guard let decisions = try? prWatches.claimDecisionNotifications(watchId: watchId), !decisions.isEmpty,
+              let watch = try? prWatches.get(watchId), !watch.paused
+        else { return }
+        for decision in decisions {
+            post(
+                "Pull request decision waiting", body: "#\(watch.number): \(decision.decisionQuestion ?? watch.title)",
+                projectId: project.id, category: .prDecisions, subject: .pullRequest(watch.id)
+            )
+        }
+    }
+
+    private func startTriageIfSettled(_ watch: PRWatch, project: Project) async {
+        let settled = Int64.nowMillis >= watch.settleDeadline(settleMinutes: project.settings.prFollowThrough.settleMinutes)
+            || (try? prWatches.hasUntriagedCheck(watchId: watch.id)) == true
+        guard !watch.paused, settled, !isFollowThroughHeld(project: project) else { return }
+        guard ((try? prWatches.untriagedItemCount(watchId: watch.id)) ?? 0) > 0 else {
+            if (try? board.beginAnsweredFixRound(watchId: watch.id)) == .fixing {
+                await startFixRound(watch, project: project)
+            }
+            return
+        }
+        guard (try? prWatches.beginTriageRound(watchId: watch.id)) != nil else { return }
+        do {
+            try await spawnTriager(watchId: watch.id)
+        } catch {
+            failTriageRound(watch, failure: describe(error))
+        }
+    }
+
+    /// SPEC §13.1's settling holds: the daily budget, a battery below `minBatteryPercent` (§13.3) and
+    /// the §8 spawn caps, plus a shutdown order, which refuses every spawn.
+    private func isFollowThroughHeld(project: Project) -> Bool {
+        if isShuttingDown(projectId: project.id) { return true }
+        if !isOnACPower(), let minimum = project.settings.prFollowThrough.minBatteryPercent,
+           let charge = batteryPercent(), charge < minimum { return true }
+        if let budget = project.settings.prFollowThrough.dailyBudgetUSD {
+            let midnight = Int64(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970 * 1000)
+            if ((try? prWatches.followThroughSpend(projectId: project.id, since: midnight)) ?? 0) >= budget { return true }
+        }
+        guard case .allowed? = try? CapCheck(db).canSpawn(projectId: project.id) else { return true }
+        return false
+    }
+
+    private func settleTriageRound(_ watch: PRWatch, project: Project) async {
+        guard let triage = try? prWatches.triage(watchId: watch.id, round: watch.round),
+              let task = try? tasks.get(triage.taskId)
+        else {
+            failTriageRound(watch, failure: "round \(watch.round)'s triage never started")
+            return
+        }
+        switch task.column {
+        case .done:
+            do {
+                if let next = try board.applyVerdicts(watchId: watch.id), next != .fixing {
+                    await postFactualReplies(watchId: watch.id, project: project)
+                }
+            } catch {
+                report(["could not apply the triage of \(watch.url): \(describe(error))"])
+            }
+        case .closed:
+            failTriageRound(watch, failure: task.closedReason ?? "the triage was closed")
+        default:
+            // Only a crash between creating the task and assigning its session leaves one with none.
+            guard ((try? sessions.forTask(task.id)) ?? []).isEmpty else { return }
+            try? tasks.delete(task.id)
+            failTriageRound(watch, failure: "the triage never got a session")
+        }
+    }
+
+    /// SPEC §13.1 fixing and §13.5's §8 amendment: the round's one fixer task, spawned with no
+    /// approval while follow-through is on, under the settling holds and every §8 cap. A fixer that
+    /// reported starts again only after a failed check; one that ended without a report is retried
+    /// until `failedSessionsBeforePark` in a row park the watch. A round left with nothing to fix ends.
+    private func startFixRound(_ watch: PRWatch, project: Project) async {
+        do {
+            guard let round = try prWatches.currentRound(watchId: watch.id) else { return }
+            let model = project.settings.prFollowThrough.roles.fixer?.model
+            guard let taskId = try round.fixTaskId ?? board.createFixRoundTask(watchId: watch.id, model: model)?.id else {
+                try board.endFixRoundWithoutFixes(watchId: watch.id)
+                return
+            }
+            if try board.parkIfFixersFailing(watchId: watch.id) { return }
+            guard try tasks.get(taskId)?.column == .ready,
+                  try sessions.forTask(taskId).filter({ $0.reviewHead == nil && $0.state == .completed }).count
+                      <= round.checkFailures,
+                  !isFollowThroughHeld(project: project),
+                  case .proceed = try board.requestSpawn(taskId: taskId, requestedBy: "follow-through")
+            else { return }
+            try await spawn(taskId: taskId)
+        } catch {
+            NSLog("PR follow-through: the fix round of %@ did not start: %@", watch.url, describe(error))
+        }
+    }
+
+    /// SPEC §13.1 checking: starts the round's reviewer and follow-up check under the settling holds,
+    /// then settles the round once both are in. A round that cannot be checked parks its watch; one whose
+    /// check never ran is retried at the next point, up to `unavailableChecksBeforePark` times, unless its
+    /// error is one no retry can fix.
+    private func advanceCheck(_ watch: PRWatch, project: Project) async {
+        guard let round = try? prWatches.currentRound(watchId: watch.id), let taskId = round.fixTaskId,
+              let task = try? tasks.get(taskId), task.column == .review
+        else { return }
+        let held = isFollowThroughHeld(project: project)
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let manager = worktreeManager(for: project)
+        do {
+            if round.reviewVerdict == nil, try sessions.activeHolder(taskId: taskId) == nil {
+                let reviewers = try sessions.forTask(taskId).filter { $0.reviewHead != nil }
+                let neverRan = reviewers.filter { $0.stopReason?.hasPrefix(SessionTermination.setupFailedLead) == true }
+                if reviewers.count - neverRan.count > round.checkFailures {
+                    try board.parkCheck(
+                        watchId: watch.id, reason: "Round \(round.number)'s reviewer ended without a verdict."
+                    )
+                    return
+                }
+                if let last = reviewers.first, neverRan.contains(where: { $0.sessionId == last.sessionId }) {
+                    try board.recordUnavailableCheck(
+                        watchId: watch.id, tip: await roundTip(branch, manager: manager), counted: false,
+                        reason: "Round \(round.number)'s reviewer never started: \(last.stopReason ?? "")"
+                    )
+                    guard try prWatches.get(watch.id)?.state == .checking else { return }
+                }
+                if !held { try await startRoundReview(task, watch: watch) }
+            }
+            guard try prWatches.get(watch.id)?.state == .checking else { return }
+            if let checkId = round.followupTaskId {
+                if let check = try tasks.get(checkId), check.column == .closed {
+                    if check.closedReason?.hasPrefix(SessionTermination.setupFailedLead) == true {
+                        try board.recordUnavailableCheck(
+                            watchId: watch.id, tip: await roundTip(branch, manager: manager), dropFollowupCheck: true,
+                            reason: "Round \(round.number)'s follow-up check never started: \(check.closedReason ?? "")"
+                        )
+                        return
+                    }
+                    try board.parkCheck(
+                        watchId: watch.id,
+                        reason: "Round \(round.number)'s follow-up check ended before grading every item: "
+                            + (check.closedReason ?? "no reason recorded")
+                    )
+                    return
+                }
+            } else if !held, !(try prWatches.checkItems(round: round)).isEmpty {
+                try await spawnFollowupCheck(watch, round: round, project: project)
+            }
+            try board.settleCheck(watchId: watch.id)
+        } catch SupervisorError.capRefused, SupervisorError.shutdownOrdered {
+            return
+        } catch {
+            NSLog("PR follow-through: the check of %@ could not run: %@", watch.url, describe(error))
+            try? board.recordUnavailableCheck(
+                watchId: watch.id, tip: await roundTip(branch, manager: manager), retryable: Self.retryCanFix(error),
+                reason: "Round \(round.number)'s check could not run: \(describe(error))"
+            )
+        }
+    }
+
+    private func roundTip(_ branch: String, manager: WorktreeManager) async -> PRRoundTip {
+        do {
+            guard let commit = try await offMain({ try manager.refCommit("refs/heads/\(branch)") }) else { return .gone }
+            return .commit(commit)
+        } catch {
+            return .unreadable(describe(error))
+        }
+    }
+
+    /// SPEC §13.1: a check that fails on configuration parks at once, since no later poll can start it.
+    private static func retryCanFix(_ error: Error) -> Bool {
+        switch error as? SupervisorError {
+        case .rosterAgentNotUsable, .serverNotRunning, .projectNotFound, .taskNotFound, .fixRoundNotFound,
+             .notAGitRepository:
+            return false
+        default:
+            return true
+        }
+    }
+
+    /// An agent reviewer, or a park when the project's routing names none. A round with nothing on its
+    /// branch is reopened on the spot rather than handed to a reviewer.
+    private func startRoundReview(_ task: BoardTask, watch: PRWatch) async throws {
+        switch try board.assignRoundReviewer(taskId: task.id) {
+        case .agentReview(let agentId, _):
+            do {
+                _ = try await spawn(taskId: task.id, rosterAgentId: agentId, scope: .reviewer)
+            } catch let empty as NothingToReview {
+                try board.recordRoundReview(
+                    taskId: task.id, sessionId: nil, reviewerName: "Agent Board", accepted: false, text: empty.reason
+                )
+            }
+        case .humanReview(let reason):
+            try board.parkCheck(watchId: watch.id, reason: reason ?? "This round has no agent reviewer.")
+        case .autoAccept:
+            try board.parkCheck(watchId: watch.id, reason: "This round has no agent reviewer.")
+        }
+    }
+
+    /// SPEC §13.1 publishing and §13.5's D8 exception, the one push made without an approval: re-reads
+    /// the PR, freezes on the verification label, goes stale if the head left the round's base, and
+    /// otherwise fast-forwards the checked round branch onto the PR's head ref through `BranchPublisher`.
+    private func publishRound(_ watch: PRWatch, project: Project) async {
+        guard let round = try? prWatches.currentRound(watchId: watch.id), let taskId = round.fixTaskId,
+              let task = try? tasks.get(taskId)
+        else { return }
+        let settings = project.settings.prFollowThrough
+        let repo = URL(fileURLWithPath: project.repoPath)
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let states = pullRequestStates
+        let url = watch.url
+        let remote: PullRequestHead
+        do {
+            remote = try await offMain { try states.head(of: url, cwd: repo) }
+        } catch {
+            NSLog("PR follow-through: could not re-read %@ before publishing: %@", url, describe(error))
+            return
+        }
+        guard remote.isOpen else { return }
+        do {
+            if let label = settings.markVerifiedLabel,
+               remote.labels.contains(where: { $0.caseInsensitiveCompare(label) == .orderedSame }) {
+                try board.freezeRound(watchId: watch.id)
+                await dropRoundWorktree(task, project: project)
+                return
+            }
+            let manager = worktreeManager(for: project)
+            guard let tip = try await offMain({ try manager.refCommit("refs/heads/\(branch)") }) else {
+                try board.parkPublishing(watchId: watch.id, reason: "Round \(round.number)'s branch `\(branch)` is gone.")
+                await postFactualReplies(watchId: watch.id, project: project)
+                return
+            }
+            if remote.oid != tip {
+                guard remote.oid == round.baseHeadOid else {
+                    try board.markRoundStale(watchId: watch.id)
+                    await dropRoundWorktree(task, project: project)
+                    await postFactualReplies(watchId: watch.id, project: project)
+                    return
+                }
+                if let checked = round.checkedHeadOid, checked != tip {
+                    try board.parkPublishing(
+                        watchId: watch.id,
+                        reason: "Round \(round.number)'s branch moved from \(checked) to \(tip) after its check, so it was not pushed."
+                    )
+                    await postFactualReplies(watchId: watch.id, project: project)
+                    return
+                }
+                let publisher = BranchPublisher(repoPath: repo, privateTerms: settings.privateTerms)
+                let headRef = watch.headRef
+                do {
+                    _ = try await offMain { try publisher.fastForward(branch: branch, onto: headRef) }
+                } catch PublishFailure.notFastForward {
+                    try board.markRoundStale(watchId: watch.id)
+                    await dropRoundWorktree(task, project: project)
+                    await postFactualReplies(watchId: watch.id, project: project)
+                    return
+                } catch {
+                    try board.parkPublishing(
+                        watchId: watch.id, reason: "Round \(round.number) was not pushed: \(describe(error))"
+                    )
+                    await postFactualReplies(watchId: watch.id, project: project)
+                    return
+                }
+            }
+            guard try board.recordRoundPublished(watchId: watch.id, pushedHeadOid: tip) != nil else { return }
+        } catch {
+            NSLog("PR follow-through: publishing %@ could not be recorded: %@", url, describe(error))
+            return
+        }
+        await dropRoundWorktree(task, project: project)
+        await postFactualReplies(watchId: watch.id, project: project)
+        await reRequestReviews(watch, round: round.number, project: project)
+    }
+
+    private func dropRoundWorktree(_ task: BoardTask, project: Project) async {
+        guard let taskSessions = try? sessions.forTask(task.id), !taskSessions.contains(where: \.state.isActive) else { return }
+        await startTeardown(
+            claimTeardown(of: ownWorktreePaths(task.id, sessions: taskSessions, project: project)),
+            task: task, project: project, report: nil, landingNotice: nil
+        )
+    }
+
+    /// SPEC §13.2: with `postFactualReplies` on, each handled thread item still owed a reply gets one and
+    /// each review body a PR comment, its URL recorded. Nothing is resolved. A failed post is recorded on
+    /// the item, and abandoned when GitHub says its comment is gone while the pull request still reads:
+    /// GitHub says the same of a whole repository the token cannot see.
+    private func postFactualReplies(watchId: String, project: Project) async {
+        guard project.settings.prFollowThrough.postFactualReplies, let watch = try? prWatches.get(watchId),
+              let items = try? prWatches.pendingReplies(watchId: watchId), !items.isEmpty
+        else { return }
+        let pushed = Dictionary(
+            ((try? prWatches.rounds(watchId: watchId)) ?? []).map { ($0.number, $0.pushedHeadOid) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let replier = pullRequestReplies
+        let cwd = URL(fileURLWithPath: project.repoPath)
+        var readable: Bool?
+        for item in items {
+            guard let id = item.id, let body = item.postedBody(pushedHeadOid: pushed[item.round] ?? nil) else { continue }
+            do {
+                let url: String
+                if item.kind == .thread {
+                    let thread = item.githubNodeId
+                    url = try await offMain { try replier.replyToThread(threadId: thread, body: body, cwd: cwd) }
+                } else {
+                    let (owner, name, pr) = (watch.repoOwner, watch.repoName, watch.number)
+                    url = try await offMain { try replier.comment(owner: owner, name: name, number: pr, body: body, cwd: cwd) }
+                }
+                try prWatches.recordReply(itemId: id, url: url)
+            } catch {
+                NSLog("PR follow-through: the reply to %@ on %@ was not posted: %@", item.githubNodeId, watch.url, describe(error))
+                var gone = false
+                if error is PullRequestReplyTargetGone {
+                    if readable == nil { readable = await pullRequestReadsForReplies(watch, project: project) }
+                    gone = readable == true
+                }
+                try? prWatches.recordReplyFailure(itemId: id, error: describe(error), gone: gone)
+            }
+        }
+    }
+
+    /// SPEC §13.2: with `reRequestReviews` on, a pushed round asks the authors of the feedback it handled
+    /// to review again, once: the round is claimed first, and what was asked or the error is kept on it.
+    /// A failure blocks nothing else.
+    private func reRequestReviews(_ watch: PRWatch, round: Int, project: Project) async {
+        guard project.settings.prFollowThrough.reRequestReviews,
+              let authors = try? prWatches.claimReviewRequests(watchId: watch.id, round: round)
+        else { return }
+        let requester = pullRequestReviewRequests
+        let (owner, name, number) = (watch.repoOwner, watch.repoName, watch.number)
+        let cwd = URL(fileURLWithPath: project.repoPath)
+        var reviewers: [String] = []
+        var failure: String?
+        do {
+            reviewers = try await offMain {
+                try requester.reviewersToRequest(owner: owner, name: name, number: number, authors: authors, cwd: cwd)
+            }
+            if !reviewers.isEmpty {
+                let asked = reviewers
+                try await offMain { try requester.request(owner: owner, name: name, number: number, reviewers: asked, cwd: cwd) }
+            }
+        } catch {
+            NSLog("PR follow-through: review was not re-requested on %@: %@", watch.url, describe(error))
+            failure = describe(error)
+        }
+        try? prWatches.recordReviewRequests(watchId: watch.id, round: round, requested: reviewers, error: failure)
+    }
+
+    /// One `gh pr view` of the watch's pull request. One that fails raises the project's PR watch
+    /// attention until a poll reads the pull request again.
+    private func pullRequestReadsForReplies(_ watch: PRWatch, project: Project) async -> Bool {
+        let states = pullRequestStates
+        let (url, cwd) = (watch.url, URL(fileURLWithPath: project.repoPath))
+        do {
+            _ = try await offMain { try states.state(of: url, cwd: cwd) }
+            prReplyReadFailures[watch.id] = nil
+            return true
+        } catch {
+            let detail = "replies to #\(watch.number) are held because the pull request could not be read: \(describe(error))"
+            prReplyReadFailures[watch.id] = (project.id, detail)
+            try? prWatches.addPollProblem(projectId: project.id, detail: detail)
+            return false
+        }
+    }
+
+    private func failTriageRound(_ watch: PRWatch, failure: String) {
+        NSLog("PR follow-through: the triage of %@ failed: %@", watch.url, failure)
+        do {
+            try prWatches.abandonTriageRound(watchId: watch.id, failure: failure)
+        } catch {
+            report(["could not record the failed triage of \(watch.url): \(describe(error))"])
+        }
+    }
+
     /// SPEC §5.2: settles each PR-open epic against GitHub. Merged makes the epic `done`, lands the
     /// done tasks the merged head carries, and unlands those only the local epic branch carries;
     /// closed returns it to `active` with a `decision` report. Returns the projects that gained a report.
@@ -1489,10 +3080,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// The shared branch `task` ran on, or nil when it had a worktree of its own. Read from its
     /// newest session that carries a branch, so a task retried into a worktree after a shared
-    /// attempt is treated as the worktree task it now is.
+    /// attempt is treated as the worktree task it now is (SPEC §5).
     private func sharedBranch(of task: BoardTask) -> String? {
         guard let rows = try? sessions.forTask(task.id) else { return nil }
-        guard let newest = rows.last(where: { $0.branch != nil }) else { return nil }
+        guard let newest = rows.first(where: { $0.branch != nil }) else { return nil }
         guard newest.worktreePath == nil, let branch = newest.branch,
               branch.hasPrefix(SharedCheckoutGroup.branchPrefix)
         else { return nil }
@@ -1701,7 +3292,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let manager = worktreeManager(for: project)
         let epicBranch = epic.branch
         let bases = [project.baseBranch, epicBranch]
-        let notices = await offMainNotices {
+        let notices = await offMainResult {
             do {
                 try manager.releaseSharedBranch(branch, to: epicBranch)
             } catch {
@@ -1748,6 +3339,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    func rerunReview(taskId: String) async throws {
+        try await recording {
+            guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
+            guard task.column == .review, let reviewerId = task.reviewerAgentId else {
+                throw SupervisorError.noReviewToRerun(title: task.title)
+            }
+            try await stopLiveSessions(onTask: taskId, by: .human)
+            _ = try await spawn(taskId: taskId, rosterAgentId: reviewerId, scope: .reviewer)
+        }
+    }
+
     func discard(taskId: String) async throws {
         try await recording {
             guard let task = try tasks.get(taskId) else { throw SupervisorError.taskNotFound(taskId) }
@@ -1755,29 +3357,59 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 throw SupervisorError.projectNotFound(task.projectId)
             }
             let taskSessions = try sessions.forTask(taskId)
+            discarding.insert(taskId)
+            defer { discarding.remove(taskId) }
+            var setups: [_Concurrency.Task<Void, Never>] = []
             for session in taskSessions where session.state.isActive {
                 if let shortId = session.shortId {
                     try? await stopAgent(session, shortId: shortId)
+                } else if let setup = setupTasks[session.sessionId] {
+                    setup.cancel()
+                    setups.append(setup)
                 }
-                try sessions.setState(session.sessionId, .stopped, endedAt: .nowMillis)
+                try board.endSession(session.sessionId, .stopped, endedAt: .nowMillis)
             }
             for session in taskSessions {
                 try grants.revokeAll(sessionId: session.sessionId)
             }
-            report(await tearDownWorktrees(of: taskSessions, task: task, project: project))
-            try board.discard(taskId: taskId)
+            // SPEC §5: a setup still running would create the worktree after the teardown looked for it.
+            for setup in setups { await setup.value }
+            let cleanup = await tearDownWorktrees(
+                claimTeardown(of: ownWorktreePaths(taskId, sessions: taskSessions, project: project)),
+                task: task, project: project
+            )
+            report(cleanup.notices)
+            try board.discard(taskId: taskId, cleanup: cleanup.findings.map(\.text))
             announceReports(projectId: project.id)
         }
     }
 
     func reconcile(projectId: String) async {
-        let listed: [AgentInfo]
+        while let running = worktreeSweeps[projectId] { await running.value }
+        await startWorktreeSweep(projectId: projectId) { await $0.reconcileNow(projectId: projectId) }.value
+    }
+
+    private func startWorktreeSweep(
+        projectId: String, _ body: @escaping @MainActor (WorkerSupervisor) async -> Void
+    ) -> _Concurrency.Task<Void, Never> {
+        let sweep = _Concurrency.Task { [weak self] in
+            guard let self else { return }
+            await body(self)
+            worktreeSweeps[projectId] = nil
+        }
+        worktreeSweeps[projectId] = sweep
+        return sweep
+    }
+
+    private func reconcileNow(projectId: String) async {
+        let listing: AgentListing
         do {
-            listed = try await runtime.listSessions()
+            listing = AgentListing(try await runtime.listSessions())
         } catch {
             lastError = describe(error)
             return
         }
+        let listed = listing.agents
         guard let ours = try? sessions.all(projectId: projectId) else { return }
         /// Snapshotted before the terminate pass so a session this reconcile just declared vanished
         /// keeps its worktree for one more cycle.
@@ -1797,8 +3429,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         continue
                     }
                     let salvage = await branchSalvage(taskId: session.taskId)
-                    let report = (try? board.terminate(
-                        sessionId: session.sessionId, cause: .vanished, salvage: salvage
+                    let report = (try? terminateSession(
+                        session.sessionId, cause: .vanished, salvage: salvage
                     )) ?? nil
                     queuedReport = queuedReport || report != nil
                     await reapProcesses(of: session, listing: listed)
@@ -1813,8 +3445,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if state == "stopped" || status == "stopped" {
                 if session.state.isActive {
                     let salvage = await branchSalvage(taskId: session.taskId)
-                    let report = (try? board.terminate(
-                        sessionId: session.sessionId, cause: .vanished, salvage: salvage
+                    let report = (try? terminateSession(
+                        session.sessionId, cause: .vanished, salvage: salvage
                     )) ?? nil
                     queuedReport = queuedReport || report != nil
                     await reapProcesses(of: session, listing: listed)
@@ -1823,7 +3455,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 if session.state == .stopped || session.state.isActive, let taskId = session.taskId,
                    !resuming.contains(session.sessionId),
                    (try? board.isSettled(taskId: taskId, apartFrom: session.sessionId)) == true {
-                    let queued = await stopOnSettledTask(session, listed: info, in: listed)
+                    let queued = await stopOnSettledTask(session, listed: info, in: listing)
                     queuedReport = queuedReport || queued
                 } else if [.starting, .idle, .stopped].contains(session.state) {
                     try? sessions.setState(session.sessionId, .running)
@@ -1837,23 +3469,25 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if queuedReport { announceReports(projectId: projectId) }
         await recoverStrandedTasks(projectId: projectId)
         await reapOrphanedWorktrees(projectId: projectId, keeping: liveWorktrees)
+        await reconcileSlots(projectId: projectId)
         refreshSleepAssertion()
     }
 
     /// SPEC §10, Status: nothing belongs running on a settled task, so its process is stopped and
     /// its row is not revived. True when that queued a report.
-    private func stopOnSettledTask(_ session: AgentSession, listed info: AgentInfo, in listing: [AgentInfo]) async -> Bool {
+    private func stopOnSettledTask(_ session: AgentSession, listed info: AgentInfo, in listing: AgentListing) async -> Bool {
         guard let shortId = session.shortId ?? info.id,
               (try? await stopAgent(session, shortId: shortId, listing: listing)) != nil,
               session.state.isActive
         else { return false }
-        let report = (try? board.terminate(sessionId: session.sessionId, cause: .taskSettled)) ?? nil
+        let report = (try? terminateSession(session.sessionId, cause: .taskSettled)) ?? nil
         try? grants.revokeAll(sessionId: session.sessionId)
         return report != nil
     }
 
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? {
         guard let shortId = try? sessions.get(sessionId)?.shortId else { return nil }
+        attachRequestedAt[sessionId] = .nowMillis
         return runtime.attachCommand(shortId: shortId)
     }
 
@@ -1862,7 +3496,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return try? await offMain {
             switch context.site {
             case .worktree(let path):
-                return try context.manager.diffstat(worktree: path, against: context.base)
+                return try context.manager.diffstat(worktree: path, against: context.diffBase)
             case .sharedBranch(let branch):
                 context.backfillTrailers(branch: branch)
                 return try context.manager.diffstat(taskId: taskId, on: branch, since: context.base)
@@ -1875,7 +3509,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return try? await offMain {
             switch context.site {
             case .worktree(let path):
-                return try context.manager.diffSummary(worktree: path, against: context.base)
+                return try context.manager.diffSummary(worktree: path, against: context.diffBase)
             case .sharedBranch(let branch):
                 context.backfillTrailers(branch: branch)
                 return try context.manager.diffSummary(taskId: taskId, on: branch, since: context.base)
@@ -1897,6 +3531,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         /// Set for the first shared-branch read of a branch this run, which is the one that turns
         /// pre-ledger `Agent-Board-Task` trailers into rows. Off main, because it runs git.
         var readTrailers: Bool = false
+        /// Set for a standalone task, whose branch may be cut from the remote's base (SPEC §3.1 step 1).
+        var standaloneTaskId: String?
+
+        /// Runs git, so only off main.
+        var diffBase: String {
+            standaloneTaskId.map { manager.diffBase(taskId: $0, base: base) } ?? base
+        }
 
         func backfillTrailers(branch: String) {
             guard readTrailers else { return }
@@ -1922,10 +3563,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         guard let worktreePath = taskSessions
             .map({ $0.worktreePath ?? $0.cwd })
-            .first(where: { FileManager.default.fileExists(atPath: $0) })
+            .first(where: { FileManager.default.fileExists(atPath: $0) && isOwnWorktree($0, taskId: taskId, project: project) })
         else { return nil }
         return DiffContext(
-            manager: manager, site: .worktree(URL(fileURLWithPath: worktreePath)), base: project.baseBranch
+            manager: manager, site: .worktree(URL(fileURLWithPath: worktreePath)), base: project.baseBranch,
+            standaloneTaskId: task.epicId == nil ? taskId : nil
         )
     }
 
@@ -2025,7 +3667,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let branch = Self.taskBranchPrefix + taskId
         let fallbackBase = mergeTargets(for: task, project: project).last ?? project.baseBranch
         let worktree = (try? sessions.forTask(taskId).compactMap(\.worktreePath))?
-            .first { FileManager.default.fileExists(atPath: $0) }
+            .first { FileManager.default.fileExists(atPath: $0) && isOwnWorktree($0, taskId: taskId, project: project) }
             .map { URL(fileURLWithPath: $0) }
         return try? await offMain {
             try Self.readSalvage(manager: manager, branch: branch, fallbackBase: fallbackBase, worktree: worktree)
@@ -2052,29 +3694,221 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     // MARK: - Worktree and branch cleanup
 
-    /// A retried task has one worktree per attempt, so every session is torn down, not just the newest.
-    private func tearDownWorktrees(of taskSessions: [AgentSession], task: BoardTask, project: Project) async -> [String] {
-        let paths = taskSessions.compactMap(\.worktreePath).reduce(into: [String]()) { unique, path in
-            if !unique.contains(path) { unique.append(path) }
+    private struct TeardownClaim: Sendable {
+        var paths: [String] = []
+        var resolvedPaths: [String] = []
+        /// Another teardown holds one of the paths, and will delete the branch when it is done.
+        var leavesBranch = false
+    }
+
+    /// Takes every path no other teardown already holds; `releaseTeardown` gives them back.
+    private func claimTeardown(of paths: [String]) -> TeardownClaim {
+        var claim = TeardownClaim()
+        for path in paths {
+            let resolvedPath = Self.resolved(path)
+            if claim.resolvedPaths.contains(resolvedPath) { continue }
+            if tearingDown.contains(resolvedPath) {
+                claim.leavesBranch = true
+                continue
+            }
+            tearingDown.insert(resolvedPath)
+            claim.paths.append(path)
+            claim.resolvedPaths.append(resolvedPath)
         }
+        return claim
+    }
+
+    /// A retried task has one worktree per attempt, so every session's is the task's own, not just
+    /// the newest's — except a pooled slot, which is the task's only while it holds the lease.
+    private func ownWorktreePaths(_ taskId: String, sessions taskSessions: [AgentSession], project: Project) -> [String] {
+        let recorded = taskSessions.compactMap(\.worktreePath).filter { isOwnWorktree($0, taskId: taskId, project: project) }
+        guard let lease = try? slots.lease(taskId: taskId) else { return recorded }
+        return recorded + [worktreeManager(for: project).worktreeRoot.appendingPathComponent(WorktreeSlot.name(lease.slot)).path]
+    }
+
+    /// A slot a task's session once ran in may be leased to another task by now.
+    private func isOwnWorktree(_ path: String, taskId: String, project: Project) -> Bool {
+        guard let slot = WorktreeSlot.index(ofPath: path, root: worktreeManager(for: project).worktreeRoot.path) else {
+            return true
+        }
+        return (try? slots.lease(taskId: taskId))?.slot == slot
+    }
+
+    private func releaseTeardown(_ claim: TeardownClaim) {
+        tearingDown.subtract(claim.resolvedPaths)
+        for path in claim.resolvedPaths {
+            teardownWaiters.removeValue(forKey: path)?.forEach { $0.resume() }
+        }
+    }
+
+    private func awaitTeardown(of path: String) async {
+        let resolvedPath = Self.resolved(path)
+        while tearingDown.contains(resolvedPath) {
+            await withCheckedContinuation { teardownWaiters[resolvedPath, default: []].append($0) }
+        }
+    }
+
+    private func tearDownWorktrees(_ claim: TeardownClaim, task: BoardTask, project: Project) async -> WorktreeCleanup {
+        defer { releaseTeardown(claim) }
         let manager = worktreeManager(for: project)
-        let branch = Self.taskBranchPrefix + task.id
+        let branch = claim.leavesBranch ? nil : Self.taskBranchPrefix + task.id
         let bases = mergeTargets(for: task, project: project)
-        return await offMainNotices {
+        let paths = claim.paths
+        let cleanup = await offMainResult {
             Self.tearDown(manager: manager, paths: paths, branch: branch, bases: bases)
+        }
+        for slot in cleanup.releasedSlots {
+            try? slots.release(projectId: project.id, slot: slot, taskId: task.id)
+        }
+        return cleanup
+    }
+
+    /// The metering tick's reap, so orphans go without the Status view open. It starts each project's
+    /// sweep without waiting on it, and skips a project whose `reconcile` is running (SPEC §5).
+    private func reapOrphanedWorktreesOnTick(_ all: [Project]) {
+        for project in all where worktreeSweeps[project.id] == nil {
+            _ = startWorktreeSweep(projectId: project.id) { supervisor in
+                guard let ours = try? supervisor.sessions.all(projectId: project.id) else { return }
+                let live = Set(ours.filter { $0.state.isActive }.compactMap(\.worktreePath))
+                await supervisor.reapOrphanedWorktrees(projectId: project.id, keeping: live)
+            }
+        }
+    }
+
+    func waitForWorktreeSweeps() async {
+        while let sweep = worktreeSweeps.values.first {
+            await sweep.value
         }
     }
 
     /// Sessions that failed or were stopped on a task nobody accepted or discarded leave their
     /// worktree behind, as do sessions whose task record is already gone.
+    /// Behind a teardown hook the removals run in the background, so `reconcile` returns promptly.
     private func reapOrphanedWorktrees(projectId: String, keeping live: Set<String>) async {
         guard let project = try? projects.get(projectId) else { return }
         let manager = worktreeManager(for: project)
         let bases = [project.baseBranch] + ((try? epics.list(projectId: projectId)) ?? []).map(\.branch)
-        let notices = await offMainNotices {
-            Self.reap(manager: manager, keeping: live, bases: bases)
+        let keeping = live.union(tearingDown).union(placing)
+        let scan = await offMainResult {
+            Self.orphans(manager: manager, keeping: keeping, bases: bases)
         }
-        report(notices)
+        report(scan.notices)
+        // `live` predates the scan, so a spawn that created its worktree and wrote its row meanwhile is in neither.
+        guard let current = try? sessions.all(projectId: projectId) else { return }
+        let held = Set(current.filter { $0.state.isActive }.compactMap(\.worktreePath).map(Self.resolved))
+            .union(placing.map(Self.resolved))
+        let claim = claimTeardown(of: scan.orphans.filter { !held.contains($0.path) }.map(\.url.path))
+        let orphans = scan.orphans.filter { claim.paths.contains($0.url.path) }
+        let removal: @MainActor (WorkerSupervisor) async -> Void = { supervisor in
+            defer { supervisor.releaseTeardown(claim) }
+            var cleanup = await supervisor.offMainResult {
+                Self.reap(manager: manager, orphans: orphans, bases: bases)
+            }
+            cleanup.notices += await supervisor.sweepMergedBranches(manager, bases: bases)
+            supervisor.recordReap(cleanup, projectId: projectId)
+        }
+        if project.settings.worktreeTeardown != nil, !orphans.isEmpty {
+            inBackground(removal)
+        } else {
+            await removal(self)
+        }
+    }
+
+    /// SPEC §3.1 step 2: a lease outlives its task only when accept or discard could not release it
+    /// — the app quit first, the slot had uncommitted changes, or the task was closed or deleted
+    /// another way — so a lease whose task is gone, done or closed is released here. A free slot
+    /// above the project's count is retired, which is the only time a slot runs the teardown hook.
+    private func reconcileSlots(projectId: String) async {
+        guard let project = try? projects.get(projectId),
+              let rows = try? slots.slots(projectId: projectId), !rows.isEmpty
+        else { return }
+        let manager = worktreeManager(for: project)
+        var releasing: [WorktreeSlot] = []
+        var retiring: [Int] = []
+        for row in rows {
+            guard let taskId = row.taskId else {
+                if row.slot > project.settings.worktreeSlots { retiring.append(row.slot) }
+                continue
+            }
+            let column = (try? tasks.get(taskId))?.column
+            guard column == nil || column == .done || column == .closed,
+                  (try? sessions.activeHolder(worktreePath: Self.slotPath(manager, row.slot))) == nil
+            else { continue }
+            releasing.append(row)
+        }
+        let placed = Set(placing.map(Self.resolved))
+        let claim = claimTeardown(
+            of: (releasing.map(\.slot) + retiring).map { Self.slotPath(manager, $0) }.filter { !placed.contains(Self.resolved($0)) }
+        )
+        releasing = releasing.filter { claim.paths.contains(Self.slotPath(manager, $0.slot)) }
+        retiring = retiring.filter { claim.paths.contains(Self.slotPath(manager, $0)) }
+        let work: @MainActor (WorkerSupervisor) async -> Void = { [releasing, retiring] supervisor in
+            defer { supervisor.releaseTeardown(claim) }
+            let outcome = await supervisor.offMainResult {
+                Self.settleSlots(manager: manager, releasing: releasing.map(\.slot), retiring: retiring)
+            }
+            for row in releasing where outcome.released.contains(row.slot) {
+                guard let taskId = row.taskId else { continue }
+                try? supervisor.slots.release(projectId: projectId, slot: row.slot, taskId: taskId)
+            }
+            for slot in outcome.retired {
+                try? supervisor.slots.retire(projectId: projectId, slot: slot)
+            }
+            supervisor.report(outcome.notices)
+        }
+        if project.settings.worktreeTeardown != nil, !retiring.isEmpty {
+            inBackground(work)
+        } else {
+            await work(self)
+        }
+    }
+
+    private nonisolated static func slotPath(_ manager: WorktreeManager, _ slot: Int) -> String {
+        manager.worktreeRoot.appendingPathComponent(WorktreeSlot.name(slot)).path
+    }
+
+    private nonisolated static func settleSlots(
+        manager: WorktreeManager, releasing: [Int], retiring: [Int]
+    ) -> (released: [Int], retired: [Int], notices: [String]) {
+        var released: [Int] = []
+        var retired: [Int] = []
+        var notices: [String] = []
+        for slot in releasing {
+            switch releaseSlot(manager, at: URL(fileURLWithPath: slotPath(manager, slot))) {
+            case .released: released.append(slot)
+            case .kept(let reason): notices.append(reason)
+            }
+        }
+        for slot in retiring {
+            let path = URL(fileURLWithPath: slotPath(manager, slot))
+            guard FileManager.default.fileExists(atPath: path.path) else {
+                retired.append(slot)
+                continue
+            }
+            switch removeIfClean(manager, at: path) {
+            case .removed(let diagnostics, let teardownFailure):
+                retired.append(slot)
+                notices.append(contentsOf: diagnostics + [teardownFailure].compactMap { $0 })
+            case .kept(let reason):
+                notices.append(reason)
+            }
+        }
+        return (released, retired, notices)
+    }
+
+    private func recordReap(_ cleanup: WorktreeCleanup, projectId: String) {
+        report(cleanup.notices)
+        guard !cleanup.findings.isEmpty else { return }
+        let owners = (try? sessions.all(projectId: projectId)) ?? []
+        var queued = false
+        for finding in cleanup.findings {
+            let owner = owners.first { $0.worktreePath.map(Self.resolved) == Self.resolved(finding.path) }?.taskId
+            if let owner,
+               (try? board.recordWorktreeCleanup(taskId: owner, reportId: nil, findings: [finding.text])) == true {
+                queued = true
+            }
+        }
+        if queued { announceReports(projectId: projectId) }
     }
 
     private func mergeTargets(for task: BoardTask, project: Project) -> [String] {
@@ -2087,41 +3921,62 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func worktreeManager(for project: Project) -> WorktreeManager {
         WorktreeManager(
             repoPath: URL(fileURLWithPath: project.repoPath),
-            worktreeRoot: URL(fileURLWithPath: project.worktreeRoot),
-            attribution: .ledger(TaskCommitStore(db))
+            worktreeRoot: WorktreeRootRule.url(project.worktreeRoot, home: home),
+            attribution: .ledger(TaskCommitStore(db)),
+            teardown: project.settings.worktreeTeardown
         )
     }
 
     private nonisolated static func tearDown(
-        manager: WorktreeManager, paths: [String], branch: String, bases: [String]
-    ) -> [String] {
-        var notices: [String] = []
+        manager: WorktreeManager, paths: [String], branch: String?, bases: [String]
+    ) -> WorktreeCleanup {
+        var cleanup = WorktreeCleanup()
         var removedEvery = true
-        for path in paths where FileManager.default.fileExists(atPath: path) {
+        for path in paths {
+            if let slot = WorktreeSlot.index(ofPath: path, root: manager.worktreeRoot.path) {
+                switch releaseSlot(manager, at: URL(fileURLWithPath: path)) {
+                case .released: cleanup.releasedSlots.append(slot)
+                case .kept(let reason):
+                    cleanup.add(reason, at: path)
+                    removedEvery = false
+                }
+                continue
+            }
+            guard FileManager.default.fileExists(atPath: path) else { continue }
             switch removeIfClean(manager, at: URL(fileURLWithPath: path)) {
-            case .removed(let diagnostics):
-                notices.append(contentsOf: diagnostics)
+            case .removed(let diagnostics, let teardownFailure):
+                cleanup.notices.append(contentsOf: diagnostics)
+                if let teardownFailure { cleanup.add(teardownFailure, at: path) }
             case .kept(let reason):
-                notices.append(reason)
+                cleanup.add(reason, at: path)
                 removedEvery = false
             }
         }
-        guard removedEvery else { return notices }
-        notices.append(contentsOf: deleteBranch(manager, branch, bases: bases))
-        return notices
+        guard removedEvery, let branch else { return cleanup }
+        cleanup.notices.append(contentsOf: deleteBranch(manager, branch, bases: bases))
+        return cleanup
     }
 
-    private nonisolated static func reap(
+    private struct Orphan: Sendable {
+        var url: URL
+        var path: String
+        var branch: String?
+    }
+
+    private nonisolated static func orphans(
         manager: WorktreeManager, keeping live: Set<String>, bases: [String]
-    ) -> [String] {
-        guard let listed = try? manager.list() else { return [] }
+    ) -> (orphans: [Orphan], notices: [String]) {
+        guard let listed = try? manager.list() else { return ([], []) }
         let root = resolved(manager.worktreeRoot.path)
         let liveRoots = Set(live.map(resolved))
+        var orphans: [Orphan] = []
         var notices: [String] = []
         for info in listed where !info.isBare {
             let path = resolved(info.path.path)
             guard path.hasPrefix(root + "/"), !liveRoots.contains(path) else { continue }
             if info.branch?.hasPrefix(EpicStore.branchPrefix) == true { continue }
+            // An idle slot is the pool's, not an orphan; reconcile releases and retires slots itself.
+            if WorktreeSlot.index(ofPath: path, root: root) != nil { continue }
             do {
                 if try manager.hasUnmergedCommits(worktree: info.path, bases: bases) {
                     notices.append("kept orphaned worktree \(path): it has commits that are not in \(bases.joined(separator: " or "))")
@@ -2131,49 +3986,118 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 notices.append("kept orphaned worktree \(path): its merge status could not be read (\(error))")
                 continue
             }
-            switch removeIfClean(manager, at: info.path) {
-            case .removed(let diagnostics):
+            orphans.append(Orphan(url: info.path, path: path, branch: info.branch))
+        }
+        return (orphans, notices)
+    }
+
+    /// Only a teardown hook's failure is a finding here: a kept orphan is noticed again on every
+    /// sweep, and the status bar is where that belongs.
+    private nonisolated static func reap(
+        manager: WorktreeManager, orphans: [Orphan], bases: [String]
+    ) -> WorktreeCleanup {
+        var cleanup = WorktreeCleanup()
+        var notices: [String] = []
+        for orphan in orphans {
+            switch removeIfClean(manager, at: orphan.url) {
+            case .removed(let diagnostics, let teardownFailure):
                 notices.append(contentsOf: diagnostics)
-                if let branch = info.branch {
+                if let teardownFailure { cleanup.add(teardownFailure, at: orphan.path) }
+                if let branch = orphan.branch {
                     notices.append(contentsOf: deleteBranch(manager, branch, bases: bases))
                 }
             case .kept(let reason):
                 notices.append(reason)
             }
         }
-        notices.append(contentsOf: sweepMergedBranches(manager, bases: bases))
-        return notices
+        cleanup.notices.insert(contentsOf: notices, at: 0)
+        return cleanup
     }
 
     /// Task branches outlive their worktree: every accepted task before this swept them up leaves one
-    /// behind. Only failures are reported, since an unmerged branch is the normal in-flight state.
-    private nonisolated static func sweepMergedBranches(_ manager: WorktreeManager, bases: [String]) -> [String] {
+    /// behind. Only failures are reported, since an unmerged branch is the normal in-flight state. An
+    /// unreadable worktree record blocks every branch's holder check, so it is named once per sweep.
+    /// A spawn's new branch has no commits and reads as merged, so a task being placed keeps its branch,
+    /// and every other worktree-less task's path is claimed until its branch is gone (SPEC §5).
+    private func sweepMergedBranches(_ manager: WorktreeManager, bases: [String]) async -> [String] {
+        let candidates = await offMainResult { Self.worktreelessTaskBranches(manager) }
+        let placed = Set(placing.map(Self.resolved))
+        let claim = claimTeardown(of: candidates.map(\.path).filter { !placed.contains(Self.resolved($0)) })
+        defer { releaseTeardown(claim) }
+        let branches = candidates.filter { claim.paths.contains($0.path) }.map(\.branch)
+        return await offMainResult { Self.deleteMergedBranches(manager, branches, bases: bases) }
+    }
+
+    /// A branch whose worktree is on disk is kept by the holder check, so only the rest need a claim.
+    private nonisolated static func worktreelessTaskBranches(_ manager: WorktreeManager) -> [(branch: String, path: String)] {
         guard let branches = try? manager.localBranches(withPrefix: taskBranchPrefix) else { return [] }
         return branches
             .filter { !$0.hasPrefix(EpicStore.branchPrefix) && !$0.hasPrefix(SharedCheckoutGroup.branchPrefix) }
-            .flatMap { branch -> [String] in
-                do {
-                    _ = try manager.deleteBranchIfMerged(branch, into: bases)
-                    return []
-                } catch {
-                    return ["could not delete branch \(branch): \(error)"]
+            .map { ($0, manager.worktreeRoot.appendingPathComponent(String($0.dropFirst(taskBranchPrefix.count))).path) }
+            .filter { !FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private nonisolated static func deleteMergedBranches(
+        _ manager: WorktreeManager, _ branches: [String], bases: [String]
+    ) -> [String] {
+        var failures: [String] = []
+        var blocked: [String: (record: UnreadableWorktreeRecord, branches: Int)] = [:]
+        for branch in branches {
+            do {
+                if case .keptUnreadable(_, let record) = try manager.deleteBranchIfMerged(branch, into: bases) {
+                    blocked[record.directory, default: (record, 0)].branches += 1
                 }
+            } catch {
+                failures.append("could not delete branch \(branch): \(error)")
             }
+        }
+        return failures + blocked.keys.sorted().compactMap { blocked[$0] }.map {
+            "kept \($0.branches) task branch\($0.branches == 1 ? "" : "es") without checking whether they were merged: "
+                + "\($0.record). Fix that directory's permissions, or remove it if its worktree is gone."
+        }
     }
 
     private enum WorktreeTeardown {
-        case removed([String])
+        case removed([String], teardownFailure: String?)
         case kept(String)
     }
 
+    nonisolated static let dirtyPathsListed = 20
+
+    /// SPEC §5: a worktree with uncommitted changes is kept, and the teardown hook does not run in it.
     private nonisolated static func removeIfClean(_ manager: WorktreeManager, at path: URL) -> WorktreeTeardown {
         do {
-            if try manager.hasUncommittedChanges(worktree: path) {
-                return .kept("kept worktree \(path.path): it has uncommitted changes")
+            let dirty = try manager.uncommittedPaths(worktree: path)
+            if !dirty.isEmpty {
+                let listed = dirty.prefix(dirtyPathsListed).joined(separator: ", ")
+                let more = dirty.count > dirtyPathsListed ? " and \(dirty.count - dirtyPathsListed) more" : ""
+                return .kept("kept worktree \(path.path): it has uncommitted changes in \(listed)\(more)")
             }
-            return .removed(try manager.remove(path: path).hookDiagnostics)
+            let removal = try manager.remove(path: path)
+            return .removed(removal.hookDiagnostics, teardownFailure: removal.teardownFailure)
         } catch {
             return .kept("could not remove worktree \(path.path): \(error)")
+        }
+    }
+
+    private enum SlotTeardown {
+        case released
+        case kept(String)
+    }
+
+    /// SPEC §5: a slot goes back to the pool rather than being removed, and the teardown hook does
+    /// not run in it; with uncommitted changes it stays leased, like a kept worktree.
+    private nonisolated static func releaseSlot(_ manager: WorktreeManager, at path: URL) -> SlotTeardown {
+        do {
+            switch try manager.releaseSlot(at: path) {
+            case .released, .gone: return .released
+            case .dirty(let dirty):
+                let listed = dirty.prefix(dirtyPathsListed).joined(separator: ", ")
+                let more = dirty.count > dirtyPathsListed ? " and \(dirty.count - dirtyPathsListed) more" : ""
+                return .kept("kept worktree slot \(path.path) out of the pool: it has uncommitted changes in \(listed)\(more)")
+            }
+        } catch {
+            return .kept("could not return worktree slot \(path.path) to the pool: \(error)")
         }
     }
 
@@ -2181,10 +4105,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         _ manager: WorktreeManager, _ branch: String, bases: [String]
     ) -> [String] {
         do {
-            if case .kept(let branch, let reason) = try manager.deleteBranchIfMerged(branch, into: bases) {
-                return ["kept branch \(branch): \(reason)"]
+            switch try manager.deleteBranchIfMerged(branch, into: bases) {
+            case .kept(let branch, let reason): return ["kept branch \(branch): \(reason)"]
+            case .keptUnreadable(let branch, let record): return ["kept branch \(branch): \(record)"]
+            case .deleted, .noSuchBranch: return []
             }
-            return []
         } catch {
             return ["could not delete branch \(branch): \(error)"]
         }
@@ -2194,7 +4119,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
     }
 
-    private func offMainNotices(_ body: @escaping @Sendable () -> [String]) async -> [String] {
+    private func offMainResult<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
         await _Concurrency.Task.detached(priority: .userInitiated) { body() }.value
     }
 
@@ -2277,6 +4202,23 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         shellConsoles.compactMapValues(\.shellPID)
     }
 
+    /// SPEC §8.7's console roots: each orchestrator console, the Coordinator's and each shell
+    /// console. Not on `WorkerSupervising`, for the same reason as `shellConsolePIDs`.
+    func consoleProcessRoots() -> [InventoryRoot] {
+        var roots = consoles.compactMap { projectId, console in
+            console.processPID.map {
+                InventoryRoot(pid: $0, owner: ProcessOwner(role: .orchestrator, projectId: projectId, sessionId: console.sessionId))
+            }
+        }
+        if let console = coordinatorConsoleInstance, let pid = console.processPID {
+            roots.append(InventoryRoot(pid: pid, owner: ProcessOwner(role: .coordinator, sessionId: console.sessionId)))
+        }
+        for (projectId, pid) in shellConsolePIDs() where pid > 0 {
+            roots.append(InventoryRoot(pid: pid, owner: ProcessOwner(role: .humanShell, projectId: projectId)))
+        }
+        return roots
+    }
+
     func shellConsole(projectId: String) throws -> ShellConsole {
         if let existing = shellConsoles[projectId] { return existing }
         guard try projects.get(projectId) != nil else { throw SupervisorError.projectNotFound(projectId) }
@@ -2299,7 +4241,38 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 if let epicId = approval.epicId { try await spawnIntegrator(epicId: epicId) }
             case .push, .pullRequest:
                 try await publish(approval)
+            case .prItemDismissal:
+                defer { announceReports(projectId: approval.projectId) }
+                let request = try PRItemDismissalRequest.decode(approval.payload)
+                do {
+                    try await stopSessions(closedByDismissing: request.itemId)
+                } catch {
+                    try board.reportItemNotDismissed(request, projectId: approval.projectId, because: describe(error))
+                    throw error
+                }
+                try board.applyItemDismissal(approval)
+            case .prWatchResume:
+                defer { announceReports(projectId: approval.projectId) }
+                try board.applyWatchResume(approval)
             }
+        }
+    }
+
+    func dismissPRItem(itemId: Int64, reason: String) async throws {
+        try await recording {
+            guard !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw PRVerdictRejection("A dismissal needs a reason.")
+            }
+            try await stopSessions(closedByDismissing: itemId)
+            let watch = try prWatches.dismissItem(itemId: itemId, reason: reason, by: PRWatchStore.humanDismissal)
+            announceReports(projectId: watch.projectId)
+        }
+    }
+
+    /// A fixer or checker left running on a task the dismissal closes would spend on a dead round.
+    private func stopSessions(closedByDismissing itemId: Int64) async throws {
+        for taskId in try prWatches.tasksClosedByDismissing(itemId: itemId) {
+            try await stopLiveSessions(onTask: taskId, by: .human, closing: true)
         }
     }
 
@@ -2312,14 +4285,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.projectNotFound(approval.projectId)
         }
         let request = try approval.publishRequest()
-        let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
+        let publisher = BranchPublisher(
+            repoPath: URL(fileURLWithPath: project.repoPath),
+            privateTerms: project.settings.prFollowThrough.privateTerms
+        )
         let base = request.base ?? project.baseBranch
         do {
             switch approval.kind {
             case .push:
                 let result = try await offMain {
                     try publisher.push(
-                        branch: request.branch, publishedAs: request.publishedBranch, remote: request.remote
+                        branch: request.branch, publishedAs: request.publishedBranch, base: base,
+                        remote: request.remote
                     )
                 }
                 try board.recordPublished(approval: approval, summary: "Push approved: \(result.summary).")
@@ -2339,7 +4316,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     summary: "\(verb) from \(from) into \(base).",
                     url: result.url
                 )
-            case .spawn, .integration:
+            case .spawn, .integration, .prItemDismissal, .prWatchResume:
                 return
             }
         } catch {
@@ -2387,6 +4364,65 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if plan.isRefused { throw SupervisorError.epicCloseRefused(plan.message) }
             let report = try board.closeEpic(epicId: epicId, as: closure, by: .human)
             report.projectId.map { announceReports(projectId: $0) }
+        }
+    }
+
+    /// SPEC §5.2: what Remove worktrees on a done or abandoned epic's lane would remove.
+    func heldWorktrees(epicId: String) throws -> [HeldWorktree] {
+        try board.heldWorktrees(epicId: epicId)
+    }
+
+    /// SPEC §5.2: removes the worktrees a done or abandoned epic left on disk, each through the
+    /// project's teardown hook. A worktree a live session holds, or one with uncommitted changes,
+    /// is kept and named. Branches are left alone.
+    func removeEpicWorktrees(epicId: String) async throws {
+        try await recording {
+            guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
+            guard epic.state.isTerminal else { throw SupervisorError.epicStillOpen(epicId) }
+            guard let project = try projects.get(epic.projectId) else {
+                throw SupervisorError.projectNotFound(epic.projectId)
+            }
+            var findings: [WorktreeCleanupFinding] = []
+            var removable: [HeldWorktree] = []
+            for worktree in try board.heldWorktrees(epicId: epicId) {
+                if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
+                    findings.append(WorktreeCleanupFinding(
+                        taskId: worktree.taskId,
+                        text: "kept worktree \(worktree.path): session \(holder.sessionId) is still running in it"
+                    ))
+                } else {
+                    removable.append(worktree)
+                }
+            }
+            let claim = claimTeardown(of: removable.map(\.path))
+            defer { releaseTeardown(claim) }
+            for worktree in removable where !claim.paths.contains(worktree.path) {
+                findings.append(WorktreeCleanupFinding(
+                    taskId: worktree.taskId, text: "kept worktree \(worktree.path): another teardown is removing it"
+                ))
+            }
+            let manager = worktreeManager(for: project)
+            let candidates = removable.filter { claim.paths.contains($0.path) }
+            let outcomes = await offMainResult {
+                candidates.map { ($0, Self.removeIfClean(manager, at: URL(fileURLWithPath: $0.path))) }
+            }
+            var removed: [String] = []
+            var notices: [String] = []
+            for (worktree, outcome) in outcomes {
+                switch outcome {
+                case .removed(let diagnostics, let teardownFailure):
+                    removed.append(worktree.path)
+                    notices.append(contentsOf: diagnostics)
+                    if let teardownFailure {
+                        findings.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: teardownFailure))
+                    }
+                case .kept(let reason):
+                    findings.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: reason))
+                }
+            }
+            report(notices + findings.map(\.text))
+            try board.recordEpicWorktreeRemoval(epicId: epicId, removed: removed, findings: findings)
+            announceReports(projectId: project.id)
         }
     }
 
@@ -2455,8 +4491,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let order = try shutdowns.outstanding(projectId: projectId) else {
                 throw SupervisorError.noShutdownOrder
             }
-            let workers = try sessions.active(projectId: projectId)
-                .filter { $0.role == .worker && $0.state != .setup }
+            let active = try sessions.active(projectId: projectId).filter { $0.role == .worker }
+            // SPEC §13.2: a triager has no acknowledge_shutdown and is never resumed, so it is stopped
+            // outright, and its round is retried once the order lifts rather than counted as failed.
+            let triagers = Set(active.filter { session in
+                session.taskId.flatMap { try? tasks.get($0) }?.origin.isPullRequestReader == true
+            }.map(\.sessionId))
+            for triager in active where triagers.contains(triager.sessionId) {
+                if let triage = triager.taskId.flatMap({ try? prWatches.triage(taskId: $0) }) {
+                    _ = try? prWatches.abandonTriageRound(watchId: triage.watchId, failure: nil)
+                }
+                if let taskId = triager.taskId { try? prWatches.interruptFollowupCheck(taskId: taskId) }
+                try? await stopSession(triager.sessionId, by: .human)
+            }
+            let workers = active.filter { $0.state != .setup && !triagers.contains($0.sessionId) }
             for worker in workers {
                 try deliveries.enroll(orderId: order.id, sessionId: worker.sessionId, taskId: worker.taskId)
             }
@@ -2616,6 +4664,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         MacNotifier.shared.post(title: $0, body: $1, route: $2)
     }
 
+    /// Both read before each follow-through spawn (SPEC §13.1); a test substitutes the answers.
+    @ObservationIgnored var isOnACPower: @MainActor () -> Bool = { PowerSource.isOnAC() }
+    @ObservationIgnored var batteryPercent: @MainActor () -> Int? = { PowerSource.batteryPercent() }
+
     /// The gating decision for every banner that is not driven by the attention signal.
     /// `MacNotifier.post` is inert under `xctest`, so this is what the tests assert on.
     /// A project that has gone missing keeps the default, which is to notify.
@@ -2682,7 +4734,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if let shortId = session.shortId {
             try? await stopAgent(session, shortId: shortId)
         }
-        _ = try? board.terminate(sessionId: sessionId, cause: .shutdownAcknowledged(note: note ?? nil))
+        _ = try? terminateSession(sessionId, cause: .shutdownAcknowledged(note: note ?? nil))
         try? grants.revokeAll(sessionId: sessionId)
         announceReports(projectId: projectId)
         if let order = try? shutdowns.outstanding(projectId: projectId) {
@@ -2698,6 +4750,119 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func workerCompleted(projectId: String, sessionId: String) async {
         guard let session = try? sessions.get(sessionId), let shortId = session.shortId else { return }
         try? await stopAgent(session, shortId: shortId)
+        await tearDownFinishedTriage(session)
+    }
+
+    /// Every way a session ends goes through here, so a triage's checkout goes however it ended.
+    @discardableResult
+    private func terminateSession(
+        _ sessionId: String, cause: SessionTermination, salvage: BranchSalvage? = nil
+    ) throws -> Report? {
+        let report = try board.terminate(sessionId: sessionId, cause: cause, salvage: salvage)
+        if let session = try? sessions.get(sessionId), let taskId = session.taskId,
+           (try? tasks.get(taskId))?.origin.isPullRequestReader == true {
+            inBackground { await $0.tearDownFinishedTriage(session) }
+        }
+        return report
+    }
+
+    /// SPEC §13.1, §13.2: a triage or follow-up check lands nothing, and its detached checkout of the PR
+    /// head always has commits outside the project's bases, so the orphan sweep would keep it forever.
+    private func tearDownFinishedTriage(_ session: AgentSession) async {
+        guard let taskId = session.taskId, let task = try? tasks.get(taskId), task.origin.isPullRequestReader,
+              task.column == .done || task.column == .closed, let project = try? projects.get(task.projectId),
+              let taskSessions = try? sessions.forTask(taskId), !taskSessions.contains(where: \.state.isActive)
+        else { return }
+        await startTeardown(
+            claimTeardown(of: ownWorktreePaths(taskId, sessions: taskSessions, project: project)),
+            task: task, project: project, report: nil, landingNotice: nil
+        )
+    }
+
+    /// SPEC §8.5: a session the board ended is stopped again when Claude Code resumes it on its own,
+    /// as it does to deliver a background command's notification. A board resume in flight and a
+    /// human who attached after the session ended are the two restarts that are meant.
+    func endedSessionRestarted(projectId: String, sessionId: String) async {
+        guard !resuming.contains(sessionId),
+              let session = try? sessions.get(sessionId),
+              session.state == .failed || session.state == .completed
+                  || !((try? grants.hasLiveGrant(sessionId: sessionId)) ?? true),
+              let shortId = session.shortId
+        else { return }
+        if let attached = attachRequestedAt[sessionId], attached >= session.endedAt ?? 0 { return }
+        try? await stopAgent(session, shortId: shortId)
+        if let taskId = session.taskId {
+            _ = try? ProgressStore(db).append(
+                taskId: taskId, sessionId: sessionId, kind: .status,
+                text: "Claude Code resumed \(session.displayShortId), which Agent Board had already ended "
+                    + "(\(session.state.rawValue)); it was stopped again."
+            )
+        }
+    }
+
+    /// SPEC §8: one continuation per stall. A lid closed through powernap dark wakes cuts every
+    /// request within seconds, so a repeat inside the window waits for the next full wake instead.
+    func workerTurnCutBySleep(projectId: String, sessionId: String) async {
+        let awake = sleepLedger.reading()
+        if let last = sleepContinuedAt[sessionId], awake.millisAwake(since: last) < Self.sleepContinuationWindowMillis,
+           (lastFullWakeAt ?? 0) <= last {
+            sleepCutAwaitingWake.insert(sessionId)
+            return
+        }
+        guard let session = try? sessions.get(sessionId), session.projectId == projectId else { return }
+        await continueSleepCutTurn(session, now: awake.nowMillis, when: "")
+    }
+
+    /// SPEC §8: `screensDidWakeNotification` needs a lit display, which a dark wake never turns on;
+    /// `NSWorkspace.didWakeNotification` marks any system wake, and nothing documents it skipping dark ones.
+    private func observeFullWakes() {
+        guard wakeObserver == nil else { return }
+        wakeObserver = wakeCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            _Concurrency.Task { @MainActor [weak self] in await self?.screensDidWake() }
+        }
+    }
+
+    /// SPEC §8: each session still waiting on a sleep-cut turn gets one continuation per full wake.
+    func screensDidWake() async {
+        let now = sleepLedger.reading().nowMillis
+        lastFullWakeAt = now
+        let waiting = sleepCutAwaitingWake
+        sleepCutAwaitingWake = []
+        for sessionId in waiting where latestTurnWasCutBySleep(sessionId) {
+            guard let session = try? sessions.get(sessionId) else { continue }
+            await continueSleepCutTurn(session, now: now, when: " when the Mac woke")
+        }
+    }
+
+    /// Any tool call or turn end after the cut means the session moved on without help.
+    private func latestTurnWasCutBySleep(_ sessionId: String) -> Bool {
+        let turnEvents: Set<String> = ["PreToolUse", "PostToolUse", "Stop", "StopFailure"]
+        guard let latest = try? hookEvents.recent(sessionId: sessionId, limit: 50)
+            .first(where: { turnEvents.contains($0.event) })
+        else { return false }
+        return latest.event == "StopFailure"
+            && Self.payloadString("last_assistant_message", in: latest.payload) == SleepCutTurn.message
+    }
+
+    private func continueSleepCutTurn(_ session: AgentSession, now: Int64, when: String) async {
+        guard session.role == .worker, session.state.isActive, let taskId = session.taskId else { return }
+        let sessionId = session.sessionId
+        sleepContinuedAt[sessionId] = now
+        do {
+            try await resume(session) { _ in SleepCutTurn.continuation }
+            _ = try? ProgressStore(db).append(
+                taskId: taskId, sessionId: sessionId, kind: .status,
+                text: "System sleep cut off \(session.displayShortId)'s turn; Agent Board sent it one continuation\(when)."
+            )
+        } catch {
+            sleepCutAwaitingWake.insert(sessionId)
+            _ = try? ProgressStore(db).append(
+                taskId: taskId, sessionId: sessionId, kind: .error,
+                text: "System sleep cut off \(session.displayShortId)'s turn, and the continuation\(when) failed: \(describe(error))"
+            )
+        }
     }
 
     /// Stops the agent of every session this board's own rows say is finished — the backlog left by
@@ -2706,11 +4871,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Every target comes from `agent_session`, and the runtime list read afterwards can only
     /// subtract. A `claude` session with no row here is never a candidate, whatever its process
     /// looks like: argv and environment cannot tell a parked spare from a session doing real work.
+    /// A row whose agent a `claude stop` already confirmed stopped is not planned (SPEC §8.6).
     @discardableResult
     func sweepLeakedAgents(dryRun: Bool = false) async -> AgentSweepReport {
         var report = AgentSweepReport(dryRun: dryRun)
-        let rows = ((try? projects.list()) ?? []).flatMap { (try? sessions.all(projectId: $0.id)) ?? [] }
-        let listed = try? await runtime.listSessions()
+        let projectIds = ((try? projects.list()) ?? []).map(\.id)
+        let rows = projectIds.flatMap { (try? sessions.sweepCandidates(projectId: $0)) ?? [] }
+        let confirmed = projectIds.flatMap { (try? sessions.confirmedStoppedShortIds(projectId: $0)) ?? [] }
+        report.confirmedStopped = confirmed.count
+        let listing = (try? await runtime.listSessions()).map(AgentListing.init)
+        let listed = listing?.agents
         // A registry entry without a pid has no process to free. Measured on this machine: of 124
         // inactive rows `claude stop` accepted, the 8 carrying a pid were the whole 1,311 MB, and
         // the other 116 cost 60s of the 71s the sweep took and moved nothing.
@@ -2734,9 +4904,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
             do {
                 if let session = rows.first(where: { $0.sessionId == decision.sessionId }) {
-                    try await stopAgent(session, shortId: shortId, listing: listed)
+                    try await stopAgent(session, shortId: shortId, listing: listing)
                 } else {
                     try await runtime.stop(shortId: shortId)
+                    try? sessions.markAgentStopped(decision.sessionId)
                 }
                 report.stopped.append(decision)
             } catch {
@@ -2746,13 +4917,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 ))
             }
         }
-        if let listed {
-            let known = Set(rows.compactMap(\.shortId))
+        if let listed, let resident {
+            let known = Set(rows.compactMap(\.shortId)).union(confirmed)
             report.untracked = listed
                 .filter { $0.pid != nil && $0.id.map { !known.contains($0) } ?? true }
                 .count
+            report.confirmedStoppedButListed = confirmed.filter(resident.contains).count
         }
         return report
+    }
+
+    func previewLeakedAgentSweep() async -> AgentSweepReport? {
+        await sweepLeakedAgents(dryRun: true)
     }
 
     /// The orchestrator only learns of a queued report through the console notice.
@@ -2787,6 +4963,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             lastPullRequestCheck = now
             _Concurrency.Task { await self.refreshPullRequestLandings() }
         }
+        if pollsPRWatchesOnTick, now - lastPRWatchPoll >= Self.prWatchPollIntervalMillis {
+            lastPRWatchPoll = now
+            // A slow `gh` must not queue a poll per tick behind the one still running.
+            if prWatchPoll == nil { _Concurrency.Task { await self.pollPRWatches() } }
+        }
+        if now - lastOrphanReap >= Self.orphanReapIntervalMillis {
+            lastOrphanReap = now
+            reapOrphanedWorktreesOnTick(all)
+        }
+        var metered: Set<String> = []
         for project in all {
             refreshShutdownProgressIfOrdered(projectId: project.id)
             await recoverStrandedTasks(projectId: project.id)
@@ -2794,13 +4980,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let projectSessions = try? sessions.all(projectId: project.id) else { continue }
             let stallSeconds = project.settings.caps.stallSeconds
             for session in projectSessions where Self.shouldMeter(session, now: now) {
+                metered.insert(session.sessionId)
                 await meter(session, limits: limits, stallSeconds: stallSeconds, awake: awake)
             }
         }
         // Metered like an orchestrator, with no cap: `meter` enforces caps on workers only.
         for session in (try? coordinator.sessions()) ?? [] where Self.shouldMeter(session, now: now) {
+            metered.insert(session.sessionId)
             await meter(session, limits: .default, stallSeconds: 0, awake: awake)
         }
+        transcriptTailers = transcriptTailers.filter { metered.contains($0.key) }
         refreshSleepAssertion(all)
     }
 
@@ -2810,7 +4999,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func refreshSleepAssertion(_ all: [Project]? = nil) {
         guard let sleepGuard else { return }
         let projectList = all ?? ((try? projects.list()) ?? [])
-        sleepGuard.apply(projectList.flatMap { ((try? sessions.all(projectId: $0.id)) ?? []).map(\.state) })
+        sleepGuard.apply(SleepPrevention.countedStates(projectList.flatMap { (try? sessions.all(projectId: $0.id)) ?? [] }))
     }
 
     /// A pending approval and a blocked worker each stop work outright and nothing else announces
@@ -2871,6 +5060,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func sweepArchives(_ all: [Project], now: Int64 = .nowMillis) -> [String] {
         _ = try? messages.deleteExpired(now: now)
         _ = try? requests.deleteExpired(now: now)
+        _ = try? hookEvents.prune(now: now)
         return all.flatMap { (try? archives.run(projectId: $0.id, now: now)) ?? [] }
     }
 
@@ -2897,7 +5087,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
         if let path = session.transcriptPath {
             let url = URL(fileURLWithPath: path)
-            if let summary = try? await offMain({ try TranscriptMeter.summarize(transcriptAt: url) }) {
+            let tailer = transcriptTailers[session.sessionId].flatMap { $0.url == url ? $0 : nil }
+                ?? TranscriptTailer(url: url)
+            if let polled = try? await offMain({
+                var next = tailer
+                try next.poll()
+                return next
+            }) {
+                transcriptTailers[session.sessionId] = polled
+                let summary = polled.summary
                 totals = summary.totals
                 context = ContextPressure(
                     usedTokens: summary.contextTokens,
@@ -2934,13 +5132,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             return
         }
         noteStall(current, lastActivity: lastActivity, stallSeconds: stallSeconds, awake: awake)
+        var limits = Self.exempting(limits, rostered: current.isRostered)
+        // SPEC §8: dark wakes keep advancing awake time while the lid is shut, so only the wake resume ends this wait.
+        if sleepCutAwaitingWake.contains(current.sessionId) { limits.maxIdleSeconds = nil }
         guard let breach = CapEvaluator.evaluate(
             totals: totals,
             startedAt: current.startedDate,
             lastActivity: lastActivity,
             toolStartedAt: current.toolStartedDate,
             awake: awake,
-            limits: Self.exempting(limits, rostered: current.isRostered),
+            limits: limits,
             state: current.state
         ) else { return }
         await enforce(breach, on: current, awake: awake)
@@ -2978,7 +5179,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             try? await stopAgent(session, shortId: shortId)
         }
         let salvage = await branchSalvage(taskId: session.taskId)
-        _ = try? board.terminate(sessionId: session.sessionId, cause: .capBreach(description), salvage: salvage)
+        _ = try? terminateSession(session.sessionId, cause: .capBreach(description), salvage: salvage)
         announceReports(projectId: session.projectId)
         post(
             "Worker stopped at cap", body: description, projectId: session.projectId,

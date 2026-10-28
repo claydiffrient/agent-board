@@ -58,21 +58,21 @@ final class EpicLaneTests: XCTestCase {
         XCTAssertEqual(EpicLane.actions(state: .integrating, readyForIntegration: true), [.closeAsDone, .abandon])
     }
 
-    func testAbandonedOffersNothing() {
-        XCTAssertEqual(EpicLane.actions(state: .abandoned, readyForIntegration: true), [])
+    func testAbandonedOffersOnlyRemovingItsWorktrees() {
+        XCTAssertEqual(EpicLane.actions(state: .abandoned, readyForIntegration: true), [.removeWorktrees])
     }
 
-    func testDoneShowsOnlyOpenPullRequest() {
-        XCTAssertEqual(EpicLane.actions(state: .done, readyForIntegration: true), [.openPullRequest])
-        XCTAssertEqual(EpicLane.actions(state: .done, readyForIntegration: false), [.openPullRequest])
+    func testDoneShowsOpenPullRequestAndRemovingItsWorktrees() {
+        XCTAssertEqual(EpicLane.actions(state: .done, readyForIntegration: true), [.openPullRequest, .removeWorktrees])
+        XCTAssertEqual(EpicLane.actions(state: .done, readyForIntegration: false), [.openPullRequest, .removeWorktrees])
     }
 
-    /// The header draws at most one ordinary button; the two that end the epic live in a menu, so
+    /// The header draws at most one ordinary button; the destructive actions live in a menu, so
     /// the lane never grows a destructive button beside a routine one.
     func testNoStateShowsMoreThanOneOrdinaryButton() {
         for state in EpicState.allCases {
             for ready in [true, false] {
-                let ordinary = EpicLane.actions(state: state, readyForIntegration: ready).filter { $0.closure == nil }
+                let ordinary = EpicLane.actions(state: state, readyForIntegration: ready).filter { !$0.isInMenu }
                 XCTAssertLessThanOrEqual(ordinary.count, 1, "\(state) ready=\(ready) showed \(ordinary)")
             }
         }

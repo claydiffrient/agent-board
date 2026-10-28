@@ -15,6 +15,7 @@ actor FakeRuntime: AgentRuntime {
     /// looks like from the outside.
     private(set) var isSettingUp = false
     private var failure: Error?
+    private var resumeFailure: Error?
     private var gate: CheckedContinuation<Void, Never>?
     private var holdNextSpawn = false
     private var entered: [CheckedContinuation<Void, Never>] = []
@@ -24,6 +25,8 @@ actor FakeRuntime: AgentRuntime {
     func holdSpawn() { holdNextSpawn = true }
 
     func failNextSpawn(_ error: Error) { failure = error }
+
+    func failNextResume(_ error: Error) { resumeFailure = error }
 
     /// Returns once the held spawn is actually inside `spawn`, so a test never races its own gate.
     func waitUntilSettingUp() async {
@@ -54,6 +57,10 @@ actor FakeRuntime: AgentRuntime {
     }
 
     func resume(sessionId: String, cwd: URL, prompt: String) async throws -> SpawnedAgent {
+        if let resumeFailure {
+            self.resumeFailure = nil
+            throw resumeFailure
+        }
         resumed.append(sessionId)
         resumePrompts.append(prompt)
         return SpawnedAgent(shortId: "short-\(sessionId)", sessionId: sessionId)
@@ -78,6 +85,11 @@ actor FakeRuntime: AgentRuntime {
     /// `claude stop` on this short id fails the way it does for a job that is no longer running.
     func failStop(shortId: String, _ error: Error) { stopFailures[shortId] = error }
 
+    private var stopHooks: [String: @Sendable () async -> Void] = [:]
+
+    /// Runs once, inside the next `stop` of this short id, where a real session's `SessionEnd` hook lands.
+    func whenStopped(shortId: String, _ action: @escaping @Sendable () async -> Void) { stopHooks[shortId] = action }
+
     private var hosts: [String: pid_t] = [:]
 
     /// A real process standing in for this short id's `claude` host, killed by `stop` as `claude stop` kills one.
@@ -86,6 +98,7 @@ actor FakeRuntime: AgentRuntime {
     func stop(shortId: String) async throws {
         if let failure = stopFailures[shortId] { throw failure }
         if let host = hosts[shortId] { kill(host, SIGKILL) }
+        if let hook = stopHooks.removeValue(forKey: shortId) { await hook() }
         stopped.append(shortId)
         if let watchedPath { watchedPathExistedAtStop.append(FileManager.default.fileExists(atPath: watchedPath)) }
     }
@@ -100,19 +113,33 @@ actor FakeRuntime: AgentRuntime {
     }
 }
 
-/// `gh` with a canned answer per pull request URL. A URL with no answer fails, so no test reaches
-/// GitHub by accident.
+/// `gh` with a canned answer per pull request URL, for `gh search prs`, and per repository for
+/// `gh api graphql`. Anything with no answer fails, so no test reaches GitHub by accident.
 final class FakeGh: GhRunning, @unchecked Sendable {
     private let lock = NSLock()
     private var answers: [String: CommandResult] = [:]
     private var recorded: [[String]] = []
+    private var searchGate: DispatchSemaphore?
 
     var calls: [[String]] { lock.withLock { recorded } }
 
-    func answer(_ url: String, state: String, mergeCommit: String? = nil, head: String? = nil) {
+    /// Blocks every `gh search prs` until `releaseSearch()`, standing in for a slow `gh`.
+    func holdSearch() {
+        lock.withLock { searchGate = DispatchSemaphore(value: 0) }
+    }
+
+    func releaseSearch() {
+        lock.withLock { () -> DispatchSemaphore? in
+            defer { searchGate = nil }
+            return searchGate
+        }?.signal()
+    }
+
+    func answer(_ url: String, state: String, mergeCommit: String? = nil, head: String? = nil, labels: [String] = []) {
         let commit = mergeCommit.map { #"{"oid":"\#($0)"}"# } ?? "null"
         let headRefOid = head.map { #""\#($0)""# } ?? "null"
-        let json = #"{"headRefOid":\#(headRefOid),"mergeCommit":\#(commit),"mergedAt":null,"state":"\#(state)"}"#
+        let names = labels.map { #"{"name":"\#($0)"}"# }.joined(separator: ",")
+        let json = #"{"headRefOid":\#(headRefOid),"labels":[\#(names)],"mergeCommit":\#(commit),"mergedAt":null,"state":"\#(state)"}"#
         lock.withLock { answers[url] = CommandResult(status: 0, stdout: json, stderr: "") }
     }
 
@@ -120,11 +147,100 @@ final class FakeGh: GhRunning, @unchecked Sendable {
         lock.withLock { answers[url] = CommandResult(status: 4, stdout: "", stderr: stderr) }
     }
 
+    /// What `gh search prs` prints: the user's open pull requests.
+    func answerSearch(_ prs: [AuthoredPullRequest]) {
+        let rows = prs.map { pr -> [String: Any] in
+            ["repository": ["nameWithOwner": pr.repository, "name": pr.repository.split(separator: "/").last.map(String.init) ?? ""],
+             "number": pr.number, "url": pr.url, "title": pr.title, "isDraft": pr.isDraft]
+        }
+        let json = String(decoding: try! JSONSerialization.data(withJSONObject: rows), as: UTF8.self)
+        lock.withLock { answers[Self.searchKey] = CommandResult(status: 0, stdout: json, stderr: "") }
+    }
+
+    func failSearch(status: Int32, stderr: String) {
+        lock.withLock { answers[Self.searchKey] = CommandResult(status: status, stdout: "", stderr: stderr) }
+    }
+
+    /// What `gh api graphql` prints for `owner/name`: a `data` object holding `viewer` and the
+    /// repository's pull requests under their `pr<number>` aliases.
+    func answerGraphQL(repository: String, viewer: String, pullRequests: [[String: Any]]) {
+        var repo: [String: Any] = [:]
+        for pr in pullRequests { repo["pr\(pr["number"] as! Int)"] = pr }
+        let payload: [String: Any] = ["data": ["viewer": ["login": viewer], "repository": repo]]
+        let json = String(decoding: try! JSONSerialization.data(withJSONObject: payload), as: UTF8.self)
+        lock.withLock { answers[Self.graphQLKey(repository)] = CommandResult(status: 0, stdout: json, stderr: "") }
+    }
+
+    func failGraphQL(repository: String, stderr: String) {
+        lock.withLock { answers[Self.graphQLKey(repository)] = CommandResult(status: 1, stdout: "", stderr: stderr) }
+    }
+
+    /// What posting a thread reply and a PR comment print, each naming `url`.
+    func answerReplies(url: String) {
+        let reply = #"{"data":{"addPullRequestReviewThreadReply":{"comment":{"url":"\#(url)"}}}}"#
+        lock.withLock {
+            answers[Self.replyKey] = CommandResult(status: 0, stdout: reply, stderr: "")
+            answers[Self.commentKey] = CommandResult(status: 0, stdout: #"{"html_url":"\#(url)"}"#, stderr: "")
+        }
+    }
+
+    /// What `gh api graphql` prints when a reply's thread is gone from GitHub.
+    func failRepliesAsGone() {
+        let errors = #"{"data":{"addPullRequestReviewThreadReply":null},"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a node"}]}"#
+        lock.withLock {
+            answers[Self.replyKey] = CommandResult(status: 1, stdout: errors, stderr: "gh: Could not resolve to a node")
+        }
+    }
+
+    /// What re-requesting review prints.
+    func answerReviewRequests() {
+        lock.withLock { answers[Self.reviewRequestKey] = CommandResult(status: 0, stdout: "{}", stderr: "") }
+    }
+
+    /// What `gh run view --job <jobId> --log-failed` prints.
+    func answerFailedLog(jobId: Int64, log: String) {
+        lock.withLock { answers[Self.failedLogKey(jobId)] = CommandResult(status: 0, stdout: log, stderr: "") }
+    }
+
+    private static let searchKey = "search prs"
+    private static let replyKey = "reply"
+    private static let commentKey = "comment"
+    private static let reviewRequestKey = "requested reviewers"
+
+    private static func graphQLKey(_ repository: String) -> String { "graphql \(repository)" }
+
+    private static func failedLogKey(_ jobId: Int64) -> String { "run log \(jobId)" }
+
+    private static func key(for arguments: [String]) -> String {
+        if arguments.starts(with: ["search", "prs"]) { return searchKey }
+        if arguments.starts(with: ["run", "view", "--job"]), arguments.count > 3, let job = Int64(arguments[3]) {
+            return failedLogKey(job)
+        }
+        if arguments.starts(with: ["api", "graphql"]), arguments.contains(where: { $0.hasPrefix("query=mutation") }) {
+            return replyKey
+        }
+        if arguments.count > 1, arguments[0] == "api", arguments[1].hasSuffix("/comments") { return commentKey }
+        if arguments.count > 1, arguments[0] == "api", arguments[1].hasSuffix("/requested_reviewers") {
+            return reviewRequestKey
+        }
+        if arguments.starts(with: ["api", "graphql"]) {
+            func value(_ name: String) -> String {
+                arguments.first { $0.hasPrefix("\(name)=") }.map { String($0.dropFirst(name.count + 1)) } ?? ""
+            }
+            return graphQLKey("\(value("owner"))/\(value("name"))")
+        }
+        return arguments.count > 2 ? arguments[2] : ""
+    }
+
     func run(_ arguments: [String], cwd: URL) throws -> CommandResult {
-        try lock.withLock {
+        let key = Self.key(for: arguments)
+        let gate = lock.withLock { () -> DispatchSemaphore? in
             recorded.append(arguments)
-            let url = arguments.count > 2 ? arguments[2] : ""
-            guard let answer = answers[url] else { throw PullRequestCheckFailure("FakeGh has no answer for \(url)") }
+            return key == Self.searchKey ? searchGate : nil
+        }
+        gate?.wait()
+        return try lock.withLock {
+            guard let answer = answers[key] else { throw PullRequestCheckFailure("FakeGh has no answer for \(key)") }
             return answer
         }
     }
@@ -134,6 +250,9 @@ struct FixtureError: Error, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
 }
+
+/// Above macOS's PID_MAX (99,999), so no process holds it: a listed host pid that a stop can never signal.
+func unheldPID(_ offset: Int = 0) -> Int { 100_000 + offset }
 
 @MainActor
 struct SupervisorFixture {
@@ -167,7 +286,7 @@ struct SupervisorFixture {
     /// spawning, worktrees, or branch teardown needs.
     static func make(
         gitRepo: Bool = false, sleepLedger: SleepLedger = SleepLedger(), sleepGuard: SleepGuard? = nil,
-        claude: ClaudeInvocation = .installed()
+        wakeCenter: NotificationCenter = NotificationCenter(), claude: ClaudeInvocation = .installed()
     ) throws -> SupervisorFixture {
         let db = try AppDatabase.inMemory()
         let supportDir = FileManager.default.temporaryDirectory
@@ -210,6 +329,7 @@ struct SupervisorFixture {
             claude: claude,
             sleepLedger: sleepLedger,
             sleepGuard: sleepGuard,
+            wakeCenter: wakeCenter,
             gh: gh
         )
         sink.target = supervisor
@@ -233,6 +353,15 @@ struct SupervisorFixture {
         }
         settings.standaloneIntegration = integration
         try ProjectStore(db).updateSettings(project.id, settings)
+    }
+
+    /// A valueless `remote.origin.url`: `git remote get-url origin` exits 128 on it while refs,
+    /// merges, status and worktrees still work — origin configured, but unreadable.
+    func breakOriginConfig() throws {
+        let config = try FileHandle(forWritingTo: repo.appendingPathComponent(".git/config"))
+        defer { try? config.close() }
+        try config.seekToEnd()
+        try config.write(contentsOf: Data("[remote \"origin\"]\n\turl\n".utf8))
     }
 
     /// A second supervisor over the same database and support directory: what the next launch of
@@ -266,12 +395,26 @@ struct SupervisorFixture {
         )
     }
 
+    /// Built once per `swift test` process and copied into place for every `gitRepo: true` fixture,
+    /// rather than paying `git init`/`add`/`commit` — three subprocesses, about 0.14s each on CI —
+    /// per test. `copyItem` relocates cleanly: nothing here sets an absolute path inside `.git`
+    /// (no `core.worktree`, no hooks, no submodules).
+    private static let repoTemplate: URL = {
+        let template = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentboard-tests-template-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: template, withIntermediateDirectories: true)
+        try! git(["init", "-q", "-b", "main"], cwd: template)
+        try! "hello\n".write(to: template.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try! git(["add", "."], cwd: template)
+        try! commit("Initial commit", cwd: template)
+        return template
+    }()
+
     static func initRepo(at repo: URL) throws {
-        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        try git(["init", "-q", "-b", "main"], cwd: repo)
-        try "hello\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
-        try git(["add", "."], cwd: repo)
-        try commit("Initial commit", cwd: repo)
+        try FileManager.default.createDirectory(
+            at: repo.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try FileManager.default.copyItem(at: repoTemplate, to: repo)
     }
 
     @discardableResult
@@ -330,6 +473,26 @@ struct SupervisorFixture {
         try "work\n".write(to: url.appendingPathComponent(file), atomically: true, encoding: .utf8)
         try Self.git(["add", "."], cwd: url)
         try Self.commit("Do the work", cwd: url)
+    }
+
+    /// Installs the repository hook `name`. The first run that meets `condition` blocks until the
+    /// returned file exists, or for 30 seconds, so a call that waits for the hook fails its
+    /// assertion instead of hanging; every run then does `finish`.
+    func installGatedHook(_ name: String, when condition: String, then finish: String = "") throws -> URL {
+        let gate = supportDir.appendingPathComponent("\(name)-gate")
+        let used = supportDir.appendingPathComponent("\(name)-used")
+        let hook = repo.appendingPathComponent(".git/hooks/\(name)")
+        try FileManager.default.createDirectory(at: hook.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try """
+        #!/bin/sh
+        if \(condition) && [ ! -e '\(used.path)' ]; then
+          touch '\(used.path)'
+          i=0; while [ ! -e '\(gate.path)' ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+        fi
+        \(finish)
+        """.write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+        return gate
     }
 
     func mergeIntoBase(_ branch: String) throws {
@@ -402,6 +565,7 @@ struct SupervisorFixture {
     /// that otherwise outlive this fixture for the rest of the process, piling up across a run until
     /// the thread pool a leftover `git` call needs to drain stderr can never be scheduled.
     func cleanUp() async {
+        await supervisor.waitForTeardowns()
         await supervisor.stop()
         let worktreeRoot = URL(fileURLWithPath: project.worktreeRoot)
         let names = (try? FileManager.default.contentsOfDirectory(atPath: worktreeRoot.path)) ?? []

@@ -94,6 +94,8 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var createdAt: Int64
     /// Overrides the project's level for this epic's tasks. nil inherits.
     public var reviewLevel: ReviewLevel?
+    /// Resolved when the integrator is spawned (SPEC §5.2); nil until then, which completes as a local merge.
+    public var shipsByPullRequest: Bool?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -104,11 +106,12 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case state
         case createdAt = "created_at"
         case reviewLevel = "review_level"
+        case shipsByPullRequest = "ships_by_pull_request"
     }
 
     public init(
         id: String, projectId: String, title: String, goal: String?, branch: String,
-        state: EpicState, createdAt: Int64, reviewLevel: ReviewLevel? = nil
+        state: EpicState, createdAt: Int64, reviewLevel: ReviewLevel? = nil, shipsByPullRequest: Bool? = nil
     ) {
         self.id = id
         self.projectId = projectId
@@ -118,6 +121,7 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         self.state = state
         self.createdAt = createdAt
         self.reviewLevel = reviewLevel
+        self.shipsByPullRequest = shipsByPullRequest
     }
 
     public static func newId() -> String { BoardId.new() }
@@ -166,6 +170,10 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     /// Why `landing` is what it is, for the cases a human has to act on.
     public var landingDetail: String?
     public var type: TaskType?
+    /// Set together when the task enters `closed` (SPEC §5) and cleared together when it leaves.
+    public var closedAt: Int64?
+    public var closedReason: String?
+    public var closedBy: String?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -193,6 +201,9 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case landing
         case landingDetail = "landing_detail"
         case type
+        case closedAt = "closed_at"
+        case closedReason = "closed_reason"
+        case closedBy = "closed_by"
     }
 
     public init(
@@ -202,8 +213,11 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         createdAt: Int64, updatedAt: Int64, model: String? = nil, reviewerAgentId: String? = nil,
         rosterAgentId: String? = nil, archivedAt: Int64? = nil, doneAt: Int64? = nil,
         unarchivedAt: Int64? = nil, landing: TaskLanding? = nil, landingDetail: String? = nil,
-        type: TaskType? = nil
+        type: TaskType? = nil, closedAt: Int64? = nil, closedReason: String? = nil, closedBy: String? = nil
     ) {
+        self.closedAt = closedAt
+        self.closedReason = closedReason
+        self.closedBy = closedBy
         self.type = type
         self.landing = landing
         self.landingDetail = landingDetail
@@ -238,6 +252,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var archivedDate: Date? { archivedAt?.asDate }
     public var isArchived: Bool { archivedAt != nil }
     public var doneDate: Date? { doneAt?.asDate }
+    public var closedDate: Date? { closedAt?.asDate }
+    public var isClosed: Bool { column == .closed }
 
     /// A `done` task whose work the human still has to place somewhere. False for `noBranch`,
     /// which is a task that legitimately had nothing to land.
@@ -315,6 +331,9 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     /// The checkout a rostered reviewer was spawned on (`ReviewCheckout.baseline`). A verdict is refused
     /// once HEAD or the uncommitted tracked changes differ from it (SPEC §5.1).
     public var reviewHead: String?
+    /// What a rostered reviewer was told to diff against, which for a standalone task can be the
+    /// recorded cut point rather than the base branch (SPEC §3.1 step 1).
+    public var reviewBase: String?
 
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -344,6 +363,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case toolStartedAt = "tool_started_at"
         case toolsInFlight = "tools_in_flight"
         case reviewHead = "review_head"
+        case reviewBase = "review_base"
     }
 
     public init(
@@ -354,7 +374,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil,
         lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil,
         rosterAgentId: String? = nil, toolStartedAt: Int64? = nil, toolsInFlight: Int = 0,
-        reviewHead: String? = nil
+        reviewHead: String? = nil, reviewBase: String? = nil
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -383,6 +403,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.toolStartedAt = toolStartedAt
         self.toolsInFlight = toolsInFlight
         self.reviewHead = reviewHead
+        self.reviewBase = reviewBase
     }
 
     public var id: String { sessionId }
@@ -412,6 +433,8 @@ public struct TokenGrant: Codable, FetchableRecord, PersistableRecord, Identifia
     public var taskId: String?
     public var createdAt: Int64
     public var revokedAt: Int64?
+    /// Set only on a `.verifier` grant: the watch its Walk me through it window was opened on.
+    public var prWatchId: String?
 
     public enum CodingKeys: String, CodingKey {
         case token
@@ -421,9 +444,13 @@ public struct TokenGrant: Codable, FetchableRecord, PersistableRecord, Identifia
         case taskId = "task_id"
         case createdAt = "created_at"
         case revokedAt = "revoked_at"
+        case prWatchId = "pr_watch_id"
     }
 
-    public init(token: String, sessionId: String?, projectId: String?, scope: TokenScope, taskId: String?, createdAt: Int64, revokedAt: Int64? = nil) {
+    public init(
+        token: String, sessionId: String?, projectId: String?, scope: TokenScope, taskId: String?, createdAt: Int64,
+        revokedAt: Int64? = nil, prWatchId: String? = nil
+    ) {
         self.token = token
         self.sessionId = sessionId
         self.projectId = projectId
@@ -431,6 +458,7 @@ public struct TokenGrant: Codable, FetchableRecord, PersistableRecord, Identifia
         self.taskId = taskId
         self.createdAt = createdAt
         self.revokedAt = revokedAt
+        self.prWatchId = prWatchId
     }
 
     public var id: String { token }
@@ -573,8 +601,9 @@ public struct Approval: Codable, FetchableRecord, PersistableRecord, Identifiabl
     public var epicId: String?
     public var requestedBy: String
     public var reason: String?
-    /// JSON for the kinds that carry one — a `PublishRequest` on `push` and `pull_request`. Nil for
-    /// `spawn` and `integration`, which are fully described by `taskId`/`epicId`.
+    /// JSON for the kinds that carry one — a `PublishRequest` on `push` and `pull_request`, a
+    /// `PRItemDismissalRequest` on `pr_item_dismissal`, a `PRWatchResumeRequest` on `pr_watch_resume`.
+    /// Nil for `spawn` and `integration`, which are fully described by `taskId`/`epicId`.
     public var payload: String?
     public var createdAt: Int64
     public var resolvedAt: Int64?
@@ -734,8 +763,8 @@ public struct HookEventRecord: Codable, FetchableRecord, MutablePersistableRecor
     public var date: Date { at.asDate }
 }
 
-/// A specialist that outlives any one task. Not owned by a project — projects opt in
-/// through `project_roster_agent`.
+/// A board-local archetype, or the pointer row for a disk one (SPEC §4). Not owned by a project —
+/// projects opt in through `project_roster_agent`.
 public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {
     public static let databaseTableName = "roster_agent"
 
@@ -751,9 +780,15 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
     /// Extra `--disallowedTools` patterns layered onto the worker default list. A deny-list: it can
     /// only narrow a rostered session's authority, never widen it, so empty means "a full worker's".
     public var disallowedTools: [String]
+    /// Each passed as `--plugin-dir` at spawn, so the agent can run a skill from a plugin the
+    /// worktree does not install (SPEC §4).
+    public var pluginDirs: [String]
     public var enabled: Bool
     public var createdAt: Int64
     public var updatedAt: Int64
+    /// A disk archetype's `tools` allow-list, filled from its definition file at read time and never
+    /// stored. Nil inherits every tool, which is all a board-local row can say.
+    public var tools: [String]? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -762,6 +797,7 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
         case systemPrompt = "system_prompt"
         case model
         case disallowedTools = "disallowed_tools"
+        case pluginDirs = "plugin_dirs"
         case enabled
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -769,7 +805,8 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
 
     public init(
         id: String, name: String, role: String, systemPrompt: String, model: String? = nil,
-        disallowedTools: [String] = [], enabled: Bool = true, createdAt: Int64, updatedAt: Int64
+        disallowedTools: [String] = [], pluginDirs: [String] = [], enabled: Bool = true,
+        createdAt: Int64, updatedAt: Int64, tools: [String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -777,12 +814,27 @@ public struct RosterAgent: Codable, FetchableRecord, PersistableRecord, Identifi
         self.systemPrompt = systemPrompt
         self.model = model
         self.disallowedTools = disallowedTools
+        self.pluginDirs = pluginDirs
         self.enabled = enabled
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.tools = tools
     }
 
     public static func newId() -> String { BoardId.new() }
+
+    static let definitionIdPrefix = "definition:"
+
+    /// The row that stands in for a disk archetype, so the foreign keys that name an agent have
+    /// something to point at. It holds no content: prompt, model and tools come from the file (SPEC §4).
+    public static func definitionId(name: String) -> String { definitionIdPrefix + name }
+
+    /// The definition this row points at, or nil for a board-local agent.
+    public var definitionName: String? { Self.definitionName(of: id) }
+
+    public static func definitionName(of id: String) -> String? {
+        id.hasPrefix(definitionIdPrefix) ? String(id.dropFirst(definitionIdPrefix.count)) : nil
+    }
 
     public var createdDate: Date { createdAt.asDate }
     public var updatedDate: Date { updatedAt.asDate }

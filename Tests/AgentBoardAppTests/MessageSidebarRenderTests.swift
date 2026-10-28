@@ -39,15 +39,8 @@ final class MessageSidebarRenderTests: XCTestCase {
         )
         window.contentView = host
         window.orderBack(nil)
+        addTeardownBlock { window.orderOut(nil) }
         return Mounted(window: window, host: host)
-    }
-
-    private func settle(_ mounted: Mounted, turns: Int = 80) {
-        for _ in 0..<turns {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-            mounted.window.layoutIfNeeded()
-            mounted.window.displayIfNeeded()
-        }
     }
 
     private func counts(_ mounted: Mounted) -> [String: Int] {
@@ -77,14 +70,14 @@ final class MessageSidebarRenderTests: XCTestCase {
     func testTheSidebarGainsAMessagesSectionWithAPlaceholderWhenThereIsNoTraffic() throws {
         let (db, alpha, _) = try projects()
         let mounted = mount(db, alpha)
-        settle(mounted)
+        pump(mounted.window) { counts(mounted)["ListTableCellView"] == 5 }
 
-        let counts = counts(mounted)
+        let cells = counts(mounted)
         XCTAssertEqual(
-            counts["ListTableHeaderView"], 5,
+            cells["ListTableHeaderView"], 5,
             "Blocked, Pending approvals, Pending reviews, Proposals, Messages"
         )
-        XCTAssertEqual(counts["ListTableCellView"], 5, "one empty-state row per section")
+        XCTAssertEqual(cells["ListTableCellView"], 5, "one empty-state row per section")
     }
 
     func testBothDirectionsGetTheirOwnRow() throws {
@@ -98,7 +91,7 @@ final class MessageSidebarRenderTests: XCTestCase {
         )
 
         let mounted = mount(db, alpha)
-        settle(mounted)
+        pump(mounted.window) { counts(mounted)["ListTableCellView"] == 6 }
 
         XCTAssertEqual(
             counts(mounted)["ListTableCellView"], 6,
@@ -114,7 +107,7 @@ final class MessageSidebarRenderTests: XCTestCase {
     func testMessagesSentAfterTheMountReachTheListWithoutPolling() throws {
         let (db, alpha, beta) = try projects()
         let mounted = mount(db, alpha)
-        settle(mounted)
+        pump(mounted.window) { counts(mounted)["ListTableCellView"] == 5 }
         XCTAssertEqual(counts(mounted)["ListTableCellView"], 5, "five empty-state rows, nothing else")
 
         let messages = MessageStore(db)
@@ -124,7 +117,7 @@ final class MessageSidebarRenderTests: XCTestCase {
         try messages.send(
             fromProjectId: alpha.id, fromSessionId: nil, toProjectId: beta.id, body: "and a reply"
         )
-        settle(mounted, turns: 60)
+        pump(mounted.window) { counts(mounted)["ListTableCellView"] == 6 }
 
         XCTAssertEqual(
             counts(mounted)["ListTableCellView"], 6,
@@ -149,6 +142,7 @@ private final class MessageStubSupervisor: WorkerSupervising {
     func pauseAll(projectId: String) async throws {}
     func accept(taskId: String) async throws {}
     func reopen(taskId: String) async throws {}
+    func rerunReview(taskId: String) async throws {}
     func discard(taskId: String) async throws {}
     func reconcile(projectId: String) async {}
     func attachCommand(sessionId: String) -> (executable: String, arguments: [String])? { nil }
@@ -165,6 +159,8 @@ private final class MessageStubSupervisor: WorkerSupervising {
     func requestIntegration(epicId: String) async throws {}
     func epicClosurePlan(epicId: String, as closure: EpicClosure) throws -> EpicClosurePlan { throw StubError.notWired }
     func closeEpic(epicId: String, as closure: EpicClosure) async throws { throw StubError.notWired }
+    func heldWorktrees(epicId: String) throws -> [HeldWorktree] { [] }
+    func removeEpicWorktrees(epicId: String) async throws { throw StubError.notWired }
     func openPullRequest(epicId: String) async throws -> PullRequestOutcome { throw StubError.notWired }
     func requestShutdown(projectId: String, requestedBy: String, reason: String?) async throws -> ShutdownOrder {
         throw StubError.notWired

@@ -35,6 +35,8 @@ public final class StoreHookSink: HookSink {
         case orchestratorCompacted(projectId: String, sessionId: String, manual: Bool)
         case coordinatorTurnEnded(sessionId: String)
         case coordinatorCompacted(sessionId: String, manual: Bool)
+        case endedSessionRestarted(projectId: String, sessionId: String)
+        case workerTurnCutBySleep(projectId: String, sessionId: String)
     }
 
     /// A write whose file another live session holds. Carried out of `process` so the wait happens
@@ -81,7 +83,10 @@ public final class StoreHookSink: HookSink {
         self.events = events
     }
 
+    /// A verifier token is refused before anything is recorded (SPEC §7): it belongs to a human's
+    /// session, which has no session row for a hook to describe.
     public func handle(_ event: HookEvent, identity: TokenIdentity) async -> HookDecision? {
+        guard identity.scope != .verifier else { return nil }
         let outcome: Outcome = await withCheckedContinuation { continuation in
             queue.async {
                 continuation.resume(returning: self.process(event, identity: identity))
@@ -103,6 +108,16 @@ public final class StoreHookSink: HookSink {
                 await events.coordinatorTurnEnded(sessionId: sessionId)
             case .coordinatorCompacted(let sessionId, let manual):
                 await events.coordinatorCompacted(sessionId: sessionId, manual: manual)
+            case .endedSessionRestarted(let projectId, let sessionId):
+                // The stop kills the very host waiting on this hook's answer, so it must not hold it.
+                _Concurrency.Task { [events] in
+                    await events.endedSessionRestarted(projectId: projectId, sessionId: sessionId)
+                }
+            case .workerTurnCutBySleep(let projectId, let sessionId):
+                // The continuation is a `claude --bg --resume` of the session still waiting on this answer.
+                _Concurrency.Task { [events] in
+                    await events.workerTurnCutBySleep(projectId: projectId, sessionId: sessionId)
+                }
             }
         }
         if let wait = outcome.lockWait {
@@ -290,6 +305,10 @@ public final class StoreHookSink: HookSink {
         if scope == .reviewer {
             return (try? ReviewPrompt.postCompactionBrief(db: db, session: session)) ?? nil
         }
+        if scope == .triager {
+            return ((try? TriagePrompt.postCompactionBrief(db: db, session: session)) ?? nil)
+                ?? ((try? FollowupCheckPrompt.postCompactionBrief(db: db, session: session)) ?? nil)
+        }
         guard let taskId, let task = try? tasks.get(taskId) else { return nil }
         let epic = task.epicId.flatMap { try? epics.get($0) } ?? nil
         let injected = (try? notes.notesForSpawn(
@@ -370,9 +389,30 @@ public final class StoreHookSink: HookSink {
         try? sessions.beginToolCall(session.sessionId, at: .nowMillis, tool: event.toolName)
     }
 
+    /// SPEC §8.5: a revoked grant is a session the board ended, which Claude Code can resume on its own.
+    /// It is heard only to stop it again and to keep the push guard; nothing it reports changes a row.
+    private func endedSessionHook(_ event: HookEvent, identity: TokenIdentity) -> Outcome {
+        switch event.name {
+        case "PreToolUse":
+            if let violation = IntegrationGuard.violation(
+                toolName: event.toolName, command: event.toolCommand, scope: identity.scope
+            ) {
+                return .deny(.deny(violation.reason(for: identity.scope)))
+            }
+        case "SessionStart":
+            if let session = projectSession(event.sessionId, identity: identity), session.role == .worker {
+                return .follow([.endedSessionRestarted(projectId: session.projectId, sessionId: session.sessionId)])
+            }
+        default:
+            break
+        }
+        return .none
+    }
+
     private func process(_ event: HookEvent, identity: TokenIdentity) -> Outcome {
         let sessionId = event.sessionId
         _ = try? hookEvents.append(sessionId: sessionId, event: event.name, payload: event.rawJSON)
+        if identity.revoked { return endedSessionHook(event, identity: identity) }
 
         if event.name == "PreToolUse" {
             if let violation = IntegrationGuard.violation(
@@ -386,7 +426,7 @@ public final class StoreHookSink: HookSink {
                         taskId: taskId,
                         sessionId: session?.sessionId,
                         kind: .error,
-                        text: "Blocked \(violation.rawValue): \(event.toolCommand ?? "")"
+                        text: "Blocked \(violation.rawValue): \(event.toolCommand ?? event.toolFilePath ?? "")"
                     )
                 }
                 return .deny(.deny(violation.reason(for: identity.scope)))
@@ -427,13 +467,17 @@ public final class StoreHookSink: HookSink {
 
         switch event.name {
         case "SessionStart":
+            if let path = event.transcriptPath {
+                try? sessions.setTranscriptPath(sessionId, path)
+            }
+            // SPEC §8.5: a row only the board writes `failed` or `completed` stays ended.
+            if session.role == .worker, session.state == .failed || session.state == .completed {
+                return .follow([.endedSessionRestarted(projectId: session.projectId, sessionId: sessionId)])
+            }
             // SPEC §7: never revived on a settled task, and never stopped from here either: a resume's
             // own SessionStart can beat its move back to `running`, and `resume` marks the row itself.
             let settled = session.taskId.flatMap { try? board.isSettled(taskId: $0, apartFrom: sessionId) } ?? false
             if !settled { try? sessions.setState(sessionId, .running) }
-            if let path = event.transcriptPath {
-                try? sessions.setTranscriptPath(sessionId, path)
-            }
             // A compaction keeps the session id and writes no `SessionEnd` (measured, SPEC §2), so
             // nothing is rebound or re-pinned here. A worker's compaction is handled instead by
             // `PreCompact` arming a re-brief that `PostToolUse` delivers.
@@ -521,6 +565,11 @@ public final class StoreHookSink: HookSink {
             if session.role == .coordinator {
                 return .follow([.coordinatorTurnEnded(sessionId: sessionId)])
             }
+            // SPEC §5.1: continues the turn once, before the session is marked idle or reported.
+            if identity.scope == .reviewer, let taskId,
+               (try? board.remindReviewerOfVerdict(taskId: taskId, sessionId: sessionId)) == true {
+                return .respond(.context(ReviewPrompt.verdictOwed))
+            }
             if session.state.isActive {
                 try? sessions.setState(sessionId, .idle)
             }
@@ -532,6 +581,13 @@ public final class StoreHookSink: HookSink {
             if identity.scope == .reviewer, let taskId,
                (try? board.reviewerStoppedWithoutVerdict(taskId: taskId, sessionId: sessionId)) != nil {
                 return .follow([.reportQueued(projectId: session.projectId)])
+            }
+
+        case "StopFailure":
+            try? sessions.clearToolCalls(sessionId)
+            if session.role == .worker, session.state.isActive, taskId != nil,
+               event.lastAssistantMessage == SleepCutTurn.message {
+                return .follow([.workerTurnCutBySleep(projectId: session.projectId, sessionId: sessionId)])
             }
 
         case "SessionEnd":

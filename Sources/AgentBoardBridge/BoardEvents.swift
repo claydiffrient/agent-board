@@ -22,6 +22,11 @@ public protocol BoardEventSink: Sendable {
     /// doing nothing is the supervisor's to do. Which of the two it was is carried by the report
     /// kind, the task's column and the session's stop reason, never by this signal.
     func workerCompleted(projectId: String, sessionId: String) async
+    /// A worker Agent Board already ended (its row `failed` or `completed`, or its grant revoked) heard a
+    /// `SessionStart`: its process is running again without the board having resumed it (SPEC §8.5).
+    func endedSessionRestarted(projectId: String, sessionId: String) async
+    /// A worker's turn ended on `SleepCutTurn.message` rather than finishing (SPEC §8).
+    func workerTurnCutBySleep(projectId: String, sessionId: String) async
     /// Something landed in the Coordinator's queue — today only a reply to one of its requests.
     func coordinatorReportQueued() async
     /// The Coordinator's counterparts of `orchestratorTurnEnded` and `orchestratorCompacted`: its
@@ -32,6 +37,8 @@ public protocol BoardEventSink: Sendable {
 
 extension BoardEventSink {
     public func workerCompleted(projectId: String, sessionId: String) async {}
+    public func endedSessionRestarted(projectId: String, sessionId: String) async {}
+    public func workerTurnCutBySleep(projectId: String, sessionId: String) async {}
     public func coordinatorReportQueued() async {}
     public func coordinatorTurnEnded(sessionId: String) async {}
     public func coordinatorCompacted(sessionId: String, manual: Bool) async {}
@@ -72,8 +79,8 @@ public struct WorkerSpawn: Sendable, Equatable {
 }
 
 public protocol WorkerControl: Sendable {
-    /// The caller has already passed `Board.requestSpawn`. Returns once the worktree exists and the
-    /// session row is written, with setup still running.
+    /// The caller has already passed `Board.requestSpawn`. Returns once the session row is written,
+    /// with setup, worktree creation included, still running.
     func spawnWorker(taskId: String) async throws -> WorkerSpawn
     /// `spawnWorker` carrying a rostered agent's identity, model and deny-list additions. `scope`
     /// decides what the session may do once it is up: `.worker` claims the task into `running`,

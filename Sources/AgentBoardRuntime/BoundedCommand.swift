@@ -29,16 +29,20 @@ public enum BoundedCommand {
         var fds: [Int32] = [0, 0]
         guard pipe(&fds) == 0 else { throw AgentRuntimeError("pipe failed: \(String(cString: strerror(errno)))") }
         let (readEnd, writeEnd) = (fds[0], fds[1])
-        defer { close(readEnd) }
+        defer { DescriptorLog.closeChecked(readEnd, site: "BoundedCommand.run readEnd") }
 
         let pid: pid_t
         do {
             pid = try spawn(executable, arguments, cwd: cwd, environment: environment, output: writeEnd)
         } catch {
-            close(writeEnd)
+            DescriptorLog.launchFailed(
+                executable, arguments: arguments, cwd: cwd,
+                descriptors: [("output.read", readEnd), ("output.write", writeEnd)], error: error
+            )
+            DescriptorLog.closeChecked(writeEnd, site: "BoundedCommand.run writeEnd after a failed spawn")
             throw error
         }
-        close(writeEnd)
+        DescriptorLog.closeChecked(writeEnd, site: "BoundedCommand.run writeEnd")
         _ = fcntl(readEnd, F_SETFL, fcntl(readEnd, F_GETFL) | O_NONBLOCK)
 
         let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)

@@ -84,8 +84,8 @@ public enum ArchivePolicy: Codable, Sendable, Equatable {
     }
 }
 
-/// How an accepted task in no epic reaches the base branch (SPEC §5). A task in an epic always
-/// merges locally into its epic branch, whichever this is.
+/// How an accepted task in no epic reaches the base branch (SPEC §5), and whether an integrated epic
+/// waits on its pull request (§5.2). A task in an epic always merges locally into its epic branch.
 public enum StandaloneIntegration: String, Codable, Sendable, CaseIterable, Equatable {
     /// The accept merges nothing; the task is landed when its recorded pull request merges.
     case pullRequest
@@ -226,12 +226,19 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var verificationTimeoutSeconds: Int? = nil {
         didSet { verificationTimeoutSeconds = verificationTimeoutSeconds.map(VerificationCommands.clampedTimeout) }
     }
+    /// Run in a worktree just before Agent Board removes it (SPEC §3.1, §4). Nil removes the
+    /// worktree and nothing else.
+    public var worktreeTeardownCommand: String? = nil
+    public var worktreeTeardownTimeoutSeconds: Int = WorktreeTeardownCommand.defaultTimeoutSeconds
     public var archivePolicy: ArchivePolicy = .afterEpicMerge
     /// Whether a worker gets its own worktree, shares the project's checkout, or is decided per spawn.
     public var worktreeStrategy: WorktreeStrategy = .worktree
     /// How many agents may be co-resident in the project's own checkout at once. Matches
     /// `caps.maxConcurrentWorkers` so shared mode adds no second, tighter ceiling to discover.
     public var sharedCheckoutMaxAgents: Int = 3
+    /// How many reusable worktrees at `<worktree root>/slot-<n>` a worker is leased before it gets
+    /// a worktree of its own (SPEC §3.1 step 2). 0 gives every task its own worktree.
+    public var worktreeSlots: Int = 0
     /// What this project may interrupt the human for. Banners only — the sidebar badge and the
     /// rest of the attention signal are unaffected by it.
     public var notifications: NotificationPreferences = NotificationPreferences()
@@ -242,6 +249,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// Nil until the human picks one; accept then uses `.pullRequest` when the repository has an
     /// `origin` remote and `.localMerge` otherwise (SPEC §5).
     public var standaloneIntegration: StandaloneIntegration? = nil
+    public var prFollowThrough: PRFollowThroughSettings = PRFollowThroughSettings()
 
     public init(
         caps: Caps = Caps(),
@@ -255,12 +263,16 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         buildCommand: String? = nil,
         testCommand: String? = nil,
         verificationTimeoutSeconds: Int? = nil,
+        worktreeTeardownCommand: String? = nil,
+        worktreeTeardownTimeoutSeconds: Int = WorktreeTeardownCommand.defaultTimeoutSeconds,
         archivePolicy: ArchivePolicy = .afterEpicMerge,
         worktreeStrategy: WorktreeStrategy = .worktree,
         sharedCheckoutMaxAgents: Int = 3,
+        worktreeSlots: Int = 0,
         notifications: NotificationPreferences = NotificationPreferences(),
         remoteBranchTemplate: String? = nil,
-        standaloneIntegration: StandaloneIntegration? = nil
+        standaloneIntegration: StandaloneIntegration? = nil,
+        prFollowThrough: PRFollowThroughSettings = PRFollowThroughSettings()
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -273,12 +285,16 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.buildCommand = buildCommand
         self.testCommand = testCommand
         self.verificationTimeoutSeconds = verificationTimeoutSeconds.map(VerificationCommands.clampedTimeout)
+        self.worktreeTeardownCommand = worktreeTeardownCommand
+        self.worktreeTeardownTimeoutSeconds = worktreeTeardownTimeoutSeconds
         self.archivePolicy = archivePolicy
         self.worktreeStrategy = worktreeStrategy
         self.sharedCheckoutMaxAgents = sharedCheckoutMaxAgents
+        self.worktreeSlots = worktreeSlots
         self.notifications = notifications
         self.remoteBranchTemplate = remoteBranchTemplate
         self.standaloneIntegration = standaloneIntegration
+        self.prFollowThrough = prFollowThrough
     }
 
     public init(from decoder: Decoder) throws {
@@ -301,14 +317,20 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
         verificationTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .verificationTimeoutSeconds)
             .map(VerificationCommands.clampedTimeout)
+        worktreeTeardownCommand = try c.decodeIfPresent(String.self, forKey: .worktreeTeardownCommand)
+        worktreeTeardownTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .worktreeTeardownTimeoutSeconds)
+            ?? WorktreeTeardownCommand.defaultTimeoutSeconds
         archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge
         worktreeStrategy = try c.decodeIfPresent(WorktreeStrategy.self, forKey: .worktreeStrategy) ?? .worktree
         sharedCheckoutMaxAgents = try c.decodeIfPresent(Int.self, forKey: .sharedCheckoutMaxAgents)
             ?? ProjectSettings().sharedCheckoutMaxAgents
+        worktreeSlots = try c.decodeIfPresent(Int.self, forKey: .worktreeSlots) ?? 0
         notifications = try c.decodeIfPresent(NotificationPreferences.self, forKey: .notifications)
             ?? NotificationPreferences()
         remoteBranchTemplate = try c.decodeIfPresent(String.self, forKey: .remoteBranchTemplate)
         standaloneIntegration = try c.decodeIfPresent(StandaloneIntegration.self, forKey: .standaloneIntegration)
+        prFollowThrough = try c.decodeIfPresent(PRFollowThroughSettings.self, forKey: .prFollowThrough)
+            ?? PRFollowThroughSettings()
     }
 
     /// Settings written before the routing table named a single reviewer here; it decodes into the

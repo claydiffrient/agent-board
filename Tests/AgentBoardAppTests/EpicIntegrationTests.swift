@@ -79,6 +79,63 @@ final class EpicIntegrationTests: XCTestCase {
         XCTAssertEqual(try fixture.tasks.get(XCTUnwrap(session.taskId))?.origin, .integration)
     }
 
+    func testRespawningAStoppedIntegratorRunsItOnTheEpicBranchAgain() async throws {
+        let ready = try fixture.epicReadyForIntegration(["api"])
+        try await fixture.supervisor.approve(approvalId: requestIntegration(epicId: ready.epic.id).id)
+        await fixture.supervisor.waitForSetup()
+        let first = try XCTUnwrap(fixture.sessions.all(projectId: fixture.project.id).first)
+        let integration = try XCTUnwrap(first.taskId)
+        try await fixture.supervisor.stop(sessionId: first.sessionId)
+
+        do {
+            _ = try await fixture.supervisor.assignAgent(taskId: integration, rosterAgentId: "any", scope: .worker)
+            XCTFail("a roster agent was spawned on an integration task")
+        } catch SupervisorError.integrationNotRosterable {}
+        _ = try await fixture.supervisor.spawnWorker(taskId: integration)
+        await fixture.supervisor.waitForSetup()
+
+        let spawns = await fixture.runtime.spawns
+        let respawn = try XCTUnwrap(spawns.last)
+        XCTAssertEqual(
+            respawn.cwd.resolvingSymlinksInPath().path,
+            URL(fileURLWithPath: first.cwd).resolvingSymlinksInPath().path
+        )
+        XCTAssertEqual(
+            try fixture.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: respawn.cwd)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            ready.epic.branch
+        )
+        XCTAssertEqual(
+            try fixture.tasks.list(projectId: fixture.project.id, epicId: ready.epic.id, includeArchived: true)
+                .filter { $0.origin == .integration }.map(\.id),
+            [integration]
+        )
+    }
+
+    func testSpawningAnIntegrationTaskAnswersWhileThePostCheckoutHookIsStillRunning() async throws {
+        let ready = try fixture.epicReadyForIntegration(["api"])
+        let integration = try fixture.board.createIntegrationTask(epicId: ready.epic.id)
+        let gate = try fixture.installGatedHook("post-checkout", when: "[ \"$3\" = \"1\" ]", then: "touch setup-ran")
+
+        let spawn = try await fixture.supervisor.spawnWorker(taskId: integration.id)
+
+        let ran = URL(fileURLWithPath: spawn.worktreePath).appendingPathComponent("setup-ran")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: ran.path),
+            "spawn_worker on an integration task waited for the post-checkout hook before answering"
+        )
+        XCTAssertEqual(try fixture.sessions.get(spawn.setupSessionId)?.state, .setup)
+        FileManager.default.createFile(atPath: gate.path, contents: nil)
+        await fixture.supervisor.waitForSetup()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ran.path))
+        XCTAssertEqual(
+            try fixture.git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: URL(fileURLWithPath: spawn.worktreePath))
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            ready.epic.branch
+        )
+        XCTAssertEqual(try fixture.sessions.forTask(integration.id).first?.state.isActive, true)
+    }
+
     func testIntegratorGetsTheSameGuardsAsAnyWorker() async throws {
         let ready = try fixture.epicReadyForIntegration(["api"])
         let approval = try requestIntegration(epicId: ready.epic.id)
@@ -209,6 +266,22 @@ final class EpicIntegrationTests: XCTestCase {
         XCTAssertEqual(try fixture.tasks.list(projectId: fixture.project.id), [])
     }
 
+    func testARepositoryWithAnOriginShipsTheEpicByPullRequest() async throws {
+        let remote = fixture.supportDir.appendingPathComponent("remote.git")
+        _ = try SupervisorFixture.git(["init", "--bare", "-q", remote.path], cwd: fixture.supportDir)
+        _ = try fixture.git(["remote", "add", "origin", remote.path])
+        let ready = try fixture.epicReadyForIntegration(["api"])
+        let approval = try requestIntegration(epicId: ready.epic.id)
+
+        try await fixture.supervisor.approve(approvalId: approval.id)
+        await fixture.supervisor.waitForSetup()
+        let session = try XCTUnwrap(fixture.sessions.all(projectId: fixture.project.id).first)
+        try await reportComplete(session: session)
+
+        XCTAssertEqual(try fixture.epics.get(ready.epic.id)?.state, .integrated)
+        XCTAssertFalse(try XCTUnwrap(fixture.tasks.get(ready.tasks[0].id)).isArchived)
+    }
+
     func testApprovingASpawnStillSpawnsTheTaskWorker() async throws {
         let task = try fixture.tasks.create(
             projectId: fixture.project.id, title: "Do the thing", body: nil, acceptance: nil,
@@ -237,27 +310,6 @@ final class EpicIntegrationTests: XCTestCase {
             "agentboard/\(task.id)"
         )
         XCTAssertNil(try fixture.epics.list(projectId: fixture.project.id).first)
-    }
-
-    /// Nothing on the integration path may reach a remote (D8, §5.2 step 4).
-    func testIntegrationPathNeverPushesOrOpensAPullRequest() async throws {
-        let ready = try fixture.epicReadyForIntegration(["api"])
-        let approval = try requestIntegration(epicId: ready.epic.id)
-
-        try await fixture.supervisor.approve(approvalId: approval.id)
-        await fixture.supervisor.waitForSetup()
-
-        let request = try await onlySpawn()
-        XCTAssertTrue(request.prompt.contains("Do not push. Do not open a PR."), request.prompt)
-        for denied in ["Bash(git push*)", "Bash(gh pr create*)", "Bash(gh pr merge*)"] {
-            XCTAssertTrue(request.disallowedTools.contains(denied), "\(request.disallowedTools)")
-        }
-        XCTAssertEqual(try fixture.git(["remote"]).trimmingCharacters(in: .whitespacesAndNewlines), "")
-        XCTAssertEqual(
-            try fixture.git(["rev-parse", ready.epic.branch]),
-            try fixture.git(["rev-parse", "agentboard/\(ready.tasks[0].id)^"]),
-            "the epic branch moved without the integrator having run"
-        )
     }
 
     private func onlySpawn() async throws -> SpawnRequest {

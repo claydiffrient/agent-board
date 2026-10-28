@@ -49,10 +49,10 @@ final class ProjectSettingsTests: XCTestCase {
     }
 
     func testTaskColumnOrderAndNeighbors() {
-        XCTAssertEqual(TaskColumn.allCases, [.proposed, .backlog, .ready, .running, .review, .done])
+        XCTAssertEqual(TaskColumn.allCases, [.proposed, .backlog, .ready, .running, .review, .done, .closed])
         XCTAssertEqual(TaskColumn.proposed.next, .backlog)
         XCTAssertEqual(TaskColumn.review.next, .done)
-        XCTAssertNil(TaskColumn.done.next)
+        XCTAssertNil(TaskColumn.closed.next)
         XCTAssertNil(TaskColumn.proposed.previous)
         XCTAssertEqual(TaskColumn.done.index, 5)
         XCTAssertEqual(TaskOrigin.workerProposal.rawValue, "worker_proposal")

@@ -1,15 +1,40 @@
 import AgentBoardCore
 import AppKit
 import SwiftUI
+import Vision
 import XCTest
 @testable import AgentBoard
 
 /// Mounts each settings tab offscreen and asserts on what that tab's controls hold.
 ///
 /// Readable here: a text field's `stringValue` and `placeholderString`, a text view's string, font
-/// and substitution flags, a pop-up's selected title, a switch's state, and every control's frame.
-/// Not readable: any `Text` — labels, section headers and help text — so their wording, placement
-/// and wrapping were checked only by looking at captures, never by this suite.
+/// and substitution flags, a switch's state, and every control's frame. Not readable: any `Text` —
+/// labels, section headers and help text — so their wording, placement and wrapping were checked
+/// only by looking at captures, never by this suite.
+///
+/// On macOS 27, in this offscreen/non-active session, a SwiftUI `Picker` no longer constructs an
+/// `NSPopUpButton` at all — not renamed, not empty, just absent from the AppKit view tree, even
+/// mounted through a real, on-screen, `makeKeyAndOrderFront`-ed window (see the headless UI
+/// verification note). Every assertion that used to read a pop-up's selected title now reads the
+/// same value one of two other ways instead:
+///
+/// - Where the picker's binding is a plain `@State` seeded once in `init` (archive mode, worktree
+///   strategy, standalone integration, review level, default model), `seededState(_:_:)` reads it
+///   off a freshly-constructed, never-mounted `ProjectSettingsSheet` through `Mirror` — see
+///   `StateMirror.swift`. This cannot prove the picker actually renders bound to that state.
+/// - Where the picker's rows depend on `projectAgents`, loaded from the database by a `.task` that
+///   only runs once a view is live — reflecting the *unmounted* sheet always sees the empty default,
+///   and reflecting it *after* mounting returns `nil` too (measured: SwiftUI moves `@State` storage
+///   into the live render graph on mount, and the original struct's reflected box no longer holds
+///   it) — the review-routing-table tests instead call `RosterStore.agents(forProject:)` and
+///   `ProjectSettingsSheet.reviewerOptions`/`routingAssignee` directly, the same pure functions
+///   `routingRow(_:)` calls, with the same database. This cannot prove `routingRow` actually calls
+///   them with what it looks like it calls them with. Whether the `Group` around the routing rows is
+///   still the thing `.disabled(settings.reviewLevel != .agent)` is attached to is read by
+///   `testAgentsRoutingTableIsDisabledOutsideAgentReview` two ways, chosen per platform: where a real
+///   `NSPopUpButton` exists (seen on macOS 26 CI) its `.isEnabled` is read directly; where none is
+///   constructed at all (this machine, macOS 27) the test falls back to pixel contrast on the row's
+///   drawn text.
 @MainActor
 final class ProjectSettingsTabRenderTests: XCTestCase {
     private static let guidance = "Sonnet 5 for docs and tests, Opus 5 for features."
@@ -17,14 +42,6 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     private struct Mounted {
         let window: NSWindow
         let host: NSView
-
-        func settle(turns: Int = 40) {
-            for _ in 0..<turns {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-                window.layoutIfNeeded()
-                window.displayIfNeeded()
-            }
-        }
 
         func collect<V: NSView>(_ type: V.Type) -> [V] {
             var found: [V] = []
@@ -44,8 +61,9 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     private func mount(
         tab: ProjectSettingsTab,
         rosterAgents: Int = 0,
-        configure: (inout ProjectSettings) -> Void = { _ in },
-        seed: (AppDatabase, String) throws -> Void = { _, _ in }
+        seed: (AppDatabase, String) throws -> Void = { _, _ in },
+        until condition: (Mounted) -> Bool = { _ in true },
+        configure: (inout ProjectSettings) -> Void = { _ in }
     ) throws -> Mounted {
         let db = try AppDatabase.inMemory()
         let projects = ProjectStore(db)
@@ -73,27 +91,111 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         )
         window.contentView = host
         window.orderBack(nil)
+        addTeardownBlock { window.orderOut(nil) }
         let mounted = Mounted(window: window, host: host)
-        mounted.settle()
+        settle(mounted, until: condition)
         return mounted
     }
 
-    func testGeneralHoldsTheRepositoryFieldsWorkspaceAndArchive() throws {
-        let mounted = try mount(tab: .general) { $0.archivePolicy = .afterDays(21) }
+    /// Pumps until the view tree stops growing (a GRDB `ValueObservation` or `.task` can still be
+    /// adding controls after the first frame) and the caller's own condition holds. Every tab here
+    /// seeds its `@State` synchronously from `configure`, so structural quiescence alone is already
+    /// correct for most of them; `.agents`' roster rows load asynchronously and pass a real `until`.
+    private func settle(
+        _ mounted: Mounted, agreeing: Int = 3, ceiling: Duration = .seconds(10),
+        until condition: (Mounted) -> Bool = { _ in true }
+    ) {
+        var previous = -1
+        var agreed = 0
+        pump(mounted.window, ceiling: ceiling) {
+            let signature = mounted.collect(NSView.self).count
+            agreed = signature == previous ? agreed + 1 : 0
+            previous = signature
+            return agreed >= agreeing && condition(mounted)
+        }
+    }
 
-        XCTAssertEqual(mounted.fields.map(\.stringValue), ["main", "/tmp/demo-worktrees", "21"])
-        XCTAssertEqual(
-            mounted.collect(NSPopUpButton.self).map(\.title),
-            ["None", ArchivePolicyMode.afterDays.title]
+    /// Builds the same project a `mount(tab:)` call would, but only constructs the
+    /// `ProjectSettingsSheet` value — no `NSHostingView`, no window — for reading a `@State`
+    /// property's seeded value through `seededState(_:_:)`.
+    private func seededSheet(
+        tab: ProjectSettingsTab,
+        configure: (inout ProjectSettings) -> Void = { _ in }
+    ) throws -> ProjectSettingsSheet {
+        let db = try AppDatabase.inMemory()
+        let projects = ProjectStore(db)
+        var project = try projects.register(
+            name: "Demo", repoPath: "/tmp/demo-\(UUID().uuidString)", baseBranch: "main",
+            worktreeRoot: "/tmp/demo-worktrees", memoryDir: nil
         )
+        var settings = project.settings
+        configure(&settings)
+        try projects.updateSettings(project.id, settings)
+        project = try XCTUnwrap(projects.get(project.id))
+        return ProjectSettingsSheet(project: project, workspaces: [], initialTab: tab, onDeleted: {})
+    }
+
+    func testGeneralHoldsTheRepositoryFieldsWorkspaceAndArchive() throws {
+        let mounted = try mount(tab: .general, configure: { $0.archivePolicy = .afterDays(21) })
+
+        XCTAssertEqual(mounted.fields.map(\.stringValue), ["main", "21"], "the worktree root is never typed")
         XCTAssertTrue(mounted.collect(NSTextView.self).isEmpty)
+
+        let sheet = try seededSheet(tab: .general) { $0.archivePolicy = .afterDays(21) }
+        let archiveMode: ArchivePolicyMode? = seededState(sheet, "_archiveMode")
+        XCTAssertEqual(archiveMode, .afterDays, "the archive picker's seeded state did not carry the stored policy")
+    }
+
+    /// The row's text is read by OCR; whether Save is disabled is not readable here (a SwiftUI
+    /// `Button` is no `NSButton`), so that half rests on `worktreeRootComplaint` gating it.
+    func testTheWorktreeRootRowShowsTheRootUnderTildeWithItsButtonsAndTheSpaceComplaint() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
+        let db = try AppDatabase.inMemory()
+        let projects = ProjectStore(db)
+        let registered = try projects.register(
+            name: "Demo", repoPath: "/tmp/demo-\(UUID().uuidString)", baseBranch: "main",
+            worktreeRoot: "/tmp/demo-worktrees", memoryDir: nil
+        )
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE project SET worktree_root = ? WHERE id = ?",
+                arguments: [home.appendingPathComponent("wt roots/demo").path, registered.id]
+            )
+        }
+        let project = try XCTUnwrap(projects.get(registered.id))
+
+        let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .general, onDeleted: {})
+            .environment(renderEnvironment(db: db))
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 700))
+        defer { mount.close() }
+        var lines: [OCRLine] = []
+        _ = try mount.capture(until: { _ in
+            guard let image = CGWindowListCreateImage(
+                .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+                [.boundsIgnoreFraming, .bestResolution]
+            ), let recognized = try? self.recognizedRoutingLines(in: image) else { return false }
+            lines = recognized
+            return recognized.contains { $0.text.contains("Use Default") }
+        })
+        let page = lines.map(\.text).joined(separator: "\n")
+        let anchor = try XCTUnwrap(lines.first { $0.text.contains("Use Default") }, page)
+        let row = lines
+            .filter { (anchor.box.minY...anchor.box.maxY).contains($0.box.midY) }
+            .map(\.text).joined(separator: " ")
+
+        XCTAssertTrue(row.contains("Choose"), row)
+        XCTAssertTrue(row.contains("roots/demo"), row)
+        XCTAssertFalse(row.contains(home.lastPathComponent), "the home folder is not shown as ~: \(row)")
+        XCTAssertTrue(page.contains("space"), "no complaint about the space: \(page)")
     }
 
     /// The guidance editor used to sit in a `LabeledContent`, which a grouped form lays out as the
     /// row's trailing half: measured, 358pt wide against the classifier's 665pt, its text drawn
     /// right-aligned (seen in a capture; `NSTextView.alignment` still reported `.natural`).
     func testAgentsGuidanceEditorSpansTheRow() throws {
-        let mounted = try mount(tab: .agents, rosterAgents: 1) {
+        let mounted = try mount(
+            tab: .agents, rosterAgents: 1, until: { $0.collect(NSSwitch.self).count == 2 }
+        ) {
             $0.modelGuidance = Self.guidance
             $0.autonomyEnabled = true
             $0.reviewLevel = .epic
@@ -104,46 +206,249 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let editor = try XCTUnwrap(editors.first)
         XCTAssertGreaterThanOrEqual(mounted.frame(of: editor).width, 600)
         XCTAssertGreaterThanOrEqual(mounted.frame(of: editor).height, 100)
-
-        XCTAssertEqual(
-            mounted.collect(NSPopUpButton.self).map(\.title),
-            ["Claude Code default", ReviewLevel.epic.label, ProjectSettingsSheet.anyReviewerTitle]
-                + Array(repeating: ProjectSettingsSheet.sameAsDefaultTitle, count: TaskType.allCases.count)
-        )
         XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off], "autonomy, then the one rostered agent")
+
+        let sheet = try seededSheet(tab: .agents) {
+            $0.modelGuidance = Self.guidance
+            $0.autonomyEnabled = true
+            $0.reviewLevel = .epic
+        }
+        let settings: ProjectSettings? = seededState(sheet, "_settings")
+        XCTAssertEqual(settings?.defaultModel, nil, "no model override, so the picker should read Claude Code default")
+        XCTAssertEqual(settings?.reviewLevel, .epic)
+        let defaultRow = ProjectSettingsSheet.reviewerChoice(
+            ProjectSettingsSheet.routingAssignee(settings?.reviewRouting ?? .init(), type: nil)
+        )
+        XCTAssertEqual(defaultRow, .anyReviewer, "an unconfigured routing table's default row")
+        XCTAssertEqual(
+            TaskType.allCases.map {
+                ProjectSettingsSheet.reviewerChoice(
+                    ProjectSettingsSheet.routingAssignee(settings?.reviewRouting ?? .init(), type: $0)
+                )
+            },
+            Array(repeating: .sameAsDefault, count: TaskType.allCases.count),
+            "an unconfigured routing table's per-type rows"
+        )
+    }
+
+    func testTheRosterListsBoardLocalAgentsWhileTheWorktreeRootIsInvalid() throws {
+        let mounted = try mount(
+            tab: .agents, rosterAgents: 2,
+            seed: { db, id in
+                try db.writer.write { db in
+                    try db.execute(
+                        sql: "UPDATE project SET worktree_root = ? WHERE id = ?",
+                        arguments: ["/tmp/Application Support/AgentBoard/worktrees/\(id)", id]
+                    )
+                }
+            },
+            until: { $0.collect(NSSwitch.self).count == 3 }
+        )
+
+        XCTAssertEqual(mounted.collect(NSSwitch.self).count, 3, "autonomy, then the two board-local agents")
     }
 
     /// Rex left the roster after being named; the Default row still shows him rather than a blank.
-    func testAgentsRoutingTableShowsEachRowsChoiceAndIsDisabledOutsideAgentReview() throws {
+    ///
+    /// This checks, for both review levels, that `routingRow`'s own logic — `routingAssignee` and
+    /// `reviewerChoice` over a `ReviewRoutingTable` that has been through a real
+    /// `ProjectStore.updateSettings`/`.get` round trip (JSON encode and decode), against a roster
+    /// read back from `RosterStore.agents(forProject:)` — resolves each row's selected title the way
+    /// the view is written to. It does not cover the `.disabled(settings.reviewLevel != .agent)` half
+    /// of the original name — see `testAgentsRoutingTableIsDisabledOutsideAgentReview` below, which
+    /// reads that through pixel contrast instead of the `NSPopUpButton.isEnabled` this session has none of.
+    func testAgentsRoutingTableShowsEachRowsChoice() throws {
         for level in [ReviewLevel.agent, .epic] {
-            let mounted = try mount(tab: .agents) { db, projectId in
-                let roster = RosterStore(db)
-                let ada = try roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
-                let roscoe = try roster.create(name: "Roscoe", role: "go", systemPrompt: "p")
-                try roster.create(name: "Elsewhere", role: "reviewer", systemPrompt: "p")
-                try roster.enable(agentId: roscoe.id, forProject: projectId)
-                try roster.enable(agentId: ada.id, forProject: projectId)
-                var settings = try XCTUnwrap(ProjectStore(db).get(projectId)).settings
-                settings.reviewLevel = level
-                settings.reviewRouting = ReviewRoutingTable(
-                    defaultAssignee: .named(ReviewAgentChoice(id: "deleted-agent", name: "Rex")),
-                    typeAssignees: [
-                        .code: .named(ReviewAgentChoice(id: ada.id, name: ada.name)),
-                        .plan: .acceptWithoutReview,
-                        .review: .person,
-                    ]
-                )
-                try ProjectStore(db).updateSettings(projectId, settings)
-            }
+            let db = try AppDatabase.inMemory()
+            let project = try ProjectStore(db).register(
+                name: "Demo", repoPath: "/tmp/demo-\(UUID().uuidString)", baseBranch: "main",
+                worktreeRoot: "/tmp/demo-worktrees", memoryDir: nil
+            )
+            let roster = RosterStore(db)
+            let ada = try roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
+            let roscoe = try roster.create(name: "Roscoe", role: "go", systemPrompt: "p")
+            try roster.create(name: "Elsewhere", role: "reviewer", systemPrompt: "p")
+            try roster.enable(agentId: roscoe.id, forProject: project.id)
+            try roster.enable(agentId: ada.id, forProject: project.id)
+            var settings = project.settings
+            settings.reviewLevel = level
+            settings.reviewRouting = ReviewRoutingTable(
+                defaultAssignee: .named(ReviewAgentChoice(id: "deleted-agent", name: "Rex")),
+                typeAssignees: [
+                    .code: .named(ReviewAgentChoice(id: ada.id, name: ada.name)),
+                    .plan: .acceptWithoutReview,
+                    .review: .person,
+                ]
+            )
+            try ProjectStore(db).updateSettings(project.id, settings)
+            let reviewRouting = try XCTUnwrap(ProjectStore(db).get(project.id)).settings.reviewRouting
+            let projectAgents = try roster.agents(forProject: project.id)
 
-            let rows = Array(mounted.collect(NSPopUpButton.self).dropFirst(2))
+            let selectedTitles = ([nil] + TaskType.allCases).map { type -> String in
+                let current = ProjectSettingsSheet.routingAssignee(reviewRouting, type: type)
+                let choice = ProjectSettingsSheet.reviewerChoice(current)
+                let options = ProjectSettingsSheet.reviewerOptions(
+                    projectAgents: projectAgents, current: current?.namedChoice, sameAsDefault: type != nil
+                )
+                return options.first { $0.choice == choice }?.title ?? "<missing: \(choice)>"
+            }
             XCTAssertEqual(
-                rows.map(\.title),
+                selectedTitles,
                 ["Rex (not available)", "Ada", "Same as Default", "Same as Default", "Accept without review", "A person"],
                 "\(level)"
             )
-            XCTAssertEqual(rows.map(\.isEnabled), Array(repeating: level == .agent, count: 6), "\(level)")
         }
+    }
+
+    /// `.disabled(settings.reviewLevel != .agent)` wraps a `Group` of pickers, one per task type,
+    /// each showing "Same as Default" while the routing table is unconfigured. On a build that still
+    /// constructs a real `NSPopUpButton` for a `Picker` offscreen (macOS 26 CI, as of this writing),
+    /// `.isEnabled` on that button is the strongest read of `.disabled(...)` there is, and is taken
+    /// directly. On a build that does not (macOS 27, this machine — see the type-level doc comment:
+    /// no pop-up button is constructed at all, not renamed, not empty, just absent), no such button
+    /// exists to read, so this falls back to pixel contrast: a disabled control's text still draws,
+    /// dimmed. That fallback sums the glyph ink in a per-type value's OCR box — every pixel's
+    /// departure from the box's own background corner, not the box's single brightest pixel — and
+    /// compares Agent review's ink against Epic review's ink directly, rather than against a fixed
+    /// brightness threshold. A threshold assumes a particular background; summed deviation from the
+    /// box's own corner does not, and a lone bright pixel (a caret, a stray anti-aliasing artifact)
+    /// cannot dominate a sum the way it can a peak.
+    ///
+    /// Proven by mutation on the pixel fallback (this machine, macOS 27): deleting
+    /// `.disabled(settings.reviewLevel != .agent)` from `ProjectSettingsSheet.swift` failed this test
+    /// (Epic review's ink came back within the Agent-review floor — no longer dimmed); inverting it to
+    /// `== .agent` also failed (Agent review came back dimmed instead, Epic review did not).
+    func testAgentsRoutingTableIsDisabledOutsideAgentReview() throws {
+        let enabled = try ocrRoutingCapture(reviewLevel: .agent)
+        let disabled = try ocrRoutingCapture(reviewLevel: .epic)
+
+        if !enabled.routingPopUps.isEmpty || !disabled.routingPopUps.isEmpty {
+            XCTAssertFalse(enabled.routingPopUps.isEmpty, "expected per-type routing pop-up buttons at Agent review")
+            XCTAssertFalse(disabled.routingPopUps.isEmpty, "expected per-type routing pop-up buttons at Epic review")
+            XCTAssertTrue(
+                enabled.routingPopUps.allSatisfy(\.isEnabled),
+                "Agent review's routing pop-up buttons should be enabled"
+            )
+            XCTAssertTrue(
+                disabled.routingPopUps.allSatisfy { !$0.isEnabled },
+                "a routing pop-up button is not disabled outside Agent review"
+            )
+            return
+        }
+
+        let enabledInk = try glyphInk(enabled)
+        let disabledInk = try glyphInk(disabled)
+        XCTAssertGreaterThan(enabledInk, 1000, "Agent review's routing row drew too little glyph ink to compare: \(enabledInk)")
+        XCTAssertGreaterThan(
+            enabledInk, disabledInk * 2,
+            "the routing row is not clearly dimmer outside Agent review: enabled ink \(enabledInk), disabled ink \(disabledInk)"
+        )
+    }
+
+    private struct OCRLine {
+        let text: String
+        let box: CGRect
+    }
+
+    /// Mounts the Agents tab at the given review level and reads it two ways: Vision OCR (to find
+    /// where a routing row's value text sits, for the pixel fallback) and a walk for the per-type
+    /// routing `Picker`s' `NSPopUpButton`s, where the platform still constructs one. No roster agent
+    /// is needed — an unconfigured `ReviewRoutingTable` already renders "Same as Default" for every
+    /// task type, which is also how the per-type pop-up buttons are told apart from the Default row's
+    /// (which never reads "Same as Default" — see `ProjectSettingsSheet.routingRow`) and from every
+    /// other pop-up button on the tab.
+    /// Waits not just for pixels to stop moving but for at least one per-type routing row to show its
+    /// "Same as Default" value — the same `Picker`-backed `NSPopUpButton` lag `typeRowHasValue(in:)`
+    /// guards against in `TaskTypeRenderTests`. Without this, `mount.capture()` can agree on a frame
+    /// drawn before any routing picker has painted its title, and `glyphInk` then fails loudly with
+    /// "no per-type routing value found" instead of comparing real ink.
+    private func ocrRoutingCapture(
+        reviewLevel: ReviewLevel
+    ) throws -> (lines: [OCRLine], rep: NSBitmapImageRep, routingPopUps: [NSPopUpButton]) {
+        let db = try AppDatabase.inMemory()
+        let projects = ProjectStore(db)
+        var project = try projects.register(
+            name: "Demo", repoPath: "/tmp/demo-\(UUID().uuidString)", baseBranch: "main",
+            worktreeRoot: "/tmp/demo-worktrees", memoryDir: nil
+        )
+        var settings = project.settings
+        settings.reviewLevel = reviewLevel
+        try projects.updateSettings(project.id, settings)
+        project = try XCTUnwrap(projects.get(project.id))
+
+        let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .agents, onDeleted: {})
+            .environment(renderEnvironment(db: db))
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 900))
+        defer { mount.close() }
+        var lines: [OCRLine] = []
+        var lastImage: CGImage?
+        _ = try mount.capture(until: { _ in
+            guard let image = CGWindowListCreateImage(
+                .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+                [.boundsIgnoreFraming, .bestResolution]
+            ) else { return false }
+            lastImage = image
+            guard let recognized = try? self.recognizedRoutingLines(in: image) else { return false }
+            lines = recognized
+            return recognized.contains { $0.text.contains(ProjectSettingsSheet.sameAsDefaultTitle) }
+        })
+        let routingPopUps = popUpButtons(titled: ProjectSettingsSheet.sameAsDefaultTitle, in: mount.host)
+        let image = try XCTUnwrap(lastImage, "no window-server image captured")
+        let rep = try XCTUnwrap(NSBitmapImageRep(cgImage: image))
+        return (lines, rep, routingPopUps)
+    }
+
+    private func recognizedRoutingLines(in image: CGImage) throws -> [OCRLine] {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        return (request.results ?? []).compactMap { observation in
+            observation.topCandidates(1).first.map { OCRLine(text: $0.string, box: observation.boundingBox) }
+        }
+    }
+
+    private func popUpButtons(titled title: String, in host: NSView) -> [NSPopUpButton] {
+        var found: [NSPopUpButton] = []
+        func walk(_ view: NSView) {
+            if let button = view as? NSPopUpButton, button.title == title { found.append(button) }
+            view.subviews.forEach(walk)
+        }
+        walk(host)
+        return found
+    }
+
+    /// Sum, over a per-type routing row's "Same as Default" OCR box, of each pixel's brightness
+    /// departure from the box's own top-left corner (its background). The glyph strokes are what
+    /// create that departure; summing rather than peaking means one stray bright pixel cannot stand
+    /// in for the whole row, and starting from the box's own corner rather than a fixed threshold
+    /// means the metric does not assume which appearance (light or dark mode) it is reading.
+    private func glyphInk(
+        _ capture: (lines: [OCRLine], rep: NSBitmapImageRep, routingPopUps: [NSPopUpButton])
+    ) throws -> Int {
+        let value = try XCTUnwrap(
+            capture.lines.first { $0.text.contains("Same as Default") },
+            "no per-type routing value found: \(capture.lines.map(\.text))"
+        )
+        let rep = capture.rep
+        let box = value.box
+        let w = rep.pixelsWide, h = rep.pixelsHigh
+        guard w > 0, h > 0 else { return 0 }
+        let x0 = max(0, Int(box.minX * CGFloat(w)))
+        let x1 = min(w, Int(box.maxX * CGFloat(w)))
+        let yTop = max(0, h - Int(box.maxY * CGFloat(h)))
+        let yBottom = min(h, h - Int(box.minY * CGFloat(h)))
+        guard x0 < x1, yTop < yBottom, let background = rep.colorAt(x: x0, y: yTop) else { return 0 }
+        let backgroundLuma = (background.redComponent + background.greenComponent + background.blueComponent) / 3 * 255
+        var ink = 0
+        for y in yTop..<yBottom {
+            for x in x0..<x1 {
+                guard let color = rep.colorAt(x: x, y: y) else { continue }
+                let luma = (color.redComponent + color.greenComponent + color.blueComponent) / 3 * 255
+                ink += Int(abs(luma - backgroundLuma))
+            }
+        }
+        return ink
     }
 
     func testTheReviewerOptionsListTheProjectsAgentsThenAMissingChoiceThenTheFixedChoices() {
@@ -187,14 +492,14 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     }
 
     func testLimitsHoldsTheSixCapsInOrderAndNothingElse() throws {
-        let mounted = try mount(tab: .limits) {
+        let mounted = try mount(tab: .limits, configure: {
             $0.caps.maxConcurrentWorkers = 4
             $0.caps.maxTokensPerAgent = nil
             $0.caps.maxWallClockSeconds = 2400
             $0.caps.maxIdleSeconds = 450
             $0.caps.stallSeconds = 90
             $0.caps.sessionCeiling = 12
-        }
+        })
 
         XCTAssertEqual(
             mounted.fields.map(\.stringValue),
@@ -209,45 +514,59 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         XCTAssertTrue(mounted.collect(NSTextView.self).isEmpty)
     }
 
-    func testWorkflowHoldsCommandsStrategyAndBranchTemplate() throws {
-        let mounted = try mount(tab: .workflow) {
+    func testWorkflowHoldsCommandsTeardownStrategyAndBranchTemplate() throws {
+        let mounted = try mount(tab: .workflow, configure: {
             $0.buildCommand = "make"
+            $0.worktreeTeardownCommand = "make clean"
+            $0.worktreeTeardownTimeoutSeconds = 90
             $0.worktreeStrategy = .shared
             $0.sharedCheckoutMaxAgents = 5
+            $0.worktreeSlots = 2
             $0.standaloneIntegration = .localMerge
-        }
+        })
 
-        XCTAssertEqual(mounted.fields.map(\.stringValue), ["make", "", "", "5", ""])
+        XCTAssertEqual(mounted.fields.map(\.stringValue), ["make", "", "", "make clean", "90", "5", "2", ""])
         XCTAssertEqual(
             mounted.fields.map(\.placeholderString),
-            ["e.g. swift build", "e.g. swift test", "30", nil, "e.g. clay/{slug}"]
+            [
+                "e.g. swift build", "e.g. swift test", "30",
+                "e.g. [ \"$(bazel info workspace)\" = \"$PWD\" ] && bazel clean --expunge", nil, nil, nil,
+                "e.g. clay/{slug}",
+            ]
         )
-        XCTAssertEqual(
-            mounted.collect(NSPopUpButton.self).map(\.title),
-            [WorktreeStrategy.shared.title, StandaloneIntegration.localMerge.title]
-        )
+
+        let sheet = try seededSheet(tab: .workflow) {
+            $0.worktreeStrategy = .shared
+            $0.standaloneIntegration = .localMerge
+        }
+        let settings: ProjectSettings? = seededState(sheet, "_settings")
+        XCTAssertEqual(settings?.worktreeStrategy, .shared)
+        XCTAssertEqual(settings?.standaloneIntegration, .localMerge)
     }
 
     func testNotificationsHoldsOneSwitchPerCategoryInItsStoredState() throws {
-        let mounted = try mount(tab: .notifications) {
+        let mounted = try mount(tab: .notifications, configure: {
             $0.notifications.setEnabled(.capsAndStalls, false)
-        }
+        })
 
         XCTAssertEqual(
             mounted.collect(NSSwitch.self).map(\.state),
             NotificationCategory.allCases.map { $0 == .capsAndStalls ? .off : .on }
         )
-        XCTAssertEqual(mounted.collect(NSPopUpButton.self).map(\.title), [NotificationMuteChoice.off.title])
         XCTAssertTrue(mounted.fields.isEmpty)
+
+        let sheet = try seededSheet(tab: .notifications) { $0.notifications.setEnabled(.capsAndStalls, false) }
+        let muteChoice: NotificationMuteChoice? = seededState(sheet, "_muteChoice")
+        XCTAssertEqual(muteChoice, .off)
     }
 
     /// A `TextEditor` takes the system's smart quotes, so a typed `"` became `“` and the field
     /// reported "Not valid JSON." — measured on the old editor: quote and dash substitution both on.
     func testAdvancedClassifierEditorIsMonospacedTallAndTakesNoSmartSubstitutions() throws {
-        let mounted = try mount(tab: .advanced) {
+        let mounted = try mount(tab: .advanced, configure: {
             $0.autoModeJSON = ProjectSettings.defaultAutoModeJSON
             $0.extraMcpServers = ["linear", "github"]
-        }
+        })
 
         let editors = mounted.collect(NSTextView.self)
         XCTAssertEqual(editors.map(\.string), [ProjectSettings.defaultAutoModeJSON])
@@ -272,6 +591,136 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
 
         let scroll = try XCTUnwrap(mounted.collect(NSTextView.self).first?.enclosingScrollView)
         XCTAssertGreaterThanOrEqual(mounted.frame(of: scroll).height, 280)
+    }
+
+    func testPRFollowThroughHoldsWatchVerificationRepliesAndThePublishGuard() throws {
+        let configure: (inout ProjectSettings) -> Void = {
+            $0.prFollowThrough = PRFollowThroughSettings(
+                enabled: true, verificationLabel: "verified-example", requireApproval: false,
+                settleMinutes: 15, roundCap: 2, verifyCommand: "example-verify {url}",
+                postFactualReplies: true,
+                roles: PRFollowThroughRoles(
+                    triage: .init(model: "example-triage"), fixer: .init(model: "example-fixer"),
+                    reviewer: .init(model: "example-reviewer"), followupCheck: .init(model: "example-check")
+                ),
+                privateTerms: ["Globex"], checksAwaitingVerification: ["example-verification", "example-sign-off"]
+            )
+        }
+        let mounted = try mount(tab: .prFollowThrough, configure: configure)
+
+        let roleModels = ["example-triage", "example-fixer", "example-reviewer", "example-check"]
+        XCTAssertEqual(
+            mounted.fields.map(\.stringValue),
+            ["15", "2", "", "50", "verified-example", "example-verify {url}", "example-verification, example-sign-off", ""]
+                + roleModels
+        )
+        XCTAssertEqual(
+            mounted.fields.map(\.placeholderString),
+            [
+                nil, nil, "Spawn caps", "Any", "e.g. verified", #"e.g. claude "/review:verify {url}" --mcp-config {mcp_config}"#, "Comma-separated check names",
+                "Press Return to add",
+            ]
+                + Array(repeating: "Model id", count: roleModels.count)
+        )
+        XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off, .on, .off])
+        if !mounted.collect(NSPopUpButton.self).isEmpty {
+            XCTAssertEqual(popUpButtons(titled: "Default", in: mounted.host).count, 4, "one agent picker per role")
+        }
+
+        let (db, project) = try storedProject(configure)
+        let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
+            .environment(renderEnvironment(db: db))
+        // Publish guard sits further down this tab than the 900pt mounts elsewhere in this file hold.
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 1100))
+        defer { mount.close() }
+        let wanted = ["Watch", "Verification", "Replies", "Publish guard", "Globex"]
+        var lines: [String] = []
+        _ = try mount.capture(until: { _ in
+            guard let image = CGWindowListCreateImage(
+                .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+                [.boundsIgnoreFraming, .bestResolution]
+            ), let recognized = try? self.recognizedRoutingLines(in: image) else { return false }
+            lines = recognized.map(\.text)
+            return wanted.allSatisfy { word in lines.contains { $0.contains(word) } }
+        })
+        for word in wanted {
+            XCTAssertTrue(lines.contains { $0.contains(word) }, "no \(word) on the tab: \(lines)")
+        }
+    }
+
+    func testPRFollowThroughSaveKeepsAPendingTermAndReloadsFromTheStore() throws {
+        let draft = PRFollowThroughSettings(
+            enabled: true, verificationLabel: "  ", settleMinutes: -5, roundCap: 0, dailyBudgetUSD: 0,
+            minBatteryPercent: 150, verifyCommand: " example-verify {url} ", privateTerms: ["Globex", " initech "]
+        )
+        let saved = ProjectSettingsSheet.savedFollowThrough(draft, pendingTerm: "GLOBEX")
+        XCTAssertEqual(saved.privateTerms, ["Globex", "initech"], "a case-variant of a listed term guards nothing new")
+        XCTAssertEqual(
+            ProjectSettingsSheet.savedFollowThrough(draft, pendingTerm: " Umbrella ").privateTerms,
+            ["Globex", "initech", "Umbrella"]
+        )
+        XCTAssertNil(saved.verificationLabel)
+        XCTAssertNil(saved.dailyBudgetUSD)
+        XCTAssertEqual(saved.verifyCommand, "example-verify {url}")
+        XCTAssertEqual(saved.settleMinutes, 0)
+        XCTAssertEqual(saved.roundCap, 1)
+        XCTAssertEqual(saved.minBatteryPercent, 100)
+        XCTAssertEqual(ProjectSettingsSheet.checkNames(" a / b, ,c,a / b "), ["a / b", "c"])
+
+        let (_, project) = try storedProject { $0.prFollowThrough = saved }
+        let sheet = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
+        let seeded: ProjectSettings? = seededState(sheet, "_settings")
+        XCTAssertEqual(seeded?.prFollowThrough, saved)
+    }
+
+    func testRolePickersOfferEnabledAgentsAndTheirSelectionsRoundTrip() throws {
+        let db = try AppDatabase.inMemory()
+        let roster = RosterStore(db)
+        let rita = try roster.create(name: "Rita", role: "reviewer", systemPrompt: "")
+        let off = try roster.create(name: "Off", role: "fixer", systemPrompt: "", enabled: false)
+        let gone = try roster.create(name: "Gone", role: "fixer", systemPrompt: "")
+
+        XCTAssertEqual(
+            ProjectSettingsSheet.roleAgentOptions(projectAgents: [rita, off], rosterAgents: [rita, off, gone], current: gone.id),
+            [
+                .init(agentId: nil, title: "Default"), .init(agentId: rita.id, title: "Rita"),
+                .init(agentId: gone.id, title: "Gone (not available)"),
+            ]
+        )
+
+        var roles = PRFollowThroughRoles()
+        for role in ProjectSettingsSheet.FollowThroughRole.allCases {
+            roles[keyPath: role.keyPath] = ProjectSettingsSheet.updating(roles[keyPath: role.keyPath]) {
+                $0.rosterAgentId = rita.id
+            }
+        }
+        roles.fixer = ProjectSettingsSheet.updating(roles.fixer) { $0.model = "claude-sonnet-5-5" }
+        roles.reviewer = ProjectSettingsSheet.updating(roles.reviewer) { $0.rosterAgentId = nil }
+        XCTAssertNil(roles.reviewer, "a role cleared back to Default is stored as absent")
+
+        let draft = PRFollowThroughSettings(roles: roles)
+        let (_, project) = try storedProject {
+            $0.prFollowThrough = ProjectSettingsSheet.savedFollowThrough(draft, pendingTerm: "")
+        }
+        let sheet = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
+        let seeded: ProjectSettings? = seededState(sheet, "_settings")
+        XCTAssertEqual(seeded?.prFollowThrough.roles, PRFollowThroughRoles(
+            triage: .init(rosterAgentId: rita.id), fixer: .init(rosterAgentId: rita.id, model: "claude-sonnet-5-5"),
+            followupCheck: .init(rosterAgentId: rita.id)
+        ))
+    }
+
+    private func storedProject(_ configure: (inout ProjectSettings) -> Void) throws -> (AppDatabase, Project) {
+        let db = try AppDatabase.inMemory()
+        let projects = ProjectStore(db)
+        let project = try projects.register(
+            name: "Demo", repoPath: "/tmp/demo-\(UUID().uuidString)", baseBranch: "main",
+            worktreeRoot: "/tmp/demo-worktrees", memoryDir: nil
+        )
+        var settings = project.settings
+        configure(&settings)
+        try projects.updateSettings(project.id, settings)
+        return (db, try XCTUnwrap(projects.get(project.id)))
     }
 
     /// A grouped form ends every field on the row's trailing edge; a `.frame(width:)` on one field

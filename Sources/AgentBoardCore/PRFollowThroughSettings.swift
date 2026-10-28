@@ -1,0 +1,190 @@
+import Foundation
+
+/// Which agent fills one follow-through role. Both nil leaves the choice to the app's default.
+public struct PRFollowThroughRole: Codable, Sendable, Equatable {
+    public var rosterAgentId: String?
+    public var model: String?
+
+    public init(rosterAgentId: String? = nil, model: String? = nil) {
+        self.rosterAgentId = rosterAgentId
+        self.model = model
+    }
+}
+
+public struct PRFollowThroughRoles: Codable, Sendable, Equatable {
+    public var triage: PRFollowThroughRole?
+    public var fixer: PRFollowThroughRole?
+    public var reviewer: PRFollowThroughRole?
+    public var followupCheck: PRFollowThroughRole?
+
+    public init(
+        triage: PRFollowThroughRole? = nil, fixer: PRFollowThroughRole? = nil,
+        reviewer: PRFollowThroughRole? = nil, followupCheck: PRFollowThroughRole? = nil
+    ) {
+        self.triage = triage
+        self.fixer = fixer
+        self.reviewer = reviewer
+        self.followupCheck = followupCheck
+    }
+}
+
+/// `settings_json.prFollowThrough` (SPEC §4). Every work-specific value lives here, never in a code
+/// default, so everything starts off or empty.
+public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
+    public var enabled: Bool = false
+    /// Nil makes the user's merge the verification.
+    public var verificationLabel: String? = nil
+    public var requireApproval: Bool = true
+    public var settleMinutes: Int = 10
+    public var roundCap: Int = 3
+    /// Nil uses the project's spawn caps instead of a dollar budget.
+    public var dailyBudgetUSD: Double? = nil
+    /// The charge a round needs to start on battery (SPEC §13.3); nil starts one at any charge.
+    public var minBatteryPercent: Int? = 50
+    /// A command template with `{url}` and optionally `{mcp_config}`, run by "Walk me through it".
+    public var verifyCommand: String? = nil
+    public var postFactualReplies: Bool = false
+    /// When `postFactualReplies` was last turned on. Stamped by `ProjectStore.updateSettings`; only items
+    /// handled since then are replied to (SPEC §13.2).
+    public var postFactualRepliesSince: Int64? = nil
+    /// Asks the reviewers a pushed round answered to review again, which notifies them as the user (SPEC §13.2).
+    public var reRequestReviews: Bool = false
+    public var roles: PRFollowThroughRoles = PRFollowThroughRoles()
+    /// Matched case-insensitively by the publish guard.
+    public var privateTerms: [String] = []
+    /// Check-run names or status contexts, matched exactly, left out of whether CI passed (SPEC §13.1):
+    /// checks that only go green once a human has verified the PR.
+    public var checksAwaitingVerification: [String] = []
+
+    public init(
+        enabled: Bool = false,
+        verificationLabel: String? = nil,
+        requireApproval: Bool = true,
+        settleMinutes: Int = 10,
+        roundCap: Int = 3,
+        dailyBudgetUSD: Double? = nil,
+        minBatteryPercent: Int? = 50,
+        verifyCommand: String? = nil,
+        postFactualReplies: Bool = false,
+        reRequestReviews: Bool = false,
+        roles: PRFollowThroughRoles = PRFollowThroughRoles(),
+        privateTerms: [String] = [],
+        checksAwaitingVerification: [String] = []
+    ) {
+        self.enabled = enabled
+        self.verificationLabel = verificationLabel
+        self.requireApproval = requireApproval
+        self.settleMinutes = settleMinutes
+        self.roundCap = roundCap
+        self.dailyBudgetUSD = dailyBudgetUSD
+        self.minBatteryPercent = minBatteryPercent
+        self.verifyCommand = verifyCommand
+        self.postFactualReplies = postFactualReplies
+        self.reRequestReviews = reRequestReviews
+        self.roles = roles
+        self.privateTerms = privateTerms
+        self.checksAwaitingVerification = checksAwaitingVerification
+    }
+
+    /// The label Mark verified adds, or nil when none is set and the merge is the verification.
+    public var markVerifiedLabel: String? {
+        let label = verificationLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return label.isEmpty ? nil : label
+    }
+
+    public static let mcpConfigPlaceholder = "{mcp_config}"
+    /// Last on the line because `--mcp-config` is variadic and would swallow a prompt after it.
+    public static let boardToolsSuffix = " --mcp-config \(mcpConfigPlaceholder)"
+
+    /// Whether Walk me through it hands this template's command a verifier grant (SPEC §13.4).
+    public static func namesMCPConfig(_ template: String) -> Bool {
+        template.contains(mcpConfigPlaceholder)
+    }
+
+    /// `verifyCommand` with `{url}` replaced, and `{mcp_config}` with `mcpConfig` single-quoted when given,
+    /// for Walk me through it. Nil without a template, and for a URL holding anything a shell would read as
+    /// syntax: the template is run by a shell as written.
+    public func verifyCommand(for url: String, mcpConfig: String? = nil) -> String? {
+        let template = verifyCommand?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !template.isEmpty, !url.isEmpty, url.allSatisfy(Self.isShellInert) else { return nil }
+        let command = template.replacingOccurrences(of: "{url}", with: url)
+        guard let mcpConfig else { return command }
+        let quoted = "'" + mcpConfig.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+        return command.replacingOccurrences(of: Self.mcpConfigPlaceholder, with: quoted)
+    }
+
+    /// `claude "<command>" --mcp-config {mcp_config}` for a verify command typed as a Claude Code slash
+    /// command, which a shell would run as a file path (SPEC §13.4); nil for anything else, an absolute
+    /// path included.
+    public static func claudeForm(ofSlashCommand command: String) -> String? {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.split(whereSeparator: \.isWhitespace).first,
+              first.count > 1, first.hasPrefix("/"), !first.dropFirst().contains("/")
+        else { return nil }
+        var quoted = ""
+        for c in trimmed {
+            if "\\\"$`".contains(c) { quoted.append("\\") }
+            quoted.append(c)
+        }
+        return "claude \"\(quoted)\"" + boardToolsSuffix
+    }
+
+    /// The template with `boardToolsSuffix` appended, for a `claude` template that lacks `{mcp_config}`;
+    /// nil for anything else (SPEC §13.4).
+    public static func withBoardTools(_ template: String) -> String? {
+        let trimmed = template.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.split(whereSeparator: \.isWhitespace).first == "claude", !namesMCPConfig(trimmed)
+        else { return nil }
+        return trimmed + boardToolsSuffix
+    }
+
+    private static func isShellInert(_ c: Character) -> Bool {
+        c.isASCII && (c.isLetter || c.isNumber || ":/._-".contains(c))
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled, verificationLabel, requireApproval, settleMinutes, roundCap, dailyBudgetUSD, minBatteryPercent
+        case verifyCommand, postFactualReplies, postFactualRepliesSince, reRequestReviews, roles, privateTerms
+        case checksAwaitingVerification
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = PRFollowThroughSettings()
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? defaults.enabled
+        verificationLabel = try c.decodeIfPresent(String.self, forKey: .verificationLabel)
+        requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? defaults.requireApproval
+        settleMinutes = try c.decodeIfPresent(Int.self, forKey: .settleMinutes) ?? defaults.settleMinutes
+        roundCap = try c.decodeIfPresent(Int.self, forKey: .roundCap) ?? defaults.roundCap
+        dailyBudgetUSD = try c.decodeIfPresent(Double.self, forKey: .dailyBudgetUSD)
+        minBatteryPercent = try c.contains(.minBatteryPercent)
+            ? c.decodeIfPresent(Int.self, forKey: .minBatteryPercent) : defaults.minBatteryPercent
+        verifyCommand = try c.decodeIfPresent(String.self, forKey: .verifyCommand)
+        postFactualReplies = try c.decodeIfPresent(Bool.self, forKey: .postFactualReplies) ?? defaults.postFactualReplies
+        postFactualRepliesSince = try c.decodeIfPresent(Int64.self, forKey: .postFactualRepliesSince)
+        reRequestReviews = try c.decodeIfPresent(Bool.self, forKey: .reRequestReviews) ?? defaults.reRequestReviews
+        roles = try c.decodeIfPresent(PRFollowThroughRoles.self, forKey: .roles) ?? defaults.roles
+        privateTerms = try c.decodeIfPresent([String].self, forKey: .privateTerms) ?? defaults.privateTerms
+        checksAwaitingVerification = try c.decodeIfPresent([String].self, forKey: .checksAwaitingVerification)
+            ?? defaults.checksAwaitingVerification
+    }
+
+    /// Writes a nil `minBatteryPercent` as null: an absent key decodes as the default, 50.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(enabled, forKey: .enabled)
+        try c.encodeIfPresent(verificationLabel, forKey: .verificationLabel)
+        try c.encode(requireApproval, forKey: .requireApproval)
+        try c.encode(settleMinutes, forKey: .settleMinutes)
+        try c.encode(roundCap, forKey: .roundCap)
+        try c.encodeIfPresent(dailyBudgetUSD, forKey: .dailyBudgetUSD)
+        try c.encode(minBatteryPercent, forKey: .minBatteryPercent)
+        try c.encodeIfPresent(verifyCommand, forKey: .verifyCommand)
+        try c.encode(postFactualReplies, forKey: .postFactualReplies)
+        try c.encodeIfPresent(postFactualRepliesSince, forKey: .postFactualRepliesSince)
+        try c.encode(reRequestReviews, forKey: .reRequestReviews)
+        try c.encode(roles, forKey: .roles)
+        try c.encode(privateTerms, forKey: .privateTerms)
+        try c.encode(checksAwaitingVerification, forKey: .checksAwaitingVerification)
+    }
+}

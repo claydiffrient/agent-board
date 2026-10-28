@@ -51,7 +51,7 @@ public struct BriefingResourceHandler: ResourceHandler {
                     + "Read it after a resume or a compaction, when those instructions are no longer in context.",
                 mimeType: Self.mimeType
             )]
-        case .coordinator:
+        case .coordinator, .triager, .verifier:
             return []
         }
     }
@@ -113,9 +113,18 @@ public struct BriefingResourceHandler: ResourceHandler {
         case .worker: BriefingResourceURI.worker
         case .orchestrator: BriefingResourceURI.orchestrator
         case .reviewer: BriefingResourceURI.reviewer
-        case .coordinator: nil
+        case .coordinator, .triager, .verifier: nil
         }
-        guard let mine else { return "Not a briefing you can read. None is addressed to the Coordinator." }
+        guard let mine else {
+            return switch identity.scope {
+            case .triager:
+                "Not a briefing you can read. A triager or follow-up checker has none; its get_ tool has everything you need."
+            case .verifier:
+                "Not a resource you can read. A Walk me through it session is offered no resources."
+            default:
+                "Not a briefing you can read. None is addressed to the Coordinator."
+            }
+        }
         return "Not a briefing you can read. The one addressed to you is \(mine)."
     }
 }

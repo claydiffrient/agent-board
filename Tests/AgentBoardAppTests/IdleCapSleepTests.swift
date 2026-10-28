@@ -1,3 +1,4 @@
+import AgentBoardBridge
 import AgentBoardCore
 import AgentBoardRuntime
 import Foundation
@@ -49,6 +50,12 @@ final class IdleCapSleepTests: XCTestCase {
         clock = FakeSystemClock(wallMillis: .nowMillis - Int64(silence * 1000))
         let ledger = SleepLedger(clock: clock)
         fixture = try SupervisorFixture.make(sleepLedger: ledger)
+        let sessionId = try backdatedWorker()
+        _ = ledger.reading()
+        return sessionId
+    }
+
+    private func backdatedWorker() throws -> String {
         let worker = try fixture.workerAtWork()
         try fixture.db.writer.write { [at = clock.wallMillis] db in
             try db.execute(
@@ -56,7 +63,6 @@ final class IdleCapSleepTests: XCTestCase {
                 arguments: [at, at, worker.sessionId]
             )
         }
-        _ = ledger.reading()
         return worker.sessionId
     }
 
@@ -101,5 +107,36 @@ final class IdleCapSleepTests: XCTestCase {
         await fixture.supervisor.meterTick()
 
         XCTAssertEqual(try session(sessionId).state, .running)
+    }
+
+    /// SPEC §8: dark wakes accrue awake time with the lid shut, so a worker waiting on the wake
+    /// resume would otherwise be idled out before the lid opens.
+    func testAWorkerWaitingForWakeAfterASleepCutIsSparedTheIdleCapUntilItsResume() async throws {
+        let waiting = try silentWorker()
+        let other = try backdatedWorker()
+        await fixture.supervisor.start()
+        try XCTSkipIf(fixture.supervisor.serverPort == nil, "the board server could not bind a port")
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "hook_event_name": "StopFailure", "session_id": waiting,
+            "error": "server_error", "last_assistant_message": SleepCutTurn.message,
+        ])
+        try HookEventStore(fixture.db).append(
+            sessionId: waiting, event: "StopFailure", payload: String(decoding: payload, as: UTF8.self)
+        )
+        await fixture.runtime.failNextResume(FixtureError("claude --bg --resume failed"))
+        await fixture.supervisor.workerTurnCutBySleep(projectId: fixture.project.id, sessionId: waiting)
+
+        clock.advanceAwake(seconds: silence)
+        await fixture.supervisor.meterTick()
+
+        XCTAssertEqual(try session(waiting).state, .running)
+        XCTAssertEqual(try session(other).state, .failed)
+
+        await fixture.supervisor.screensDidWake()
+        let resumed = await fixture.runtime.resumed
+        XCTAssertEqual(resumed, [waiting])
+        await fixture.supervisor.meterTick()
+
+        XCTAssertEqual(try session(waiting).state, .running)
     }
 }

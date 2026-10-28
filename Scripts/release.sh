@@ -19,6 +19,8 @@ symlink to drag it onto. The .app is left beside it in dist/.
     when built with --allow-dirty from a tree with uncommitted changes.
   - arm64 only: the host architecture swift build produces. Not universal.
   - Signed ad hoc unless AGENTBOARD_SIGN_IDENTITY names a codesign identity.
+  - The disk image is built with diskutil image when the host has it, else
+    hdiutil; AGENTBOARD_DMG_TOOL=hdiutil forces hdiutil.
   - The bundle is verified after assembly and again inside the mounted disk image;
     any failed check fails the release.
 
@@ -42,13 +44,41 @@ newest_version() {
   echo "$heading"
 }
 
+# macOS 27 deprecates hdiutil for `diskutil image`; older hosts, possibly including the macos-26 runner, lack it.
+dmg_tool() {
+  [ "${AGENTBOARD_DMG_TOOL:-}" != hdiutil ] || { echo hdiutil; return; }
+  local create attach
+  create=$(diskutil help image create from 2>&1 || true)
+  attach=$(diskutil help image attach 2>&1 || true)
+  if [[ $create == *UDZO* && $create == *--volumeName* && $attach == *--mountPoint* ]]; then
+    echo diskutil
+  else
+    echo hdiutil
+  fi
+}
+
+# create SRCFOLDER DMG | attach MOUNTPOINT DMG | detach MOUNTPOINT | force-detach MOUNTPOINT
+dmg() {
+  case "$dmg_tool:$1" in
+    diskutil:create) diskutil image create from --format UDZO --volumeName "Agent Board" "$2" "$3" ;;
+    diskutil:attach) diskutil image attach --readOnly --nobrowse --mountPoint "$2" "$3" ;;
+    diskutil:detach) diskutil eject "$2" ;;
+    diskutil:force-detach) diskutil eject force "$2" >/dev/null ;;
+    hdiutil:create) hdiutil create -volname "Agent Board" -srcfolder "$2" -format UDZO -ov "$3" ;;
+    hdiutil:attach) hdiutil attach -nobrowse -readonly -mountpoint "$2" "$3" ;;
+    hdiutil:detach) hdiutil detach "$2" ;;
+    hdiutil:force-detach) hdiutil detach -quiet -force "$2" ;;
+    *) fail "dmg: unknown operation $dmg_tool:$1" ;;
+  esac
+}
+
 # GitHub's macOS runners intermittently fail hdiutil with "Resource busy" (actions/runner-images#7522).
-hdiutil_retry() {
+dmg_retry() {
   local attempt
   for attempt in 1 2 3 4; do
-    hdiutil "$@" && return
+    dmg "$@" && return
     [ "$attempt" -lt 4 ] || return 1
-    echo "release.sh: hdiutil $1 failed; retrying in $((attempt * 5))s" >&2
+    echo "release.sh: $dmg_tool $1 failed; retrying in $((attempt * 5))s" >&2
     sleep $((attempt * 5))
   done
 }
@@ -169,12 +199,13 @@ plutil -replace AgentBoardCommit -string "$commit" "$plist"
 codesign --force --sign "$identity" "$app" || fail "codesign --sign '$identity' failed"
 check_bundle "$app" "$version" "$build" "$commit"
 
+dmg_tool=$(dmg_tool)
 staging=$(mktemp -d)
 mountpoint=$(mktemp -d)
 mounted=false
 verified=false
 cleanup() {
-  if $mounted; then hdiutil detach -quiet -force "$mountpoint" || true; fi
+  if $mounted; then dmg force-detach "$mountpoint" || true; fi
   $verified || rm -f "$dmg"
   rm -rf "$staging"
   rmdir "$mountpoint" 2>/dev/null || true
@@ -183,14 +214,14 @@ trap cleanup EXIT
 
 ditto "$app" "$staging/$(basename "$app")"
 ln -s /Applications "$staging/Applications"
-hdiutil_retry create -volname "Agent Board" -srcfolder "$staging" -format UDZO -ov "$dmg"
+dmg_retry create "$staging" "$dmg"
 
-hdiutil_retry attach -nobrowse -readonly -mountpoint "$mountpoint" "$dmg" >/dev/null
+dmg_retry attach "$mountpoint" "$dmg" >/dev/null
 mounted=true
 check_bundle "$mountpoint/$(basename "$app")" "$version" "$build" "$commit"
 [ "$(readlink "$mountpoint/Applications")" = /Applications ] ||
   fail "$dmg: Applications is not a symlink to /Applications"
-hdiutil_retry detach "$mountpoint" >/dev/null
+dmg_retry detach "$mountpoint" >/dev/null
 mounted=false
 verified=true
 

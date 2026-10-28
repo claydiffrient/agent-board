@@ -156,7 +156,9 @@ final class CoordinatorSource: ConsoleSessionSource {
             strictMcpConfig: false,
             addDirs: [home.path],
             disallowedTools: CoordinatorHome.denyRules(
-                readOnlyPaths: registered.flatMap { [$0.repoPath, $0.worktreeRoot] }
+                readOnlyPaths: registered.flatMap {
+                    [$0.repoPath, WorktreeRootRule.url($0.worktreeRoot, home: home).path]
+                }
             ),
             projectsRoot: projectsRoot,
             invocation: claude

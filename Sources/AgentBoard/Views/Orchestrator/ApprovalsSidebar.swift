@@ -82,7 +82,8 @@ struct ApprovalsSidebar: View {
                             roster: roster.value,
                             now: now,
                             accept: { run { try await env.supervisor.accept(taskId: task.id) } },
-                            reopen: { run { try await env.supervisor.reopen(taskId: task.id) } }
+                            reopen: { run { try await env.supervisor.reopen(taskId: task.id) } },
+                            rerunReview: { run { try await env.supervisor.rerunReview(taskId: task.id) } }
                         )
                     }
                 }
@@ -218,7 +219,9 @@ struct ApprovalsSidebar: View {
             Text(describe(approval))
                 .fontWeight(.medium)
                 .lineLimit(2)
-            if let reason = approval.reason, !reason.isEmpty {
+            if approval.kind == .prWatchResume, let request = try? PRWatchResumeRequest.decode(approval.payload) {
+                resumeDetail(request)
+            } else if let reason = approval.reason, !reason.isEmpty {
                 Text(reason)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -307,6 +310,20 @@ struct ApprovalsSidebar: View {
         )
     }
 
+    /// Each part gets its own line budget, so a long parked reason cannot hide the orchestrator's (SPEC §13.4).
+    private func resumeDetail(_ request: PRWatchResumeRequest) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("#\(request.number) \(request.title)")
+                .lineLimit(2)
+            Text("Parked: \(request.parkedReason ?? "no reason recorded")")
+                .lineLimit(3)
+            Text("Reason: \(request.reason)")
+                .lineLimit(4)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
     private func describe(_ approval: Approval) -> String {
         switch approval.kind {
         case .spawn:
@@ -318,6 +335,10 @@ struct ApprovalsSidebar: View {
             return "Push \(branchOf(approval)) to the remote"
         case .pullRequest:
             return "Open a pull request from \(branchOf(approval))"
+        case .prItemDismissal:
+            return "Dismiss a pull request item"
+        case .prWatchResume:
+            return "Resume a parked pull request"
         }
     }
 
@@ -351,6 +372,7 @@ private struct ReviewRow: View {
     let now: Date
     let accept: () -> Void
     let reopen: () -> Void
+    let rerunReview: () -> Void
 
     @Environment(AppEnvironment.self) private var env
     @State private var changes: DiffSummary?
@@ -400,6 +422,9 @@ private struct ReviewRow: View {
             HStack {
                 Button("Accept") { decide(.accept) }
                     .buttonStyle(.borderedProminent)
+                if hold.endedWithoutVerdict {
+                    Button("Re-run review", action: rerunReview)
+                }
                 Button("Reopen") { decide(.reopen) }
             }
             .controlSize(.small)

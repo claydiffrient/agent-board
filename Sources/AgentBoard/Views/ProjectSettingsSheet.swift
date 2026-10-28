@@ -6,7 +6,7 @@ import SwiftUI
 /// The sheet's tabs (SPEC §10, Project settings). Every `ProjectSettingsSection` belongs to exactly
 /// one, which `ProjectSettingsTabTests` pins; a section in no tab is a setting with no UI.
 enum ProjectSettingsTab: String, CaseIterable, Identifiable {
-    case general, agents, limits, workflow, notifications, advanced
+    case general, agents, limits, workflow, notifications, advanced, prFollowThrough
 
     var id: Self { self }
 
@@ -18,6 +18,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
         case .workflow: "Workflow"
         case .notifications: "Notifications"
         case .advanced: "Advanced"
+        case .prFollowThrough: "PR Follow-Through"
         }
     }
 
@@ -26,16 +27,18 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
         case .general: [.repository, .workspace, .archive]
         case .agents: [.models, .review, .autonomy, .roster]
         case .limits: [.caps]
-        case .workflow: [.verification, .isolation, .publishing]
+        case .workflow: [.verification, .teardown, .isolation, .publishing]
         case .notifications: [.notifications]
         case .advanced: [.autoMode, .extraMcpServers]
+        case .prFollowThrough: [.prWatch, .prVerification, .prReplies, .publishGuard, .prRoles]
         }
     }
 }
 
 enum ProjectSettingsSection: String, CaseIterable, Identifiable {
-    case repository, workspace, caps, models, review, verification, isolation, publishing
+    case repository, workspace, caps, models, review, verification, teardown, isolation, publishing
     case archive, notifications, autonomy, autoMode, extraMcpServers, roster
+    case prWatch, prVerification, prReplies, prRoles, publishGuard
 
     var id: Self { self }
 
@@ -47,6 +50,7 @@ enum ProjectSettingsSection: String, CaseIterable, Identifiable {
         case .models: "Models"
         case .review: "Review"
         case .verification: "Verification"
+        case .teardown: "Worktree teardown"
         case .isolation: "Isolation"
         case .publishing: "Publishing"
         case .archive: "Archive"
@@ -55,6 +59,11 @@ enum ProjectSettingsSection: String, CaseIterable, Identifiable {
         case .autoMode: "Permission classifier (autoMode)"
         case .extraMcpServers: "Extra MCP servers"
         case .roster: "Roster"
+        case .prWatch: "Watch"
+        case .prVerification: "Verification"
+        case .prReplies: "Replies"
+        case .prRoles: "Roles"
+        case .publishGuard: "Publish guard"
         }
     }
 }
@@ -71,6 +80,7 @@ struct ProjectSettingsSheet: View {
     @State private var worktreeRoot: String
     @State private var autoModeJSON: String
     @State private var extraServers: String
+    @State private var checksAwaitingVerification: String
     @State private var archiveMode: ArchivePolicyMode
     @State private var archiveDays: Int
     @State private var workspaceId: String?
@@ -78,10 +88,12 @@ struct ProjectSettingsSheet: View {
     @State private var tab: ProjectSettingsTab
     @State private var confirmDelete = false
     @State private var roster = Observed<[RosterAgent]>([])
+    @State private var archetypes: [Archetype] = []
     @State private var selectedAgentIds: Set<String> = []
     @State private var projectAgents: [RosterAgent] = []
     @State private var errorMessage: String?
     @State private var integrationDefault: StandaloneIntegration?
+    @State private var newPrivateTerm = ""
 
     init(
         project: Project,
@@ -99,6 +111,9 @@ struct ProjectSettingsSheet: View {
         _worktreeRoot = State(initialValue: project.worktreeRoot)
         _autoModeJSON = State(initialValue: settings.autoModeJSON ?? "")
         _extraServers = State(initialValue: settings.extraMcpServers.joined(separator: ", "))
+        _checksAwaitingVerification = State(
+            initialValue: settings.prFollowThrough.checksAwaitingVerification.joined(separator: ", ")
+        )
         _archiveMode = State(initialValue: settings.archivePolicy.mode)
         _archiveDays = State(initialValue: settings.archivePolicy.days ?? ArchivePolicy.defaultDays)
         _muteChoice = State(initialValue: NotificationMuteChoice(settings.notifications.mute))
@@ -140,7 +155,7 @@ struct ProjectSettingsSheet: View {
             .task {
                 await roster.run(RosterStore(env.db).observe(), in: env.db.reader)
             }
-            .task(id: roster.value.map(\.id)) {
+            .task(id: roster.value) {
                 reloadSelection()
             }
 
@@ -183,7 +198,7 @@ struct ProjectSettingsSheet: View {
         case .repository:
             LabeledContent("Path", value: project.repoPath)
             TextField("Base branch", text: $baseBranch)
-            TextField("Worktree root", text: $worktreeRoot)
+            WorktreeRootRow(root: $worktreeRoot, projectId: project.id)
             if let complaint = worktreeRootComplaint {
                 Text(complaint)
                     .font(.caption)
@@ -253,6 +268,15 @@ struct ProjectSettingsSheet: View {
             Text("How this project builds and tests itself. Handed to every worker and to the integrator; left empty, they work it out from the repo and report what they ran. Refreshing an epic runs both on the merge first, stopping each one that runs past the timeout.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        case .teardown:
+            TextField("Teardown command", text: Binding(
+                get: { settings.worktreeTeardownCommand ?? "" },
+                set: { settings.worktreeTeardownCommand = $0.isEmpty ? nil : $0 }
+            ), prompt: Text("e.g. [ \"$(bazel info workspace)\" = \"$PWD\" ] && bazel clean --expunge"))
+            TextField("Teardown timeout (seconds)", value: $settings.worktreeTeardownTimeoutSeconds, format: .number)
+            Text("Runs in a task's or epic's worktree, as its working directory, just before Agent Board removes it, to clean up what tools built for it elsewhere: a Bazel output base, a Docker volume. Left empty, removal deletes the worktree and nothing else. A failure or timeout never stops the removal; it is recorded on the task and in the decision report. It does not run on a worktree kept for uncommitted changes.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .isolation:
             Picker("Worktree strategy", selection: $settings.worktreeStrategy) {
                 ForEach(WorktreeStrategy.allCases, id: \.self) { strategy in
@@ -263,8 +287,12 @@ struct ProjectSettingsSheet: View {
             Text("A worktree per task is the default and always isolates. Shared runs workers in this project's own checkout on one branch, skipping a full repository setup per task; Auto shares only when a compatible group already holds the checkout. A task that cannot join gets a worktree. Co-resident agents take a per-file lock before every write, so a collision is a wait rather than an overwrite.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            TextField("Reusable worktree slots", value: $settings.worktreeSlots, format: .number)
+            Text("Workers take turns in this many worktrees that stay on disk between tasks, so build output inside them stays warm. A slot is switched to the task's branch and kept until the task is accepted or discarded, and the teardown hook runs only when a slot is retired by lowering this number. When every slot is taken, a task gets its own worktree. 0 gives every task its own.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .publishing:
-            Picker("Integrate standalone tasks by", selection: $settings.standaloneIntegration) {
+            Picker("Integrate standalone tasks and epics by", selection: $settings.standaloneIntegration) {
                 Text(Self.defaultIntegrationTitle(integrationDefault)).tag(StandaloneIntegration?.none)
                 ForEach(StandaloneIntegration.allCases, id: \.self) { integration in
                     Text(integration.title).tag(StandaloneIntegration?.some(integration))
@@ -273,14 +301,14 @@ struct ProjectSettingsSheet: View {
             .task {
                 let publisher = BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath))
                 integrationDefault = await _Concurrency.Task.detached {
-                    publisher.defaultStandaloneIntegration()
+                    try? publisher.defaultStandaloneIntegration()
                 }.value
             }
             TextField("Remote branch name", text: Binding(
                 get: { settings.remoteBranchTemplate ?? "" },
                 set: { settings.remoteBranchTemplate = $0.isEmpty ? nil : $0 }
             ), prompt: Text("e.g. clay/{slug}"))
-            Text("The name a branch takes on the remote. \(RemoteBranchTemplate.slugToken) comes from the epic's or task's title; \(RemoteBranchTemplate.idToken) is an optional short id. The local branch stays agentboard/<id> either way. Left empty, the local name is what reaches the remote. By pull request, accepting a task in no epic merges nothing, and it is marked landed once its recorded pull request merges on GitHub; local merge merges it into the base branch on accept. The default is pull request when the repository has an origin remote and local merge when it has none. A task in an epic always merges into its epic branch.")
+            Text("The name a branch takes on the remote. \(RemoteBranchTemplate.slugToken) comes from the epic's or task's title; \(RemoteBranchTemplate.idToken) is an optional short id. The local branch stays agentboard/<id> either way. Left empty, the local name is what reaches the remote. By pull request, accepting a task in no epic merges nothing, and it is marked landed once its recorded pull request merges on GitHub; local merge merges it into the base branch on accept. The default is pull request when the repository has an origin remote and local merge when it has none. A task in an epic always merges into its epic branch. By pull request, an epic stays open after its integration and closes when its pull request merges; by local merge, its integration closes it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .archive:
@@ -330,6 +358,159 @@ struct ProjectSettingsSheet: View {
                 .foregroundStyle(.secondary)
         case .roster:
             rosterSelection
+        case .prWatch:
+            Toggle("Watch my open pull requests", isOn: $settings.prFollowThrough.enabled)
+            TextField("Settle window (minutes)", value: $settings.prFollowThrough.settleMinutes, format: .number)
+            TextField("Round cap", value: $settings.prFollowThrough.roundCap, format: .number)
+            TextField(
+                "Daily budget (USD)", value: $settings.prFollowThrough.dailyBudgetUSD, format: .number,
+                prompt: Text("Spawn caps")
+            )
+            TextField(
+                "Minimum battery to start a round (%)", value: $settings.prFollowThrough.minBatteryPercent,
+                format: .number, prompt: Text("Any")
+            )
+            Text("Watches every open, non-draft pull request you author in this project. New feedback waits for the settle window to pass with nothing newer before a round starts. Left empty, the daily budget falls back to this project's spawn caps. On battery, a round starts only at or above the minimum charge; on AC it always can.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .prVerification:
+            TextField("Verification label", text: Binding(
+                get: { settings.prFollowThrough.verificationLabel ?? "" },
+                set: { settings.prFollowThrough.verificationLabel = $0.isEmpty ? nil : $0 }
+            ), prompt: Text("e.g. verified"))
+            Toggle("Require reviewer approval", isOn: $settings.prFollowThrough.requireApproval)
+            TextField("Verify command", text: Binding(
+                get: { settings.prFollowThrough.verifyCommand ?? "" },
+                set: { settings.prFollowThrough.verifyCommand = $0.isEmpty ? nil : $0 }
+            ), prompt: Text(#"e.g. claude "/review:verify {url}" --mcp-config {mcp_config}"#))
+            if let claudeForm = PRFollowThroughSettings.claudeForm(
+                ofSlashCommand: settings.prFollowThrough.verifyCommand ?? ""
+            ) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("This runs in a shell, where a slash command is read as a file path. To run a Claude command, use \(claudeForm).")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Button("Use \(claudeForm)") { settings.prFollowThrough.verifyCommand = claudeForm }
+                }
+            }
+            if let withBoardTools = PRFollowThroughSettings.withBoardTools(settings.prFollowThrough.verifyCommand ?? "") {
+                Button("Add board tools") { settings.prFollowThrough.verifyCommand = withBoardTools }
+                    .help("Appends --mcp-config {mcp_config}, so the claude session can propose tasks to this board.")
+            }
+            Text("Mark verified adds the label to the pull request. Left empty, your own merge is the verification. Walk me through it runs the verify command as a shell command in a terminal, the way your own terminal would, with {url} replaced by the pull request's URL; left empty, that button is hidden. A Claude command goes through claude, e.g. claude \"/review:verify {url}\" --mcp-config {mcp_config}. {mcp_config} becomes a config file giving that session board tools that can only propose tasks, revoked when the window's shell exits or the window closes. Keep --mcp-config last: it takes every argument after it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("Checks that wait on verification", text: $checksAwaitingVerification, prompt: Text("Comma-separated check names"))
+            Text("Checks or statuses that only pass once you have verified the pull request. They are ignored when deciding whether CI has passed, both after a pushed round and for Ready to verify, and a failing one never becomes a failed-check item. Names match exactly.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .prReplies:
+            Toggle("Post factual replies", isOn: $settings.prFollowThrough.postFactualReplies)
+            Text("Factual replies are \"Fixed in <sha>\", an answer to a factual question, a pointer to the commit that already did it, and a note that out-of-scope work is tracked separately. Anything argued waits for you as a decision.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle("Re-request reviews", isOn: $settings.prFollowThrough.reRequestReviews)
+            Text("After a fix round is pushed, asks each reviewer whose feedback it addressed to review again, unless they approved or already have a pending request. GitHub notifies them as you.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .prRoles:
+            ForEach(FollowThroughRole.allCases) { role in
+                roleRows(role)
+            }
+            Text("Default runs the built-in prompt for the role on the project's default model; a chosen agent's own model applies unless one is picked here. Triage classifies each review item; Fixer makes the round's code changes; Reviewer reviews the round's diff; Follow-up check grades whether each item actually got fixed. All four run.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .publishGuard:
+            ForEach(settings.prFollowThrough.privateTerms, id: \.self) { term in
+                HStack {
+                    Text(term)
+                    Spacer()
+                    Button {
+                        settings.prFollowThrough.privateTerms.removeAll { $0 == term }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove \(term)")
+                }
+            }
+            TextField("Add a private term", text: $newPrivateTerm, prompt: Text("Press Return to add"))
+                .onSubmit(addPrivateTerm)
+            Text("Agent Board refuses any push or pull request whose diff, commit messages, branch name, title or body contains one of these, ignoring case. It applies whether or not follow-through is on.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func addPrivateTerm() {
+        settings.prFollowThrough.privateTerms = Self.privateTerms(
+            settings.prFollowThrough.privateTerms, adding: newPrivateTerm
+        )
+        newPrivateTerm = ""
+    }
+
+    /// Appends `pending` unless it is blank or already listed; matching ignores case, so a second
+    /// spelling of the same term would guard nothing more.
+    static func privateTerms(_ terms: [String], adding pending: String) -> [String] {
+        var result: [String] = []
+        for term in terms + [pending] {
+            let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !result.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame })
+            else { continue }
+            result.append(trimmed)
+        }
+        return result
+    }
+
+    /// What Save stores (SPEC §13.4). A term typed but never added is kept: losing it silently would
+    /// leave the guard open.
+    static func savedFollowThrough(_ draft: PRFollowThroughSettings, pendingTerm: String) -> PRFollowThroughSettings {
+        var saved = draft
+        saved.settleMinutes = max(0, draft.settleMinutes)
+        saved.roundCap = max(1, draft.roundCap)
+        saved.dailyBudgetUSD = draft.dailyBudgetUSD.flatMap { $0 > 0 ? $0 : nil }
+        saved.minBatteryPercent = draft.minBatteryPercent.map { min(100, max(0, $0)) }
+        saved.verificationLabel = draft.verificationLabel?.trimmingCharacters(in: .whitespaces)
+        if saved.verificationLabel?.isEmpty == true { saved.verificationLabel = nil }
+        saved.verifyCommand = draft.verifyCommand?.trimmingCharacters(in: .whitespaces)
+        if saved.verifyCommand?.isEmpty == true { saved.verifyCommand = nil }
+        saved.privateTerms = privateTerms(draft.privateTerms, adding: pendingTerm)
+        return saved
+    }
+
+    static func checkNames(_ text: String) -> [String] {
+        var names: [String] = []
+        for name in text.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) })
+        where !name.isEmpty && !names.contains(name) {
+            names.append(name)
+        }
+        return names
+    }
+
+    private func roleRows(_ role: FollowThroughRole) -> some View {
+        let current = settings.prFollowThrough.roles[keyPath: role.keyPath]
+        return Group {
+            Picker(role.title, selection: Binding(
+                get: { current?.rosterAgentId },
+                set: { id in
+                    settings.prFollowThrough.roles[keyPath: role.keyPath] = Self.updating(current) { $0.rosterAgentId = id }
+                }
+            )) {
+                ForEach(Self.roleAgentOptions(
+                    projectAgents: projectAgents, rosterAgents: roster.value, current: current?.rosterAgentId
+                ), id: \.agentId) { option in
+                    Text(option.title).tag(option.agentId)
+                }
+            }
+            ModelPicker(
+                label: "\(role.title) model", inheritLabel: "Agent's model or project default",
+                model: Binding(
+                    get: { current?.model },
+                    set: { model in
+                        settings.prFollowThrough.roles[keyPath: role.keyPath] = Self.updating(current) { $0.model = model }
+                    }
+                )
+            )
         }
     }
 
@@ -350,18 +531,19 @@ struct ProjectSettingsSheet: View {
         }
     }
 
-    /// The whole roster with a toggle each: on writes the project's opt-in, off writes the opt-out.
-    /// Both land immediately rather than on Save, because they are per-project join rows and not
-    /// part of the settings blob the Save button rewrites.
+    /// Every archetype this project could use, with a toggle each: on writes the project's opt-in,
+    /// off writes the opt-out. Both land immediately rather than on Save, because they are
+    /// per-project join rows and not part of the settings blob the Save button rewrites.
     @ViewBuilder
     private var rosterSelection: some View {
-        if roster.value.isEmpty {
-            Text("No rostered agents yet. Add them in the Roster tab.")
+        if archetypes.isEmpty {
+            Text("No archetypes yet. Add one in the Roster tab, or define one in ~/.claude/agents or this repository's .claude/agents.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else {
-            let split = RosterListing.partition(roster: roster.value, selectedIds: selectedAgentIds)
-            ForEach(split.selected + split.available) { agent in
+            let selected = archetypes.filter { selectedAgentIds.contains($0.agent.id) }
+            ForEach(selected + archetypes.filter { !selectedAgentIds.contains($0.agent.id) }) { archetype in
+                let agent = archetype.agent
                 Toggle(isOn: Binding(
                     get: { selectedAgentIds.contains(agent.id) },
                     set: { setSelected(agent, $0) }
@@ -369,10 +551,14 @@ struct ProjectSettingsSheet: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(agent.name)
-                            Text(agent.role)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            if archetype.source.isEditable {
+                                Text(agent.role)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            ArchetypeSourceChip(source: archetype.source)
                         }
+                        ArchetypeProvenance(archetype: archetype)
                         if !agent.enabled {
                             Text("Disabled in the roster; this project will not spawn it.")
                                 .font(.caption)
@@ -380,8 +566,9 @@ struct ProjectSettingsSheet: View {
                         }
                     }
                 }
+                .disabled(archetype.shadowedBy != nil && !selectedAgentIds.contains(agent.id))
             }
-            Text("\(split.selected.count) of \(roster.value.count) selected for \(project.name). Other projects are unaffected.")
+            Text("\(selected.count) of \(archetypes.count) selected for \(project.name). Other projects are unaffected.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -389,15 +576,16 @@ struct ProjectSettingsSheet: View {
 
     private func reloadSelection() {
         do {
-            projectAgents = try RosterStore(env.db).agents(forProject: project.id)
+            projectAgents = try env.roster.agents(forProject: project.id)
             selectedAgentIds = Set(projectAgents.map(\.id))
+            archetypes = env.roster.archetypes(rows: roster.value, project: project).archetypes
         } catch {
             errorMessage = errorText(error)
         }
     }
 
     private func setSelected(_ agent: RosterAgent, _ selected: Bool) {
-        let store = RosterStore(env.db)
+        let store = env.roster
         do {
             if selected {
                 try store.enable(agentId: agent.id, forProject: project.id)
@@ -414,8 +602,12 @@ struct ProjectSettingsSheet: View {
         var updated = settings
         updated.buildCommand = VerificationCommands(build: settings.buildCommand).build
         updated.testCommand = VerificationCommands(test: settings.testCommand).test
+        updated.worktreeTeardownCommand = settings.worktreeTeardown?.command
+        updated.worktreeTeardownTimeoutSeconds = WorktreeTeardownCommand.clampedTimeout(settings.worktreeTeardownTimeoutSeconds)
         updated.archivePolicy = ArchivePolicy.make(mode: archiveMode, days: archiveDays)
         updated.notifications.mute = muteChoice.mute(existing: settings.notifications.mute)
+        updated.prFollowThrough = Self.savedFollowThrough(settings.prFollowThrough, pendingTerm: newPrivateTerm)
+        updated.prFollowThrough.checksAwaitingVerification = Self.checkNames(checksAwaitingVerification)
         let trimmedJSON = autoModeJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.autoModeJSON = trimmedJSON.isEmpty ? nil : trimmedJSON
         updated.extraMcpServers = extraServers
@@ -535,6 +727,59 @@ struct ProjectSettingsSheet: View {
         } else if let assignee {
             table.defaultAssignee = assignee
         }
+    }
+
+    enum FollowThroughRole: CaseIterable, Identifiable {
+        case triage, fixer, reviewer, followupCheck
+
+        var id: Self { self }
+
+        var title: String {
+            switch self {
+            case .triage: "Triage"
+            case .fixer: "Fixer"
+            case .reviewer: "Reviewer"
+            case .followupCheck: "Follow-up check"
+            }
+        }
+
+        var keyPath: WritableKeyPath<PRFollowThroughRoles, PRFollowThroughRole?> {
+            switch self {
+            case .triage: \.triage
+            case .fixer: \.fixer
+            case .reviewer: \.reviewer
+            case .followupCheck: \.followupCheck
+            }
+        }
+    }
+
+    struct RoleAgentOption: Equatable {
+        let agentId: String?
+        let title: String
+    }
+
+    /// Default, then the project's enabled agents. A stored agent the project can no longer spawn
+    /// stays listed, marked, so the picker shows what the spawn will refuse rather than a blank.
+    static func roleAgentOptions(
+        projectAgents: [RosterAgent], rosterAgents: [RosterAgent], current: String?
+    ) -> [RoleAgentOption] {
+        let enabled = projectAgents.filter(\.enabled)
+        var options = [RoleAgentOption(agentId: nil, title: "Default")]
+        options += enabled.map { RoleAgentOption(agentId: $0.id, title: $0.name) }
+        if let current, !enabled.contains(where: { $0.id == current }) {
+            let name = rosterAgents.first { $0.id == current }?.name ?? current
+            options.append(RoleAgentOption(agentId: current, title: "\(name) (not available)"))
+        }
+        return options
+    }
+
+    /// A role with neither field set is stored as absent, so clearing both pickers leaves no trace.
+    static func updating(
+        _ role: PRFollowThroughRole?, _ change: (inout PRFollowThroughRole) -> Void
+    ) -> PRFollowThroughRole? {
+        var updated = role ?? PRFollowThroughRole()
+        change(&updated)
+        return updated == PRFollowThroughRole() ? nil : updated
     }
 
     static func reviewLevelBlurb(_ level: ReviewLevel) -> String {

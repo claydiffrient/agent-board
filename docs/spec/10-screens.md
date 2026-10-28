@@ -11,7 +11,18 @@ absent things. When any project needs a human the headline leads with how many
 do — "2 projects need you." — *beside* the review count rather than in place of
 it: the review clause counts tasks in one board column, while attention counts
 projects that cannot proceed, and a pending approval raises the second without
-ever touching the first. Below it, one card per project — every project,
+ever touching the first. In projects with PR follow-through on (§13), the
+headline also carries "N PRs ready to verify" after the review count — "Nothing
+running, nothing awaiting your review, 1 PR ready to verify." — and at zero the
+clause is absent rather than reassuring, so the resting sentence is unchanged.
+Each project's card shows its own count as a link under its name, and a card
+with one is not **Idle**. Clicking the card's count opens the Pull Requests page
+filtered to that project; clicking the headline's clause does the same when one
+project holds every ready PR, and opens it unfiltered when several do. The counts
+come from the `PRWatchStore.observeBadgeCounts` observation `MainWindow` already
+runs for the sidebar badge, which counts only projects with follow-through on,
+since a project that turned it off stops polling, and only watches that are not
+paused (§13.1), so the badge and At a Glance never disagree. Below it, one card per project — every project,
 including idle ones — grouped into the same workspace sections in the same order
 as the sidebar, so a project sits in the same relative place in both. A card
 carries the project name and its running, in-review and ready counts, or reads
@@ -22,8 +33,9 @@ and an approval waiting is not idle. The page starts no observation of its own
 for that: it is handed the one `ProjectAttentionStore.observeAll` the sidebar
 already runs, so the two surfaces cannot disagree. Clicking anywhere on a card
 selects that project through the same write the sidebar uses, landing on Orchestrator and starting
-its console (§9) — which is the only way a console ever starts, so this page
-itself costs nothing.
+its console (§9) — which is the only way a console ever starts, so the Projects
+view costs nothing by itself; the Processes view below has a cost rule of its
+own.
 
 A **Coordinator** card sits above the project sections, showing the estimated
 spend of every Coordinator session (§8.2) and the same unread-replies dot as its
@@ -32,6 +44,40 @@ have spent anything shows its own total the same way, so the two read against
 each other. Both are all-time sums of `agent_session.est_cost_usd`, ended sessions
 included, and neither has a cap; the Coordinator total rides in the same
 statement as the working-session count, so the page still runs two.
+
+**Processes** — a **Projects | Processes** toggle under the headline switches
+the cards for a table of every process Agent Board launched or controls
+(§8.7), in the style of Activity Monitor's "All Processes, Hierarchically".
+Rows are grouped by owner: a project, then each owner within it (a task's
+worker or reviewer under the task's title, the orchestrator, a shell), then
+that owner's process tree indented beneath its root; the Coordinator and Agent
+Board are groups of their own, Agent Board last. Owner and group rows carry
+the sum of their processes' CPU and memory. The columns are Process, PID,
+Owner, CPU %, Memory, Uptime and Ports. CPU on a process's first reading is
+unknown and drawn as a dash, not 0. Clicking CPU % or Memory sorts by it and
+flattens the tree; **Show Hierarchy** restores it. A totals line under the
+table gives the process count, total CPU and total memory. The seven columns'
+ideal widths fit the 761pt minimum detail width without scrolling sideways
+(§10.1); a long command or owner truncates, with the full text as its tooltip.
+While the last `claude agents` read failed, the line under the table says
+**Session hosts unavailable** (§8.7).
+
+**Stop…** — in a process row's context menu, and as a button beside the
+totals line for the selected row. It plans first (§8.7): a refusal shows its
+reason under the totals and signals nothing. Otherwise a confirmation names
+the process and what will be signalled — the process and how many under it,
+SIGTERM then SIGKILL after two seconds, and its process group when that is
+signalled too — or, for a worker's or reviewer's host, that the session's own
+Stop runs instead. Confirming plans again against a fresh table, so a row that
+changed while the dialog was open is refused rather than signalled. Group and
+owner rows have no Stop. The outcome replaces the reason under the totals.
+
+The cost rule is the page's own: At a Glance always opens on Projects and the
+toggle is not remembered, so landing on the page never samples. The table
+samples every 2 seconds, off the main thread, only while it is on screen;
+switching back to Projects or leaving At a Glance cancels the sampler. A
+section on the page was rejected for that reason: it would be built, and so
+sampling, whenever the page is open, whether or not it was scrolled into view.
 
 **Shut Down** — a button beside the At a Glance headline, for the wind-down
 that quitting does not do on its own: workers are detached `claude --bg`
@@ -90,7 +136,12 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
    shows its type pill beside that line. While a
    reviewer is live, Accept and Reopen ask first ("Rita is reviewing this task.
    Accepting now stops Rita's review."), because either one stops the reviewer
-   (§5).
+   (§5). A row whose reviewer stopped without a verdict also offers **Re-run
+   review** between them: it stops that reviewer's session and starts a fresh
+   one from the same roster agent on the same task, which stays in `review`
+   (`WorkerSupervising.rerunReview`). Reopen stays, but it sends finished work
+   back to `ready` as a redo, so it is no longer the only way out of a stalled
+   review.
 4. **Proposals** — worker-proposed tasks awaiting promotion.
 5. **Messages** — every §9.3 message this project sent or received, newest
    first, bold until the receiving orchestrator pulls it. Each row deletes on
@@ -140,6 +191,20 @@ than silently respawned; **Start Again** (idle) or **Restart** (hang up and
 relaunch — SIGHUP to the shell's process group, escalating to SIGKILL) is the
 way back. It carries no board authority — D19 (§1).
 
+Every terminal in the app — this screen, Orchestrator Command, the attach window
+and the worktree shell — draws with the one appearance set under **Settings →
+Terminal** (below), applied by `TerminalAppearanceStore.attach` at each
+construction site. An edit repaints every open terminal on the same turn, not
+only the next one opened.
+
+**⌘K** clears the terminal that has keyboard focus, in all four of those
+surfaces, as Terminal.app and iTerm2 do: its scrollback and visible screen are
+emptied locally, then a form feed (Ctrl-L, `0x0c`) is written to the child so a
+shell redraws its prompt and Claude Code repaints its interface. No signal is
+sent and nothing restarts. With focus anywhere else — a text field, the board —
+the key is not consumed. Every construction site builds a `BoardTerminalView`,
+which handles it in `performKeyEquivalent`.
+
 A worker's worktree gets its own shell instead of using this screen: the
 `apple.terminal` button beside the attach button on a session row opens a
 `worktree-shell` window keyed by session id, its working directory the
@@ -179,6 +244,18 @@ The inspector's **Type** picker (Default plus the five types) saves through the
 same task update as its body and model. Changing it doesn't touch a review
 already under way; the task's next completion routes by the new type.
 
+A task proposed through a `verifier` grant (origin `verify_session`, §6) says
+where it came from: its card in `proposed` shows "From Walk me through it ·
+`owner/repo#N`", and its inspector in any column shows "From Walk me through
+it" with `owner/repo#N` on the line below, so a narrow inspector wraps rather
+than cutting the pull request off. The pull request is read back
+from the line the verifier's `propose_task` writes into the proposal report,
+which names the grant's `pr_watch_id` watch, so it survives that watch being
+deleted; when the watch was already gone the line reads "From Walk me through
+it" alone. Only that line, at the position `propose_task` writes it, is read:
+a matching line anywhere else in the report, which the session wrote after
+reading untrusted pull request text, names nothing. Every other origin, a worker's proposal included, shows no such line.
+
 The task inspector shows a **Comments** thread above the Progress log, oldest
 first. Each comment names its author in words — `You`, `Orchestrator`,
 `Rita · reviewer`, `Rita · worker`, or `Worker 3f9a1c2e` / `Reviewer 3f9a1c2e`
@@ -207,10 +284,22 @@ columns they actually sit in (always `done`), dimmed to 55% opacity with a
 dashed border and an "archived `<when>`" line; from there a card's context menu
 or the inspector unarchives it.
 
+**Closed tasks** (§5) sit in their own **Closed** column after Done, never
+mixed into it: the card is dimmed, its title struck through, with the reason
+under it and a **Reopen** button; the inspector shows the reason, who closed it
+and when, with the same **Reopen**. Nothing can be dragged into or out of
+Closed and the **Move to** menu leaves it out — only the orchestrator's
+`close_task` enters it, with a reason, and only Reopen leaves it. A closed card
+can be archived from its context menu like a done one; the toolbar's Archive
+button stays done-only. An epic lane's tally reads "2/3 done · 1 closed", or
+just "3 closed" when every task in it is closed.
+
 **Finished epics leave the board.** With Show Archived off, a `done` or
 `abandoned` epic whose tasks are all archived, or that has no tasks, gets no
 lane and no jump-rail entry, and the rail itself is dropped when no epic has a
-lane. Every other epic state keeps its lane, even when empty. Turning Show
+lane. Every other epic state keeps its lane, even when empty — an
+`integrated` epic (§5.2 step 4) among them, with a teal badge and **Open PR**
+in its header. Turning Show
 Archived on brings those lanes back, collapsed by default like every `done`
 lane. Nothing records this: it is derived from the epic's state and its tasks'
 `archived_at` (`EpicLaneVisibility`), with no flag, state or column of its own.
@@ -227,7 +316,7 @@ a matching card stays in its own column and lane, and nothing is regrouped
 into a results list. Every whitespace-separated term must appear, case- and
 diacritic-insensitively, in one of the task's title, body, acceptance criteria,
 epic title, model (id or display name), type name (§4), or the name of the
-rostered agent that last worked or reviewed it; the task id is not searched. While a query is
+archetype that last worked or reviewed it; the task id is not searched. While a query is
 active an epic lane with no match vanishes, header and rail entry included,
 and a collapsed lane with a match is drawn open without changing its saved
 state. The lane header's done/total tally and actions still count the whole
@@ -270,6 +359,11 @@ that the branches and worktrees survive. Its copy and the write's guards read
 the same `EpicClosurePlan` (`AgentBoardCore.EpicClosure`, unit-tested apart
 from SwiftUI), so the dialog cannot promise something `Board.closeEpic` refuses.
 
+Once an epic is `done` or `abandoned` the same `…` menu offers **Remove
+worktrees…** instead (§5.2): its confirmation lists every worktree the epic and
+its integration task still have on disk, or says none is, and removing runs the
+project's teardown hook in each (§3.1). No branch is deleted.
+
 Closing is **refused**, not forced, while any session in the epic is still
 active — the integrator's included, since it is bound to a synthetic task inside
 the epic. The refusal names each live worker by task and short id, the way the
@@ -285,7 +379,8 @@ as dead rather than phantom-running. A session listed as running on a task in
 `reconcile` stops its process, and a row still active is ended with the
 settled-task `decision` report (§5.1), never a `failed` one. Per agent: role,
 task, state, elapsed, spend
-against cap, last tool used. A blocked agent's row opens its terminal, which is
+against cap, last tool used — in seven columns sized to the minimum detail
+width (§10.1). A blocked agent's row opens its terminal, which is
 how permission prompts get answered (D15).
 
 The role names the roster agent a session runs as: `reviewer · Rita`,
@@ -320,7 +415,7 @@ that line carries the refresh button, and this section has no button to keep.
 the pane, narrows the roster and the ports section together: `:3000` finds a
 port, `idle cap` finds a session's task and the port that session holds. Terms
 match as on the board, every one somewhere in a single row. A session row
-matches on its short id, task title, role label (so the rostered agent's name),
+matches on its short id, task title, role label (so the archetype's name),
 state as drawn and as stored (`setting up`, `setup`), and model id or display
 name; not on its last tool, which changes under the query while the session
 works, nor its full session id. A port row matches on `:<port>`, its command,
@@ -334,15 +429,26 @@ Archived: the summary counts ended matches instead — "No sessions match “idl
 · 1 ended match hidden · 1 of 2 ports". Filtering reads the rows the sidebar
 panel's sweep already holds, so a query starts no sweep.
 
-**Roster** — the cross-project register of specialists (§4), and the one screen
+**Roster** — the cross-project register of archetypes (§4), and the one screen
 not scoped to a project: a `Roster` row in the sidebar beside `At a Glance` and
 above the workspace sections, so it does not join Task Board and Status inside a
-project. Per agent: name, role, model, an enabled switch, and the task it is
-mid-way through. Add, edit and delete; the editor covers name, role, system
-prompt, model and enabled. Deleting an agent that is working is **refused**, and
+project. Per archetype: name, a source chip (`board-local`, `project`, `user`),
+model, an enabled switch, and the task it is mid-way through. A board-local one
+also shows its role and can be added, edited and deleted; the editor covers
+name, role, system prompt, model, enabled, and plugin directories (one path
+per line, §4). A disk one is read-only: it shows
+its file path and description, and offers Open and Reveal in Finder instead of
+Edit and Delete. Every user definition is listed, plus every project's own, each
+project one noting the user file it replaces. A name clash is marked on both
+sides (§4), along with any warning from parsing (an unknown model alias, a
+permission pattern in `tools`), and files the scan skipped are listed with the
+reason under **Skipped definition files**. The disk list rereads the directories
+when the roster table changes and whenever the app becomes active. Deleting an agent that is working is **refused**, and
 the confirmation names the task holding it, because deleting would leave a live
 session with no identity behind it. Which agents a project uses is chosen in
-that project's settings sheet, one toggle per rostered agent, writing
+that project's settings sheet, one toggle per archetype the project resolves
+(its own definitions over user ones), labeled the same way, with a shadowed one's
+toggle disabled unless the project already had it on, writing
 `project_roster_agent` immediately rather than on Save — those are join rows,
 not part of the settings blob the Save button rewrites.
 
@@ -370,6 +476,44 @@ three sections:
   sheet; the Coordinator writes them through its note tools.
 - **Sessions** — **New Session**, the active session, and the history; clicking
   a history entry resumes it. Each shows its start and its spend.
+
+**Pull Requests** — the fourth pinned sidebar row, directly below Coordinator
+(`SidebarSelection.pullRequests`), opening a cross-project page rather than a
+project tab, for the pull requests a project with PR follow-through turned on is
+watching (§13). The row's count badge is PRs in Ready to verify plus open
+decision items across every project with follow-through on, leaving out paused
+watches (`PRWatchStore.observeBadgeCounts`). The page observes `PRWatchStore.observePage`
+and groups the watches as **Ready to verify**, **Needs you**, **In progress**,
+**Waiting on reviewers**, **Verified**, and **Parked**, newest change first in
+each. Needs you and Parked are absent while empty; the other four always show,
+with a one-line placeholder when empty. A **Project** menu above the list
+narrows it to one project with follow-through on; while it shows every project,
+each row names its project. A row shows the title (a link that opens the PR in
+the browser), `owner/repo #n`, the state, the round once one has run, the open
+item count, "pushed …" from `head_changed_at` — or, for a PR whose head has
+not moved since watching began, "updated …" from `updated_at` — and "polled …"
+from `last_polled_at`, the last time a poll read it from GitHub. Each group's
+header carries a **Refresh** button (accessible name "Refresh <group>") that
+polls that group's watches now and applies their transitions, showing a spinner
+while it or any poll runs and its failure inline in the group (§13.4). Row actions: **Mark verified**
+(hidden once verified, disabled when the project sets no verification label),
+**Walk me through it** (only once the project sets a `verifyCommand`), and
+**Pause**, which sets `paused` and becomes **Resume**. A stale row, shown under
+In progress until the next poll settles it, adds "restarted: head moved" to its
+details. A parked row shows its `parked_reason` under the details, and in place
+of Pause offers **Resume**, which returns it to settling with a fresh round cap
+and failure streak, and **Stop watching**, which drops it from the page for good
+(§13.4). A row in Needs you lists
+each open decision under it (`PRDecisionRow`): the comment's author and text
+on one or two lines, triage's question, one button per option, and a **Reply
+instead** field with **Send reply**. An option answers the decision as a fix
+and the reply answers it in words (§13.4); either way the decision leaves the
+row, the badge and the project's attention dot at once. The page's project filter
+belongs to `MainWindow`, so At a Glance and a Ready to verify banner (§13.4) can
+open it already filtered; the banner's route
+(`NotificationRoute.Subject.pullRequest`) also scrolls to its row once the
+filtered page has loaded. See §13 for the state machine, verdicts, and settings
+behind all of it.
 
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
@@ -486,11 +630,11 @@ not free. The header still costs that one line rather than collapsing to zero,
 because it carries the refresh button — the sweep is hourly, and a panel that
 vanished entirely would leave nobody to ask about a port that appeared since.
 
-**Project settings** — a sheet from the sidebar row's gear, in six tabs:
+**Project settings** — a sheet from the sidebar row's gear, in seven tabs:
 **General** (Repository, Workspace, Archive), **Agents** (Models, Review,
-Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Isolation,
-Publishing), **Notifications**, and **Advanced** (the `autoMode` classifier JSON,
-Extra MCP servers). Tabs group by what a setting governs, not by how often it is
+Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Worktree
+teardown, Isolation, Publishing), **Notifications** (one switch per banner category — approvals, blocked workers, caps and stalls, worker failures, pull requests ready to verify, pull request decisions — and the project mute), **Advanced** (the `autoMode` classifier JSON,
+Extra MCP servers), and **PR Follow-Through** (Watch, Verification, Replies, Publish guard, Roles; §13.3), after Advanced. Tabs group by what a setting governs, not by how often it is
 touched. Every section is in exactly one tab; a section in none would be a stored
 setting with no UI. **Delete Project…** sits outside the tabs, at the left of the
 Cancel/Save row, so it is reachable from every tab. The sheet is at least 780pt
@@ -516,6 +660,16 @@ deleted from the roster or opted out — stays listed anyway, suffixed
 `(not available)`, so the picker shows what routing will actually do rather
 than silently dropping the choice. A caption beneath the table repeats that it
 takes effect only while Review level is Agent.
+
+**Preview Leaked-Agent Sweep…** — in the app menu, beside About, because it is
+a one-off diagnostic and not a screen anyone lives in. It opens a `Window` scene
+that runs the launch sweep as a dry run (§8.6) and shows its report one line per
+decision — `WOULD-STOP`, `KEPT` with its reason, the untracked and
+already-confirmed counts — in a selectable, monospaced, read-only text view, so
+a human can copy it. **Run Again** re-runs it; nothing on the window can stop a
+session. The Status pane was rejected because a one-shot report there wants to
+become a live view, and a dry-run-only setting because its output would reach a
+human only through stderr.
 
 **What's New in Agent Board** — the release notes, opened from the Help menu and
 once on their own after an update installs. A `Window` scene rather than a
@@ -604,6 +758,25 @@ it. Neither placement affects the Help search field: AppKit adds that to whateve
 menu is `NSApp.helpMenu` when the menu opens, and it is never an item in the
 built menu.
 
+**Settings** — the standard macOS Settings window, opened with ⌘, from the app
+menu. It has one pane, **Terminal**: the font family (installed monospaced
+families only; a stored family that is no longer installed is listed as "not
+installed" and draws as the monospaced system font), the font size (8–36pt), the
+foreground, background, cursor, cursor text, selection background and selection
+foreground colors, the 16 ANSI colors in two rows of eight, a small preview, and
+**Restore Defaults**, disabled while nothing differs from the defaults. The
+setting is app-wide, not per project — the same person looks at every project's
+terminal — and is stored in `UserDefaults` under `terminal.appearance`. Colors
+16–255 stay SwiftTerm's xterm cube.
+
+The defaults are a snapshot of Clay's Ghostty on 2026-10-19 (theme "Night Owl"),
+not a read of Ghostty's config, so Agent Board does not depend on Ghostty being
+installed or on its config format: Monaspace Neon 12pt, background `#011627`,
+foreground `#d6deeb`, cursor `#7e57c2`, cursor text `#ffffff`, selection
+`#5f7e97` on `#dfe5ee`, and palette `#011627 #ef5350 #22da6e #addb67 #82aaff
+#c792ea #21c7a8 #ffffff` / `#575656 #ef5350 #22da6e #ffeb95 #82aaff #c792ea
+#7fdbca #ffffff`.
+
 ### 10.1 Main window size
 
 **The rule: at or above the minimum window size and the minimum detail width,
@@ -630,7 +803,7 @@ guaranteed to agree with this table across macOS versions.
 | Window height | 600pt | The tallest fixed stack a screen needs is the sidebar's: the project list's reserve plus Add Project, the notifications-off notice and the usage footer. Measured at the 180pt sidebar: 44 + 86 + 143 = 273pt, plus 224 for the list, is 497pt of the 548 a 600pt window leaves under a 52pt toolbar (the unified toolbar's usual height, assumed: an offscreen test window has no toolbar). The remainder goes to the Ports panel's header and rows. 600 also holds the settings sheet's 480pt minimum under the toolbar. |
 
 **The sidebar list always keeps seven rows' worth of height** (224pt, at the
-sidebar's 32pt row pitch: the three pinned rows, a section header and three
+sidebar's 32pt row pitch: the four pinned rows, a section header and two
 projects), and scrolls within it. The bottom stack — Ports panel, Add Project…,
 the notifications-off notice and the usage footer — sits *below* the list, not
 in a `safeAreaInset` over it: an inset lets the list scroll beneath it, so any
@@ -644,9 +817,17 @@ the notice and Add Project are one or two lines each.
 Measured at the minimum, rendered offscreen at 761×548 for a detail pane under
 the toolbar: At a Glance fits three card columns; Roster, Orchestrator, Notes and
 Coordinator lay out at their own minimums; the Task Board scrolls sideways
-through fixed 250pt columns, which it does at any width. Status is the one screen
-the minimum does not serve well. Its session table's column minimums alone sum
-to 760pt before cell padding, so it scrolls sideways at any detail width below
-about 920pt, and Actions starts out of view. That is a column redesign rather
-than a size, and it is filed as its own proposal rather than folded into this
-rule.
+through fixed 250pt columns, which it does at any width; and Status's session
+table (Actions included) and the Processes table (§8.7) both fit without
+scrolling sideways. A `Table` lays its
+columns out at their *ideal* widths and scrolls when those overflow, and each
+column costs its width plus 17pt of intercell spacing, with 20pt more for the
+inset style. So the table has seven columns whose ideals come to 745pt: State
+carries elapsed time under it, Last activity carries the last tool, and Spend
+draws the cost (with the cap's progress bar) while its token detail — counted
+tokens, the cap, cache reads — is the cell's tooltip. The 16pt left over is room
+for a legacy vertical scroller. Wider, the extra goes to Role, Task and Last
+activity; the other columns are capped. The Processes table's seven columns
+(Process, PID, Owner, CPU %, Memory, Uptime, Ports) have ideals of 200, 52,
+120, 58, 64, 56 and 66, summing to 616pt — 755pt with the same spacing and
+inset, 6pt under the 761pt floor.

@@ -25,11 +25,12 @@ final class RosteredSpawnTests: XCTestCase {
 
     @discardableResult
     private func rostered(
-        _ name: String, role: String = "frontend", model: String? = nil, disallowedTools: [String] = []
+        _ name: String, role: String = "frontend", model: String? = nil, disallowedTools: [String] = [],
+        pluginDirs: [String] = []
     ) throws -> RosterAgent {
         let agent = try roster.create(
             name: name, role: role, systemPrompt: "You own the front end.", model: model,
-            disallowedTools: disallowedTools
+            disallowedTools: disallowedTools, pluginDirs: pluginDirs
         )
         try roster.enable(agentId: agent.id, forProject: fixture.project.id)
         return agent
@@ -75,39 +76,17 @@ final class RosteredSpawnTests: XCTestCase {
         }
     }
 
-    func testAnEmptyDisallowedListIsExactlyAPlainWorkersAuthority() async throws {
-        let ada = try rostered("Ada")
+    func testAnAgentsPluginDirsArePassedAsPluginDirArguments() async throws {
+        let ada = try rostered("Ada", pluginDirs: ["/opt/plugins/checks", "~/plugins/follow-up"])
 
         try await assign(try makeTask(), as: ada)
 
-        let request = try await lastRequest()
-        XCTAssertEqual(request.disallowedTools, SpawnRequest.defaultDisallowedTools)
-    }
-
-    func testARosteredAgentGetsTheSameDenyListAsAnUnrosteredWorkerPlusItsOwn() async throws {
-        try await fixture.supervisor.assign(taskId: try makeTask("plain").id)
-        await fixture.supervisor.waitForSetup()
-        let plain = try await lastRequest()
-
-        let ada = try rostered("Ada", disallowedTools: ["WebFetch"])
-        try await assign(try makeTask("rostered"), as: ada)
-
-        let rosteredRequest = try await lastRequest()
-        XCTAssertEqual(rosteredRequest.disallowedTools, plain.disallowedTools + ["WebFetch"])
+        let args = BackgroundSessionRuntime.arguments(for: try await lastRequest())
+        let pairs = args.indices.dropLast().filter { args[$0] == "--plugin-dir" }.map { args[$0 + 1] }
+        XCTAssertEqual(pairs, ["/opt/plugins/checks", fixture.fakeHome.path + "/plugins/follow-up"])
     }
 
     // MARK: identity, model and the recorded assignment
-
-    func testTheIdentitySectionLeadsTheSpawnedPrompt() async throws {
-        let ada = try rostered("Ada")
-
-        try await assign(try makeTask(), as: ada)
-
-        let prompt = try await lastRequest().prompt
-        XCTAssertTrue(prompt.hasPrefix("# You are Ada"), String(prompt.prefix(80)))
-        XCTAssertTrue(prompt.contains("Your specialty is frontend"))
-        XCTAssertTrue(prompt.contains("You own the front end."))
-    }
 
     func testModelPrecedenceIsTaskThenAgentThenProjectDefault() async throws {
         let ada = try rostered("Ada", model: "claude-opus-5")
@@ -127,11 +106,17 @@ final class RosteredSpawnTests: XCTestCase {
 
         try await assign(task, as: ada)
 
+        let prompt = try await lastRequest().prompt
+        XCTAssertTrue(prompt.hasPrefix("# You are Ada"), String(prompt.prefix(80)))
+        XCTAssertTrue(prompt.contains("Your specialty is frontend"))
+        XCTAssertTrue(prompt.contains("You own the front end."))
+
         let session = try XCTUnwrap(fixture.sessions.forTask(task.id).last)
         XCTAssertEqual(session.rosterAgentId, ada.id)
         XCTAssertTrue(session.isRostered)
         XCTAssertEqual(try fixture.tasks.get(task.id)?.rosterAgentId, ada.id)
         XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .running)
+        XCTAssertEqual(try fixture.grants.forSession(session.sessionId).map(\.scope), [.worker])
     }
 
     func testAnAgentTheProjectHasNotEnabledIsRefusedBeforeAnythingIsSpawned() async throws {
@@ -184,15 +169,6 @@ final class RosteredSpawnTests: XCTestCase {
         XCTAssertEqual(scopes, [.reviewer], "the reviewer session must hold a reviewer grant and nothing wider")
     }
 
-    func testAWorkerScopedRosteredSpawnStillMintsAWorkerGrant() async throws {
-        let ada = try rostered("Ada")
-        let task = try makeTask()
-
-        try await assign(task, as: ada)
-
-        let session = try XCTUnwrap(fixture.sessions.forTask(task.id).last)
-        XCTAssertEqual(try fixture.grants.forSession(session.sessionId).map(\.scope), [.worker])
-    }
 }
 
 /// A rostered session runs without the elapsed and idle caps; the token cap still applies.

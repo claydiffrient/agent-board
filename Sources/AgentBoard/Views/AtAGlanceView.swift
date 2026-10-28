@@ -8,16 +8,27 @@ import SwiftUI
 /// cross-project `ProjectAttentionStore.observeAll` that feeds the sidebar badges, so the page adds
 /// no second observation of the same signal and cannot disagree with the sidebar about it.
 struct AtAGlanceView: View {
+    enum Mode: Hashable {
+        case projects
+        case processes
+    }
+
     let projects: [Project]
     let workspaces: [Workspace]
     let attention: [ProjectAttention]
     var unreadReplies = 0
+    var pullRequestCounts: [String: PRBadgeCount] = [:]
     let select: (SidebarSelection) -> Void
+    /// Opens the Pull Requests page filtered to a project, or to every project for nil.
+    var showPullRequests: (String?) -> Void = { _ in }
 
     @Environment(AppEnvironment.self) private var env
     @State private var summary = Observed<GlanceSummary>(.empty)
     @State private var confirmingShutdown = false
     @State private var windingDown = false
+    /// Not remembered across visits: the page lands on Projects, so At a Glance itself never
+    /// starts the process sampler (SPEC §10).
+    @State var mode = Mode.projects
 
     private var sections: [GlanceGrouping.Section] {
         GlanceGrouping.sections(projects: projects, workspaces: workspaces, summary: summary.value)
@@ -27,18 +38,40 @@ struct AtAGlanceView: View {
         Dictionary(attention.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                headline
-                coordinatorCard
-                ForEach(sections) { section in
-                    sectionView(section)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(20)
+    /// `PRBadgeCount` already leaves out projects with follow-through off and paused watches, the
+    /// sidebar badge's rule (SPEC §10).
+    private var readyToVerify: [String: Int] {
+        Self.readyToVerify(pullRequestCounts)
+    }
+
+    static func readyToVerify(_ counts: [String: PRBadgeCount]) -> [String: Int] {
+        counts.compactMapValues { $0.readyToVerify > 0 ? $0.readyToVerify : nil }
+    }
+
+    /// The headline's clause filters to the one project it counts, and lists every project when
+    /// it counts several.
+    static func headlineFilter(_ ready: [String: Int]) -> String? {
+        ready.count == 1 ? ready.keys.first : nil
+    }
+
+    private static let pullRequestsLink = URL(string: "agentboard-glance:pull-requests")!
+
+    private var headlineText: AttributedString {
+        let ready = readyToVerify.values.reduce(0, +)
+        var text = AttributedString(GlanceHeadline.text(
+            workingSessions: summary.value.workingSessions,
+            tasksInReview: summary.value.tasksInReview,
+            projectsNeedingYou: attention.filter(\.needsAttention).count,
+            prsReadyToVerify: ready
+        ))
+        if let clause = GlanceHeadline.prsReadyToVerify(ready), let range = text.range(of: clause) {
+            text[range].link = Self.pullRequestsLink
         }
+        return text
+    }
+
+    var body: some View {
+        content
         .navigationTitle("At a Glance")
         .task {
             await summary.run(GlanceStore(env.db).observe(), in: env.db.reader)
@@ -72,15 +105,51 @@ struct AtAGlanceView: View {
         } message: { Text($0) }
     }
 
+    @ViewBuilder private var content: some View {
+        switch mode {
+        case .projects:
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    header
+                    coordinatorCard
+                    ForEach(sections) { section in
+                        sectionView(section)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(20)
+            }
+        case .processes:
+            VStack(alignment: .leading, spacing: 0) {
+                header.padding(20)
+                ProcessInventoryView(projects: projects)
+            }
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            headline
+            Picker("Show", selection: $mode) {
+                Text("Projects").tag(Mode.projects)
+                Text("Processes").tag(Mode.processes)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+        }
+    }
+
     private var headline: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(GlanceHeadline.text(
-                workingSessions: summary.value.workingSessions,
-                tasksInReview: summary.value.tasksInReview,
-                projectsNeedingYou: attention.filter(\.needsAttention).count
-            ))
-            .font(.title2)
-            .fontWeight(.medium)
+            Text(headlineText)
+                .font(.title2)
+                .fontWeight(.medium)
+                .environment(\.openURL, OpenURLAction { url in
+                    guard url == Self.pullRequestsLink else { return .systemAction }
+                    showPullRequests(Self.headlineFilter(readyToVerify))
+                    return .handled
+                })
             Spacer()
             Button("Shut Down…") { confirmingShutdown = true }
                 .help("Winds down every project's workers, then quits Agent Board.")
@@ -123,7 +192,11 @@ struct AtAGlanceView: View {
                     Button {
                         select(.project(card.id))
                     } label: {
-                        ProjectGlanceCard(glance: card, attention: attentionById[card.id])
+                        ProjectGlanceCard(
+                            glance: card, attention: attentionById[card.id],
+                            readyToVerify: readyToVerify[card.id] ?? 0,
+                            showPullRequests: { showPullRequests(card.id) }
+                        )
                     }
                     .buttonStyle(.plain)
                 }
@@ -135,6 +208,8 @@ struct AtAGlanceView: View {
 struct ProjectGlanceCard: View {
     let glance: ProjectGlance
     let attention: ProjectAttention?
+    var readyToVerify = 0
+    var showPullRequests: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -148,7 +223,7 @@ struct ProjectGlanceCard: View {
             }
             // A project waiting on an approval has an idle board and still needs a human, so the
             // badge stands alone rather than sitting beside "Idle".
-            if glance.isIdle && attention?.needsAttention != true {
+            if glance.isIdle && attention?.needsAttention != true && readyToVerify == 0 {
                 Text("Idle")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -158,6 +233,12 @@ struct ProjectGlanceCard: View {
                     count(glance.review, "in review")
                     count(glance.ready, "ready")
                 }
+            }
+            if let clause = GlanceHeadline.prsReadyToVerify(readyToVerify) {
+                Button(clause, action: showPullRequests)
+                    .buttonStyle(.link)
+                    .font(.callout)
+                    .help("Open Pull Requests filtered to \(glance.name)")
             }
             if glance.spendUSD > 0 {
                 Text("\(Format.cost(glance.spendUSD)) spent")

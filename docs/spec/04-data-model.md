@@ -23,7 +23,8 @@ CREATE TABLE project (
                                    -- verificationTimeoutSeconds (null = 30 min; else clamped
                                    --   to 60..86400, i.e. 1 min to 24 h, on decode and on set),
                                    -- archivePolicy, worktreeStrategy, sharedCheckoutMaxAgents,
-                                   -- rosterAgentIds
+                                   -- worktreeSlots, rosterAgentIds, worktreeTeardownCommand,
+                                   -- worktreeTeardownTimeoutSeconds, prFollowThrough
   created_at      INTEGER NOT NULL,
   workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
 );
@@ -34,9 +35,10 @@ CREATE TABLE epic (
   title          TEXT NOT NULL,
   goal           TEXT,
   branch         TEXT NOT NULL,    -- agentboard/epic-<id>
-  state          TEXT NOT NULL,    -- planning | active | integrating | pull_request_open | done | abandoned
+  state          TEXT NOT NULL,    -- planning | active | integrating | integrated | pull_request_open | done | abandoned
   created_at     INTEGER NOT NULL,
-  review_level   TEXT              -- none|agent|task|epic for this epic's tasks; NULL inherits the project's
+  review_level   TEXT,             -- none|agent|task|epic for this epic's tasks; NULL inherits the project's
+  ships_by_pull_request INTEGER    -- set when the integrator spawns (§5.2 step 4); NULL completes as a local merge
 );
 
 CREATE TABLE task (
@@ -47,22 +49,25 @@ CREATE TABLE task (
   body           TEXT,
   acceptance     TEXT,
   priority       TEXT,
-  column_name    TEXT NOT NULL,    -- proposed|backlog|ready|running|review|done
+  column_name    TEXT NOT NULL,    -- proposed|backlog|ready|running|review|done|closed
   blocked        INTEGER NOT NULL DEFAULT 0,
   blocked_reason TEXT,
   failed         INTEGER NOT NULL DEFAULT 0,
   failure_reason TEXT,
   ordering       REAL NOT NULL,
-  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration
+  origin         TEXT NOT NULL,    -- human | orchestrator | worker_proposal | integration | triage | follow_through | fix_round | followup_check | verify_session
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
   reviewer_agent_id TEXT REFERENCES roster_agent(id),  -- the rostered reviewer holding it in `review`
-  roster_agent_id TEXT REFERENCES roster_agent(id),    -- the rostered agent that last worked it
+  roster_agent_id TEXT REFERENCES roster_agent(id),    -- the archetype that last worked it
   archived_at    INTEGER,          -- non-null = archived: hidden from the board, never deleted
   done_at        INTEGER,          -- entered done; cleared on leaving. The afterDays clock
   unarchived_at  INTEGER,          -- a human pulled it back; no automatic policy touches it again
-  type           TEXT              -- code|docs|tests|plan|review; NULL = Default. Picks its review row (§4)
+  type           TEXT,             -- code|docs|tests|plan|review; NULL = Default. Picks its review row (§4)
+  closed_at      INTEGER,          -- entered closed (§5); cleared on leaving. afterDays reads it for a closed task
+  closed_reason  TEXT,             -- why it was retired; required to enter closed
+  closed_by      TEXT              -- who closed it, e.g. "orchestrator (<session id>)"
 );
 CREATE INDEX task_project_archived ON task(project_id, archived_at);
 CREATE INDEX task_project_done_at ON task(project_id, done_at);
@@ -100,8 +105,10 @@ CREATE TABLE agent_session (
   tool_started_at INTEGER,           -- oldest tool call not yet seen to return
   tools_in_flight INTEGER NOT NULL DEFAULT 0,
   blocked_on_path TEXT,               -- §8.4: the shared-checkout file lock this session is waiting on
-  roster_agent_id TEXT REFERENCES roster_agent(id),  -- §10: the rostered identity this session runs as
+  roster_agent_id TEXT REFERENCES roster_agent(id),  -- §10: the archetype this session was spawned from
   review_head    TEXT,               -- §5.1: HEAD (and uncommitted-change fingerprint) a rostered reviewer was spawned on
+  review_base    TEXT,               -- §3.1 step 1, §5.1: what a rostered reviewer diffs against; `ReviewPrompt.recorded` rebuilds from it
+  agent_stopped_at INTEGER,         -- §8.6: a `claude stop` succeeded after the row's last sign of life; a trigger clears it
   CHECK ((role = 'coordinator') = (project_id IS NULL))
 );
 
@@ -115,10 +122,11 @@ CREATE TABLE token_grant (
   token       TEXT PRIMARY KEY,      -- random, per session
   session_id  TEXT REFERENCES agent_session(session_id),  -- NULL until `claude --bg` returns the id
   project_id  TEXT REFERENCES project(id),  -- NULL for the Coordinator's grant only (§8.2)
-  scope       TEXT NOT NULL,         -- orchestrator | worker | reviewer | coordinator
+  scope       TEXT NOT NULL,         -- orchestrator | worker | reviewer | coordinator | triager | verifier
   task_id     TEXT,                  -- worker: the only task it may mutate
   created_at  INTEGER NOT NULL,
   revoked_at  INTEGER,
+  pr_watch_id TEXT REFERENCES pr_watch(id) ON DELETE SET NULL,  -- verifier only: the watch its Walk me through it window was opened on (§6)
   CHECK ((scope = 'coordinator') = (project_id IS NULL))
 );
 
@@ -160,7 +168,7 @@ CREATE TABLE report (
   project_id  TEXT REFERENCES project(id),  -- NULL: the Coordinator's queue (§9.1)
   task_id     TEXT REFERENCES task(id),
   session_id  TEXT REFERENCES agent_session(session_id),
-  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision | message | comment | request | reply
+  kind        TEXT NOT NULL,         -- complete | failed | blocked | proposal | decision | message | comment | request | reply | pr_follow_through
   body        TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
   consumed_at INTEGER               -- set when the orchestrator pulls it
@@ -213,7 +221,7 @@ CREATE TABLE request_epic (
 CREATE TABLE approval (
   id           TEXT PRIMARY KEY,
   project_id   TEXT NOT NULL REFERENCES project(id),
-  kind         TEXT NOT NULL,            -- spawn | integration
+  kind         TEXT NOT NULL,            -- spawn | integration | push | pull_request | pr_item_dismissal
   task_id      TEXT REFERENCES task(id),
   epic_id      TEXT REFERENCES epic(id),
   requested_by TEXT NOT NULL,            -- session_id of the requester, or 'human'
@@ -258,7 +266,8 @@ CREATE TABLE hook_event (
   at          INTEGER NOT NULL
 );
 
--- The roster is cross-project: no project_id. Projects opt in below.
+-- The roster is cross-project: no project_id. Projects opt in below. A row is a board-local
+-- archetype, or a content-free pointer (id `definition:<name>`) to a disk one; see below.
 CREATE TABLE roster_agent (
   id            TEXT PRIMARY KEY,
   name          TEXT NOT NULL,
@@ -269,7 +278,8 @@ CREATE TABLE roster_agent (
                                                 -- a deny-list, so empty = a full worker's authority
   enabled       INTEGER NOT NULL DEFAULT 1,
   created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
+  updated_at    INTEGER NOT NULL,
+  plugin_dirs   TEXT NOT NULL DEFAULT '[]'  -- JSON array; each is one --plugin-dir at spawn
 );
 
 CREATE TABLE project_roster_agent (
@@ -301,6 +311,129 @@ CREATE TABLE comment_delivery (
   comment_id INTEGER NOT NULL REFERENCES task_comment(id) ON DELETE CASCADE,
   PRIMARY KEY (session_id, comment_id)
 );
+
+-- PR follow-through: one row per watched pull request, keyed by its repository and number.
+CREATE TABLE pr_watch (
+  id               TEXT PRIMARY KEY,
+  project_id       TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  repo_owner       TEXT NOT NULL,
+  repo_name        TEXT NOT NULL,
+  number           INTEGER NOT NULL,
+  url              TEXT NOT NULL,
+  title            TEXT NOT NULL,
+  body             TEXT,              -- the description as rendered, from the last poll; null until one reads it (§13.1)
+  is_draft         INTEGER NOT NULL DEFAULT 0,
+  head_ref         TEXT NOT NULL,
+  head_oid         TEXT NOT NULL,
+  head_changed_at  INTEGER,           -- the poll that first saw head_oid; null for the head watching began on
+  base_ref         TEXT NOT NULL,
+  state            TEXT NOT NULL,     -- watching | settling | triaging | fixing | checking | publishing |
+                                      -- awaiting_ci | ready_to_verify | verified | stale | parked | merged | closed |
+                                      -- stopped
+  round            INTEGER NOT NULL DEFAULT 0,
+  review_decision  TEXT,              -- GitHub's reviewDecision, as read
+  checks_state     TEXT,              -- SUCCESS | PENDING | FAILURE by §13.1's checks rule; null when nothing is required or reported
+  mergeable        TEXT,
+  labels_json      TEXT NOT NULL DEFAULT '[]',
+  paused           INTEGER NOT NULL DEFAULT 0,
+  last_polled_at   INTEGER,
+  last_feedback_at INTEGER,           -- the last poll that brought a new, changed or reopened item
+  verified_at      INTEGER,
+  est_cost_usd     REAL NOT NULL DEFAULT 0,
+  ready_notified_oid TEXT,            -- the head whose Ready to verify banner fired (§13.4)
+  parked_reason    TEXT,              -- why follow-through parked it, e.g. the last of three failed triages (§13.1)
+  resumed_at       INTEGER,           -- the last Resume from parked; bounds the round cap and failure streak (§13.4)
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,  -- moves only when something other than last_polled_at changes
+  UNIQUE (project_id, repo_owner, repo_name, number)
+);
+CREATE INDEX pr_watch_state ON pr_watch(state);
+
+-- One piece of feedback on a watched PR, keyed by GitHub node id.
+CREATE TABLE pr_item (
+  id                    INTEGER PRIMARY KEY,
+  watch_id              TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+  github_node_id        TEXT NOT NULL,
+  kind                  TEXT NOT NULL,   -- thread | review | comment | check | conflict | verify_failure
+  author                TEXT,
+  body                  TEXT NOT NULL,
+  path                  TEXT,
+  line                  INTEGER,
+  url                   TEXT,
+  state                 TEXT NOT NULL,   -- open | handled | dismissed
+  verdict               TEXT,            -- fix | answer | already_done | follow_up | decision; null until triaged
+  approach              TEXT,
+  decision_question     TEXT,
+  decision_options_json TEXT,            -- [{label, verdict: fix|answer, reply_body?}]; a bare string reads as fix (§13.4)
+  decision_answer       TEXT,            -- the human's answer from Needs you (§13.4)
+  decision_notified_at  INTEGER,         -- when this decision's banner was claimed; one banner per decision
+  fix_task_id           TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the fix or follow-up task triage made of it (§13.1)
+  followup_grade        TEXT,            -- fixed | partly | not_fixed | moot; the round's follow-up check (§13.1)
+  followup_note         TEXT,            -- that grade's evidence, which a failed check hands the fixer
+  reply_body            TEXT,
+  reply_url             TEXT,            -- the reply publishing posted (§13.2); null until one is
+  reply_error           TEXT,            -- the last failed post's error (§13.2)
+  reply_abandoned_at    INTEGER,         -- when a post found the comment gone on a PR that still reads; no reply is tried again
+  handled_at            INTEGER,         -- when it last became handled; bounds the replies §13.2 posts
+  answers               TEXT,            -- the review node id or reviewer login an add_pr_item item answers (§13.1)
+  dismiss_reason        TEXT,            -- why it was dismissed by hand (§13.1 dismissed items); null for Stop watching
+  dismissed_by          TEXT,            -- 'human', or the orchestrator session and approval that granted it
+  dismissed_at          INTEGER,
+  round                 INTEGER NOT NULL DEFAULT 0,  -- the round it arrived in, then the round that handled it, whose replies post it
+  created_at            INTEGER NOT NULL,
+  updated_at            INTEGER NOT NULL,
+  UNIQUE (watch_id, github_node_id)
+);
+CREATE INDEX pr_item_watch_state ON pr_item(watch_id, state);
+
+CREATE TABLE pr_round (
+  id              INTEGER PRIMARY KEY,
+  watch_id        TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+  number          INTEGER NOT NULL,
+  base_head_oid   TEXT NOT NULL,     -- the PR head the round's branch was cut from
+  pushed_head_oid TEXT,              -- the round branch's tip publishing fast-forwarded the PR to
+  outcome         TEXT,              -- triaged | triage_failed | interrupted | check_failed | check_unavailable | published | stale | frozen | publish_failed | fixer_failed; null while the round runs
+  started_at      INTEGER NOT NULL,
+  ended_at        INTEGER,
+  fix_task_id     TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the round's `fix_round` task (§13.1)
+  check_failures  INTEGER NOT NULL DEFAULT 0,  -- failed checks this round; the third parks the watch
+  review_verdict  TEXT,              -- accepted | reopened; the reviewer's verdict on the current check
+  review_findings TEXT,              -- a reopening reviewer's findings, for the fixer
+  followup_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,  -- the current check's `followup_check` task
+  checked_head_oid TEXT,             -- the round branch's tip the follow-up check judged
+  unavailable_checks INTEGER NOT NULL DEFAULT 0,  -- checks that never ran since the last resume; the third parks (§13.1)
+  review_requests_at   INTEGER,      -- when the pushed round claimed its review re-request (§13.2)
+  review_requests_json TEXT,         -- the logins it re-requested, a JSON array
+  review_request_error TEXT,         -- why the re-request failed
+  UNIQUE (watch_id, number)
+);
+
+CREATE TABLE worktree_slot (       -- pooled worktrees (§3.1 step 2)
+  project_id TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  slot       INTEGER NOT NULL,      -- <worktree_root>/slot-<slot>, from 1
+  task_id    TEXT,                  -- the lease; null = free
+  leased_at  INTEGER,
+  PRIMARY KEY (project_id, slot)
+);                                  -- unique index on task_id where it is not null
+
+-- An enabled project whose last PR poll could not run `gh` (§13.1); it raises the attention signal.
+CREATE TABLE pr_poll_problem (
+  project_id TEXT PRIMARY KEY REFERENCES project(id) ON DELETE CASCADE,
+  detail     TEXT NOT NULL,
+  since      INTEGER NOT NULL
+);
+
+-- One triage run (§13.2): the synthetic `triage` task its session is bound to, the watch it
+-- triages, and the diff it was spawned to read. A triager grant reaches its watch only through this.
+CREATE TABLE pr_triage (
+  task_id    TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
+  watch_id   TEXT NOT NULL REFERENCES pr_watch(id) ON DELETE CASCADE,
+  base_oid   TEXT NOT NULL,   -- origin's tip of the PR's base branch, fetched at spawn
+  head_oid   TEXT NOT NULL,   -- the PR head the triager's detached checkout is at
+  round      INTEGER NOT NULL DEFAULT 0,  -- the watch's round this triage was spawned for
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX pr_triage_watch ON pr_triage(watch_id);
 ```
 
 Every `epic.state` value is written by exactly one place, and nothing writes one
@@ -311,8 +444,9 @@ that is not listed here:
 | `planning` | `EpicStore.insert` | The epic is created; `create_epic` and the New Epic sheet both land here |
 | `active` | `WorkerSupervisor.spawn`, `Board.accept`, `Board.reopenEpicAfterClosedPullRequest` | The first task in the epic is spawned, or accepted, while the epic is still `planning`, **or** its pull request closed without merging (§5.2 step 5) |
 | `integrating` | `WorkerSupervisor.spawnIntegrator` | The integrator worker spawned successfully on the epic branch (§5.2 step 3) |
+| `integrated` | `Board.complete` | The integrator reported on an `integrating` epic whose project ships epics by pull request (§5.2 step 4) |
 | `pull_request_open` | `Board.recordPublished` | An approved `open_pull_request(epic_id)` recorded its URL, from any state but `abandoned` (§5.2 step 5) |
-| `done` | `Board.complete`, `Board.landEpicPullRequest`, `Board.closeEpic` | The integrator reported on an `integrating` epic, **or** its pull request merged, **or** a human closed the epic by hand (§10) |
+| `done` | `Board.complete`, `Board.landEpicPullRequest`, `Board.closeEpic` | The integrator reported on an `integrating` epic whose project merges epics locally, **or** its pull request merged, **or** a human closed the epic by hand (§10) |
 | `abandoned` | `Board.closeEpic` | A human abandoned the epic by hand (§10) |
 
 `done` and `abandoned` are terminal: `Board.closeEpic` refuses an epic that is
@@ -330,18 +464,91 @@ Notes are sectioned rather than a single body specifically so three concurrent
 workers appending to one note do not silently lose each other's writes. Whole-
 document replace is not offered.
 
+An **archetype** is a template — role, system prompt, model, tool scope — and
+every assignment instantiates it in a fresh session. The role is the durable
+thing, not the agent: spike task `c4d74da3` found a `claude --bg` session cannot
+be moved to another working directory, so nothing outlives a task but the
+template. "Role is not identity": two sessions from one archetype in two repos
+are the same role.
+
+Archetypes come from three sources, each labeled in every list
+(`Archetype.Source`):
+
+| Source | Where | Editable in Agent Board |
+|---|---|---|
+| `board-local` | a `roster_agent` row | yes, on the Roster screen |
+| `project` | `<project repo_path>/.claude/agents/*.md` | no — shown with its file path |
+| `user` | `~/.claude/agents/*.md` | no — shown with its file path |
+
+A disk archetype is a Claude Code agent definition: frontmatter, then a markdown
+body that is the system prompt. `AgentDefinitionParser` reads only the subset
+those files use — one `key: value` scalar per line, split on the first colon so a
+description containing one survives, surrounding quotes stripped — and refuses
+anything else (an indented continuation, a block list) rather than half-reading
+it. `name` is required. `model` is a short alias mapped through
+`ModelCatalog.resolve` (`sonnet` → `claude-sonnet-5`, newest in the family
+first); an alias it cannot map, or `inherit`, is no model, so the task's or the
+project's default applies. `color` is Claude Code's and is ignored. An omitted
+`tools` key inherits every tool; `tools:` with nothing after it grants none.
+A file that fails to parse, or that repeats a name already read from its
+directory, is skipped with a diagnostic and the rest of the directory loads.
+
+Disk archetypes are **read at use**, never imported: every listing, every
+`usableAgents` call and so every spawn rereads the directory, with no cache, so
+editing a file changes the next spawn with no re-import step. Only what the
+foreign keys need is stored: when a project opts into a disk archetype, or its
+enabled switch is flipped, `RosterStore.linkDefinition` writes a pointer row
+with id `definition:<name>` whose content columns are placeholders the read path
+never uses. One pointer row serves every project; each resolves the name against
+its own directories. A pointer whose file is gone resolves to nothing and drops
+out of the usable set.
+
+On a name clash, the source nearest the board wins: **board-local, then
+project, then user.** A project definition replaces the user-level one of the
+same name inside that project. A board-local agent beats a disk definition of
+the same name (compared case-insensitively), so adding a file to
+`~/.claude/agents` can never change what an existing board-local agent spawns.
+The loser is never dropped silently: the Roster screen and the project picker
+list it, marked (`shadowedBy`, `shadows`, `overrides`), and a shadowed
+definition is left out of the usable set even if a project opted into it.
+
+A disk archetype's `tools` list reaches the spawn as `--tools`, which narrows
+Claude Code's built-in tools and nothing else. Measured on Claude Code 2.1.285
+by capturing the request's `tools` array: the board's own MCP tools from
+`--strict-mcp-config --mcp-config` survive every `--tools` list, including
+`--tools ""`, so an archetype can always call `report_complete` and there is no
+"can it finish" check to make. (`--agent`, which applies a definition the way
+Claude Code does for a subagent, *would* drop an unlisted `mcp__*` tool; that is
+why it is not used.) `--tools` also drops names it does not know — `LS`,
+`MultiEdit`, `TodoWrite` — and a permission pattern such as `Bash(git status*)`,
+which therefore grants nothing; the parser attaches a warning to the archetype
+for the pattern case. A tool the deny list names stays denied even when
+`--tools` names it, so an archetype listing `Bash(git push*)` still has push
+denied.
+
 `roster_agent.disallowed_tools` is a **deny-list**, not an allow-list: its
-patterns are appended to the worker default `--disallowedTools` at spawn, so a
-rostered agent can only ever have *less* authority than a plain worker and can
+patterns are appended to the worker default `--disallowedTools` at spawn, so an
+archetype can only ever have *less* authority than a plain worker and can
 never grant itself anything. That is why `NOT NULL DEFAULT '[]'` is the right
 default — an empty list is exactly a full worker's authority, which is the status
 quo for an unrostered one.
+
+`roster_agent.plugin_dirs` lets an archetype's prompt run a skill from a Claude
+Code plugin the worktree does not install, without that plugin's path reaching
+source. Each entry is passed as its own `--plugin-dir` when a session runs as the
+agent, after a leading `~/` is expanded to the home directory, since `claude` is
+spawned without a shell. Only a board-local row carries the list: a disk
+archetype is read from its file, which has no such field, so its pointer row's
+`[]` is all it ever has. A plugin brings its skills, agents, hooks and MCP
+servers; `--disallowedTools` still applies to every tool call, but a plugin hook
+runs its command outside tool permissions, so the list is trusted the way the
+user's own settings are, and only the human edits it.
 
 `roster_agent.role` is a plain string, not an enum: the roster is user-defined,
 so adding a specialty must not need a migration. A project's *usable* set is
 `project_roster_agent` joined to `roster_agent` where `enabled = 1` — disabling
 an agent roster-wide takes it out of every project's rotation without removing
-anyone's selection. Deleting a rostered agent clears its `project_roster_agent`
+anyone's selection. Deleting an archetype's row clears its `project_roster_agent`
 rows and keeps its history: the tasks it worked or reviewed, its sessions, the
 `progress` rows naming it and the comments it wrote all survive it. Their `roster_agent_id` and
 `reviewer_agent_id` are set to NULL in the same transaction, because those columns
@@ -388,14 +595,38 @@ reviewer; neither fails the rest of `settings_json`.
 The table is read only under `agent`; the integration-task and shared-checkout
 overrides (§5, §5.1) still apply over it, and there are no per-epic rows.
 
+`PRWatchStore.upsert` records one poll of a pull request. A new watch starts in
+`watching`. Items are matched by `github_node_id`, so the same snapshot twice
+changes nothing but `last_polled_at`. An open item that the snapshot reports
+resolved, or leaves out, becomes `handled`; a resolved item never seen before is
+not stored. An unresolved item whose body changed — a new reply — loses
+everything triage gave it: `verdict`, `approach`, the `decision_*` fields,
+`reply_body`, `reply_url`, `reply_error`, `reply_abandoned_at` and
+`followup_grade`, so the next round triages it afresh and replies anew. A
+`handled` or `dismissed` one also reopens to `open` and drops `fix_task_id` and
+the `dismiss_*` fields; the
+task it named stays on the board as the record of the earlier round, and is
+never treated as the item's current task. An item still open keeps its
+`fix_task_id`. `settings_json.prFollowThrough`
+holds every work-specific value — `enabled`, `verificationLabel`,
+`requireApproval`, `settleMinutes`, `roundCap`, `dailyBudgetUSD`,
+`verifyCommand`, `postFactualReplies`, `postFactualRepliesSince` (when
+replies were last turned on, §13.2), `reRequestReviews` (§13.2), `roles` (`triage`, `fixer`, `reviewer`,
+`followupCheck`, each `{rosterAgentId, model}`), `privateTerms` and
+`checksAwaitingVerification` (check names left out of whether CI passed,
+§13.1) — and an
+absent key, or an absent field inside it, decodes to off or empty:
+`enabled` false, `requireApproval` true, `settleMinutes` 10, `roundCap` 3, the
+rest nil or `[]`.
+
 `settings_json.reviewLevel` is one of `none`, `agent`, `task` or `epic` and
 defaults to **`task`**, so a project that predates the setting behaves exactly as
 it did. `epic.review_level` overrides it for that epic's tasks; NULL inherits.
 Nothing else reads either value — the level is resolved once, on completion (§5).
 
-`archived_at` is a flag on a task, not a seventh column — D7 fixes the six, and
-`blocked`/`failed` are the precedent. Only a task in `done` may be archived;
-unarchiving is always allowed. Archiving hides a task from the default board
+`archived_at` is a flag on a task, not a column — D7 fixes the columns, and
+`blocked`/`failed` are the precedent. Only a task in a terminal column, `done`
+or `closed` (§5), may be archived; unarchiving is always allowed. Archiving hides a task from the default board
 query and does nothing else: no branch, worktree, session row, report or
 progress row is removed or altered by it. `settings_json.archivePolicy` says
 when a done task is archived automatically — `{"mode":"manual"}`,
@@ -413,12 +644,17 @@ The three modes fire on two different things, so they have two entry points
   metering tick, throttled to one sweep every 5 minutes rather than the 5-second
   metering cadence, and there is no second timer. `done_at` rather than
   `updated_at` measures time-in-done, because archiving, reordering, blocking and
-  every other edit move `updated_at`.
-- **`afterEpicMerge`** archives every `done` task of an epic inside the same
+  every other edit move `updated_at`. A `closed` task (§5) is measured from
+  `closed_at` the same way.
+- **`afterEpicMerge`** archives every `done` or `closed` task of an epic when the epic
+  becomes `done` by merging: in a project that ships epics by pull request,
+  inside `Board.landEpicPullRequest` once the pull request merges; in one that
+  merges locally, inside the same
   `Board.complete` transaction that moves the epic to `done` (§5.2 step 4),
   including the synthetic `integration` task. Under this policy alone that task
   lands in `done` rather than `review`: the epic reaching `done` is its
-  acceptance. A task of the epic parked outside `done` is skipped, not an error.
+  acceptance. A task of the epic parked outside `done` and `closed` is skipped,
+  not an error.
 
 A done task with no epic has no merge event, so under `afterEpicMerge` it never
 archives automatically; it stays on the board until archived by hand. There is
@@ -427,10 +663,10 @@ policy is worse than one that does nothing.
 
 Automatic archiving never fights a human: `unarchive` stamps `unarchived_at`,
 and while that is set no policy re-archives the task. Moving a task out of `done`
-clears `done_at` and `unarchived_at` together, so a reopened task starts both the
+or `closed` clears `done_at`, the `closed_*` fields and `unarchived_at` together, so a reopened task starts both the
 clock and the policy from scratch. A `done` epic lane's **Archive** runs the
 same `ArchiveSweep.archiveEpic` as `afterEpicMerge`, so it too leaves a task a
-human unarchived, and every task outside `done`, where it is. The picker for
+human unarchived, and every task outside `done` and `closed`, where it is. The picker for
 the three modes lives in Project Settings, next to the day count it disables
 outside `afterDays`; the Task Board's own archive controls are in §10.
 
@@ -444,14 +680,98 @@ only read back from `agent_session` rows with `role = worker` and no
 is still found in it on the next launch, with no separate row to fall out of
 sync with the sessions it describes.
 
+`worktreeSlots` is how many pooled worktrees, at `<worktree_root>/slot-<n>`, a
+worker is leased before it gets one of its own (§3.1 step 2). 0, the default
+for every project, gives every task its own worktree as before. It sits on
+the Isolation tab beside `worktreeStrategy`. Lowering it retires each free slot
+above the new number on the next `reconcile`, running the teardown hook in it;
+a leased one is retired once its task releases it.
+
+`worktree_slot` holds a row for each slot that has ever been leased. `task_id`
+is the lease: set by `Board.assign` in the transaction that writes the
+worker's session row, kept for the task across retries, hand-offs and its
+reviewer, and cleared when accept or discard releases the slot (§5). It is not
+a foreign key, because a discarded task's row is deleted while its slot may
+still hold its uncommitted work. A lease whose task is gone, `done` or
+`closed` is released by `reconcile`. `agent_session.worktree_path` stops
+identifying a task once slots are in use, since every task leased slot `n`
+over time records the same path; a slot path counts as a task's own worktree
+only while `worktree_slot` says the task holds it, which is what keeps one
+task's accept, diff or salvage from reading another task's checkout.
+
+`worktreeTeardownCommand` is the project's teardown hook, run in a worktree just
+before Agent Board removes it (§3.1, "Removing a worktree"); nil or blank runs
+nothing, which is every project's behavior from before it existed.
+`worktreeTeardownTimeoutSeconds` bounds it: 600 by default, clamped to 1
+through 86,400. Both sit on Project settings' Workflow tab, in a Worktree teardown section
+after Verification, because they are the same kind of setting as the build and
+test commands: a shell command the project chooses and Agent Board runs without
+interpreting it.
+
+`project.worktree_root` is the directory each task's worktree is cut under
+(§3.1 step 2). Registration sets it to `~/.agentboard/worktrees/<project-id>`,
+or `<AGENTBOARD_SUPPORT_DIR>/worktrees/<project-id>` under the override. A root
+containing whitespace is refused, at registration and in Project Settings,
+because repo setup that shells out without quoting the path breaks on it. A
+leading `~` means the board's home directory wherever the root becomes a path
+(`WorktreeRootRule.url`). Project Settings never takes a typed root: **Choose…**
+opens a folder chooser and **Use Default** restores the registration default,
+and either stores a standardized absolute path. A `~` root can still come from
+a row written before that, and the sheet abbreviates the home folder to `~` for
+display only.
+
+Projects registered before that default still carry the old one,
+`~/Library/Application Support/AgentBoard/worktrees/<project-id>`, which the
+space rule rejects. At every launch `WorktreeRootMigration` rewrites such a
+root to the current default, but only if the project's repository has no
+worktree registered under the old root. That is read from each
+`.git/worktrees/<id>/gitdir`, not `git worktree list`, which leaves out an entry
+it cannot read; an unreadable one keeps the root, and a dead one (§5) is pruned
+and does not. Worktrees are not
+moved. A project that still has one keeps its root, and the status bar names
+the project and each remaining worktree, because reconcile's reaper (§5) only
+considers worktrees under the current root and would never see one left
+behind. The pass repeats on each launch and moves the root once those worktrees
+are gone. It is a launch-time pass and not a GRDB migration for that reason: a
+migration runs once and cannot shell out to git.
+
 `file_lock` exists only for that group: a worktree worker cannot collide with
 anyone, so it never takes one. A lock is claimed by a session's first write to
-a path and held until the session ends; `agent_session.blocked_on_path` records
-what a session is waiting on while it holds (§8.4). `task_commit` is the
+a path and held until the session ends. Every write that moves a session to an
+inactive state deletes its locks in the same transaction — a report, a
+termination, a hand-off, an acceptance, `update_status(failed)`, a discard —
+rather than leaving them to `SessionEnd`, and deleting a project deletes its
+`file_lock` rows, which reference `project(id)` with no cascade.
+
+Deleting a project (`ProjectStore.delete`) is one transaction that removes or
+unlinks every row referencing the project, its tasks, its epics or its
+sessions, because most of those foreign keys are `NO ACTION` and are left that
+way rather than rebuilt to cascade. That reaches other projects' rows: messages
+either project sent the other are deleted, as are another project's note links
+to this one's tasks or epics; a reference from another project's row to one of
+this project's sessions or reports is set to null instead. Approvals, shutdown
+orders with their deliveries, and task comments go with the project.
+`agent_session.blocked_on_path` records what a session is waiting on while it
+holds (§8.4). `task_commit` is the
 companion ledger for a branch several tasks commit to — the only way, once
 commits from different tasks interleave on one ref, to say afterwards which
 task made which commit, since the branch name can no longer carry that the way
 `agentboard/<task-id>` does.
+
+`hook_event` is a raw log of every hook payload, one row per `PostToolUse`
+among them, so it is pruned rather than kept. The archive sweep's tick
+(`HookEventStore.prune`, every 5 minutes) deletes a row once it is more than 14
+days old (`HookEventStore.retentionMillis`, wall clock, measured from the row's
+own `at`) — unless its `session_id` names an `agent_session` in an active state
+(`setup`, `starting`, `running`, `idle`, `blocked`, `waiting_on_lock`), whose
+rows are kept regardless of age. A row with no session, or one whose session
+has no `agent_session` row, ages out the same as an ended session's. The
+retention is a constant, not a setting. Nothing reads an ended session's rows:
+the table's only readers are spawn's replay of hooks that beat the session row
+(§3.1 step 8), the `PreCompact` trigger lookup when a compacted session restarts
+(§7), and the E2E harness, all of them about a live session. Attention, Status,
+`last_tool`, transcripts and reports read `agent_session`, `progress`,
+`report` or the transcript file, never `hook_event`.
 
 ### 4.1 Opening the database: newer-build refusal and launch backups
 

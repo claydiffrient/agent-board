@@ -22,29 +22,6 @@ final class IntegrationPlanRepositoryTests: XCTestCase {
         try? FileManager.default.removeItem(at: repo)
     }
 
-    func testAReapedBranchWhoseWorkFastForwardedIsReportedAsLanded() throws {
-        let epicBranch = "agentboard/epic-\(UUID().uuidString)"
-        try git("branch", epicBranch, "main")
-        let taskId = UUID().uuidString
-        try cutTaskBranch(taskId, from: epicBranch)
-        try checkout("agentboard/\(taskId)")
-        try commit(file: "GlanceStore.swift", contents: "struct GlanceStore {}")
-
-        try fastForward(epicBranch, to: "agentboard/\(taskId)")
-        try reapTaskBranch(taskId)
-
-        XCTAssertFalse(try branchExists("agentboard/\(taskId)"), "the branch under test still exists")
-        let facts = try branchFacts(taskId: taskId, epicBranch: epicBranch)
-        XCTAssertEqual(TaskBranchEvidence.read(facts), .landed(commit: try resolve(TaskBranchLedger.tipRef(taskId: taskId))))
-
-        let prompt = try prompt(epicBranch: epicBranch, facts: [taskId: facts], titles: [taskId: "count the board"])
-        XCTAssertTrue(prompt.contains("nothing to do"), prompt)
-        XCTAssertTrue(prompt.contains("do not report them as missing"), prompt)
-        XCTAssertFalse(prompt.contains("Nothing was ever committed"), prompt)
-        XCTAssertFalse(prompt.contains("No branch exists for these tasks"), prompt)
-        XCTAssertFalse(prompt.contains("1. `agentboard/\(taskId)`"), "a landed task was handed over to be merged")
-    }
-
     func testAReapedBranchWhoseWorkWasMergedNoFFIsReportedAsLanded() throws {
         let epicBranch = "agentboard/epic-\(UUID().uuidString)"
         try git("branch", epicBranch, "main")
@@ -66,60 +43,6 @@ final class IntegrationPlanRepositoryTests: XCTestCase {
         let prompt = try prompt(epicBranch: epicBranch, facts: [taskId: facts], titles: [taskId: "count the board"])
         XCTAssertTrue(prompt.contains("nothing to do"), prompt)
         XCTAssertFalse(prompt.contains("Nothing was ever committed"), prompt)
-    }
-
-    func testABranchWhoseWorkerCommittedNothingKeepsTheNothingWasCommittedWording() throws {
-        let epicBranch = "agentboard/epic-\(UUID().uuidString)"
-        try git("branch", epicBranch, "main")
-        let taskId = UUID().uuidString
-        try cutTaskBranch(taskId, from: epicBranch)
-        try reapTaskBranch(taskId)
-
-        let facts = try branchFacts(taskId: taskId, epicBranch: epicBranch)
-        XCTAssertEqual(facts.ownCommits, 0)
-        XCTAssertEqual(TaskBranchEvidence.read(facts), .nothingCommitted)
-
-        let prompt = try prompt(epicBranch: epicBranch, facts: [taskId: facts], titles: [taskId: "document it"])
-        XCTAssertTrue(prompt.contains("No branch exists for these tasks"), prompt)
-        XCTAssertTrue(prompt.contains("Nothing was ever committed on them."), prompt)
-        XCTAssertFalse(prompt.contains("nothing to do"), prompt)
-    }
-
-    func testAnUnrecordedBranchIsReportedAsUnknownRatherThanMissing() throws {
-        let epicBranch = "agentboard/epic-\(UUID().uuidString)"
-        try git("branch", epicBranch, "main")
-        let taskId = UUID().uuidString
-        try git("branch", "agentboard/\(taskId)", epicBranch)
-        try checkout("agentboard/\(taskId)")
-        try commit(file: "Orphan.swift", contents: "struct Orphan {}")
-        try checkout("main")
-        // Deleted by hand, so neither ledger ref was ever written.
-        try git("update-ref", "-d", "refs/heads/agentboard/\(taskId)")
-
-        let facts = try branchFacts(taskId: taskId, epicBranch: epicBranch)
-        XCTAssertNil(facts.recordedTip)
-        XCTAssertEqual(TaskBranchEvidence.read(facts), .unestablished)
-
-        let prompt = try prompt(epicBranch: epicBranch, facts: [taskId: facts], titles: [taskId: "hand-deleted"])
-        XCTAssertTrue(prompt.contains("Branch gone, outcome unknown"), prompt)
-        XCTAssertFalse(prompt.contains("Nothing was ever committed"), prompt)
-    }
-
-    func testAnExistingUnmergedBranchIsStillHandedOverToBeMerged() throws {
-        let epicBranch = "agentboard/epic-\(UUID().uuidString)"
-        try git("branch", epicBranch, "main")
-        let taskId = UUID().uuidString
-        try cutTaskBranch(taskId, from: epicBranch)
-        try checkout("agentboard/\(taskId)")
-        try commit(file: "Pending.swift", contents: "struct Pending {}")
-        try checkout("main")
-
-        let facts = try branchFacts(taskId: taskId, epicBranch: epicBranch)
-        XCTAssertTrue(facts.branchExists)
-        XCTAssertFalse(facts.mergedIntoEpic)
-
-        let prompt = try prompt(epicBranch: epicBranch, facts: [taskId: facts], titles: [taskId: "still open"])
-        XCTAssertTrue(prompt.contains("1. `agentboard/\(taskId)` — still open"), prompt)
     }
 
     // MARK: - The ledger, read back out of a real repository

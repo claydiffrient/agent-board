@@ -1,4 +1,4 @@
-import AgentBoardBridge
+@testable import AgentBoardBridge
 import AgentBoardCore
 import AgentBoardServer
 import Foundation
@@ -99,6 +99,91 @@ final class SharedCommitToolTests: XCTestCase {
 
         let rows = try f.progress.list(taskId: mine.id, limit: 50).map(\.text)
         XCTAssertTrue(rows.contains { $0.contains("Sources/Mine.swift") && $0.contains("Committed") }, "\(rows)")
+    }
+}
+
+/// SPEC §6: a commit hook can outlast Claude Code's 60s wait for an answer.
+final class SlowSharedCommitTests: XCTestCase {
+    func testACommitStillInItsHooksAnswersPendingAndTheNextCallCollectsIt() async throws {
+        let commits = RecordingScopedCommits()
+        let gate = FileManager.default.temporaryDirectory.appendingPathComponent("commit-gate-\(UUID().uuidString)")
+        commits.gate = gate
+        let f = try BridgeFixture.make(scopedCommits: commits, commitAnswerWithin: .seconds(1))
+        let mine = try f.task("Mine", column: .running)
+        try f.sharedSession("mine", taskId: mine.id)
+        let me = f.workerIdentity(sessionId: "mine", taskId: mine.id)
+        _ = await f.preToolUseWrite(f.repoFile("Sources/Mine.swift"), sessionId: "mine", identity: me)
+
+        let pending = try await f.call("commit_my_work", ["message": .string("Add my work")], as: me)
+
+        XCTAssertTrue(pending.text.contains("still running"), "commit_my_work waited for its commit hooks: \(pending.text)")
+        XCTAssertEqual(try TaskCommitStore(f.db).shas(taskId: mine.id), [])
+        FileManager.default.createFile(atPath: gate.path, contents: nil)
+        defer { try? FileManager.default.removeItem(at: gate) }
+        var polls = 0
+        while try TaskCommitStore(f.db).shas(taskId: mine.id).isEmpty, polls < 300 {
+            try await _Concurrency.Task.sleep(for: .milliseconds(100))
+            polls += 1
+        }
+        XCTAssertEqual(
+            try TaskCommitStore(f.db).shas(taskId: mine.id).count, 1,
+            "the commit that finished after the answer was never recorded as this task's"
+        )
+
+        let collected = try await f.callJSON("commit_my_work", ["message": .string("Ignored")], as: me)
+
+        XCTAssertNotNil(collected["commit"]?.stringValue, "\(collected)")
+        XCTAssertEqual(commits.requests.map(\.message), ["Add my work"], "the collecting call started a second commit")
+    }
+
+    func testNoAcceptLandsTheTaskWhileItsCommitIsStillRunning() async throws {
+        let commits = RecordingScopedCommits()
+        let gate = FileManager.default.temporaryDirectory.appendingPathComponent("commit-gate-\(UUID().uuidString)")
+        commits.gate = gate
+        defer { try? FileManager.default.removeItem(at: gate) }
+        let f = try BridgeFixture.make(scopedCommits: commits, commitAnswerWithin: .seconds(1))
+        try f.setReviewLevel(.none)
+        let mine = try f.task("Mine", column: .running)
+        try f.sharedSession("mine", taskId: mine.id)
+        let me = f.workerIdentity(sessionId: "mine", taskId: mine.id)
+        _ = await f.preToolUseWrite(f.repoFile("Sources/Mine.swift"), sessionId: "mine", identity: me)
+        let pending = try await f.call("commit_my_work", ["message": .string("Add my work")], as: me)
+        XCTAssertTrue(pending.text.contains("still running"), pending.text)
+
+        let completing = await refusal(of: try await f.call("report_complete", ["summary": .string("Done.")], as: me))
+        XCTAssertTrue(completing.contains("commit_my_work"), "report_complete was not refused for the running commit: \(completing)")
+        try f.tasks.move(mine.id, to: .review)
+        try f.session("rita", taskId: mine.id)
+        let rita = f.reviewerIdentity(sessionId: "rita", taskId: mine.id)
+        let accepting = await refusal(of: try await f.call("accept_task", ["verdict": .string("Fine.")], as: rita))
+        XCTAssertTrue(accepting.contains("commit_my_work"), "accept_task was not refused for the running commit: \(accepting)")
+
+        let accepted = await f.control.accepted
+        XCTAssertEqual(accepted.map(\.taskId), [])
+        XCTAssertEqual(try f.tasks.get(mine.id)?.column, .review)
+    }
+
+    private func refusal(of call: @autoclosure () async throws -> ToolResult) async -> String {
+        do {
+            return "answered: " + (try await call()).text
+        } catch let error as ToolError {
+            return error.message
+        } catch {
+            return "\(error)"
+        }
+    }
+
+    func testALateDeliveryLeavesTheSessionsNewerCommitInFlight() async throws {
+        let inFlight = CommitsInFlight()
+        let first = await inFlight.commit(sessionId: "mine", taskId: "task") { .nothingToCommit(paths: []) }
+        _ = await first.commit.result
+        await inFlight.delivered(sessionId: "mine", id: first.id)
+        _ = await inFlight.commit(sessionId: "mine", taskId: "task") { .nothingToCommit(paths: []) }
+
+        await inFlight.delivered(sessionId: "mine", id: first.id)
+
+        let third = await inFlight.commit(sessionId: "mine", taskId: "task") { .nothingToCommit(paths: []) }
+        XCTAssertFalse(third.started, "a late delivery of the first commit cleared the second, so a third ran beside it")
     }
 }
 

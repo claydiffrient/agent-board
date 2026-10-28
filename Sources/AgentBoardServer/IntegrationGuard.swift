@@ -12,6 +12,12 @@ public enum IntegrationGuard {
         case push
         case pullRequestCreate
         case pullRequestMerge
+        /// Edit, Write and the other file-writing tools, denied to a triager only.
+        case fileWrite
+        /// Any `gh` call, denied to a triager only.
+        case gh
+        /// A git subcommand outside `readOnlyGitSubcommands`, denied to a triager only.
+        case gitWrite
 
         /// Denied for a worker grant only; an orchestrator reaches the remote through the
         /// approval-gated tools instead.
@@ -35,6 +41,14 @@ public enum IntegrationGuard {
                 return "Agent Board blocks merging pull requests. Merging a pull request is the human's call and there is no tool for it."
             case (.push, .coordinator), (.pullRequestCreate, .coordinator):
                 return "Agent Board blocks pushing and opening pull requests on a project's behalf from the Coordinator. Ask that project's orchestrator."
+            case (.push, .verifier), (.pullRequestCreate, .verifier), (.pullRequestMerge, .verifier):
+                return "Agent Board takes no hooks from a Walk me through it session, so it blocks nothing there."
+            case (.push, .triager), (.pullRequestCreate, .triager), (.pullRequestMerge, .triager), (.gh, _):
+                return "Agent Board blocks `gh` and every push for a triager. get_pr_items has the pull request and its items; record your verdicts with set_verdicts."
+            case (.fileWrite, _):
+                return "Agent Board blocks file edits for a triager. Triage changes nothing; a fix verdict's approach tells the fixer what to change."
+            case (.gitWrite, _):
+                return "Agent Board blocks git commands that change anything for a triager. Read the change with git diff, git log and git show."
             }
         }
     }
@@ -45,8 +59,10 @@ public enum IntegrationGuard {
 
     /// Mirrors `SpawnRequest.defaultDisallowedTools`. Scans the whole command, so a chained, wrapped,
     /// or env-prefixed invocation (`cd x && git push`, `GIT_SSH_COMMAND=... git -C d push`) is caught too.
-    /// `scope` decides which matches are violations; the scan itself is the same for both.
+    /// `scope` decides which matches are violations. A triager is held to `readOnlyViolation` instead,
+    /// which denies everything `match` finds and more.
     public static func violation(toolName: String?, command: String?, scope: TokenScope = .worker) -> Violation? {
+        if scope == .triager { return readOnlyViolation(toolName: toolName, command: command) }
         guard let match = match(toolName: toolName, command: command) else { return nil }
         guard scope == .worker || !match.isWorkerOnly else { return nil }
         return match
@@ -73,6 +89,27 @@ public enum IntegrationGuard {
             }
         }
         return nil
+    }
+
+    /// The git subcommands a triager may run (SPEC §6): an allow-list, so a write git adds later is
+    /// denied by default. `branch`, `tag`, `config` and `remote` read and write alike, so all are out.
+    public static let readOnlyGitSubcommands: Set<String> = [
+        "diff", "log", "show", "status", "blame", "annotate", "grep", "rev-parse", "rev-list", "merge-base",
+        "ls-files", "ls-tree", "cat-file", "describe", "shortlog", "show-ref", "for-each-ref", "name-rev",
+        "diff-tree", "range-diff", "cherry", "whatchanged", "check-ignore", "help", "version",
+    ]
+
+    /// The tools `readOnlyViolation` denies outright, which a triager's hook matcher must name.
+    public static let fileWriteTools: Set<String> = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+
+    static func readOnlyViolation(toolName: String?, command: String?) -> Violation? {
+        if let toolName, fileWriteTools.contains(toolName) { return .fileWrite }
+        if let match = match(toolName: toolName, command: command) { return match }
+        guard toolName == "Bash", let command, !command.isEmpty else { return nil }
+        if tokens(command).contains(where: isGh) { return .gh }
+        let writes = gitInvocations(toolName: toolName, command: command)
+            .contains { !readOnlyGitSubcommands.contains($0.subcommand) }
+        return writes ? .gitWrite : nil
     }
 
     /// Whether the command invokes `git <subcommand>` anywhere in it, by the same scan `match` uses,

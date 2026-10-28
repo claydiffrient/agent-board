@@ -40,7 +40,6 @@ enum E2E {
 
         try await supervisor.assign(taskId: task.id)
         let setupRow = try SessionStore(env.db).forTask(task.id).first!
-        check("worktree exists before setup finishes", FileManager.default.fileExists(atPath: setupRow.worktreePath ?? "/nonexistent"))
         check("task is running before setup finishes", try tasks.get(task.id)?.column == .running)
         check("session is in setup", setupRow.state == .setup)
 
@@ -48,6 +47,7 @@ enum E2E {
         let session = try SessionStore(env.db).forTask(task.id).first!
         print("assigned session=\(session.sessionId) short=\(session.shortId ?? "?") state=\(session.state.rawValue) worktree=\(session.worktreePath ?? "?")")
         check("setup resolved into a real session", session.sessionId != setupRow.sessionId && session.state != .setup)
+        check("setup created the worktree", FileManager.default.fileExists(atPath: setupRow.worktreePath ?? "/nonexistent"))
 
         let deadline = Date().addingTimeInterval(300)
         var last = ""

@@ -112,7 +112,7 @@ final class SessionConfigTests: XCTestCase {
         let files = try SessionConfigWriter.write(configDir: dir, configId: "c", port: 4321, token: "tok")
         let settings = try readJSON(files.settingsURL)
 
-        for event in ["PreCompact", "SubagentStop"] {
+        for event in ["PreCompact", "SubagentStop", "StopFailure"] {
             let hookList = try hooks(for: event, in: settings)
             XCTAssertEqual(hookList.count, 1, event)
             XCTAssertEqual(hookList[0]["type"] as? String, "http", event)

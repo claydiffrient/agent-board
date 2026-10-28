@@ -7,6 +7,7 @@ struct TaskInspectorView: View {
     let allTasks: [BoardTask]
     let sessions: [AgentSession]
     let drafts: TaskDraftCache
+    var verifyPullRequest: String?
     let onClose: () -> Void
 
     @Environment(AppEnvironment.self) private var env
@@ -65,9 +66,13 @@ struct TaskInspectorView: View {
                     if task.isArchived {
                         Button("Unarchive") { unarchive() }
                             .help("Put this task back on the board")
-                    } else if task.column == .done {
+                    } else if task.column == .done || task.isClosed {
                         Button("Archive") { archive() }
                             .help("Hide this task from the board. Nothing is deleted.")
+                    }
+                    if task.isClosed {
+                        Button("Reopen") { run { try await env.supervisor.reopen(taskId: task.id) } }
+                            .help("Put this task back in ready (or backlog, if a dependency is not done)")
                     }
                     Spacer()
                     Button("Delete Task…", role: .destructive) { confirmDelete = true }
@@ -138,10 +143,30 @@ struct TaskInspectorView: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+            if let provenance = ProposalProvenance.label(origin: task.origin, pullRequest: nil) {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(provenance)
+                        if let verifyPullRequest { Text(verifyPullRequest) }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "checklist")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            }
             if let reason = task.blockedReason ?? task.failureReason {
                 Text(reason)
                     .font(.caption)
                     .foregroundStyle(.red)
+            }
+            if task.isClosed {
+                Text(TaskClosedLine.byline(task) + (task.closedReason.map { ": \($0)" } ?? ""))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
             // Shown for every landing a `done` task has, not only the alarming ones: "nothing to
             // land" has to be readable as its own answer, or a task that never had a branch looks
@@ -242,7 +267,7 @@ struct TaskInspectorView: View {
                     Spacer()
                     if session.state.isActive {
                         Button("Stop") { run { try await env.supervisor.stop(sessionId: session.sessionId) } }
-                    } else {
+                    } else if !task.origin.isPullRequestReader {
                         Button("Resume") { run { try await env.supervisor.resume(sessionId: session.sessionId) } }
                     }
                     SessionActionButtons(session: session, showsTitle: true)

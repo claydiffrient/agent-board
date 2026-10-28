@@ -59,11 +59,14 @@ final class EpicSpawnTests: XCTestCase {
         (try? git(["merge-base", "--is-ancestor", ancestor, branch])) != nil
     }
 
+    /// Also the only re-cut check: an epic branch that already exists, and already has commits past
+    /// `main`, must be reused rather than moved or re-cut when a second task spawns from it.
     func testTaskInAnEpicBranchesFromTheEpicBranch() async throws {
         let epic = try makeEpic()
         let task = try makeTask("Epic work", epicId: epic.id)
         try git(["branch", epic.branch, "main"])
         try advance(epic.branch, message: "Epic groundwork")
+        let epicHead = try head(epic.branch)
 
         try await fixture.supervisor.assign(taskId: task.id)
         await fixture.supervisor.waitForSetup()
@@ -75,6 +78,7 @@ final class EpicSpawnTests: XCTestCase {
         )
         XCTAssertEqual(try head(taskBranch), try head(epic.branch))
         XCTAssertNotEqual(try head(taskBranch), try head("main"))
+        XCTAssertEqual(try head(epic.branch), epicHead, "an existing epic branch was moved")
     }
 
     /// SPEC §5 "Resumed": only a resume merges the epic branch in. A spawn into a worktree the task
@@ -95,36 +99,6 @@ final class EpicSpawnTests: XCTestCase {
         XCTAssertEqual(try SupervisorFixture.git(["rev-parse", "HEAD"], cwd: worktree), before, "spawn merged the epic branch")
     }
 
-    func testTheEpicBranchIsCutFromTheProjectBaseWhenAbsent() async throws {
-        let epic = try makeEpic()
-        let task = try makeTask("First in epic", epicId: epic.id)
-        XCTAssertThrowsError(try git(["rev-parse", "--verify", epic.branch]))
-
-        try await fixture.supervisor.assign(taskId: task.id)
-        await fixture.supervisor.waitForSetup()
-
-        XCTAssertEqual(try head(epic.branch), try head("main"))
-    }
-
-    /// The second task must land on whatever the first one left on the epic branch, not on a re-cut from main.
-    func testAnExistingEpicBranchIsReusedNotRecut() async throws {
-        let epic = try makeEpic()
-        try git(["branch", epic.branch, "main"])
-        try advance(epic.branch, message: "Epic groundwork")
-        let epicHead = try head(epic.branch)
-        XCTAssertNotEqual(epicHead, try head("main"), "the fixture failed to move the epic branch ahead of main")
-
-        let task = try makeTask("Second in epic", epicId: epic.id)
-        try await fixture.supervisor.assign(taskId: task.id)
-        await fixture.supervisor.waitForSetup()
-
-        XCTAssertEqual(try head(epic.branch), epicHead, "an existing epic branch was moved")
-        XCTAssertEqual(
-            try head("agentboard/\(task.id)"), epicHead,
-            "the task branch did not start at the epic branch's tip"
-        )
-    }
-
     func testStandaloneTaskStillBranchesFromTheProjectBase() async throws {
         let task = try makeTask("No epic here", epicId: nil)
 
@@ -141,11 +115,13 @@ final class EpicSpawnTests: XCTestCase {
     func testFirstSpawnMovesTheEpicFromPlanningToActive() async throws {
         let epic = try makeEpic()
         XCTAssertEqual(epic.state, .planning)
+        XCTAssertThrowsError(try git(["rev-parse", "--verify", epic.branch]))
 
         try await fixture.supervisor.assign(taskId: try makeTask("First", epicId: epic.id).id)
         await fixture.supervisor.waitForSetup()
 
         XCTAssertEqual(try epics.get(epic.id)?.state, .active)
+        XCTAssertEqual(try head(epic.branch), try head("main"), "the epic branch was not cut from the project base")
     }
 
     func testLaterSpawnsLeaveANonPlanningEpicAlone() async throws {

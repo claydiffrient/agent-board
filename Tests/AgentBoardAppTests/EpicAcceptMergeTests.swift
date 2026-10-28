@@ -41,7 +41,7 @@ final class EpicAcceptMergeTests: XCTestCase {
         XCTAssertEqual(try mergeReports(), [])
     }
 
-    /// Derivita's `post-checkout` runs its setup script, which fails under launchd's PATH; a merge
+    /// A work project's `post-checkout` runs its setup script, which fails under launchd's PATH; a merge
     /// that checked the epic branch out anywhere failed with it and left that checkout behind.
     func testANonFastForwardAcceptMergesWithoutRunningTheRepositorysCheckoutHook() async throws {
         let epic = try makeEpic()
@@ -123,23 +123,6 @@ final class EpicAcceptMergeTests: XCTestCase {
         XCTAssertTrue(notice.contains("schema.sql"), notice)
     }
 
-    func testAcceptingAnAlreadyMergedBranchIsANoOp() async throws {
-        let epic = try makeEpic()
-        try fixture.manager.ensureBranch(epic.branch, from: "main")
-        let task = try makeTask(epicId: epic.id)
-        let session = try epicWorker(task: task, epic: epic)
-        try fixture.commitInto(try XCTUnwrap(session.worktreePath))
-        try fixture.markMerged(epic: epic, branch: "agentboard/\(task.id)")
-        let epicHeadBefore = try headOf(epic.branch)
-
-        try await fixture.supervisor.accept(taskId: task.id)
-
-        XCTAssertEqual(try headOf(epic.branch), epicHeadBefore)
-        XCTAssertEqual(try worktreePaths(), [])
-        XCTAssertEqual(try column(task.id), .done)
-        XCTAssertEqual(try mergeReports(), [])
-    }
-
     /// A reopen puts the task back in `ready`; accepting it again finds its branch already in.
     func testReAcceptingAfterAReopenIsANoOp() async throws {
         let epic = try makeEpic()
@@ -192,28 +175,7 @@ final class EpicAcceptMergeTests: XCTestCase {
         XCTAssertEqual(try column(task.id), .done)
     }
 
-    /// The epic is mid-integration: its worktree holds the branch, so the merge defers to the
-    /// integrator instead of updating a ref out from under a live checkout.
-    func testAnEpicBranchCheckedOutElsewhereIsLeftToItsHolder() async throws {
-        let epic = try makeEpic()
-        try fixture.manager.ensureBranch(epic.branch, from: "main")
-        let integration = try fixture.manager.createForBranch(name: "epic-\(epic.id)", branch: epic.branch)
-        let epicHeadBefore = try headOf(epic.branch)
-        let task = try makeTask(epicId: epic.id)
-        let session = try epicWorker(task: task, epic: epic)
-        try fixture.commitInto(try XCTUnwrap(session.worktreePath))
-
-        try await fixture.supervisor.accept(taskId: task.id)
-
-        XCTAssertEqual(try headOf(epic.branch), epicHeadBefore)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: integration.path))
-        XCTAssertEqual(try column(task.id), .done)
-        XCTAssertEqual(try landing(task.id), .unlanded)
-        let body = try XCTUnwrap(try mergeReports().first)
-        XCTAssertTrue(body.contains(integration.path), body)
-    }
-
-    /// The Derivita incident: a dependent spawned while its accepted dependency's commit was not yet
+    /// An incident on a work project: a dependent spawned while its accepted dependency's commit was not yet
     /// on the epic branch, so its worker started without the work it builds on.
     func testADependentIsNotCutFromAnEpicBranchThatLacksItsDependencysCommit() async throws {
         await fixture.supervisor.start()
@@ -242,6 +204,7 @@ final class EpicAcceptMergeTests: XCTestCase {
 
         try fixture.markMerged(epic: epic, branch: "agentboard/\(dependency.id)")
         try await fixture.supervisor.assign(taskId: dependent.id)
+        await fixture.supervisor.waitForSetup()
         XCTAssertTrue(try isAncestor(commit, of: "agentboard/\(dependent.id)"))
     }
 

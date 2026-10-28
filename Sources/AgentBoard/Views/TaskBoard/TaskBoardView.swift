@@ -9,6 +9,7 @@ struct TaskBoardView: View {
     @State private var tasks = Observed<[BoardTask]>([])
     @State private var sessions = Observed<[AgentSession]>([])
     @State private var commentCounts = Observed<[String: Int]>([:])
+    @State private var verifyPullRequests = Observed<[String: String]>([:])
     @State private var epics = Observed<[Epic]>([])
     @State private var selectedTaskId: String?
     @State private var showNewTask = false
@@ -19,6 +20,7 @@ struct TaskBoardView: View {
     @State private var errorMessage: String?
     @State private var taskPendingDelete: BoardTask?
     @State private var closurePlan: EpicClosurePlan?
+    @State private var worktreeRemoval: EpicWorktreeRemoval?
     @State private var drafts = TaskDraftCache()
     @State private var collapseChoices: [String: Bool] = [:]
     @State private var showArchived = false
@@ -206,6 +208,9 @@ struct TaskBoardView: View {
             await commentCounts.run(CommentStore(env.db).observeCounts(projectId: project.id), in: env.db.reader)
         }
         .task(id: project.id) {
+            await verifyPullRequests.run(ProposalProvenance.observePullRequests(projectId: project.id), in: env.db.reader)
+        }
+        .task(id: project.id) {
             let projectId = project.id
             let observation = ValueObservation.tracking { db -> [Epic] in
                 try Epic.fetchAll(
@@ -278,6 +283,7 @@ struct TaskBoardView: View {
                     allTasks: visibleTasks,
                     sessions: sessionsByTask[task.id] ?? [],
                     drafts: drafts,
+                    verifyPullRequest: verifyPullRequests.value[task.id],
                     onClose: { selectedTaskId = nil }
                 )
                 .inspectorColumnWidth(min: 300, ideal: 360)
@@ -286,6 +292,7 @@ struct TaskBoardView: View {
         .background(deleteConfirmation)
         .background(archiveConfirmation)
         .background(closeEpicConfirmation)
+        .background(worktreeRemovalConfirmation)
         .overlay {
             if let busyMessage {
                 ZStack {
@@ -466,7 +473,8 @@ struct TaskBoardView: View {
                     onArchive: { archiveDoneTasks(epic) },
                     onRequestIntegration: { requestIntegration(epic) },
                     onOpenPullRequest: { openPullRequest(epic) },
-                    onClose: { planClosure(epic, as: $0) }
+                    onClose: { planClosure(epic, as: $0) },
+                    onRemoveWorktrees: { planWorktreeRemoval(epic) }
                 )
             } else if layout.lanes.count > 1 {
                 Text(lane.title)
@@ -506,6 +514,7 @@ struct TaskBoardView: View {
                     latestSession: taskSessions.first,
                     isSelected: task.id == selectedTaskId,
                     commentCount: commentCounts.value[task.id] ?? 0,
+                    verifyPullRequest: verifyPullRequests.value[task.id],
                     onAccept: { accept(task.id) },
                     onReopen: { reopen(task.id) }
                 )
@@ -513,15 +522,19 @@ struct TaskBoardView: View {
                 .onTapGesture { selectedTaskId = TaskSelection.toggled(current: selectedTaskId, tapped: task.id) }
                 .contextMenu {
                     Button("Details") { selectedTaskId = task.id }
-                    Menu("Move to") {
-                        ForEach(TaskColumn.allCases.filter { $0 != task.column }, id: \.self) { target in
-                            Button(target.title) { _ = drop(taskId: task.id, onto: target) }
+                    if task.isClosed {
+                        Button("Reopen") { reopen(task.id) }
+                    } else {
+                        Menu("Move to") {
+                            ForEach(TaskColumn.allCases.filter { $0 != task.column && $0 != .closed }, id: \.self) { target in
+                                Button(target.title) { _ = drop(taskId: task.id, onto: target) }
+                            }
                         }
                     }
                     Divider()
                     if task.isArchived {
                         Button("Unarchive") { unarchive(task.id) }
-                    } else if task.column == .done {
+                    } else if task.column == .done || task.isClosed {
                         Button("Archive") { archive([task.id]) }
                     }
                     Button("Delete Task…", role: .destructive) { taskPendingDelete = task }
@@ -544,8 +557,11 @@ struct TaskBoardView: View {
         }
     }
 
+    /// Closed is entered only by `close_task`, which records a reason, and left only by Reopen (SPEC §10).
     private func drop(taskId: String, onto column: TaskColumn) -> Bool {
-        guard let task = visibleTasks.first(where: { $0.id == taskId }), task.column != column else {
+        guard let task = visibleTasks.first(where: { $0.id == taskId }), task.column != column,
+              column != .closed, !task.isClosed
+        else {
             return false
         }
         switch column {
@@ -633,6 +649,36 @@ struct TaskBoardView: View {
                 }
             } message: { plan in
                 Text(plan.message)
+            }
+    }
+
+    private func planWorktreeRemoval(_ epic: Epic) {
+        do {
+            worktreeRemoval = EpicWorktreeRemoval(
+                epicId: epic.id, epicTitle: epic.title, held: try env.supervisor.heldWorktrees(epicId: epic.id)
+            )
+        } catch {
+            errorMessage = errorText(error)
+        }
+    }
+
+    private var worktreeRemovalConfirmation: some View {
+        EmptyView()
+            .confirmationDialog(
+                worktreeRemoval?.title ?? "",
+                isPresented: Binding(get: { worktreeRemoval != nil }, set: { if !$0 { worktreeRemoval = nil } }),
+                titleVisibility: .visible,
+                presenting: worktreeRemoval
+            ) { removal in
+                if !removal.held.isEmpty {
+                    Button("Remove worktrees", role: .destructive) {
+                        runSupervised("Removing worktrees…") {
+                            try await env.supervisor.removeEpicWorktrees(epicId: removal.epicId)
+                        }
+                    }
+                }
+            } message: { removal in
+                Text(removal.message)
             }
     }
 

@@ -14,8 +14,12 @@ public final class ReviewerToolHandler: ToolHandler {
     private let comments: CommentTools
     private let control: any WorkerControl
     private let events: any BoardEventSink
+    private let commitsInFlight: CommitsInFlight
 
-    public init(db: AppDatabase, control: any WorkerControl, events: any BoardEventSink) {
+    public init(
+        db: AppDatabase, control: any WorkerControl, events: any BoardEventSink,
+        commitsInFlight: CommitsInFlight = CommitsInFlight()
+    ) {
         tasks = TaskStore(db)
         progress = ProgressStore(db)
         roster = RosterStore(db)
@@ -24,6 +28,7 @@ public final class ReviewerToolHandler: ToolHandler {
         comments = CommentTools(db: db)
         self.control = control
         self.events = events
+        self.commitsInFlight = commitsInFlight
     }
 
     public static let descriptors: [ToolDescriptor] = [
@@ -31,7 +36,8 @@ public final class ReviewerToolHandler: ToolHandler {
             name: "get_my_task",
             description: "Return the task you are reviewing: id, title, body, acceptance criteria and its comment "
                 + "thread oldest first. It carries no worker report or progress: judge the work from the task and "
-                + "the diff alone. Call it first. " + CommentTools.authority,
+                + "the diff alone. The report is withheld on purpose, so never file a finding about what the "
+                + "worker did or did not disclose in it. Call it first. " + CommentTools.authority,
             inputSchema: ToolSchema.object(properties: [:], required: [])
         ),
         ToolDescriptor(
@@ -97,8 +103,23 @@ public final class ReviewerToolHandler: ToolHandler {
         case "accept_task":
             let verdict = try ToolArguments.requiredString("verdict", in: arguments)
             try requireUnderReview(task)
+            guard await !commitsInFlight.isCommitting(taskId: task.id) else {
+                throw ToolError(
+                    "A commit_my_work on this task is still running, and accepting now could land its branch while "
+                        + "that commit holds the checkout. Nothing was recorded; call accept_task again "
+                        + "in a minute."
+                )
+            }
             try await requireUntouchedCheckout(task, identity: identity, then: "Stop here; do not start further work.")
             let name = try reviewerName(task, identity: identity)
+            // SPEC §13.1: a round's acceptance is half of its check, never the ordinary accept path.
+            if task.origin == .fixRound {
+                try recordRoundReview(task, identity: identity, name: name, accepted: true, text: verdict)
+                return stoppingAfterwards(ToolResult(
+                    text: "Recorded your acceptance of this round. Agent Board pushes it once its follow-up check "
+                        + "passes. Stop here; do not start further work."
+                ), identity: identity)
+            }
             try board.recordReviewVerdict(
                 taskId: task.id, sessionId: identity.sessionId, reviewerName: name, verdict: verdict
             )
@@ -117,6 +138,15 @@ public final class ReviewerToolHandler: ToolHandler {
                 task, identity: identity,
                 then: "Record your findings with log_progress so the person sees them, then stop."
             )
+            if task.origin == .fixRound {
+                try recordRoundReview(
+                    task, identity: identity, name: try reviewerName(task, identity: identity), accepted: false,
+                    text: findings
+                )
+                return stoppingAfterwards(ToolResult(
+                    text: "Recorded. Your findings go back to the round's fixer. Stop here; do not start further work."
+                ), identity: identity)
+            }
             try board.reviewReopen(
                 taskId: task.id, sessionId: identity.sessionId,
                 reviewerName: try reviewerName(task, identity: identity), findings: findings
@@ -139,6 +169,18 @@ public final class ReviewerToolHandler: ToolHandler {
             await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
         }
         return result
+    }
+
+    private func recordRoundReview(
+        _ task: BoardTask, identity: TokenIdentity, name: String, accepted: Bool, text: String
+    ) throws {
+        do {
+            try board.recordRoundReview(
+                taskId: task.id, sessionId: identity.sessionId, reviewerName: name, accepted: accepted, text: text
+            )
+        } catch let rejection as PRVerdictRejection {
+            throw ToolError("\(rejection.reason) Your verdict was not recorded. Stop here.")
+        }
     }
 
     private func assignedTask(_ identity: TokenIdentity) throws -> BoardTask {

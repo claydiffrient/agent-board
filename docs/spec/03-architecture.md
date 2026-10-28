@@ -26,15 +26,22 @@
 └────────────────────────────────┘  └────────────────────────────┘
 ```
 
-The server binds `127.0.0.1` on an ephemeral port chosen at launch. The port and
-each session's token are written into that session's generated `--mcp-config`
-and `--settings` files, so nothing is discoverable by a process that wasn't
-spawned by Agent Board.
+The server binds `127.0.0.1` on the port saved in `<support>/server-port` by
+the previous launch, falling back to an ephemeral one only when that port is
+taken. The port and each session's token are written into that session's
+generated `--mcp-config` and `--settings` files, never its environment. The one
+config handed to a process not spawned as a session is Walk me through it's
+`<support>/sessions/verify-<random>.json` (§13.4): a 0600 file holding a
+`verifier` grant, which can propose a task or record a verify failure on that
+one pull request, named on the verify command's own line through
+`{mcp_config}`, and deleted with its grant revoked when the window's shell
+exits or the window closes. Tokens in these files are readable by any process
+running as the same user; the OS user, not token secrecy, is the boundary.
 
-A rostered agent (§4) is not a third kind of process: it is one of the same
-`Workers (N, capped)` boxes, spawned through the same `AgentRuntime`, just
-carrying a `RosterAgent` identity that names it in the opening prompt and
-narrows its `--disallowedTools` (§3.1). A rostered reviewer under `agent`
+A session spawned from an archetype (§4) is not a third kind of process: it is
+one of the same `Workers (N, capped)` boxes, spawned through the same
+`AgentRuntime`, just carrying a `RosterAgent` identity that names it in the
+opening prompt and narrows its tools (§3.1). A rostered reviewer under `agent`
 review (§5) is the same worker box again, holding a `reviewer`-scoped token
 instead of `worker`, spawned into the same task's worktree rather than a new
 one. Neither gets a dedicated column in the diagram above; `role` in
@@ -46,6 +53,30 @@ For a task `T` in project `P`:
 
 1. Ensure the epic branch exists (`agentboard/epic-<epic-id>`, cut from `P`'s
    base branch) if `T` belongs to an epic.
+   A branch cut **from the base** — a standalone task's new branch, or a new
+   epic branch — first runs `git fetch origin +refs/heads/<base>:refs/remotes/origin/<base>`,
+   because work integrates by pull request and local `<base>` falls behind
+   until a human pulls. When local `<base>` is an ancestor of
+   `origin/<base>` (behind or equal) the branch is cut from the remote's
+   commit; when local has commits the remote lacks (ahead or diverged) it is
+   cut from local `<base>`, which holds the human's unpushed work. Local
+   `<base>` itself is never moved: it is usually checked out in the human's
+   own checkout. The fetch never fails a spawn. A project with no `origin`
+   (the remote `BranchPublisher` pushes to, §6.1) skips it silently; a remote
+   git cannot read, or a fetch that fails or outlives `WorktreeManager.baseFetchTimeout` falls back to local
+   `<base>` and returns a spawn warning naming the problem. It runs off the
+   main thread under `ChildEnvironment.sanitized()` with
+   `GIT_TERMINAL_PROMPT=0`, like every other git call. Whatever start point
+   is chosen is what `refs/agentboard/base/<task-id>` records, and a
+   standalone task's diff, and its reviewer's (§5.1), reads against that
+   record while local `<base>` is still behind it, so commits the remote had
+   are not shown as the task's.
+   **A task inside an epic always branches from the local epic branch as it
+   stands**: no fetch, no comparison with any remote. An existing epic branch
+   is local integration state its tasks must see each other's merged work on,
+   and it is never fetched into, moved or rebased. Reusing an existing task
+   branch or worktree, and adopting a shared checkout (step 2), fetch nothing
+   either.
 2. Decide where `T`'s worker runs: `WorkerPlacementDecision.decide(strategy:
    project.settings.worktreeStrategy, wantedSharedBranch:
    SharedCheckoutGroup.branch(epicId:), group: SharedCheckoutGroup.current(...))`.
@@ -57,14 +88,40 @@ For a task `T` in project `P`:
    detached `claude --bg` worker that outlives the app is still found on the
    next launch.
    - **`worktree`** always places, and always worktrees: `git worktree add
-     <worktrees>/<task-id> -b agentboard/<task-id> <base>` where `<base>` is
-     the epic branch, or the project base branch for a standalone task. This
+     <worktrees>/<task-id> -b agentboard/<task-id> <base>`, where
+     `<worktrees>` is `project.worktree_root` with a leading `~` expanded
+     against the board's home (§4), and `<base>` is
+     the epic branch, or for a standalone task the start point step 1 chose
+     from the project base branch. This
      is every project's behavior from before this setting existed. Git exits
      with the `post-checkout` hook's status and leaves the new worktree on
      disk when it fails, while a spawn adopts any worktree already at its
      path; so a failed `git worktree add` removes the worktree it created
      (keeping the branch), and the retry runs the hook afresh instead of
      starting a worker in a checkout whose setup never finished.
+   - **Worktree slots.** With `worktreeSlots` above 0 (§4), a worker is
+     leased a pooled worktree at `<worktrees>/slot-<n>` instead, and only
+     falls back to `<worktrees>/<task-id>` above when every slot is leased or
+     unusable — it never waits for one. A slot outlives its tasks so a build
+     directory inside it stays warm: SwiftPM, measured, recompiles every
+     object when the same sources build at a new path, and 14 of 1631 after a
+     one-PR switch in place. `Board.assign` picks the lowest free slot
+     (`worktree_slot`, §4) in the same transaction that writes the session
+     row, so two spawns cannot lease one slot; a free slot whose directory is
+     not a worktree of this repository, has uncommitted changes, or still has
+     a live session in it is skipped. The lease belongs to the *task*, not
+     the session, from spawn until accept or discard (§5): a reviewer lands in
+     the worker's slot, and a handed-off or retried task keeps it for its next
+     agent. The task keeps a per-task worktree an earlier attempt left it, too.
+     Putting the slot on `agentboard/<task-id>` — `git worktree add` the first
+     time, then `git switch <branch>`, or `git switch -c <branch> <base>` for
+     a new branch — runs in the background where a per-task worktree's
+     `git worktree add` would (below), not here, and fires the
+     repository's `post-checkout` hook once per lease, as `git worktree add`
+     does. A slot with uncommitted changes is refused rather than switched.
+     Every task in slot `n` shares `~/.claude/projects/<slot-slug>/`, which
+     is safe: a transcript is found by session id within it, and step 3's
+     memory link is already in place for the next lease.
    - **`shared`** places in the project's own checkout — `P`'s repository root,
      not a path under `<worktrees>` — checking the wanted branch out there
      (`git checkout <branch>`, or `git checkout -b <branch> <base>` the first
@@ -90,9 +147,14 @@ For a task `T` in project `P`:
    `/hooks?token=…` (a `command` + `curl` hook for `SessionStart`, see §2), plus
    the project's `autoMode` block. On resume, rewrite this file and the MCP
    config in place with the current port; `--bg --resume` reuses the paths.
+   The rewrite keeps the spawn's hooks, so a shared-checkout worker resumed by a
+   human or by a wind-down order (§8) still gets its file-lock `PreToolUse`
+   entry (§8.4).
 5. Generate `mcp-<session>.json`: one HTTP server entry for `/mcp` with
-   `Authorization: Bearer <token>`, where the token carries scope `worker` and
-   is bound to `(session, task)`.
+   `Authorization: Bearer <token>`, where the token carries the scope the
+   session was spawned with, `worker` or `reviewer` (§5.1), and is bound to
+   `(session, task)`. A resume issues its replacement token with the same scope
+   (§5).
 6. Compose the opening prompt: task title, body, acceptance criteria, epic goal,
    task- and epic-attached notes in full, a one-line index of every other note in
    the project naming its `note://` resource uri, the project's build and test
@@ -141,7 +203,9 @@ role, and the agent's own system prompt, "this identity is yours across every
 task you are given"); step 6's `--model` becomes `task.model ?? agent.model ??
 project default`, most specific override wins; and step 7's
 `--disallowedTools` gains the agent's own `disallowed_tools` patterns appended
-after the fixed push/PR block. `assign_to_agent` under `reviewer` scope (used
+after the fixed push/PR block, and a disk archetype's `tools` list becomes
+`--tools` (§4). Neither can widen anything: `--tools` narrows built-in tools
+only, and every deny above still applies to a tool it names. `assign_to_agent` under `reviewer` scope (used
 only to start a rostered reviewer, §5.1) skips the `running` transition step 8
 would otherwise make — the task stays in `review` — and lands the reviewer in
 the *worker's own* worktree rather than cutting one, since it is keyed on the
@@ -153,17 +217,107 @@ changes a branch or the index, plus `rm` and `mv`) and
 directory, §5.1) after the push/PR block. It refuses a branch with no diff
 against its base before any of that runs (§5.1).
 
-Steps 1-2 are synchronous; `spawn_worker` answers between step 2 and step 3,
-with a row in `agent_session` under a placeholder id and state `setup`, and the
-task already in `running`. Steps 3-8 finish in the background, because on a
+Step 1 and the placement decision in step 2 are synchronous, as is adopting a
+shared checkout; `spawn_worker` answers then, with a row in `agent_session`
+under a placeholder id and state `setup`, its `worktree_path` naming the
+worktree still to be created, and the task already in `running`. The `git
+worktree add` itself, and steps 3-8, finish in the background, because on a
 large repository they outlast the MCP call — a timeout an orchestrator cannot
-tell from a failure turns every dispatch into a guess. A session in `setup`
+tell from a failure turns every dispatch into a guess. The `post-checkout` hook
+is the worst of it: a hook that builds a fresh toolchain output base has run
+for over ten minutes under load, while Claude Code abandons a tool call whose
+answer has not started after 60 seconds (§6). The epic integrator's worktree
+on `agentboard/epic-<id>` is created the same way, under the same mark (§5.2
+step 3). A rostered reviewer is the exception: it judges the checkout before
+its session exists, so its spawn creates or reuses the worktree before
+answering. Its only tool-call route is `report_complete`, from the worker
+still running in that worktree, so it reuses one and runs no hook.
+
+One attempt sets up a task at a time. The spawn marks the task's worktree path
+before it runs any git command and clears the mark only when setup ends —
+agent launched, or setup failed and a failed `git worktree add` has removed
+what it created. A slot's path is marked the same way, from the moment the
+task is known to lease it, and its setup also waits out a merged-branch sweep's
+claim on the task-named path before switching to the task branch. A second
+spawn for the task while the mark is held is refused
+with "still setting up", even when the first attempt's session was stopped
+mid-setup: its hook keeps running, and a retry that adopted that worktree would
+have it deleted by the first attempt's rollback, or share a build output base
+keyed on the same path with a hook still writing it. Stopping an attempt
+mid-setup cancels whatever of its setup has not started, so a stop before
+`git worktree add` creates nothing, but a hook already running finishes. A
+cancelled setup queues no `failed` report, since the stop has ended the
+session, so when a stopped attempt's setup ends a `decision` report says so;
+that report is the refusal's cue to spawn again. A retry after a reap or
+teardown has claimed the path waits for that removal instead (§5). A session in `setup`
 holds a concurrency slot but does no work, is exempt from the idle cap (the
 clock is measuring setup, not the agent), and is skipped by `reconcile`, whose
 join against `claude agents --json` cannot see a placeholder id. A failure in
 steps 3-8 has nowhere to be thrown: it terminates the session, puts the task
 back in `ready` flagged failed, and queues a `failed` report, which is also what
 happens to a setup still running when Agent Board quits.
+
+**Removing a worktree.** Every path that removes a task or epic worktree goes
+through `WorktreeManager.remove`: accepting a task, discarding one, the
+orphan reaper `reconcile` and the metering tick run (§5), **Remove worktrees** on a done or
+abandoned epic's lane (§5.2), and retiring a worktree slot. Archiving removes
+nothing, and closing an epic removes nothing, so neither runs anything. A
+slot is not removed when its task is accepted or discarded: it is *released*
+(§5), and neither the orphan reaper nor **Remove worktrees** touches one. It
+is removed only when `reconcile` retires it — a free slot numbered above the
+project's `worktreeSlots` — so the teardown hook runs in a slot then and at no
+other time: a `bazel clean --expunge` on release would delete exactly the warm
+output base the slot exists to keep. Before git deletes the directory,
+`remove` runs the project's **teardown hook** (`worktreeTeardownCommand`, §4)
+when one is set: `/bin/zsh -c <command>` with the worktree as its working
+directory and `PWD`, under `ChildEnvironment.sanitized()`, off the main
+thread, as the leader of its own process group (`BoundedCommand`). It exists
+because a tool that builds for a worktree outside it leaves that build behind
+when only the directory goes: on a work project, Bazel's output base under
+`/private/var/tmp/_bazel_<user>/<md5 of the workspace path>`, 2–12 GB per
+worktree. Agent Board knows nothing about Bazel; that project's setup sets
+`[ "$(bazel info workspace)" = "$PWD" ] && bazel clean --expunge`, whose guard
+stops `--expunge` wiping the main checkout's output base if it ever ran there.
+With no hook set, removal is exactly what it was. Claude Code's own
+`WorktreeRemove` hooks from `~/.claude/settings.json` still run after it.
+
+A hook never decides whether the worktree goes. One that exits non-zero, or
+cannot start, is recorded and removal continues; one that outlives
+`worktreeTeardownTimeoutSeconds` (default 600, clamped to 1 second through 24
+hours) has its whole process group sent `SIGTERM`, then `SIGKILL` five seconds
+later, and removal continues. The deadline is measured on `CLOCK_UPTIME_RAW`,
+so a sleeping Mac does not use it up. Ten minutes covers `bazel clean
+--expunge` deleting a 12 GB output base with room to spare, and still ends a
+hook that waits forever, as Bazel does on an output base another command
+holds. A hook that leaves files in a worktree that was clean before it ran is
+forced past (`git worktree remove --force`), so its leftovers cannot be what
+keeps the worktree; a worktree that was dirty before is never forced. The
+failure, with the end of the hook's output, goes on the task's progress and
+into the decision report for the removal (§5).
+
+A hook runs at most once in a worktree. Each removal first claims its paths in
+the supervisor's in-flight set, and none of the others touches a claimed path:
+the reaper adds them to the worktrees it keeps, an accept or discard that finds
+one of its own already claimed leaves it and its branch to the claimant, and
+**Remove worktrees** names it as kept. Without that, the reaper — which sees an
+accepted task's worktree as an orphan as soon as its sessions stop — would
+start a second hook beside the accept's, and two `git worktree remove` calls
+would race, the loser reporting a removal that never failed.
+
+The hook never runs in the project's own checkout, which git refuses to
+remove anyway. It does not run where `remove` does not: on a worktree kept for
+uncommitted changes (§5), and on the rollback of a failed `git worktree add`
+(step 2), which removes with `git worktree remove --force` directly. That
+worktree's setup never finished, so the hook has nothing reliable to read —
+`bazel info workspace` in a half-checked-out tree can start a server and
+create the very output base it is meant to remove — and the retry adopts the
+branch, not anything the hook would clean.
+
+The hook lives in Project settings, not in a file in the repository. A repo
+file is read from whichever branch is checked out, so any branch — including
+one a worker wrote — could choose a command the board runs with the human's
+privileges on removal, and run it in a checkout the human never reviewed. The
+setting is entered by the human in the app and is the only source.
 
 `--strict-mcp-config` is deliberate: without it a worker sees `repo-tasks`,
 `solo`, and the other globally configured servers, and has two contradictory

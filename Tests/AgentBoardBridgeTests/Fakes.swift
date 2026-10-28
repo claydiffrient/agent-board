@@ -140,6 +140,7 @@ struct BridgeFixture {
     static func make(
         lockWait: FileLockWaitPolicy = .default,
         scopedCommits: RecordingScopedCommits? = nil,
+        commitAnswerWithin: Duration = .seconds(30),
         repoPath: String? = nil
     ) throws -> BridgeFixture {
         let db = try AppDatabase.inMemory()
@@ -153,8 +154,12 @@ struct BridgeFixture {
         let events = RecordingEventSink()
         let control = FakeWorkerControl(board: Board(db))
         let orchestrator = OrchestratorToolHandler(db: db, control: control, events: events)
-        let worker = WorkerToolHandler(db: db, control: control, events: events, scopedCommits: scopedCommits)
-        let reviewer = ReviewerToolHandler(db: db, control: control, events: events)
+        let commitsInFlight = CommitsInFlight()
+        let worker = WorkerToolHandler(
+            db: db, control: control, events: events, scopedCommits: scopedCommits,
+            commitsInFlight: commitsInFlight, commitAnswerWithin: commitAnswerWithin
+        )
+        let reviewer = ReviewerToolHandler(db: db, control: control, events: events, commitsInFlight: commitsInFlight)
         return BridgeFixture(
             db: db,
             project: project,
@@ -165,7 +170,9 @@ struct BridgeFixture {
             reviewer: reviewer,
             scoped: ScopedToolHandler(
                 worker: worker, orchestrator: orchestrator, reviewer: reviewer,
-                coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: events)
+                coordinator: CoordinatorToolHandler(db: db, board: orchestrator, events: events),
+                triager: TriagerToolHandler(db: db, events: events),
+                verifier: VerifierToolHandler(db: db, events: events)
             ),
             hooks: StoreHookSink(db: db, events: events, lockWait: lockWait),
             commits: scopedCommits
@@ -244,6 +251,12 @@ struct BridgeFixture {
         TokenIdentity(
             token: "reviewer-\(sessionId)", scope: .reviewer, projectId: project.id,
             sessionId: sessionId, taskId: taskId
+        )
+    }
+
+    func triagerIdentity(sessionId: String, taskId: String) -> TokenIdentity {
+        TokenIdentity(
+            token: "triager-\(sessionId)", scope: .triager, projectId: project.id, sessionId: sessionId, taskId: taskId
         )
     }
 
@@ -340,6 +353,8 @@ final class RecordingScopedCommits: ScopedCommitting, @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [ScopedCommitRequest] = []
     var outcome: ScopedCommitOutcome?
+    /// A commit waits for this file to exist, or for 30 seconds, the way a slow pre-commit hook holds one.
+    var gate: URL?
 
     var requests: [ScopedCommitRequest] {
         lock.lock(); defer { lock.unlock() }
@@ -350,6 +365,11 @@ final class RecordingScopedCommits: ScopedCommitting, @unchecked Sendable {
         lock.lock()
         recorded.append(request)
         lock.unlock()
+        if let gate {
+            for _ in 0..<300 where !FileManager.default.fileExists(atPath: gate.path) {
+                try await _Concurrency.Task.sleep(for: .milliseconds(100))
+            }
+        }
         return outcome ?? .committed(sha: String(repeating: "a", count: 40), paths: request.paths)
     }
 }

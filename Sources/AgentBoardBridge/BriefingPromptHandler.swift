@@ -50,11 +50,15 @@ public struct BriefingPromptHandler: PromptHandler {
         ),
     ]
 
+    /// A verifier is a human's interactive session, not a worker: it is offered no prompts (SPEC §6).
     public func prompts(for identity: TokenIdentity) async -> [PromptDescriptor] {
-        Self.descriptors
+        identity.scope == .verifier ? [] : Self.descriptors
     }
 
     public func get(_ name: String, arguments: [String: String], identity: TokenIdentity) async throws -> PromptResult {
+        guard identity.scope != .verifier else {
+            throw PromptError("Unknown prompt: \(name).")
+        }
         switch name {
         case Self.windDownOrder:
             let via = try Self.required("via", in: arguments, for: name)

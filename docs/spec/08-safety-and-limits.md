@@ -4,7 +4,7 @@ Per project, overridable:
 
 | Cap | Default | On breach |
 |---|---|---|
-| Concurrent workers | 3 (lower for large repos — Derivita) | Spawn refused; orchestrator told why |
+| Concurrent workers | 3 (lower for large repos, e.g. a monorepo work project) | Spawn refused; orchestrator told why |
 | Tokens per agent (uncached input + output) | off until set | Agent stopped, task flagged, Resume offered |
 | Elapsed per agent, sleep excluded | 30 min | Agent stopped, task flagged, Resume offered |
 | Idle (no tool use, no output), sleep excluded | 5 min (6× while a tool call is running) | Agent stopped, task flagged |
@@ -13,7 +13,7 @@ Per project, overridable:
 - **A rostered session (`agent_session.roster_agent_id` set — a worker spawned
   by `assign_to_agent`, or a reviewer spawned under `agent` review) is exempt
   from the elapsed and idle caps.** `WorkerSupervisor.exempting` overrides both
-  to `nil` before `CapEvaluator.evaluate` runs, so a rostered agent can neither
+  to `nil` before `CapEvaluator.evaluate` runs, so a session spawned from an archetype can neither
   stall out nor run long and be stopped for it. **This is deliberate, not an
   oversight** — the epic that built the roster decided no caps apply to it for
   now, on the reasoning that a durable, human-curated identity is not the same
@@ -62,8 +62,61 @@ Per project, overridable:
   the turn it went missing in. `tools_in_flight` counts rather than flags
   because Claude runs parallel tool calls: the row keeps the oldest outstanding
   start, so a short call returning cannot end a long one's grace.
+- **A turn cut off by system sleep is resumed once, not left to the idle
+  cap.** When the Mac sleeps under an in-flight model request, Claude Code
+  ends the turn with `API Error: Your computer went to sleep mid-response. The
+  response above may be incomplete.` and fires `StopFailure`, not `Stop`; the
+  session then sits idle. All four worker idle-outs in 0.8.0 were this, each
+  under a lid close the §8.3 assertion cannot prevent, and with the lid shut
+  workers still run in the seconds-long powernap dark wakes, so every request
+  that outlasts one is cut. Workers subscribe to `StopFailure`, and
+  `StoreHookSink` matches its `last_assistant_message` against that exact
+  text (`SleepCutTurn.message`) — its `error` is `server_error`, which other
+  failures share. A match sends the worker one `claude --bg --resume` with
+  `SleepCutTurn.continuation`, the same channel §8.1 uses to reach an idle
+  worker, and logs it to the task's progress. A second cut within five awake
+  minutes of a continuation (`sleepContinuationWindowMillis`, on the
+  `SleepLedger` clock) is not resumed then, because a lid still closed would
+  cut every resume; it waits for the next full wake instead, as does a cut
+  whose continuation failed to start. The window is
+  held in memory, so an app relaunch resets it.
+- **A full wake resumes a worker still stuck on a sleep-cut turn.**
+  `WorkerSupervisor` observes `NSWorkspace.screensDidWakeNotification`, which
+  needs a display to come on, and a dark wake never turns one on: the
+  2026-10-23/24 lid-closed stretch logged 264 `DarkWake`s and one `Display is
+  turned on`, at the lid-open `Wake`. `NSWorkspace.didWakeNotification` is
+  posted on system wake and nothing documents it skipping dark wakes, so it
+  is not used. On that notification each session the window turned away, or
+  whose continuation failed, gets
+  one continuation, logged to its task's progress, if it is still an active
+  worker and its newest `PreToolUse`, `PostToolUse`, `Stop` or `StopFailure`
+  hook is still the sleep-cut `StopFailure`; a tool call or turn end since
+  means it moved on by itself. Handling a wake clears the record, so a cut is
+  continued at most once per wake, and a full wake reopens the window, so a
+  cut that lands seconds after the lid opens goes through the bullet above
+  as normal. A display waking from display sleep also posts the notification,
+  which is harmless: it can only reach a session already waiting. The record
+  is held in memory, so an app relaunch drops it.
+- **A worker waiting for that wake is exempt from the idle cap.** Dark wakes
+  advance `CLOCK_UPTIME_RAW` like any awake time — that stretch accrued 2,198
+  awake seconds in 20 hours, about 110 an hour — so at the default 300s idle
+  cap a waiting worker would be ended after roughly three hours of closed lid,
+  before any full wake. While a session is in that record, the metering tick
+  drops its idle cap, however much awake time passes; the token and elapsed
+  caps still apply. The wake continuation is a `claude --bg --resume`, which
+  writes the session's `last_activity` and `started_at` as it resumes, so its
+  idle and elapsed clocks start from the resume, not from the cut. An app
+  relaunch drops the record, and with it the exemption.
 - **Autonomy is off on first run.** Every `spawn_worker` creates a pending
   approval until you turn it on. This is a setting, not a rebuild.
+- **PR follow-through spawns skip approval (§13).** In a project with the
+  feature turned on, the follow-through `triage` (§13.2) and `fixer` (§13.1)
+  spawns create no pending approval, autonomy setting regardless — the one
+  exception to the bullet above. Every cap in this section still applies
+  unchanged: concurrent workers, the token cap, the daily budget (§13.3), and
+  the session ceiling. Only the approval step is skipped, the same way a
+  rostered agent is exempt from the elapsed and idle caps today without being
+  exempt from spend.
 - **Stopping is not destructive.** Every session has a pinned `--session-id`, so
   a capped agent resumes exactly where it stopped.
 - **Pause All** stops every managed session in the project via `claude stop`.
@@ -71,7 +124,9 @@ Per project, overridable:
   So does every outward-facing publish: `push_branch` and `open_pull_request`
   (§6) create an approval row and return it. Both are visible to collaborators
   and CI the moment they happen and cannot be taken back, which is why neither
-  is reachable through the autonomy setting.
+  is reachable through the autonomy setting. An approved publish still runs
+  the publish guard first (§13.5): one that would send any of the project's
+  private terms is refused and records the term and where it was found.
 - **Workers never push.** Unchanged by the D8 amendment (§1). Enforced twice, by
   two controls that fail independently:
   1. `--disallowedTools "Bash(git push*)" "Bash(gh pr create*)" "Bash(gh pr
@@ -188,6 +243,13 @@ tool on every scope as a Coordinator read, the Coordinator's own queue and
 ledger, a plan write, an inbox refusal, a write refusal, or not offered, and
 fails on a tool it has not classified.
 
+The `verifier` grant (§6) holds the boundary the same way.
+`CrossProjectBoundaryTests` classifies its four tools — `propose_task` and
+`search_notes` as reaching only `identity.projectId`, `read_note` as refusing
+another project's id, `add_pr_item` as reaching only the grant's own watch
+whatever `pr_url` it is handed — fails when the verifier is offered a tool it has not
+classified, and asserts that every other tool on every scope is refused to it.
+
 **The Coordinator's session.** It runs in the same console machinery as an
 orchestrator (§9 — `OrchestratorConsole`, with a `CoordinatorSource` in place of
 the project's), under these rules:
@@ -230,24 +292,43 @@ the project's), under these rules:
   orchestrator's, and every project-scoped query still misses it. The metering
   tick reads its spend after the projects', with no cap. Its `Stop` and
   compaction hooks reach its own console only from the session pinned in
-  `active_session_id`; a stale session's are ignored. At launch, while no
+  `active_session_id`; a stale session's are ignored.
+- **Launch sweep.** A quit that skips the global shutdown sheet (§10), or a
+  crash, kills every console's PTY without its exit handler running, so the
+  rows it leaves stay active with no process behind them. At launch, while no
   Coordinator console is running, every active `coordinator` row is marked
-  stopped, as `reconcile` does for an orchestrator row with no console.
+  stopped; likewise every active `orchestrator` row whose project has no
+  running console. Those rows then stop being metered and stop showing as
+  live. `reconcile` does the same for an orchestrator row, but only for a
+  project whose Status pane is open, so without the launch sweep a project
+  nobody looks at keeps its row active indefinitely. The sweep has no effect on
+  Keep awake (§8.3), which never counts these rows.
 
 ### 8.3 Sleep prevention
 
 A Mac that sleeps with workers running kills them, and the idle cap counts the
 sleeping minutes as silence — so twenty minutes of suspend reaps everything
-that was running. While at least one `agent_session` row is in an active state
-(§4), the app holds one `kIOPMAssertPreventUserIdleSystemSleep` assertion named
+that was running. While at least one `worker` `agent_session` row is in an
+active state (§4), the app holds one `kIOPMAssertPreventUserIdleSystemSleep`
+assertion named
 `Agent Board — an agent is running`, and releases it when the count reaches
 zero, when the setting goes off, or when the app quits. The name is what
 `pmset -g assertions` prints: the only place a human can see who is holding
 their Mac awake.
 
+Only `worker` rows count, which takes in reviewers and integrators, since both
+run as `worker` rows. Orchestrator and Coordinator rows never count. An
+orchestrator console is interactive and can sit open, idle, for days, and
+before the launch sweep (§8.2) its row stayed active after an app quit killed
+the console. Measured from `pmset -g log` and the board's session history,
+back when every active role counted: nine such rows, none with a process or a
+hook event, held the assertion for the whole
+67:52:15 that app process ran (2026-10-22 20:25 to 2026-10-25 16:17 local),
+while workers were active for 31 of those hours.
+
 The decision reads the observed session rows and nothing else — never a
 spawn-side counter — so a worker that dies without reporting stops holding the
-Mac awake the moment `reconcile` or the leaked-agent sweep (§3) flips its row
+Mac awake the moment `reconcile` or the leaked-agent sweep (§8.6) flips its row
 inactive. It is re-evaluated on the metering tick and immediately after `stop`,
 `pauseAll` and `reconcile`.
 
@@ -362,11 +443,238 @@ Nothing outside the session's own tree is signalled:
 - The following are never signalled: the app and its ancestors, every other
   live `claude` host listed by `claude agents` together with its ancestors
   and descendants, and any process whose executable is `claude` (the
-  daemon).
+  daemon). The session's own host is the one exception, and it is reached
+  by the separate step below, never by these rules.
 - A human's terminal keeps its controlling tty. An app launched by launchd
   runs in `/`.
+
+**The host itself ends too, or the board says it did not.** The rules above
+never name the `claude` host, so the host's own end rests on `claude stop`
+alone, and `claude stop` answering does not prove it. It exits 0 for a
+registry row whatever happened to the process, and it can time out. So the
+host's pid, as `claude agents` lists it for this session, is read with its
+start time before the stop. If that listing came back empty, which is what a
+`claude agents` that timed out looks like, the host is looked up once more
+after the stop. The pid is the host only while it is a `claude` executable
+whose start time is no later than when that listing was read. The leaked-agent
+sweep reads one listing and reuses it across every stop it makes, which took
+71s on this machine, and a pid freed in that time can go to any new process.
+A pid that fails either check is treated as a host already gone, and nothing
+is signaled. After the stop and the reap, a host already gone is done with at
+once. One still there gets up to 3s to exit by itself, then SIGTERM, and then
+SIGKILL 3s later. This runs whether `claude stop` succeeded or failed. A host that
+survives both signals is not passed over. The board queues a `failed` report
+naming the session, the task and the pid, along with a notification. The
+session is still marked ended, and its revoked grant still refuses every
+board tool. But git commits never pass through the board, so the report is
+the only thing that tells a human a process is still able to write to the
+branch. This target comes from the session's own registry entry, which is
+positive evidence, never from argv or a process name; the executable and
+start-time checks can only rule a pid out.
+
+Before this step existed, a host could outlive a stop like this. On
+2026-10-23 at 12:07, under a load average of 175, the idle cap ended worker
+session 3d828d82. Its row went to `failed` with `agent_stopped_at` still
+NULL, which means `claude stop` threw: the caps discard that error. A minute
+later `claude agents` still listed the session as `working`, with its
+`bg-spare` host alive and two of its shells still running under it.
+
+The `claude daemon run … --spawned-by {"label":"claude --bg","cwd":…}`
+process is not a session's host. It is the one daemon that parents every
+`--bg` session's `bg-pty-host` on the machine. Its `spawned-by` records the
+`claude --bg` call that happened to start it, so it names some worker's
+worktree and outlives that worker by design. Measured 2026-10-23 on
+Claude Code 2.1.309: one `claude daemon run --origin transient` parented the
+hosts of four live sessions in four different worktrees, plus an unclaimed
+spare. Its `spawned-by` named only the worktree of the oldest of them, the
+session whose `claude --bg` had started it.
+
+**A session the board ended stays stopped.** `claude stop` does not keep a
+session down. Claude Code resumes a stopped `--bg` session by itself to deliver
+a background command's task-notification, and killing those commands is exactly
+what the reap does. This was measured on 2026-10-07 with integrator d44b3f51:
+
+- 10:43:15: the idle cap stopped it (`SessionEnd`, reason `other`). Its two
+  `run_in_background` commands were reaped and reported `exited with code 144`.
+- 10:43:43: a `SessionStart` arrived with `source: resume`, followed by a
+  `UserPromptSubmit` carrying their `<task-notification>`.
+- It then worked for another 32 minutes under a `failed` row.
+
+The row's `state` cannot say whether the board ended a session. The
+`SessionEnd` that `claude stop` fires races `Board.terminate` and often writes
+`stopped` first, so an idle-capped row can end `stopped` rather than `failed`,
+the same state a session that merely exited leaves. So the board marks the
+session itself: `Board.terminate` revokes the worker's token grants in the same
+transaction, on every route through it (the caps, a human's Stop, Pause All, a
+vanished or failed session, a settled task, an acknowledged shutdown). A
+revived session then gets a 401 on every MCP tool call. Its hooks are still
+heard on the revoked token (§7). A `SessionStart` on one does not revive the
+row: the supervisor stops the process again (`endedSessionRestarted`) and logs
+the stop on the task. A `SessionStart` on a worker row that is `failed` or
+`completed` is handled the same way, since only the board writes those states.
+That covers `report_complete`, which keeps its grant so that a resend still gets
+its answer (§5.1).
+
+Two restarts are exempt. A board resume issues a fresh grant before it starts
+the process, so its `SessionStart` never arrives on the revoked one. A session a
+human opened Attach on after it ended is left running too, since
+`claude attach` also resumes a stopped session; its tool calls get the same 401.
+Attach requests are held in memory, so one made before an app restart no longer
+exempts the session after it. A `stopped` row with a live grant ended without
+the board ending it, and keeps §7's rule.
 
 Another process's environment is not readable on this macOS:
 `KERN_PROCARGS2` returns argv but no environment for any pid but the caller's.
 So the `CLAUDE_CODE_SESSION_ID` that Claude exports to every Bash command
 cannot be used to find them.
+
+### 8.6 The leaked-agent sweep
+
+Every launch stops the `claude --bg` agent of each `agent_session` row that is
+inactive but still holds a short id. The sweep decides from the rows alone
+(`LeakedAgentSweep.plan`); the `claude agents` listing is read afterwards and
+may only subtract a target, never add one, so a `claude` session the board has
+no row for is never touched. A row whose registry entry carries no pid is kept:
+there is no process to free.
+
+**A row is examined until its agent is confirmed stopped.** Every successful
+`claude stop` on a session — the sweep, `report_complete`, a human's Stop, the
+caps — writes `agent_session.agent_stopped_at`, and the sweep plans only rows
+where it is NULL. A trigger clears it the moment the row shows life again: its
+state becomes active, or `last_activity` moves past the stop. The second rule
+is for a session resumed on a settled task, whose `SessionStart` deliberately
+does not revive the row (§7) but whose tool calls still bump `last_activity`.
+Each life of a row therefore costs at most one successful `claude stop`, however
+long the table grows, and the case of an unlistable runtime — where every
+unmarked row is attempted — is paid once, not on every launch.
+
+This is not an age horizon. A row that ended a year ago and was never
+confirmed stopped is planned exactly like one that ended a minute ago, which is
+the leak the sweep exists for. Nothing is marked on weaker evidence than a
+`claude stop` that succeeded: a registry entry with no pid is not enough,
+because the registry failing to report a resident session's pid is the one
+failure that would otherwise hide a real leak forever. A marked row whose short
+id the listing does show with a process is counted in the report rather than
+stopped, because acting on it would let the listing add a target.
+
+**Preview Leaked-Agent Sweep…** in the app menu runs the same sweep as a dry
+run and shows its report in a window (§10). The dry run stops nothing and marks
+nothing; `WorkerSupervising` exposes only the dry run, so no surface can reach
+the real one.
+
+### 8.7 The process inventory
+
+`ProcessInventory` lists every process Agent Board launched or controls and
+names its owner. It decides from a `ProcessTable` snapshot, the roots its
+caller passes, and per-process facts (cwd, controlling tty, whether the
+executable is `claude`), so the rules below run without real processes.
+
+**Roots.** Each root is a pid and the owner its tree belongs to:
+
+- each session's `claude` host that `claude agents` lists, matched to its
+  `agent_session` row by session id or short id as the reaper matches it,
+  owned by its session, task and project with the role worker, reviewer,
+  orchestrator or Coordinator. A worker row is a reviewer when it records the
+  checkout it was spawned on (`reviewHead`); its `role` says worker. A host
+  with no row is not a root (`SessionInventoryRoots`);
+- each orchestrator console's process, owned by its project and session with
+  the role orchestrator; the Coordinator's console process, owned by its
+  session with the role Coordinator and no project; and each project's shell
+  console, owned by its project with the role human shell
+  (`WorkerSupervisor.consoleProcessRoots`);
+- each terminal window the app opened — a worktree shell, a `claude attach`
+  and a PR verify shell — which registers its child with the
+  `TerminalProcessRegistry` while it runs, owned by its project (and session
+  and task, where it has one) with the role human shell;
+- the app's own pid, owned by Agent Board. `LiveProcessSampler` always adds
+  it. Board-run commands are Foundation `Process` children of the app, so
+  `git worktree add` and its hook, `BoundedCommand` verification runs and the
+  `ProcessRunner` helpers (git, gh, account-usage refresh) are in its tree.
+
+An ended session with no host is passed with no pid and its worktree, so its
+orphans are found — but only while that worktree is still on disk and no
+active session or listed host occupies it. A shared-checkout session has no
+worktree path and is never claimed. `claude agents` launches a process, so the
+session roots are rebuilt at most every 10 seconds (`SessionProcessRoots`);
+the console and terminal roots are read on every sample. A failed `claude
+agents` read is not cached: that sample has no session host, says so
+(`SampledInventory.sessionHostsUnavailable`), and the next sample reads again.
+A host missing from the inventory cannot be stopped from it, which is the safe
+direction.
+
+A terminal window on the Coordinator's session registers no project: the
+Coordinator's row has an empty `project_id`, which the owner records as none,
+as `SessionInventoryRoots` does.
+
+**Attribution.** Every process goes to the nearest root on its parent chain.
+The consoles and shells are children of the app, so their trees go to their
+own owners, and only what is left under the app is Agent Board's. A process
+whose chain reaches no root, or reaches pid 1 first, is not listed. Nothing is
+matched by name.
+
+**Worktree orphans.** §8.5's second rule, the same function the reaper calls:
+reparented to launchd, no controlling terminal, cwd inside the session's own
+worktree, started no earlier than the session. Its descendants follow it. A
+`claude` executable is never an orphan. The rule is off for a shared checkout
+and while another live session shares the worktree, as in §8.5. When two
+claims cover the same worktree, the orphan goes to the latest session that
+started before it.
+
+**Ports.** Listening ports come from the Ports sweep's last rows
+(`ListeningPortModel`, §10) and attach to the pid the sweep gave the row: the
+process that bound the socket. The process view asks for one sweep when it
+appears; otherwise the rows are as fresh as the sweep's hourly refresh.
+
+**Usage.** CPU % is the change in a process's total user plus system time
+(`proc_pidinfo` `PROC_PIDTASKINFO`) over the wall time between two readings,
+where 100% is one core. Those times are Mach ticks, not nanoseconds, and are
+converted with `mach_timebase_info`. Resident memory comes from the same call.
+Readings are keyed by `PIDIdentity`, so a reused pid starts with no history.
+A process's first reading shows CPU as unknown, not 0. Wall time is
+`CLOCK_UPTIME_RAW`, which stops while the Mac sleeps.
+
+**Cost.** Sampling runs only while its stream is iterated (`ProcessSampling`),
+off the main thread. Cancelling the iterating task stops it, so the view costs
+nothing off screen (§10). The stream keeps only the newest sample, so a slow
+view never works through stale ones. A process whose reading fails once has no
+usage that sample and starts again with no history, so its CPU reads unknown
+on the next one.
+
+**Stopping a process.** The process view's Stop (§10) decides what it may
+signal with `ProcessStopPlanner`, from a process table and a `claude agents`
+listing both read when the human asks, never from the sample the row was
+drawn with. It refuses, signalling nothing and showing the reason, when:
+
+- the row is Agent Board's own pid or any ancestor of it;
+- the row, or anything below it, is a `claude` process other than the row's
+  own session host — another session's host, or a `claude` executable the
+  listing did not name. A failed listing names none, so every `claude` below
+  the row refuses the stop;
+- the row is an orchestrator's or the Coordinator's host, which runs in its
+  console and is ended there;
+- the row's `PIDIdentity` is not in the current inventory, or the live table
+  now gives that pid a different start time;
+- the row, or anything below it, belongs to another user (`pbi_uid`).
+
+A worker's or reviewer's host — the root of its owner's tree, with the session
+id the listing gives that pid — is never signalled. It goes through the
+session Stop (`WorkerSupervisor.stop(sessionId:)`): `claude stop`, the tree
+reaped as §8.5 does, the row stopped and its grants revoked by
+`Board.terminate`.
+
+Anything else stops as a tree: the row and every descendant, SIGTERM, then
+SIGKILL to whatever is still alive after `PortStopper`'s two-second grace.
+Each round re-reads the table, adds descendants forked since, and skips a pid
+whose start time changed. Its process group is signalled too only when the row
+leads that group and `PortStopPlanner` finds it holds nothing protected (the
+board, its ancestors and group, every listed host) and no `claude` or other
+user's process; the group reaches descendants already reparented to launchd,
+which the parent walk no longer finds. A group led by the row's parent is not
+signalled, unlike a port's stop: the row is a tree, and the parent is a row of
+its own.
+
+Every stop is recorded: a `note` progress row on the owning task; for a
+project-owned process with no task (a shell, an orchestrator console's child),
+a `decision` report on the project; for the Coordinator's, a `decision` report
+on its queue. Agent Board's own helpers belong to no project and are logged to
+the unified log (`AgentBoard`, category `process-stop`).

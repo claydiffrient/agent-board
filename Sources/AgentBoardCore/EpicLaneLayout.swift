@@ -9,11 +9,12 @@ public enum EpicLaneOrder {
     public static func precedence(_ state: EpicState) -> Int {
         switch state {
         case .active: 0
-        case .pullRequestOpen: 1
-        case .planning: 2
-        case .integrating: 3
-        case .done: 4
-        case .abandoned: 5
+        case .integrated: 1
+        case .pullRequestOpen: 2
+        case .planning: 3
+        case .integrating: 4
+        case .done: 5
+        case .abandoned: 6
         }
     }
 

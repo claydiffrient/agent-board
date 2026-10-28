@@ -1,5 +1,6 @@
 import AgentBoardBridge
 import AgentBoardCore
+import AgentBoardRuntime
 import AgentBoardServer
 import Foundation
 import XCTest
@@ -23,12 +24,6 @@ final class NoReviewAcceptanceTests: XCTestCase {
     private func setReviewLevel(_ level: ReviewLevel) throws {
         var settings = fixture.project.settings
         settings.reviewLevel = level
-        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
-    }
-
-    private func setArchivePolicy(_ policy: ArchivePolicy) throws {
-        var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
-        settings.archivePolicy = policy
         try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
     }
 
@@ -99,62 +94,74 @@ final class NoReviewAcceptanceTests: XCTestCase {
         XCTAssertNil(identity, "the worker token still resolves after an automatic accept")
         XCTAssertTrue(try XCTUnwrap(fixture.grants.forSession(worker.session.sessionId).first).isRevoked)
 
-        // 3. worktree removal, and the merged branch with it
+        // 3. worktree removal, and the merged branch with it, which run after the answer
+        await fixture.supervisor.waitForTeardowns()
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
         XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(blocker.id)"))
     }
 
-    func testTaskReviewRunsNoneOfThoseAndLeavesTheTaskForAHuman() async throws {
-        try setReviewLevel(.task)
-        let subject = try task("build the parser")
-        let worker = try finishedWorker(on: subject)
-        let worktree = try XCTUnwrap(worker.session.worktreePath)
-
-        let text = try await reportComplete(task: subject, session: worker.session, token: worker.token)
-
-        XCTAssertTrue(text.contains("now in Review"), text)
-        XCTAssertEqual(try fixture.tasks.get(subject.id)?.column, .review)
-        let stillLive = await fixture.resolver.resolve(token: worker.token)
-        XCTAssertNotNil(stillLive)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree))
-        XCTAssertTrue(try fixture.manager.branchExists("agentboard/\(subject.id)"))
-    }
-
-    func testAnEpicOverrideOfNoReviewAcceptsATaskTheProjectWouldHaveHeld() async throws {
-        try setReviewLevel(.task)
-        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Parser", goal: nil)
-        try fixture.epics.setReviewLevel(epic.id, ReviewLevel.none)
-        let subject = try task("lexer", epicId: epic.id)
-        let worker = try finishedWorker(on: subject)
-
-        _ = try await reportComplete(task: subject, session: worker.session, token: worker.token)
-
-        XCTAssertEqual(try fixture.tasks.get(subject.id)?.column, .done)
-        let revoked = await fixture.resolver.resolve(token: worker.token)
-        XCTAssertNil(revoked)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(worker.session.worktreePath)))
-    }
-
-    /// `none` never auto-accepts an integration task: the grant survives and the worker is told to
-    /// stop. The archive policy, not the review level, decides the column, so this pins the
-    /// non-default `manual` policy — `afterEpicMerge` sends it to `done` instead (§5.2 step 4), and
-    /// `ReviewLevelTests` covers both policies against every level.
-    func testAnEpicIntegrationTaskStillWaitsForAHumanUnderNoReview() async throws {
+    /// SPEC §6: landing can run repository hooks, so the answer cannot wait for it.
+    func testReportCompleteAnswersWhileTheLandingIsStillInARefHook() async throws {
         try setReviewLevel(.none)
-        try setArchivePolicy(.manual)
-        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Parser", goal: nil)
-        try fixture.epics.setState(epic.id, .integrating)
-        let integration = try fixture.tasks.create(
-            projectId: fixture.project.id, title: "Integrate Parser", body: nil, acceptance: nil,
-            priority: nil, column: .ready, origin: .integration, epicId: epic.id
+        let epic = try fixture.epics.create(projectId: fixture.project.id, title: "Ship search", goal: nil)
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        let done = try task("build the parser", epicId: epic.id)
+        let session = try fixture.worktreeWorker(task: done, state: .running)
+        try fixture.commitInto(try XCTUnwrap(session.worktreePath))
+        let grant = try fixture.grants.issue(projectId: fixture.project.id, scope: .worker, taskId: done.id)
+        try fixture.grants.bind(token: grant.token, sessionId: session.sessionId)
+        let gate = try fixture.installGatedHook(
+            "reference-transaction", when: "[ \"$1\" = prepared ] && grep -q ' refs/heads/\(epic.branch)$'"
         )
-        let worker = try finishedWorker(on: integration)
+        let tip = try fixture.git(["rev-parse", "agentboard/\(done.id)"]).trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let text = try await reportComplete(task: integration, session: worker.session, token: worker.token)
+        let text = try await reportComplete(task: done, session: session, token: grant.token)
 
-        XCTAssertTrue(text.contains("now in Review"), text)
-        XCTAssertEqual(try fixture.tasks.get(integration.id)?.column, .review)
-        let integratorGrant = await fixture.resolver.resolve(token: worker.token)
-        XCTAssertNotNil(integratorGrant, "the integrator's grant must survive until a person accepts")
+        XCTAssertTrue(text.contains("straight to Done"), text)
+        XCTAssertEqual(try fixture.tasks.get(done.id)?.column, .done)
+        XCTAssertFalse(
+            try fixture.manager.isMerged(commit: tip, into: "refs/heads/\(epic.branch)"),
+            "report_complete waited for the accepted branch to land before answering"
+        )
+        FileManager.default.createFile(atPath: gate.path, contents: nil)
+        await fixture.supervisor.waitForTeardowns()
+        XCTAssertTrue(try fixture.manager.isMerged(commit: tip, into: "refs/heads/\(epic.branch)"))
+        XCTAssertEqual(try fixture.tasks.get(done.id)?.landing, .landed)
+    }
+
+    /// The accept a tool call makes stops live sessions in the background, behind the answer
+    /// (`WorkerSupervisor.accept(taskId:acceptedBy:)`). When that stop fails, the task must still
+    /// reach `done`, but as `.unlanded` with its worktree kept rather than landed out from under a
+    /// session that may still be working in it.
+    func testAToolCallAcceptWhoseBackgroundStopFailsLeavesTheTaskUnlandedWithTheWorktreeKept() async throws {
+        let blocker = try task("build the parser")
+        let session = try fixture.worktreeWorker(task: blocker, state: .running)
+        try fixture.commitInto(try XCTUnwrap(session.worktreePath))
+        let shortId = try XCTUnwrap(session.shortId)
+        await fixture.runtime.failStop(shortId: shortId, FixtureError("permission denied"))
+        await fixture.runtime.setListed([
+            AgentInfo(id: shortId, cwd: session.cwd, kind: "bg", sessionId: session.sessionId, status: "running"),
+        ])
+
+        try await fixture.supervisor.accept(taskId: blocker.id, acceptedBy: .policy(.none))
+
+        XCTAssertEqual(
+            try fixture.tasks.get(blocker.id)?.column, .done,
+            "a stop that is still pending in the background must not hold the task out of done"
+        )
+        await fixture.supervisor.waitForTeardowns()
+
+        let accepted = try XCTUnwrap(try fixture.tasks.get(blocker.id))
+        XCTAssertEqual(accepted.landing, .unlanded)
+        XCTAssertTrue(accepted.needsLanding)
+        let decision = try XCTUnwrap(
+            ReportStore(fixture.db).unconsumed(projectId: fixture.project.id).first { $0.body.contains("but its branch") }
+        )
+        XCTAssertTrue(decision.body.contains("was not landed and its worktree was kept"), decision.body)
+        XCTAssertTrue(decision.body.contains("permission denied"), decision.body)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: try XCTUnwrap(session.worktreePath)),
+            "a session that could not be stopped may still be working in the checkout"
+        )
     }
 }

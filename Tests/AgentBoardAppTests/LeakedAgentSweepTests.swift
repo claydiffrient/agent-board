@@ -125,7 +125,7 @@ final class LaunchSweepTests: XCTestCase {
     private func listing(_ shortIds: [String]) -> [AgentInfo] {
         shortIds.enumerated().map { index, shortId in
             AgentInfo(id: shortId, cwd: "/tmp", kind: "background", sessionId: "uuid-\(shortId)",
-                      state: "done", pid: 9000 + index)
+                      state: "done", pid: unheldPID(index))
         }
     }
 
@@ -163,9 +163,9 @@ final class LaunchSweepTests: XCTestCase {
     func testASessionAbsentFromTheDatabaseIsNeverTargeted() async throws {
         try session("ours", .completed)
         await fixture.runtime.setListed([
-            AgentInfo(id: "ours", cwd: "/tmp", kind: "background", sessionId: "uuid-ours", state: "done", pid: 9001),
-            AgentInfo(id: "stranger", cwd: "/tmp", kind: "background", sessionId: "uuid-stranger", state: "done", pid: 9002),
-            AgentInfo(id: "human", cwd: "/Users/someone", kind: "interactive", sessionId: "uuid-human", state: "idle", pid: 9003),
+            AgentInfo(id: "ours", cwd: "/tmp", kind: "background", sessionId: "uuid-ours", state: "done", pid: unheldPID(1)),
+            AgentInfo(id: "stranger", cwd: "/tmp", kind: "background", sessionId: "uuid-stranger", state: "done", pid: unheldPID(2)),
+            AgentInfo(id: "human", cwd: "/Users/someone", kind: "interactive", sessionId: "uuid-human", state: "idle", pid: unheldPID(3)),
         ])
 
         let report = await fixture.supervisor.sweepLeakedAgents()
@@ -252,6 +252,57 @@ final class LaunchSweepTests: XCTestCase {
         XCTAssertEqual(removed, [], "the sweep called remove, which strips a session's saved spawn options")
     }
 
+    /// SPEC §8.6. The second launch cannot list the runtime, which is the fallback that attempts
+    /// every row it plans, so only the row's absence from the plan keeps the stop from repeating.
+    func testASweptRowIsNotReplannedOnTheNextLaunch() async throws {
+        let sessionId = try session("leaked", .completed)
+        await fixture.runtime.setListed(listing(["leaked"]))
+        _ = await fixture.supervisor.sweepLeakedAgents()
+
+        await fixture.runtime.failListing(FixtureError("claude agents failed"))
+        let report = await fixture.supervisor.sweepLeakedAgents()
+
+        let stopped = await fixture.runtime.stopped
+        XCTAssertEqual(stopped, ["leaked"], "the next launch stopped the swept row again")
+        XCTAssertFalse(report.lines.contains { $0.contains(sessionId) }, report.lines.joined(separator: "\n"))
+        XCTAssertEqual(report.confirmedStopped, 1)
+    }
+
+    /// An `ended_at` horizon would skip exactly this row: it ended a year ago, nothing ever
+    /// confirmed its agent stopped, and it is still resident.
+    func testASessionThatEndedLongAgoAndStillHoldsAProcessIsStillStopped() async throws {
+        let yearAgo = Int64.nowMillis - 365 * 86_400_000
+        try fixture.sessions.insert(AgentSession(
+            sessionId: "session-ancient", shortId: "ancient", projectId: fixture.project.id, role: .worker,
+            cwd: fixture.supportDir.path, state: .completed, startedAt: yearAgo - 3_600_000,
+            endedAt: yearAgo, lastActivity: yearAgo
+        ))
+        await fixture.runtime.setListed(listing(["ancient"]))
+
+        _ = await fixture.supervisor.sweepLeakedAgents()
+
+        let stopped = await fixture.runtime.stopped
+        XCTAssertEqual(stopped, ["ancient"])
+    }
+
+    /// A confirmed stop holds only until the row shows life again: a resume, or tool calls from a
+    /// session resumed on a settled task, whose row `SessionStart` deliberately leaves `completed`.
+    func testAConfirmedStoppedRowThatComesBackToLifeIsSweptAgain() async throws {
+        let resumed = try session("resumed", .completed)
+        let working = try session("working", .completed)
+        await fixture.runtime.setListed(listing(["resumed", "working"]))
+        _ = await fixture.supervisor.sweepLeakedAgents()
+
+        try fixture.sessions.markResumed(resumed)
+        try fixture.sessions.setState(resumed, .completed, endedAt: .nowMillis)
+        try fixture.sessions.beginToolCall(working, at: .nowMillis + 60_000, tool: "Bash")
+        let report = await fixture.supervisor.sweepLeakedAgents()
+
+        let stopped = await fixture.runtime.stopped
+        XCTAssertEqual(stopped.sorted(), ["resumed", "resumed", "working", "working"])
+        XCTAssertEqual(report.confirmedStopped, 0)
+    }
+
     func testLaunchRunsTheSweep() async throws {
         try session("leaked", .completed)
         await fixture.runtime.setListed(listing(["leaked"]))
@@ -289,9 +340,9 @@ final class SweepDryRunTests: XCTestCase {
         try session("busy", .running)
         try session(nil, .completed)
         await fixture.runtime.setListed([
-            AgentInfo(id: "leaked", cwd: "/tmp", kind: "background", sessionId: "uuid-leaked", state: "done", pid: 9001),
-            AgentInfo(id: "busy", cwd: "/tmp", kind: "background", sessionId: "uuid-busy", state: "working", pid: 9002),
-            AgentInfo(id: "elsewhere", cwd: "/tmp", kind: "background", sessionId: "uuid-elsewhere", state: "idle", pid: 9003),
+            AgentInfo(id: "leaked", cwd: "/tmp", kind: "background", sessionId: "uuid-leaked", state: "done", pid: unheldPID(1)),
+            AgentInfo(id: "busy", cwd: "/tmp", kind: "background", sessionId: "uuid-busy", state: "working", pid: unheldPID(2)),
+            AgentInfo(id: "elsewhere", cwd: "/tmp", kind: "background", sessionId: "uuid-elsewhere", state: "idle", pid: unheldPID(3)),
         ])
 
         let report = await fixture.supervisor.sweepLeakedAgents(dryRun: true)
@@ -322,9 +373,9 @@ final class SweepDryRunTests: XCTestCase {
         try session("b", .idle)
         try session("c", .failed)
         await fixture.runtime.setListed([
-            AgentInfo(id: "a", cwd: "/tmp", kind: "background", sessionId: "uuid-a", pid: 9001),
-            AgentInfo(id: "b", cwd: "/tmp", kind: "background", sessionId: "uuid-b", pid: 9002),
-            AgentInfo(id: "c", cwd: "/tmp", kind: "background", sessionId: "uuid-c", pid: 9003),
+            AgentInfo(id: "a", cwd: "/tmp", kind: "background", sessionId: "uuid-a", pid: unheldPID(1)),
+            AgentInfo(id: "b", cwd: "/tmp", kind: "background", sessionId: "uuid-b", pid: unheldPID(2)),
+            AgentInfo(id: "c", cwd: "/tmp", kind: "background", sessionId: "uuid-c", pid: unheldPID(3)),
         ])
 
         let report = await fixture.supervisor.sweepLeakedAgents(dryRun: true)

@@ -154,8 +154,10 @@ final class SetupHandoffTests: XCTestCase {
             ),
             appSupportDir: fixture.supportDir,
             worktreeBase: fixture.worktreeBase,
-            projectsRoot: fixture.supportDir.appendingPathComponent("claude-projects")
+            projectsRoot: fixture.supportDir.appendingPathComponent("claude-projects"),
+            gh: fixture.gh
         )
+        addTeardownBlock { await restarted.stop() }
         await restarted.start()
 
         XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .ready)
@@ -170,6 +172,7 @@ final class SetupHandoffTests: XCTestCase {
         await fixture.runtime.holdSpawn()
         try await fixture.supervisor.assign(taskId: task.id)
         let placeholder = try XCTUnwrap(sessions(for: task).first).sessionId
+        await fixture.runtime.waitUntilSettingUp()
 
         try await fixture.supervisor.stop(sessionId: placeholder)
 

@@ -41,6 +41,7 @@ public enum ReviewPolicy {
         // An epic's integration task is the human's own gate (SPEC §5.2): never auto-accepted, never
         // handed to an agent, at any level.
         if task.origin == .integration { return .humanReview(reason: nil) }
+        if task.origin == .fixRound { return try fixRoundRouting(db, projectId: task.projectId) }
         switch try level(db, task: task) {
         case .none:
             return .autoAccept
@@ -92,6 +93,31 @@ public enum ReviewPolicy {
                 + "reviewer role, so it needs a person.")
         }
         return .agentReview(agentId: reviewer.id, agentName: reviewer.name)
+    }
+
+    /// SPEC §13.1 checking: the `reviewer` role's roster agent, else the review routing table's Code row.
+    /// A round is pushed with no person in the loop, so it is never accepted without review, and anything
+    /// but an agent comes back as `humanReview` with the reason the watch parks for.
+    public static func fixRoundRouting(_ db: Database, projectId: String) throws -> ReviewRouting {
+        let project = try Project.fetchOne(db, key: projectId)
+        let routing: ReviewRouting
+        if let id = project?.settings.prFollowThrough.roles.reviewer?.rosterAgentId {
+            let name = try RosterAgent.fetchOne(db, key: id)?.name ?? id
+            routing = try namedReviewerRouting(
+                db, named: ReviewAgentChoice(id: id, name: name), row: nil, projectId: projectId
+            )
+        } else {
+            routing = try agentRouting(db, projectId: projectId, type: .code)
+        }
+        switch routing {
+        case .agentReview, .humanReview(_?):
+            return routing
+        case .humanReview(nil), .autoAccept:
+            return .humanReview(reason: "A fix round is pushed without a person, so it needs an agent reviewer, but "
+                + "this project's review routing sends Code tasks to "
+                + (routing == .autoAccept ? "no review" : "a person")
+                + ". Choose a reviewer role in PR Follow-Through settings.")
+        }
     }
 
     /// A named reviewer that cannot take the task sends it to a person, never to another agent

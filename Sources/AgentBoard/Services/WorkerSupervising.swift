@@ -21,6 +21,9 @@ protocol WorkerSupervising: AnyObject {
     /// and the task branch deleted once it is merged into the base or epic branch.
     func accept(taskId: String) async throws
     func reopen(taskId: String) async throws
+    /// Stops the task's reviewer session and starts a fresh one from the same roster agent; the task
+    /// stays in `review` (SPEC §10, Pending reviews).
+    func rerunReview(taskId: String) async throws
     /// Stops any active worker, removes every attempt's worktree, deletes the task and its progress.
     /// The branch survives unless it is already merged.
     func discard(taskId: String) async throws
@@ -52,6 +55,10 @@ protocol WorkerSupervising: AnyObject {
     /// branch or worktree, and leaves every unfinished task where it is. Refused while a worker is
     /// running in the epic and for an epic that is already terminal.
     func closeEpic(epicId: String, as closure: EpicClosure) async throws
+    /// The worktrees a done or abandoned epic still has on disk (SPEC §5.2).
+    func heldWorktrees(epicId: String) throws -> [HeldWorktree]
+    /// Removes them through the project's teardown hook and queues a `decision` report.
+    func removeEpicWorktrees(epicId: String) async throws
     /// Opens the prefilled compare page for the epic branch; never creates the PR itself.
     @discardableResult
     func openPullRequest(epicId: String) async throws -> PullRequestOutcome
@@ -83,9 +90,23 @@ protocol WorkerSupervising: AnyObject {
     /// A report was queued outside the supervisor — the human's comment (SPEC §9.1) — so the
     /// orchestrator console is told now rather than on the next board event.
     func reportQueued(projectId: String) async
+    /// The launch sweep as a dry run (SPEC §8.6); nil where there is nothing to sweep with. Only the
+    /// dry run is on the protocol, so no surface can reach the sweep that stops sessions.
+    func previewLeakedAgentSweep() async -> AgentSweepReport?
+    /// True while a PR follow-through poll, the tick's or a Refresh, is running (SPEC §13.4).
+    var isPollingPRWatches: Bool { get }
+    /// Polls these watches now and applies their transitions, joining a poll already in flight.
+    func pollPRWatches(watchIds: Set<String>) async throws
+    /// The human's dismissal of one open item (SPEC §13.1 dismissed items), after stopping any session
+    /// still working the round it ends.
+    func dismissPRItem(itemId: Int64, reason: String) async throws
 }
 
 extension WorkerSupervising {
+    var isPollingPRWatches: Bool { false }
+    func pollPRWatches(watchIds: Set<String>) async throws {}
+    func dismissPRItem(itemId: Int64, reason: String) async throws {}
     func focusChanged(projectId: String?) {}
     func reportQueued(projectId: String) async {}
+    func previewLeakedAgentSweep() async -> AgentSweepReport? { nil }
 }

@@ -66,11 +66,17 @@ public enum SessionTermination: Sendable, Equatable {
     /// `reconcile` found a process still running on a task in `done`, or in `ready` with no
     /// session on it (SPEC §10, Status), and stopped it.
     case taskSettled
+    /// A dismissal closes the session's task next and reports it (SPEC §13.1 dismissed items), so the
+    /// stop neither moves the task nor reports.
+    case taskClosing(by: BoardActor)
+
+    /// Opens the stop reason of every session whose setup failed, so nothing it launched ever ran.
+    public static let setupFailedLead = "setting up the worktree failed before the worker started:"
 
     var sessionState: SessionState {
         switch self {
         case .capBreach, .setupFailed: return .failed
-        case .stopped, .vanished, .shutdownAcknowledged, .taskSettled: return .stopped
+        case .stopped, .vanished, .shutdownAcknowledged, .taskSettled, .taskClosing: return .stopped
         }
     }
 
@@ -80,14 +86,14 @@ public enum SessionTermination: Sendable, Equatable {
     var salvagesBranchWork: Bool {
         switch self {
         case .capBreach, .vanished, .stopped: return true
-        case .setupFailed, .shutdownAcknowledged, .taskSettled: return false
+        case .setupFailed, .shutdownAcknowledged, .taskSettled, .taskClosing: return false
         }
     }
 
     var flagsTaskFailed: Bool {
         switch self {
         case .capBreach, .vanished, .setupFailed: return true
-        case .stopped, .shutdownAcknowledged, .taskSettled: return false
+        case .stopped, .shutdownAcknowledged, .taskSettled, .taskClosing: return false
         }
     }
 
@@ -96,15 +102,16 @@ public enum SessionTermination: Sendable, Equatable {
         case .capBreach(let breach): return breach
         case .stopped(let actor): return "stopped from Agent Board by \(actor.described)"
         case .vanished: return "the session is no longer running and Agent Board did not stop it"
-        case .setupFailed(let detail): return "setting up the worktree failed before the worker started: \(detail)"
+        case .setupFailed(let detail): return "\(Self.setupFailedLead) \(detail)"
         case .shutdownAcknowledged: return "wound down for the project shutdown order and acknowledged"
         case .taskSettled: return "claude agents still listed it as running on a task with no work left for it"
+        case .taskClosing(let actor): return "stopped from Agent Board by \(actor.described) to close its task for a dismissed item"
         }
     }
 
     var reportKind: ReportKind {
         switch self {
-        case .shutdownAcknowledged, .taskSettled: return .decision
+        case .shutdownAcknowledged, .taskSettled, .taskClosing: return .decision
         case .capBreach, .stopped, .vanished, .setupFailed: return .failed
         }
     }
@@ -115,6 +122,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .setupFailed: return "Worker never started: \(reason)"
         case .capBreach, .stopped, .vanished: return "Worker session ended without reporting: \(reason)"
         case .taskSettled: return "Session ended after its task was settled: \(reason)"
+        case .taskClosing: return "Session ended so its task could close: \(reason)"
         }
     }
 
@@ -124,7 +132,7 @@ public enum SessionTermination: Sendable, Equatable {
         case .shutdownAcknowledged(let note):
             guard let note, !note.isEmpty else { return nil }
             return note
-        case .capBreach, .stopped, .vanished, .setupFailed, .taskSettled: return nil
+        case .capBreach, .stopped, .vanished, .setupFailed, .taskSettled, .taskClosing: return nil
         }
     }
 }
@@ -164,7 +172,8 @@ public struct Board: Sendable {
             guard let project = try Project.fetchOne(db, key: task.projectId) else {
                 throw BoardError.projectNotFound(task.projectId)
             }
-            if project.settings.autonomyEnabled {
+            // SPEC §13.5's §8 amendment: a fix round skips approval where follow-through is on.
+            if project.settings.autonomyEnabled || (task.origin == .fixRound && project.settings.prFollowThrough.enabled) {
                 return .proceed
             }
             if let existing = try ApprovalStore.pendingSpawn(db, taskId: taskId) {
@@ -229,10 +238,13 @@ public struct Board: Sendable {
     }
 
     /// Resolves the approval and queues a `decision` report so the orchestrator learns the outcome on its next pull.
+    /// A granted dismissal or resume is reported by `applyItemDismissal` or `applyWatchResume` instead,
+    /// which says what it did.
     @discardableResult
     public func resolveApproval(_ id: String, approved: Bool, by: String, reason: String? = nil) throws -> Approval {
         try db.writer.write { db in
             let approval = try ApprovalStore.resolve(db, id, approved ? .approved : .denied)
+            if approved, approval.kind == .prItemDismissal || approval.kind == .prWatchResume { return approval }
             var body = "\(approval.kind.rawValue) \(approved ? "approved" : "denied")"
             if let taskId = approval.taskId {
                 body += " for task \(taskId)"
@@ -241,6 +253,10 @@ public struct Board: Sendable {
                 }
             } else if let epicId = approval.epicId {
                 body += " for epic \(epicId)"
+            } else if approval.kind == .prItemDismissal, let request = try? PRItemDismissalRequest.decode(approval.payload) {
+                body += " for item \(request.itemId)"
+            } else if approval.kind == .prWatchResume, let request = try? PRWatchResumeRequest.decode(approval.payload) {
+                body += " for #\(request.number)"
             }
             if let reason, !reason.isEmpty {
                 body += ": \(reason)"
@@ -281,14 +297,28 @@ public struct Board: Sendable {
     /// The only path that creates a worker session row. The two guards run inside the write
     /// transaction, so a handed-off task cannot be assigned twice concurrently: one caller wins and
     /// the other throws rather than launching a second agent into the same checkout.
+    ///
+    /// With `slots`, the session's checkout is the slot leased here (SPEC §3.1 step 2), chosen in
+    /// the same transaction so two spawns can never lease one slot; `noFreeWorktreeSlot` when none is free.
     @discardableResult
-    public func assign(taskId: String, session: AgentSession) throws -> AgentSession {
+    public func assign(taskId: String, session: AgentSession, leasingSlotFrom slots: WorktreeSlotPool? = nil) throws -> AgentSession {
         try db.writer.write { db in
             guard let task = try Task.fetchOne(db, key: taskId) else {
                 throw BoardError.taskNotFound(taskId)
             }
+            guard task.column != .closed else {
+                throw BoardError.invalidTransition(taskId: taskId, from: .closed, to: .running)
+            }
             if let holder = try SessionStore.activeHolder(db, taskId: taskId) {
                 throw BoardError.taskAlreadyHeld(taskId: taskId, sessionId: holder.sessionId)
+            }
+            var session = session
+            if let slots {
+                guard let slot = try WorktreeSlotStore.lease(db, projectId: task.projectId, taskId: taskId, pool: slots) else {
+                    throw BoardError.noFreeWorktreeSlot(projectId: task.projectId)
+                }
+                session.worktreePath = slots.path(slot)
+                session.cwd = slots.path(slot)
             }
             if let path = session.worktreePath, let holder = try SessionStore.activeHolder(db, worktreePath: path) {
                 throw BoardError.worktreeAlreadyHeld(path: path, sessionId: holder.sessionId)
@@ -298,7 +328,6 @@ public struct Board: Sendable {
                 sql: "SELECT COUNT(*) FROM agent_session WHERE task_id = ?",
                 arguments: [taskId]
             ) ?? 0
-            var session = session
             session.taskId = taskId
             session.projectId = task.projectId
             session.role = .worker
@@ -361,10 +390,21 @@ public struct Board: Sendable {
         /// wherever it has been moved to since the first call.
         public var column: TaskColumn
         public var wasAlreadyComplete: Bool
+        /// The epic this integration left `integrated`, waiting on its pull request (SPEC §5.2).
+        public var awaitingPullRequest: Epic? = nil
+        /// The state of a session Agent Board had already ended before this call. Its report is kept
+        /// as a `decision`, and nothing on the task moves (SPEC §5.1).
+        public var endedSessionState: SessionState? = nil
+        /// The task was closed while this session still ran on it, so the report moved nothing.
+        public var closedUnderSession = false
 
         /// Never true on a resend: the first call already ran the acceptance path.
-        public var autoAccept: Bool { routing == .autoAccept && !wasAlreadyComplete }
+        public var autoAccept: Bool {
+            routing == .autoAccept && !wasAlreadyComplete && endedSessionState == nil && !closedUnderSession
+        }
     }
+
+    static let lateCompletionHeadline = "Late report_complete from a session Agent Board had already ended"
 
     /// Records the report and parks the task where §5's review level says. Under `.none` (and `.epic`
     /// for a task inside an epic) the task stays in `review` for the length of this transaction only:
@@ -387,11 +427,26 @@ public struct Board: Sendable {
                     wasAlreadyComplete: true
                 )
             }
+            if let session = try AgentSession.fetchOne(db, key: sessionId), !session.state.isActive {
+                return try Self.lateCompletion(db, task: task, session: session, summary: summary)
+            }
+            // SPEC §5.1: a live session another one has taken the task from must not move it.
+            if let holder = try SessionStore.activeHolder(db, taskId: taskId), holder.sessionId != sessionId {
+                throw BoardError.sessionNotOnTask(sessionId: sessionId, taskId: taskId)
+            }
+            if task.column == .closed {
+                return try Self.completionOnClosedTask(db, task: task, sessionId: sessionId, summary: summary)
+            }
+            if task.origin == .fixRound {
+                return try Self.completeFixRound(db, task: task, sessionId: sessionId, summary: summary)
+            }
             let report = try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .complete, body: summary
             )
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
-            let mergedEpicId = try Self.epicMergedBy(db, task)
+            let integratedEpic = try Self.epicIntegratedBy(db, task)
+            let awaitingPullRequest = integratedEpic?.shipsByPullRequest == true ? integratedEpic : nil
+            let mergedEpicId = awaitingPullRequest == nil ? integratedEpic?.id : nil
             let sweepsOnMerge = try mergedEpicId != nil
                 && Self.settings(db, projectId: task.projectId).archivePolicy == .afterEpicMerge
             // Under afterEpicMerge the integration task lands in `done` rather than `review`: the epic
@@ -404,9 +459,21 @@ public struct Board: Sendable {
             try FileLockStore.releaseAll(db, sessionId: sessionId)
             if let mergedEpicId {
                 try EpicStore.setState(db, mergedEpicId, .done)
+                // SPEC §5.2: accepting the integration task removes its own checkout and reports what it keeps.
+                let held = try Self.heldWorktrees(db, epicId: mergedEpicId).filter { sweepsOnMerge || !$0.isIntegration }
+                if let held = HeldWorktree.paragraph(held), let epic = try Epic.fetchOne(db, key: mergedEpicId) {
+                    _ = try ReportStore.insert(
+                        db, projectId: task.projectId, taskId: nil, sessionId: nil, kind: .decision,
+                        body: "Epic \(epic.id) (\(epic.title)) is done.\n\n" + held
+                    )
+                }
                 if sweepsOnMerge {
                     _ = try ArchiveSweep.archiveEpic(db, epicId: mergedEpicId, at: .nowMillis)
                 }
+            }
+            if let awaitingPullRequest {
+                try EpicStore.setState(db, awaitingPullRequest.id, .integrated)
+                try Self.announceIntegrated(db, epic: awaitingPullRequest)
             }
             let level = try ReviewPolicy.level(db, task: task)
             let routing = try ReviewPolicy.routing(db, task: task, completedBy: sessionId)
@@ -423,9 +490,58 @@ public struct Board: Sendable {
                 try Self.leaveReviewToPerson(db, taskId: taskId, reason: reason)
             }
             return CompletionOutcome(
-                report: report, level: level, routing: routing, column: column, wasAlreadyComplete: false
+                report: report, level: level, routing: routing, column: column, wasAlreadyComplete: false,
+                awaitingPullRequest: awaitingPullRequest
             )
         }
+    }
+
+    /// A session the board failed, stopped or completed can still be running — Claude Code resumes a
+    /// stopped one by itself — and the task may have moved on under another session since. Its report
+    /// is kept for the orchestrator; the column, the landing and the archive are left alone.
+    private static func lateCompletion(
+        _ db: Database, task: Task, session: AgentSession, summary: String
+    ) throws -> CompletionOutcome {
+        let existing = try ReportStore.lateCompletion(db, taskId: task.id, sessionId: session.sessionId, headline: lateCompletionHeadline)
+        let report = try existing ?? ReportStore.insert(
+            db, projectId: task.projectId, taskId: task.id, sessionId: session.sessionId, kind: .decision,
+            body: [
+                "\(lateCompletionHeadline) (\(session.state.rawValue)); the task was left in \(task.column.rawValue).",
+                "Task: \(task.id) (\(task.title))",
+                "Session: \(session.sessionId) (attempt \(session.attempt))",
+                summary,
+            ].joined(separator: "\n")
+        )
+        return CompletionOutcome(
+            report: report,
+            level: try ReviewPolicy.level(db, task: task),
+            routing: try ReviewPolicy.routing(db, task: task, completedBy: session.sessionId),
+            column: task.column,
+            wasAlreadyComplete: existing != nil,
+            endedSessionState: session.state
+        )
+    }
+
+    /// A dismissal can close a round's task under its fixer or checker (SPEC §13.1 dismissed items). The
+    /// task stays closed; the report is kept, already consumed, and the session ends.
+    private static func completionOnClosedTask(
+        _ db: Database, task: Task, sessionId: String, summary: String
+    ) throws -> CompletionOutcome {
+        let report = try ReportStore.insert(
+            db, projectId: task.projectId, taskId: task.id, sessionId: sessionId, kind: .complete, body: summary
+        )
+        try db.execute(sql: "UPDATE report SET consumed_at = ? WHERE id = ?", arguments: [Int64.nowMillis, report.id])
+        _ = try ProgressStore.append(
+            db, taskId: task.id, sessionId: nil, kind: .status,
+            text: "Session \(sessionId) reported complete after this task was closed; it stays closed."
+        )
+        try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
+        try FileLockStore.releaseAll(db, sessionId: sessionId)
+        return CompletionOutcome(
+            report: report, level: try ReviewPolicy.level(db, task: task),
+            routing: try ReviewPolicy.routing(db, task: task, completedBy: sessionId), column: .closed,
+            wasAlreadyComplete: false, closedUnderSession: true
+        )
     }
 
     /// A task in `review` that its rostered reviewer will not take: it stays in `review` for a person,
@@ -486,6 +602,7 @@ public struct Board: Sendable {
             try TaskStore.move(db, taskId, to: .ready, before: nil)
             try SessionStore.setState(db, sessionId, .completed, endedAt: .nowMillis)
             try SessionStore.setStopReason(db, sessionId, suggested.map { "handed off to \($0)" } ?? "handed off")
+            try FileLockStore.releaseAll(db, sessionId: sessionId)
             return report
         }
     }
@@ -501,6 +618,14 @@ public struct Board: Sendable {
             try TaskStore.setFailed(db, taskId, true, reason: reason)
             try SessionStore.setState(db, sessionId, .failed, endedAt: .nowMillis)
             return report
+        }
+    }
+
+    /// Moves a session to an inactive state with no report, releasing its file locks in the same write (SPEC §4).
+    public func endSession(_ sessionId: String, _ state: SessionState, endedAt: Int64? = nil) throws {
+        try db.writer.write { db in
+            try SessionStore.setState(db, sessionId, state, endedAt: endedAt)
+            try FileLockStore.releaseAll(db, sessionId: sessionId)
         }
     }
 
@@ -654,6 +779,29 @@ public struct Board: Sendable {
     }
 
     public static let reviewerStalledLead = "Reviewer stopped without a verdict."
+    public static let reviewerRemindedLead = "Reviewer's turn ended without a verdict."
+
+    /// SPEC §5.1: the first verdict-less end of a reviewer's turn is answered by continuing it once
+    /// with `ReviewPrompt.verdictOwed`. True when that reminder is owed now; the `status` row it
+    /// writes is what makes it once per session.
+    public func remindReviewerOfVerdict(taskId: String, sessionId: String) throws -> Bool {
+        try db.writer.write { db in
+            guard let task = try Task.fetchOne(db, key: taskId), task.column == .review,
+                  let session = try AgentSession.fetchOne(db, key: sessionId), session.state.isActive
+            else { return false }
+            let reminded = try Bool.fetchOne(
+                db,
+                sql: "SELECT EXISTS(SELECT 1 FROM progress WHERE task_id = ? AND session_id = ? AND text GLOB ?)",
+                arguments: [taskId, sessionId, Self.reviewerRemindedLead + "*"]
+            ) ?? false
+            guard !reminded else { return false }
+            _ = try ProgressStore.append(
+                db, taskId: taskId, sessionId: sessionId, kind: .status,
+                text: "\(Self.reviewerRemindedLead) Agent Board asked it once to finish with accept_task or reopen_task."
+            )
+            return true
+        }
+    }
 
     /// SPEC §5.1: a reviewer's turn ended with its task still in `review`. Nothing accepts the task;
     /// one `blocked` report per reviewer session tells the orchestrator. Nil when the task has left
@@ -685,6 +833,8 @@ public struct Board: Sendable {
         }
     }
 
+    /// A closed task (SPEC §5) is unarchived and goes back through the readiness check, so one whose
+    /// dependency left `done` meanwhile lands in `backlog`; the report quotes why it had been closed.
     @discardableResult
     public func reopen(taskId: String) throws -> Report {
         try db.writer.write { db in
@@ -693,22 +843,98 @@ public struct Board: Sendable {
             try TaskStore.setFailed(db, taskId, false, reason: nil)
             try TaskStore.move(db, taskId, to: .ready, before: nil)
             try Self.closeReviewFindings(db, taskId: taskId, by: "reopened by a human")
+            guard task.column == .closed else {
+                return try ReportStore.insert(
+                    db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision,
+                    body: "Task \(taskId) (\(task.title)) was reopened by a human and is back in ready."
+                )
+            }
+            try db.execute(sql: "UPDATE task SET archived_at = NULL WHERE id = ?", arguments: [taskId])
+            _ = try TaskStore.refreshReadiness(db, projectId: task.projectId)
+            let column = try Self.requireTask(db, taskId).column
+            _ = try ProgressStore.append(
+                db, taskId: taskId, sessionId: nil, kind: .note,
+                text: "Reopened by a human after being closed. It is in \(column.rawValue)."
+            )
             return try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision,
-                body: "Task \(taskId) (\(task.title)) was reopened by a human and is back in ready."
+                body: "Task \(taskId) (\(task.title)) was reopened by a human and is in \(column.rawValue). "
+                    + "It had been closed by \(task.closedBy ?? "an unknown actor"): \(task.closedReason ?? "no reason recorded")"
             )
         }
     }
 
-    /// Deletes the task and leaves a `decision` report behind, so an orchestrator holding the id
-    /// learns it is gone rather than dispatching it.
+    public static let closedLead = "Closed without being done."
+
+    /// SPEC §5: retires a task nobody needs to finish. The task moves to `closed` with the reason on
+    /// the row and in a `progress` row, and a pending spawn approval for it is denied; nothing else on
+    /// the board, in git or on disk changes.
     @discardableResult
-    public func discard(taskId: String) throws -> Report {
+    public func close(taskId: String, reason: String, by: BoardActor) throws -> TaskClosure {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
+            let reason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let refusal = try Self.closeRefusal(db, task: task, reason: reason) {
+                throw BoardError.closeRefused(taskId: taskId, reason: refusal)
+            }
+            try TaskStore.close(db, taskId, reason: reason, by: by.described, at: .nowMillis)
+            if let approval = try ApprovalStore.pendingSpawn(db, taskId: taskId) {
+                _ = try ApprovalStore.resolve(db, approval.id, .denied)
+            }
+            _ = try ProgressStore.append(
+                db, taskId: taskId, sessionId: nil, kind: .note,
+                text: "\(Self.closedLead) Closed by \(by.described) from \(task.column.rawValue): \(reason)"
+            )
+            let waiting = try Task.fetchAll(
+                db,
+                sql: """
+                SELECT t.* FROM task t JOIN task_dep d ON d.task_id = t.id
+                WHERE d.depends_on = ? AND t.column_name NOT IN ('done', 'closed')
+                ORDER BY t.ordering, t.id
+                """,
+                arguments: [taskId]
+            )
+            return TaskClosure(task: try Self.requireTask(db, taskId), waitingDependents: waiting)
+        }
+    }
+
+    static func closeRefusal(_ db: Database, task: Task, reason: String) throws -> String? {
+        if reason.isEmpty {
+            return "A reason is required: say why the task no longer needs doing."
+        }
+        switch task.column {
+        case .done:
+            return "Task \(task.id) is in done: it was finished and accepted, so there is nothing to close."
+        case .closed:
+            return "Task \(task.id) is already closed: \(task.closedReason ?? "no reason recorded")"
+        default:
+            break
+        }
+        if task.origin == .integration {
+            return "Task \(task.id) is an epic's integration task. It ends through integration, or close the epic "
+                + "with close_epic."
+        }
+        if let holder = try SessionStore.activeHolder(db, taskId: task.id) {
+            return "Task \(task.id) has an active session, \(holder.sessionId) (\(holder.state.rawValue)). Stop it with "
+                + "stop_worker first."
+        }
+        return nil
+    }
+
+    /// Deletes the task and leaves a `decision` report behind, so an orchestrator holding the id
+    /// learns it is gone rather than dispatching it.
+    /// `cleanup` is what removing its worktrees could not do (SPEC §5); the task's progress goes
+    /// with the task, so the report is the only place it is kept.
+    @discardableResult
+    public func discard(taskId: String, cleanup: [String] = []) throws -> Report {
+        try db.writer.write { db in
+            let task = try Self.requireTask(db, taskId)
+            var body = "Task \(taskId) (\(task.title)) was discarded by a human and removed from the board. Do not dispatch it."
+            if !cleanup.isEmpty {
+                body += "\n\n\(Self.worktreeCleanupLead)\n" + cleanup.map { "- \($0)" }.joined(separator: "\n")
+            }
             let report = try ReportStore.insert(
-                db, projectId: task.projectId, taskId: nil, sessionId: nil, kind: .decision,
-                body: "Task \(taskId) (\(task.title)) was discarded by a human and removed from the board. Do not dispatch it."
+                db, projectId: task.projectId, taskId: nil, sessionId: nil, kind: .decision, body: body
             )
             try TaskStore.delete(db, taskId)
             return report
@@ -717,17 +943,22 @@ public struct Board: Sendable {
 
     /// Ends a worker session that will not report for itself and queues a `failed` report, so the
     /// orchestrator stops believing the worker is running. A task stranded in `running` leaves it:
-    /// for `review` when `salvage` shows commits on its branch, otherwise back to `ready`.
+    /// for `review` when `salvage` shows commits on its branch, otherwise, and always for a fix round,
+    /// back to `ready`. A triage task is closed instead, with no report (SPEC §13.2).
     ///
     /// An already-inactive session row is not a reason to stop. The worker's `SessionEnd` hook races
     /// this call and writes `stopped` first often enough that bailing there strands the task in
     /// `running` with no report and nothing able to pick it up.
+    ///
+    /// A worker's grants are revoked whatever the row says, so a session Claude Code resumes on its own
+    /// can call no tool, and its hooks mark it as one the board ended (SPEC §8.5).
     @discardableResult
     public func terminate(
         sessionId: String, cause: SessionTermination, salvage: BranchSalvage? = nil
     ) throws -> Report? {
         try db.writer.write { db in
             guard let session = try AgentSession.fetchOne(db, key: sessionId) else { return nil }
+            if session.role == .worker { try TokenGrantStore.revokeAll(db, sessionId: sessionId) }
             let task = session.role == .worker
                 ? try session.taskId.flatMap { try Task.fetchOne(db, key: $0) }
                 : nil
@@ -739,12 +970,26 @@ public struct Board: Sendable {
                 try SessionStore.setState(db, sessionId, cause.sessionState, endedAt: .nowMillis)
             }
             try SessionStore.setStopReason(db, sessionId, reason)
-            // Every route out of a session lands here or in `complete`: a cap kill, a human stop,
-            // a vanished process, a failed setup, an acknowledged wind-down. A lock that outlived
-            // one of them would block the checkout with nobody behind it.
             try FileLockStore.releaseAll(db, sessionId: sessionId)
             guard let task else { return nil }
             let taskId = task.id
+
+            // SPEC §13.1, §13.2: the orchestrator never asked for a triage or follow-up check and nothing can
+            // reassign one, so an unfinished one is closed with no report and the follow-through loop decides.
+            if task.origin.isPullRequestReader {
+                if task.column != .done, task.column != .closed {
+                    try TaskStore.setBlocked(db, taskId, false, reason: nil)
+                    try TaskStore.close(db, taskId, reason: reason, by: "Agent Board", at: .nowMillis)
+                    _ = try ProgressStore.append(
+                        db, taskId: taskId, sessionId: sessionId, kind: .note,
+                        text: task.origin == .triage
+                            ? "Triage ended before every item had a verdict: \(reason)"
+                            : "Follow-up check ended before every item had a grade: \(reason)"
+                    )
+                }
+                return nil
+            }
+            if case .taskClosing = cause { return nil }
 
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             if let settledLine = try Self.settledLine(db, task: task) {
@@ -762,7 +1007,8 @@ public struct Board: Sendable {
             if cause.flagsTaskFailed {
                 try TaskStore.setFailed(db, taskId, true, reason: reason)
             }
-            let destination = Self.landingColumn(stranded: stranded, cause: cause, salvage: salvage)
+            let destination = task.origin == .fixRound && stranded
+                ? .ready : Self.landingColumn(stranded: stranded, cause: cause, salvage: salvage)
             if let destination {
                 try TaskStore.move(db, taskId, to: destination, before: nil)
             }
@@ -790,6 +1036,8 @@ public struct Board: Sendable {
         switch task.column {
         case .done:
             return "The task is in done; ending this session changed nothing on it."
+        case .closed:
+            return "The task is closed; ending this session changed nothing on it."
         case .ready where try ProgressStore.openReviewFindings(db, taskId: task.id) != nil:
             return "The task is back in ready with a reviewer's findings; ending this session changed nothing on it."
         case .ready where try SessionStore.activeHolder(db, taskId: task.id) == nil:
@@ -799,12 +1047,12 @@ public struct Board: Sendable {
         }
     }
 
-    /// SPEC §7, §10 Status: no session belongs running on a task in `done`, or in `ready` with no
+    /// SPEC §7, §10 Status: no session belongs running on a task in `done` or `closed`, or in `ready` with no
     /// other session on it, so `reconcile` and `SessionStart` never set one running there.
     public func isSettled(taskId: String, apartFrom sessionId: String) throws -> Bool {
         try db.reader.read { db in
             switch try Task.fetchOne(db, key: taskId)?.column {
-            case .done:
+            case .done, .closed:
                 return true
             case .ready:
                 let held = try Bool.fetchOne(
@@ -900,22 +1148,26 @@ public struct Board: Sendable {
         }
     }
 
+    /// `source` is a line saying where the proposal came from, written into its report after the id.
     @discardableResult
     public func propose(
         projectId: String, title: String, body: String?, rationale: String?, sessionId: String?,
-        epicId: String?
+        epicId: String?, acceptance: String? = nil, type: TaskType? = nil, origin: TaskOrigin = .workerProposal,
+        source: String? = nil
     ) throws -> Task {
         try db.writer.write { db in
             if let epicId {
                 _ = try Self.proposalEpic(db, epicId: epicId, projectId: projectId)
             }
             let task = try TaskStore.insert(
-                db, projectId: projectId, title: title, body: body, acceptance: nil, priority: nil,
-                column: .proposed, origin: .workerProposal, epicId: epicId
+                db, projectId: projectId, title: title, body: body, acceptance: acceptance, priority: nil,
+                column: .proposed, origin: origin, epicId: epicId, type: type
             )
             var lines = ["Proposed task: \(title)", "Task id: \(task.id)"]
+            if let source { lines.append(source) }
             if let epicId { lines.append("Proposed into epic: \(epicId)") }
             if let body, !body.isEmpty { lines.append(body) }
+            if let acceptance, !acceptance.isEmpty { lines.append("Acceptance: \(acceptance)") }
             if let rationale, !rationale.isEmpty { lines.append("Rationale: \(rationale)") }
             _ = try ReportStore.insert(
                 db, projectId: projectId, taskId: task.id, sessionId: sessionId, kind: .proposal,
@@ -1175,6 +1427,9 @@ public struct Board: Sendable {
                         + "set_epic(task_id) and no epic_id, and it stands alone on the board."
                 )
             }
+            if let held = HeldWorktree.paragraph(try Self.heldWorktrees(db, epicId: epicId)) {
+                lines.append(held)
+            }
             lines.append("Closed by: \(by.recorded)")
             return try ReportStore.insert(
                 db, projectId: epic.projectId, taskId: nil, sessionId: nil, kind: .decision,
@@ -1190,7 +1445,7 @@ public struct Board: Sendable {
         let unfinished = try Task
             .fetchAll(
                 db,
-                sql: "SELECT * FROM task WHERE epic_id = ? AND column_name != 'done' ORDER BY ordering",
+                sql: "SELECT * FROM task WHERE epic_id = ? AND column_name NOT IN ('done', 'closed') ORDER BY ordering",
                 arguments: [epicId]
             )
             .map { EpicUnfinishedTask(id: $0.id, title: $0.title, column: $0.column) }
@@ -1237,29 +1492,26 @@ public struct Board: Sendable {
         }
     }
 
-    /// True when the epic holds at least one task and every one of them is in `done`.
+    /// True when every task in the epic is `done` or `closed` and at least one is `done` (SPEC §5.2).
     public func epicReadyForIntegration(epicId: String) throws -> Bool {
         try db.reader.read { db in
             guard try Epic.exists(db, key: epicId) else {
                 throw BoardError.epicNotFound(epicId)
             }
-            let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM task WHERE epic_id = ?", arguments: [epicId]) ?? 0
-            let unfinished = try Int.fetchOne(
-                db,
-                sql: "SELECT COUNT(*) FROM task WHERE epic_id = ? AND column_name != 'done'",
-                arguments: [epicId]
-            ) ?? 0
-            return total > 0 && unfinished == 0
+            let columns = try TaskColumn.fetchAll(
+                db, sql: "SELECT column_name FROM task WHERE epic_id = ?", arguments: [epicId]
+            )
+            return EpicLane.taskCount(columns: columns).readyForIntegration
         }
     }
 
-    /// The epic this report finishes, if the task is the synthetic integrator task and the epic is
+    /// The epic this report integrates, if the task is the synthetic integrator task and the epic is
     /// still `integrating`; nil for every ordinary task.
-    static func epicMergedBy(_ db: Database, _ task: Task) throws -> String? {
+    static func epicIntegratedBy(_ db: Database, _ task: Task) throws -> Epic? {
         guard task.origin == .integration, let epicId = task.epicId,
-              try Epic.fetchOne(db, key: epicId)?.state == .integrating
+              let epic = try Epic.fetchOne(db, key: epicId), epic.state == .integrating
         else { return nil }
-        return epicId
+        return epic
     }
 
     static func settings(_ db: Database, projectId: String) throws -> ProjectSettings {
@@ -1294,6 +1546,17 @@ public struct Board: Sendable {
             sql: "SELECT id FROM task WHERE column_name = 'ready' AND id IN (\(placeholders)) ORDER BY ordering",
             arguments: StatementArguments(changed)
         )
+    }
+}
+
+public struct TaskClosure: Sendable, Equatable {
+    public var task: Task
+    /// Unfinished tasks that depend on the closed one. None of them becomes ready because of it.
+    public var waitingDependents: [Task]
+
+    public init(task: Task, waitingDependents: [Task]) {
+        self.task = task
+        self.waitingDependents = waitingDependents
     }
 }
 

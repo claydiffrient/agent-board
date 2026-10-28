@@ -4,7 +4,7 @@ import AppKit
 import Foundation
 import Observation
 
-/// One power assertion for the whole app, held while any session is live and released when the last
+/// One power assertion for the whole app, held while any worker is live and released when the last
 /// one ends, when the setting goes off, or when the app quits. SPEC §8.3.
 @Observable
 @MainActor

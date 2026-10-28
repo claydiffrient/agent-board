@@ -35,7 +35,7 @@ public struct JSONObjectString: Sendable, Equatable, ExpressibleByStringLiteral 
 
 public enum SessionConfigWriter {
     public static let httpHookEvents = [
-        "UserPromptSubmit", "PostToolUse", "Notification", "Stop", "SubagentStop",
+        "UserPromptSubmit", "PostToolUse", "Notification", "Stop", "StopFailure", "SubagentStop",
         "PreCompact", "SessionEnd",
     ]
     /// `PreToolUse` is the app-side half of the push/PR block (§8), of the `git commit` block a
@@ -45,6 +45,13 @@ public enum SessionConfigWriter {
     /// round trip measures 4.1ms p50 / 14.8ms p95 over loopback including the session write, which
     /// is not worth paying on every `Read` and `Grep` to mark a call that returns in milliseconds.
     public static let guardedPreToolUseMatcher = "Bash"
+    /// A triager's guard also sees the write tools, so they are denied in-process as well as by
+    /// `--disallowedTools` (SPEC §6).
+    public static let readOnlyPreToolUseMatcher = "Bash|Edit|MultiEdit|Write|NotebookEdit"
+
+    public static func configDir(supportDir: URL) -> URL {
+        supportDir.appendingPathComponent("sessions")
+    }
 
     public static func settingsURL(configDir: URL, configId: String) -> URL {
         configDir.appendingPathComponent("settings-\(configId).json")
@@ -70,12 +77,13 @@ public enum SessionConfigWriter {
         token: String,
         autoModeJSON: String? = nil,
         extraMcpServers: [String: JSONObjectString]? = nil,
-        fileLocks: Bool = false
+        fileLocks: Bool = false,
+        readOnly: Bool = false
     ) throws -> SessionConfigFiles {
         try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
 
         let settings = try settingsObject(
-            port: port, token: token, autoModeJSON: autoModeJSON, fileLocks: fileLocks
+            port: port, token: token, autoModeJSON: autoModeJSON, fileLocks: fileLocks, readOnly: readOnly
         )
         let mcp = try mcpConfigObject(port: port, token: token, extraMcpServers: extraMcpServers)
 
@@ -88,8 +96,42 @@ public enum SessionConfigWriter {
         return files
     }
 
+    static let verifierConfigPrefix = "verify-"
+
+    /// Walk me through it's MCP config (SPEC §13.4): the board server alone, under a fresh name, and
+    /// created 0600 rather than chmodded after the token is already on disk.
+    public static func writeVerifierMCPConfig(configDir: URL, port: Int, token: String) throws -> URL {
+        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        let url = configDir.appendingPathComponent("\(verifierConfigPrefix)\(UUID().uuidString.lowercased()).json")
+        let data = try JSONSerialization.data(
+            withJSONObject: mcpConfigObject(port: port, token: token, extraMcpServers: nil),
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        )
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard fd >= 0 else {
+            throw AgentRuntimeError("could not create \(url.path): \(String(cString: strerror(errno)))")
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        do {
+            try handle.write(contentsOf: data)
+            try handle.close()
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+        return url
+    }
+
+    /// Every verifier config left in `configDir`, which only a crash or a forced quit leaves behind.
+    public static func removeVerifierMCPConfigs(configDir: URL) {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: configDir.path)) ?? []
+        for name in names where name.hasPrefix(verifierConfigPrefix) && name.hasSuffix(".json") {
+            try? FileManager.default.removeItem(at: configDir.appendingPathComponent(name))
+        }
+    }
+
     static func settingsObject(
-        port: Int, token: String, autoModeJSON: String?, fileLocks: Bool = false
+        port: Int, token: String, autoModeJSON: String?, fileLocks: Bool = false, readOnly: Bool = false
     ) throws -> [String: Any] {
         let url = hookURL(port: port, token: token)
         let httpHook: [String: Any] = ["type": "http", "url": url, "timeout": 5]
@@ -98,7 +140,8 @@ public enum SessionConfigWriter {
             "command": "curl -s -m 5 -X POST -H 'Content-Type: application/json' --data-binary @- '\(url)' >/dev/null",
         ]
 
-        var preToolUse: [[String: Any]] = [["matcher": guardedPreToolUseMatcher, "hooks": [httpHook]]]
+        let guarded = readOnly ? readOnlyPreToolUseMatcher : guardedPreToolUseMatcher
+        var preToolUse: [[String: Any]] = [["matcher": guarded, "hooks": [httpHook]]]
         if fileLocks {
             // Its own entry rather than a wider matcher on the guard's: this one may hold the
             // response for the whole of `FileLockPolicy.waitTimeout`, and every Bash call would

@@ -106,7 +106,7 @@ public final class BoardServer: Sendable {
     @Sendable
     private func handleHook(request: Request, context: BasicRequestContext) async throws -> Response {
         guard let token = request.uri.queryParameters["token"].map(String.init),
-              let identity = await tokens.resolve(token: token)
+              let identity = await tokens.resolveIncludingRevoked(token: token)
         else {
             return unauthorized()
         }

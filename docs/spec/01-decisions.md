@@ -11,7 +11,7 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D4 | Tiered authority enforced at the token | Prompts are not a permission system | Flat authority |
 | D5 | Budgeted autonomy with caps | Recorded session ids + `--resume` make cap-kills non-destructive | Manual gate on every spawn |
 | D6 | Worktree per task, branch bound to task id | A retry sees what the previous attempt built | Worktree per agent session |
-| D7 | Fixed columns: Proposed → Backlog → Ready → Running → Review → Done | The orchestrator must be told which column is assignable | User-defined columns |
+| D7 | Fixed columns: Proposed → Backlog → Ready → Running → Review → Done, plus a terminal Closed beside Done for work retired without being done (§5) | The orchestrator must be told which column is assignable | User-defined columns; a closed flag on a task left in its column |
 | D8 | Workers commit and stop. They never push. The orchestrator may push and open a pull request, but only through named tools that each wait on a human approval | Nothing reaches a shared remote unattended; the last step of an epic stops being manual without handing an agent a shell it can aim anywhere | Worker opens a draft PR; unblocking `gh` in Bash for the orchestrator |
 | D9 | Reports queue in SQLite; app injects a fixed notice; orchestrator pulls | Worker text never enters the orchestrator's user-authority turn | Inject report text into PTY |
 | D10 | Epics group tasks and own the integration branch | Merge scope becomes a lookup, not a judgment call | Flat tasks |
@@ -23,8 +23,8 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D16 | Workers are `claude --bg` background sessions | Deletes process supervision, crash recovery, and scrollback from scope | App owns the PTYs |
 | D17 | Swift + SwiftUI | Literal reading of "native Mac app" | Tauri |
 | D18 | Runtime spike → board → orchestrator → epics → notes | The riskiest assumption is provable in 200 lines | Build everything |
-| D19 | The Terminal screen and worktree shells (§10) run with the human's own authority: `IntegrationGuard` and `--disallowedTools` deliberately do not gate them, and no Agent Board grant token may reach the shell's environment | A human typing `git push` is entitled to push — those mechanisms bound what an unattended agent may do under `--permission-mode auto`, and there is no agent here; a shell holding a grant token would let anything running in it act with that session's authority over the board | Route the shell through a worker-scoped grant |
-| D20 | A cross-project roster of specialized agents (§4), assigned a task with `assign_to_agent` and returned to the queue with `hand_off` (§6) | A rostered identity outlives any single task, and mediating handoff through the board queue keeps D6's worktree-per-task model instead of building a second coordination path | Hive's model: every agent works on `main`, and a privileged orchestrator arbitrates conflicts between them |
+| D19 | The Terminal screen and worktree shells (§10) run with the human's own authority: `IntegrationGuard` and `--disallowedTools` deliberately do not gate them, and no Agent Board grant token may reach the shell's environment. One deliberate exception: Walk me through it (§13.4) may hand the command it runs a `verifier` grant through the `{mcp_config}` placeholder — a file path on that command's line, never an environment variable — whose only writes are a task in Proposed and a `verify_failure` item on the window's own pull request, and which is revoked when the window's shell exits | A human typing `git push` is entitled to push — those mechanisms bound what an unattended agent may do under `--permission-mode auto`, and there is no agent here; a shell holding a grant token would let anything running in it act with that session's authority over the board | Route the shell through a worker-scoped grant |
+| D20 | A cross-project roster of archetypes (§4) — board-local, or read from `.claude/agents` definitions — assigned a task with `assign_to_agent` and returned to the queue with `hand_off` (§6) | The role outlives any single task even though no session can (a `claude --bg` session cannot move to another working directory), so each assignment instantiates the archetype in a fresh session, and mediating handoff through the board queue keeps D6's worktree-per-task model instead of building a second coordination path | Hive's model: every agent works on `main`, and a privileged orchestrator arbitrates conflicts between them |
 | D21 | An agent working a ticket owns making its own work mergeable into the epic branch: a conflict a sibling's already-accepted work left in its path, found when its own task resumes, is still that agent's to resolve (§5.2) | It is the one with the context to resolve a conflict it wakes up inside; the board never resolves one for it, and resolving it is deferred to neither a timer nor the integrator for that reason alone — a branch whose merge conflicted after it was already accepted stays the integrator's leftover work regardless (§5.2 step 3) | Board auto-resolves, or every conflict waits for integration |
 
 **D6 amended.** As first written, D6 said every task gets its own worktree and
@@ -71,6 +71,17 @@ branch, and there is no tool that merges a pull request.
 **The worker half of D8 is untouched.** Workers commit on their branch and stop.
 They never push, never open a pull request, and the two controls in §8 that
 enforce it are unchanged for them.
+
+**D8 amended again, for PR follow-through (§13).** The app, never a worker,
+may fast-forward push a round branch to the head ref of an open pull request
+the human authored, without a human approval. This is allowed only after the
+reviewer role has accepted the round, every item in the round is graded fixed
+or moot, and the project's tests pass (§13.1 publishing, §13.2 verdicts).
+Everything else about pushing is unchanged: creating a branch, opening a
+pull request, any non-fast-forward push, and any push to a pull request
+already verified all stay human-gated or forbidden, exactly as before this
+amendment. `push_branch` and `open_pull_request` (§6) are unaffected and still
+create an approval row per the amendment above.
 
 Pivots named at decision time, to be designed for but not built:
 

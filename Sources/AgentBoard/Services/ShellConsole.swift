@@ -29,7 +29,7 @@ final class ShellConsole {
     /// The shell the last start launched, so the UI can name it and a test can check it.
     private(set) var shellPath: String?
 
-    @ObservationIgnored let terminal: LocalProcessTerminalView
+    @ObservationIgnored let terminal: BoardTerminalView
     @ObservationIgnored private let projects: ProjectStore
     @ObservationIgnored private let baseEnvironment: [String: String]
     @ObservationIgnored private let processObserver = ProcessObserver()
@@ -43,10 +43,8 @@ final class ShellConsole {
         self.projectId = projectId
         projects = ProjectStore(db)
         self.baseEnvironment = baseEnvironment
-        terminal = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
-        terminal.nativeForegroundColor = .white
-        terminal.nativeBackgroundColor = NSColor(calibratedRed: 0x1e / 255, green: 0x1e / 255, blue: 0x2e / 255, alpha: 1)
-        terminal.caretColor = .systemGreen
+        terminal = BoardTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        TerminalAppearanceStore.shared.attach(terminal)
         terminal.processDelegate = processObserver
         processObserver.console = self
     }
