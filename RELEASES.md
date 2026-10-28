@@ -9,6 +9,43 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.9.0 — 2026-10-28
+
+- **Pull requests.** Project Settings → PR Follow-Through → Verification's
+  verify command gains an **Add board tools** button, which appends
+  `--mcp-config {mcp_config}` to it. With that in the command, opening
+  **Walk me through it** gives that session a narrow grant: it can propose
+  a task, read this project's notes, and record a verify failure against
+  the very pull request it's checking — nothing else, and the grant is
+  revoked the moment the window's shell exits or the window closes. A task
+  it proposes this way is labeled "From Walk me through it · owner/repo#N"
+  on its card and in the inspector, so you can tell where it came from.
+  Orchestrators can now ask to resume a parked pull request once they've
+  dealt with the parked reason — it reaches you as a pending approval
+  naming that reason alongside the orchestrator's own. PR Follow-Through →
+  Watch gains **Minimum battery to start a round (%)**, 50 by default and
+  blank for any charge — a settled round used to wait for AC power
+  outright, rather than any charge above a threshold. Follow-through's
+  automatic checks now read a pull request's current title and description
+  before grading an item against them, instead of the stale copy from
+  when the watch started, so an edit you made yourself no longer gets
+  re-flagged as unfixed.
+- **Sessions.** A worker whose turn was cut short by the Mac sleeping
+  mid-response is now resumed automatically once the Mac is fully awake,
+  instead of sitting idle until the 40-minute idle cap ends it — and it's
+  now exempt from that cap while it waits for wake, instead of often being
+  killed first on an overnight lid close. **Keep awake**, in each
+  project's status footer, now holds the Mac awake only while a worker or
+  reviewer is actually running, not for an idle or already-quit
+  orchestrator console; a stray orchestrator session left showing as live
+  after its console closed is now cleared at the next launch instead of
+  sitting there indefinitely.
+- **Projects.** Deleting a project whose tasks had any approvals no longer
+  fails with a database error.
+- **Reliability.** A long-running app could eventually fail to read a
+  session it had just spawned and leave that session running untracked;
+  both the leak behind it and the orphaned session are now fixed.
+
 ## 0.8.0 — 2026-10-25
 
 - **Process management.** At a Glance gets a new Processes view, next to
