@@ -335,7 +335,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         prWatches = PRWatchStore(db)
     }
 
-    private var sessionConfigDir: URL { appSupportDir.appendingPathComponent("sessions") }
+    private var sessionConfigDir: URL { SessionConfigWriter.configDir(supportDir: appSupportDir) }
 
     func start() async {
         do {
@@ -348,6 +348,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             lastError = describe(error)
         }
+        sweepVerifierGrants()
         failInterruptedSetups()
         stopOrphanedCoordinatorSessions()
         stopOrphanedOrchestratorSessions()
@@ -358,6 +359,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         lastOrphanReap = sleepLedger.reading().nowMillis
         observeFullWakes()
         startMetering()
+    }
+
+    /// No Walk me through it window outlives the app (SPEC §13.4), so every verifier grant and config
+    /// file still here is a leftover. Runs before `startup` completes, which the window awaits.
+    func sweepVerifierGrants() {
+        do {
+            try grants.revokeVerifierGrants()
+        } catch {
+            lastError = describe(error)
+        }
+        SessionConfigWriter.removeVerifierMCPConfigs(configDir: sessionConfigDir)
     }
 
     /// The other half of `start()`: releases the real port `server` bound and cancels the metering

@@ -691,14 +691,28 @@ final class PRWatchStoreTests: XCTestCase {
         settings.verifyCommand = "verify-example --pr {url}"
         XCTAssertEqual(settings.verifyCommand(for: url), "verify-example --pr \(url)")
         XCTAssertNil(settings.verifyCommand(for: url + ";touch x"))
+
+        settings.verifyCommand = #"claude "/review:verify {url}" --mcp-config {mcp_config}"#
+        XCTAssertEqual(
+            settings.verifyCommand(for: url, mcpConfig: "/support/it's/verify-1.json"),
+            #"claude "/review:verify \#(url)" --mcp-config '/support/it'\''s/verify-1.json'"#
+        )
+    }
+
+    func testAddBoardToolsAppliesOnlyToAClaudeTemplateWithoutThePlaceholderAndOnlyOnce() {
+        let added = PRFollowThroughSettings.withBoardTools(#"claude "/review:verify {url}""#)
+        XCTAssertEqual(added, #"claude "/review:verify {url}" --mcp-config {mcp_config}"#)
+        XCTAssertNil(PRFollowThroughSettings.withBoardTools(added ?? ""))
+        XCTAssertNil(PRFollowThroughSettings.withBoardTools("open {url}"))
+        XCTAssertNil(PRFollowThroughSettings.withBoardTools("claudette {url}"))
     }
 
     func testASlashCommandGetsItsClaudeFormAndAPathOrAClaudeCallDoesNot() {
         XCTAssertEqual(
             PRFollowThroughSettings.claudeForm(ofSlashCommand: " /review:verify {url} "),
-            #"claude "/review:verify {url}""#
+            #"claude "/review:verify {url}" --mcp-config {mcp_config}"#
         )
-        XCTAssertEqual(PRFollowThroughSettings.claudeForm(ofSlashCommand: #"/review "$x""#), #"claude "/review \"\$x\"""#)
+        XCTAssertEqual(PRFollowThroughSettings.claudeForm(ofSlashCommand: #"/review "$x""#), #"claude "/review \"\$x\"" --mcp-config {mcp_config}"#)
         XCTAssertNil(PRFollowThroughSettings.claudeForm(ofSlashCommand: "/usr/local/bin/verify {url}"))
         XCTAssertNil(PRFollowThroughSettings.claudeForm(ofSlashCommand: #"claude "/review:verify {url}""#))
         XCTAssertNil(PRFollowThroughSettings.claudeForm(ofSlashCommand: "/ {url}"))
