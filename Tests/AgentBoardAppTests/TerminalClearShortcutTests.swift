@@ -62,12 +62,15 @@ final class TerminalClearShortcutTests: XCTestCase {
         XCTAssertTrue(started, "the child never put its terminal in raw mode")
         fill(terminal)
         XCTAssertTrue(text(of: terminal).contains("line 1\n"), "the first line should be in scrollback before the clear")
+        let scroller = try XCTUnwrap(terminal.subviews.lazy.compactMap { $0 as? NSScroller }.first)
+        XCTAssertLessThan(scroller.knobProportion, 1)
 
         XCTAssertTrue(terminal.performKeyEquivalent(with: commandK(in: window)))
 
         let remaining = text(of: terminal)
         XCTAssertEqual(remaining.trimmingCharacters(in: .whitespacesAndNewlines), "")
         XCTAssertEqual(remaining.filter { $0 == "\n" }.count, terminal.getTerminal().rows, "scrollback survived the clear")
+        XCTAssertEqual(scroller.knobProportion, 1, "the scroller still sized its knob for the old scrollback")
         let delivered = await waitUntil { (try? Data(contentsOf: received)) == Data([0x0c]) }
         XCTAssertTrue(delivered, "the child read \(String(describing: try? Data(contentsOf: received))) instead of a form feed")
     }
