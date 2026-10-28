@@ -902,6 +902,9 @@ check is still running is refused, naming the commit being verified; nothing
 new starts. Each check's scratch worktree also has a name of its own, and
 leftovers a crash stranded under `refresh-<epic-id>` are removed before a new
 check starts — safe only because no other check of that epic can be running.
+An orphan reap (§5) leaves a running check's scratch worktree alone; an epic
+with no commits of its own fast-forwards, so that worktree sits on the base
+head and would otherwise read as merged.
 
 *Each step is bounded.* Creating the scratch worktree, the build and the test
 are each stopped once they run past the project's verification timeout

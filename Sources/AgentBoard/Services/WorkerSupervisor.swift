@@ -239,8 +239,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// a teardown hook never runs twice in one worktree (SPEC §3.1).
     @ObservationIgnored private var tearingDown: Set<String> = []
     @ObservationIgnored private var teardownWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
-    /// Worktree paths a spawn is setting up, from before it touches git until setup ends. A reap keeps
-    /// them, since a new worktree is clean and at its base, and a second spawn for the task is refused (SPEC §5).
+    /// Worktree paths a spawn is setting up, from before it touches git until setup ends, and a refresh
+    /// check's scratch checkout while it runs. A reap keeps them, since a new worktree is clean and at
+    /// its base, and a second spawn for the task is refused (SPEC §5).
     @ObservationIgnored private var placing: Set<String> = []
     /// Runs once a spawn's worktree exists and before its agent launches, so a test can act in that gap.
     @ObservationIgnored var afterCheckoutCreated: @MainActor () async -> Void = {}
@@ -794,6 +795,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         commands: VerificationCommands, manager: WorktreeManager, project: Project, run: RefreshRun
     ) async -> EpicRefresh {
         let isCancelled: @Sendable () -> Bool = { run.isCanceled }
+        let scratchName = "refresh-\(epicId)-\(UUID().uuidString.prefix(8).lowercased())"
+        // A fast-forward's scratch sits on the base head, which an orphan reap reads as merged.
+        let scratchPath = manager.worktreeRoot.appendingPathComponent(scratchName).path
+        placing.insert(scratchPath)
+        defer { placing.remove(scratchPath) }
         let verification: RefreshVerifier.Outcome
         do {
             verification = try await offMain {
@@ -801,7 +807,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     manager.removeScratch(path: leftover)
                 }
                 let scratch = try manager.createDetached(
-                    name: "refresh-\(epicId)-\(UUID().uuidString.prefix(8).lowercased())", commit: candidate,
+                    name: scratchName, commit: candidate,
                     timeout: TimeInterval(commands.timeoutSeconds), isCancelled: isCancelled
                 )
                 defer { manager.removeScratch(path: scratch) }

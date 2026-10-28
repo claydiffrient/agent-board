@@ -118,6 +118,30 @@ final class EpicRefreshTests: XCTestCase {
         XCTAssertTrue(try isAncestor(try head("main"), of: epic.branch))
     }
 
+    /// An epic with no commits of its own fast-forwards, so the check's scratch checkout sits on the
+    /// base head, which an orphan reap reads as merged.
+    func testAnOrphanReapDuringAFastForwardRefreshLeavesTheScratchCheckoutAlone() async throws {
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        try commit("main\n", to: "from-main.txt", on: "main")
+        let gate = FileManager.default.temporaryDirectory.appendingPathComponent("refresh-gate-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: gate) }
+        try setCommands(build: "until [ -f '\(gate.path)' ]; do sleep 0.1; done; test -f from-main.txt", test: "true")
+
+        let started = try await refresh().text
+        XCTAssertTrue(started.contains("Refresh started"), started)
+        var waited = 0
+        while try worktreeCount() < 2, waited < 300 {
+            try await _Concurrency.Task.sleep(for: .milliseconds(100))
+            waited += 1
+        }
+        await fixture.supervisor.reconcile(projectId: fixture.project.id)
+        try Data().write(to: gate)
+
+        let report = try await awaitRefreshReport()
+        XCTAssertTrue(report.contains("passed, then `true` passed"), report)
+        XCTAssertTrue(try isAncestor(try head("main"), of: epic.branch))
+    }
+
     func testTheRefreshCheckoutRunsTheRepositorysPostCheckoutHook() async throws {
         try fixture.manager.ensureBranch(epic.branch, from: "main")
         try commit("main\n", to: "from-main.txt", on: "main")
