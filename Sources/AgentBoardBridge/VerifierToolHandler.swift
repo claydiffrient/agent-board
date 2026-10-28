@@ -29,7 +29,7 @@ public final class VerifierToolHandler: ToolHandler {
                 + "verifying.",
             inputSchema: ToolSchema.object(
                 properties: [
-                    "title": ToolSchema.string(),
+                    "title": ToolSchema.string("One line, with no line breaks."),
                     "body": ToolSchema.string("What needs to be done and where."),
                     "acceptance": ToolSchema.string("How the human will know it is done."),
                     "type": OrchestratorToolHandler.typeSchema,
@@ -99,6 +99,9 @@ public final class VerifierToolHandler: ToolHandler {
 
     private func proposeTask(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
         let title = try ToolArguments.requiredString("title", in: arguments)
+        guard !title.contains(where: \.isNewline) else {
+            throw ToolError("A title must be one line: it may not contain a line break. Put the detail in body.")
+        }
         let type = try OrchestratorToolHandler.parseType(in: arguments, label: "type")
         let proposed = try board.propose(
             projectId: identity.projectId,
@@ -136,9 +139,11 @@ public final class VerifierToolHandler: ToolHandler {
 
     private func source(_ identity: TokenIdentity) throws -> String {
         guard let watch = try grantWatch(identity) else {
-            return "From Walk me through it; its pull request is no longer watched."
+            return ProposalProvenance.reportLine(pullRequest: nil)
         }
-        return "From Walk me through it on \(watch.repoOwner)/\(watch.repoName)#\(watch.number)."
+        return ProposalProvenance.reportLine(pullRequest: ProposalProvenance.pullRequest(
+            owner: watch.repoOwner, repo: watch.repoName, number: watch.number
+        ))
     }
 
     private func grantWatch(_ identity: TokenIdentity) throws -> PRWatch? {

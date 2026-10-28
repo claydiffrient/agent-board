@@ -9,6 +9,7 @@ struct TaskBoardView: View {
     @State private var tasks = Observed<[BoardTask]>([])
     @State private var sessions = Observed<[AgentSession]>([])
     @State private var commentCounts = Observed<[String: Int]>([:])
+    @State private var verifyPullRequests = Observed<[String: String]>([:])
     @State private var epics = Observed<[Epic]>([])
     @State private var selectedTaskId: String?
     @State private var showNewTask = false
@@ -207,6 +208,9 @@ struct TaskBoardView: View {
             await commentCounts.run(CommentStore(env.db).observeCounts(projectId: project.id), in: env.db.reader)
         }
         .task(id: project.id) {
+            await verifyPullRequests.run(ProposalProvenance.observePullRequests(projectId: project.id), in: env.db.reader)
+        }
+        .task(id: project.id) {
             let projectId = project.id
             let observation = ValueObservation.tracking { db -> [Epic] in
                 try Epic.fetchAll(
@@ -279,6 +283,7 @@ struct TaskBoardView: View {
                     allTasks: visibleTasks,
                     sessions: sessionsByTask[task.id] ?? [],
                     drafts: drafts,
+                    verifyPullRequest: verifyPullRequests.value[task.id],
                     onClose: { selectedTaskId = nil }
                 )
                 .inspectorColumnWidth(min: 300, ideal: 360)
@@ -509,6 +514,7 @@ struct TaskBoardView: View {
                     latestSession: taskSessions.first,
                     isSelected: task.id == selectedTaskId,
                     commentCount: commentCounts.value[task.id] ?? 0,
+                    verifyPullRequest: verifyPullRequests.value[task.id],
                     onAccept: { accept(task.id) },
                     onReopen: { reopen(task.id) }
                 )

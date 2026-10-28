@@ -8,6 +8,7 @@ struct TaskCardView: View {
     let latestSession: AgentSession?
     let isSelected: Bool
     var commentCount = 0
+    var verifyPullRequest: String?
     let onAccept: () -> Void
     let onReopen: () -> Void
 
@@ -33,6 +34,13 @@ struct TaskCardView: View {
                         .foregroundStyle(.secondary)
                         .help(commentCount == 1 ? "1 comment" : "\(commentCount) comments")
                 }
+            }
+
+            if task.column == .proposed,
+               let provenance = ProposalProvenance.label(origin: task.origin, pullRequest: verifyPullRequest) {
+                Label(provenance, systemImage: "checklist")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             if let epicTitle {
