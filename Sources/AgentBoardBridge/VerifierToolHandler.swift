@@ -2,9 +2,9 @@ import AgentBoardCore
 import AgentBoardServer
 import Foundation
 
-/// The capability a Walk me through it session holds (SPEC §6): propose a task into Proposed and
-/// read notes, in the grant's project only. The pull request it names comes from the grant's
-/// `pr_watch_id`, never from an argument.
+/// The capability a Walk me through it session holds (SPEC §6): propose a task into Proposed, record a
+/// verify failure on its own pull request, and read notes, in the grant's project only. The pull request
+/// comes from the grant's `pr_watch_id`, never from an argument.
 public final class VerifierToolHandler: ToolHandler {
     private let grants: TokenGrantStore
     private let watches: PRWatchStore
@@ -39,6 +39,28 @@ public final class VerifierToolHandler: ToolHandler {
             )
         ),
         ToolDescriptor(
+            name: "add_pr_item",
+            description: "Report a failure found while verifying the pull request this session is verifying, so "
+                + "Agent Board's PR follow-through fixes it. The body becomes a `verify_failure` item on that pull "
+                + "request and goes through triage like review feedback. A pull request that is ready to verify goes "
+                + "back to settling; one already verified is frozen, so the failure waits as a decision for the "
+                + "human instead of starting a fix round. It always lands on this session's pull request; no "
+                + "argument names another. Refused once that pull request is merged, closed or no longer watched. "
+                + "Say what you did, what you expected and what happened.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "body": ToolSchema.string(
+                        "The failure, as a reviewer would write it.", maxLength: PRWatchStore.maxVerifyFailureLength
+                    ),
+                    "answers": ToolSchema.string(
+                        "Optional: the review this item answers, as its GraphQL node id, or the reviewer's login. "
+                            + "Nothing is read from the body."
+                    ),
+                ],
+                required: ["body"]
+            )
+        ),
+        ToolDescriptor(
             name: "search_notes",
             description: "Full-text search this project's shared notes on Agent Board and return the matches as id, "
                 + "title and current version. Use read_note to see a match in full.",
@@ -65,11 +87,13 @@ public final class VerifierToolHandler: ToolHandler {
         switch name {
         case "propose_task":
             return try await proposeTask(arguments, identity: identity)
+        case "add_pr_item":
+            return try addPRItem(arguments, identity: identity)
         case "search_notes", "read_note":
             return try notes.call(name, arguments: arguments, identity: identity)
         default:
             throw ToolError("Unknown tool: \(name). A Walk me through it session can call propose_task, "
-                + "search_notes and read_note.")
+                + "add_pr_item, search_notes and read_note.")
         }
     }
 
@@ -96,10 +120,31 @@ public final class VerifierToolHandler: ToolHandler {
         ]))
     }
 
+    private func addPRItem(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+        let body = try ToolArguments.requiredString("body", in: arguments)
+        guard let watch = try grantWatch(identity) else {
+            throw ToolError("This session's pull request is no longer watched. Nothing was recorded.")
+        }
+        guard !watch.state.isTerminal else {
+            throw ToolError("\(watch.repoOwner)/\(watch.repoName)#\(watch.number) is \(watch.state.rawValue). "
+                + "Nothing was recorded.")
+        }
+        return try OrchestratorToolHandler.recordVerifyFailure(
+            on: watch, body: body, arguments: arguments, watches: watches
+        )
+    }
+
     private func source(_ identity: TokenIdentity) throws -> String {
+        guard let watch = try grantWatch(identity) else {
+            return "From Walk me through it; its pull request is no longer watched."
+        }
+        return "From Walk me through it on \(watch.repoOwner)/\(watch.repoName)#\(watch.number)."
+    }
+
+    private func grantWatch(_ identity: TokenIdentity) throws -> PRWatch? {
         guard let watchId = try grants.lookup(token: identity.token)?.prWatchId,
               let watch = try watches.get(watchId), watch.projectId == identity.projectId
-        else { return "From Walk me through it; its pull request is no longer watched." }
-        return "From Walk me through it on \(watch.repoOwner)/\(watch.repoName)#\(watch.number)."
+        else { return nil }
+        return watch
     }
 }

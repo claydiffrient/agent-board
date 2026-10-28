@@ -206,8 +206,8 @@ public enum TokenScope: String, Codable, Sendable, CaseIterable, Equatable, Data
     case coordinator
     /// A PR triager (SPEC §6): reads its own watch's items and writes their verdicts, nothing else.
     case triager
-    /// A human's Walk me through it session (SPEC §6): proposes tasks into its project and reads its
-    /// notes. It has no session row and is never heard at `/hooks`.
+    /// A human's Walk me through it session (SPEC §6): proposes tasks into its project, records verify
+    /// failures on its own watch, and reads its notes. It has no session row and is never heard at `/hooks`.
     case verifier
 }
 

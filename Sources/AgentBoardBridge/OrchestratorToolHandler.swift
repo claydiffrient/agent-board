@@ -1033,6 +1033,13 @@ public final class OrchestratorToolHandler: ToolHandler {
         guard let watch = try watches.liveWatch(url: url, projectId: identity.projectId) else {
             throw ToolError("\(url) is not an open pull request this project watches.")
         }
+        return try Self.recordVerifyFailure(on: watch, body: body, arguments: arguments, watches: watches)
+    }
+
+    /// The one path both `add_pr_item`s take, so the orchestrator's and a verifier's call move a watch the same way.
+    static func recordVerifyFailure(
+        on watch: PRWatch, body: String, arguments: JSONValue, watches: PRWatchStore
+    ) throws -> ToolResult {
         let item: PRItem
         do {
             item = try watches.addVerifyFailure(

@@ -32,7 +32,8 @@ taken. The port and each session's token are written into that session's
 generated `--mcp-config` and `--settings` files, never its environment. The one
 config handed to a process not spawned as a session is Walk me through it's
 `<support>/sessions/verify-<random>.json` (§13.4): a 0600 file holding a
-propose-only `verifier` grant, named on the verify command's own line through
+`verifier` grant, which can propose a task or record a verify failure on that
+one pull request, named on the verify command's own line through
 `{mcp_config}`, and deleted with its grant revoked when the window's shell
 exits or the window closes. Tokens in these files are readable by any process
 running as the same user; the OS user, not token secrecy, is the boundary.
