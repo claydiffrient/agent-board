@@ -72,6 +72,9 @@ final class CrossProjectBoundaryTests: XCTestCase {
     /// A verifier's tools that take an id and must refuse one from another project.
     static let verifierRefusesForeignId: Set<String> = ["read_note"]
 
+    /// A verifier's tools that reach only the grant's own watch, whatever URL they are handed.
+    static let verifierReachesOnlyItsWatch: Set<String> = ["add_pr_item"]
+
     override func setUpWithError() throws {
         f = try BridgeFixture.make()
         try f.session(try XCTUnwrap(f.orchestratorIdentity.sessionId), role: .orchestrator)
@@ -722,7 +725,8 @@ final class CrossProjectBoundaryTests: XCTestCase {
     func testTheVerifierIsOfferedOnlyItsClassifiedToolsAndRefusedEveryOther() async throws {
         let offered = Set(await f.scoped.tools(for: verifierIdentity).map(\.name))
         XCTAssertEqual(
-            offered, Self.verifierScopedByIdentity.union(Self.verifierRefusesForeignId),
+            offered,
+            Self.verifierScopedByIdentity.union(Self.verifierRefusesForeignId).union(Self.verifierReachesOnlyItsWatch),
             "a tool was added to the verifier surface without a cross-project test in this file"
         )
         let everyTool = Set(
@@ -745,6 +749,35 @@ final class CrossProjectBoundaryTests: XCTestCase {
         let found = try await f.call("search_notes", ["query": .string("private")], as: verifierIdentity).text
         XCTAssertTrue(found.contains(ours.id), found)
         XCTAssertFalse(found.contains(theirs.id), found)
+    }
+
+    func testTheVerifiersAddPRItemLandsOnItsOwnWatchWhateverURLItIsHanded() async throws {
+        let watches = PRWatchStore(f.db)
+        func watch(_ number: Int, in projectId: String) throws -> PRWatch {
+            let url = "https://github.com/example-org/app/pull/\(number)"
+            let watch = try watches.upsert(projectId: projectId, snapshot: PRSnapshot(
+                repoOwner: "example-org", repoName: "app", number: number, url: url, title: "PR \(number)",
+                headRef: "b\(number)", headOid: String(repeating: "c", count: 40), baseRef: "main"
+            ))
+            try watches.setState(.readyToVerify, watchId: watch.id)
+            return watch
+        }
+        let ours = try watch(1, in: f.project.id)
+        let sibling = try watch(2, in: f.project.id)
+        let theirs = try watch(3, in: other.id)
+        let grant = try TokenGrantStore(f.db).issueVerifier(projectId: f.project.id, prWatchId: ours.id)
+        let identity = TokenIdentity(token: grant.token, scope: .verifier, projectId: f.project.id)
+
+        for target in [sibling, theirs] {
+            _ = try await f.call("add_pr_item", [
+                "pr_url": .string(target.url), "body": .string("Broken."),
+            ], as: identity)
+        }
+
+        XCTAssertEqual(try watches.items(watchId: ours.id).count, 2)
+        XCTAssertEqual(try watches.items(watchId: sibling.id), [])
+        XCTAssertEqual(try watches.items(watchId: theirs.id), [])
+        XCTAssertEqual(try watches.get(theirs.id)?.state, .readyToVerify)
     }
 
     // MARK: An unknown id reads the same as a foreign one, deliberately

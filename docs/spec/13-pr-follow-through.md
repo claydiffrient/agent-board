@@ -474,9 +474,12 @@ settling to triage them.
 
 **Verify failures (phase 4).** What the human finds while verifying a PR by
 hand re-enters the loop as an item of kind `verify_failure`, recorded either by
-the **Send back** row action (§13.4) or by an agent through the orchestrator's
+the **Send back** row action (§13.4), by an agent through the orchestrator's
 `add_pr_item(pr_url, body, answers?)` (§6), which a manual-verification skill's agent
-calls. The item has no author, path or URL, and its node id is
+calls, or by a Walk me through it session through the verifier's
+`add_pr_item(body, answers?)` (§6), which records it on the window's own watch
+only. Both tools take the same store path, so the state moves below are the
+same whichever recorded it. The item has no author, path or URL, and its node id is
 `verify:<uuid>`, so it never collides with a GitHub id. An orchestrator that
 files a reviewer's requests this way, because they never became an item of
 their own, passes `answers`: the review's node id or the reviewer's login,

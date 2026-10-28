@@ -194,18 +194,22 @@ change to its disposable checkout.
 Held by a human's Walk me through it session (§13.4), not by a worker: the
 grant has `session_id` NULL, no `agent_session` row, and its `pr_watch_id`
 names the watch the window was opened on. Nothing about it is metered,
-rostered, capped or idle-capped, and `/hooks` refuses it (§7). Its whole
-write is one more row in Proposed, which a human promotes.
+rostered, capped or idle-capped, and `/hooks` refuses it (§7). It writes
+two things: a row in Proposed, which a human promotes, and a verify failure on
+its own watch, which follow-through triages.
 
 | Tool | Effect |
 |---|---|
 | `propose_task(title, body, acceptance, type, rationale)` | Inserts a task into `proposed` in the grant's project with `origin = verify_session`, carrying `acceptance` and `type`. `type` is validated as `create_task`'s is, and any other value is refused with the valid list. The proposal report names the pull request as `owner/repo#N`, read off the grant's `pr_watch_id`, never off the arguments. The description names Agent Board as the native macOS app that manages this project's board, and says the task waits in Proposed for the human to promote it |
+| `add_pr_item(body, answers?)` | The orchestrator's `add_pr_item` with no `pr_url`: the watch is the grant's `pr_watch_id`, so no argument reaches another pull request, and the item goes through the same store path, so each watch state moves exactly as the orchestrator's call moves it. Refused, writing nothing, for a merged or closed watch, a watch deleted since the window opened (`pr_watch_id` NULL), a blank body, and a body over 4000 characters |
 | `search_notes(query)`, `read_note(id)` | The worker's note reads, over the grant's project only. A note of another project reads as not in this project |
 
 Every other tool name is refused as unknown. `list_tasks`, `get_task`,
-comments, note writes, `create_task` and `add_pr_item` are withheld on
-purpose: duplicate-checking happens at promotion, and nothing written after
-reading untrusted pull request text skips the human's gate.
+comments, note writes and `create_task` are withheld on purpose:
+duplicate-checking happens at promotion, and nothing written after reading
+untrusted pull request text reaches the backlog without the human's gate. A
+verify failure goes through triage, as one the orchestrator records does, and
+on a verified watch it waits as a frozen decision for the human.
 
 ### Orchestrator scope
 
