@@ -237,8 +237,10 @@ same task update as its body and model. Changing it doesn't touch a review
 already under way; the task's next completion routes by the new type.
 
 A task proposed through a `verifier` grant (origin `verify_session`, §6) says
-where it came from: its card in `proposed`, and its inspector in any column,
-show "From Walk me through it · `owner/repo#N`". The pull request is read back
+where it came from: its card in `proposed` shows "From Walk me through it ·
+`owner/repo#N`", and its inspector in any column shows "From Walk me through
+it" with `owner/repo#N` on the line below, so a narrow inspector wraps rather
+than cutting the pull request off. The pull request is read back
 from the line the verifier's `propose_task` writes into the proposal report,
 which names the grant's `pr_watch_id` watch, so it survives that watch being
 deleted; when the watch was already gone the line reads "From Walk me through

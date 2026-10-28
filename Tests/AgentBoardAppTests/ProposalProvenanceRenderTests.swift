@@ -46,18 +46,18 @@ final class ProposalProvenanceRenderTests: XCTestCase {
         .frame(width: 320)
         let cardText = try ocr(cards, size: CGSize(width: 320, height: 240))
         let verifiedCard = try text(between: "Empty state card", and: "Lint cleanup", in: cardText)
-        XCTAssertTrue(verifiedCard.contains("Walk me through it"), "verify card read as: \(verifiedCard)")
-        XCTAssertTrue(verifiedCard.contains("example-org/app#42"), "verify card read as: \(verifiedCard)")
+        XCTAssertTrue(verifiedCard.contains(fold("Walk me through")), "verify card read as: \(verifiedCard)")
+        XCTAssertTrue(verifiedCard.contains(fold("app#42")), "verify card read as: \(verifiedCard)")
         let workerCard = try text(between: "Lint cleanup", and: nil, in: cardText)
-        XCTAssertFalse(workerCard.contains("Walk me through"), "worker card read as: \(workerCard)")
+        XCTAssertFalse(workerCard.contains(fold("Walk me through")), "worker card read as: \(workerCard)")
 
         let inspector = TaskInspectorView(
             task: verified, allTasks: [verified], sessions: [], drafts: TaskDraftCache(),
             verifyPullRequest: pullRequests[verified.id], onClose: {}
         )
-        let detail = try ocr(inspector, size: CGSize(width: 420, height: 600)).joined(separator: " | ")
-        XCTAssertTrue(detail.contains("Walk me through it"), "detail read as: \(detail)")
-        XCTAssertTrue(detail.contains("example-org/app#42"), "detail read as: \(detail)")
+        let detail = fold(try ocr(inspector, size: CGSize(width: 300, height: 600)).joined(separator: "\n"))
+        XCTAssertTrue(detail.contains(fold("Walk me through")), "detail read as: \(detail)")
+        XCTAssertTrue(detail.contains(fold("app#42")), "detail read as: \(detail)")
     }
 
     /// Recognized lines top to bottom. SwiftUI `Text` leaves no string in the AppKit view tree.
@@ -78,9 +78,15 @@ final class ProposalProvenanceRenderTests: XCTestCase {
             .compactMap { $0.topCandidates(1).first?.string }
     }
 
+    /// Lowercased, with I, l and 1 made one character: the CI runner's OCR reads "it" as "It" and "verify" as "verlfy".
+    private func fold(_ text: String) -> String {
+        String(text.lowercased().map { "i1".contains($0) ? "l" : $0 })
+    }
+
     private func text(between start: String, and end: String?, in lines: [String]) throws -> String {
-        let from = try XCTUnwrap(lines.firstIndex { $0.contains(start) }, "\"\(start)\" not found in: \(lines)")
-        let to = end.flatMap { end in lines.firstIndex { $0.contains(end) } } ?? lines.endIndex
-        return lines[from..<max(from, to)].joined(separator: " | ")
+        let folded = lines.map(fold)
+        let from = try XCTUnwrap(folded.firstIndex { $0.contains(fold(start)) }, "\"\(start)\" not found in: \(lines)")
+        let to = end.flatMap { end in folded.firstIndex { $0.contains(fold(end)) } } ?? folded.endIndex
+        return folded[from..<max(from, to)].joined(separator: "\n")
     }
 }

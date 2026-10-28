@@ -143,11 +143,19 @@ struct TaskInspectorView: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
-            if let provenance = ProposalProvenance.label(origin: task.origin, pullRequest: verifyPullRequest) {
-                Label(provenance, systemImage: "checklist")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+            if let provenance = ProposalProvenance.label(origin: task.origin, pullRequest: nil) {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(provenance)
+                        if let verifyPullRequest { Text(verifyPullRequest) }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "checklist")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
             }
             if let reason = task.blockedReason ?? task.failureReason {
                 Text(reason)
