@@ -41,7 +41,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
     public var dailyBudgetUSD: Double? = nil
     /// The charge a round needs to start on battery (SPEC §13.3); nil starts one at any charge.
     public var minBatteryPercent: Int? = 50
-    /// A command template with `{url}`, run by "Walk me through it".
+    /// A command template with `{url}` and optionally `{mcp_config}`, run by "Walk me through it".
     public var verifyCommand: String? = nil
     public var postFactualReplies: Bool = false
     /// When `postFactualReplies` was last turned on. Stamped by `ProjectStore.updateSettings`; only items
@@ -92,16 +92,30 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         return label.isEmpty ? nil : label
     }
 
-    /// `verifyCommand` with `{url}` replaced, for Walk me through it. Nil without a template, and for
-    /// a URL holding anything a shell would read as syntax: the template is run by a shell as written.
-    public func verifyCommand(for url: String) -> String? {
-        let template = verifyCommand?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !template.isEmpty, !url.isEmpty, url.allSatisfy(Self.isShellInert) else { return nil }
-        return template.replacingOccurrences(of: "{url}", with: url)
+    public static let mcpConfigPlaceholder = "{mcp_config}"
+    /// Last on the line because `--mcp-config` is variadic and would swallow a prompt after it.
+    public static let boardToolsSuffix = " --mcp-config \(mcpConfigPlaceholder)"
+
+    /// Whether Walk me through it hands this template's command a verifier grant (SPEC §13.4).
+    public static func namesMCPConfig(_ template: String) -> Bool {
+        template.contains(mcpConfigPlaceholder)
     }
 
-    /// `claude "<command>"` for a verify command typed as a Claude Code slash command, which a shell
-    /// would run as a file path (SPEC §13.4); nil for anything else, an absolute path included.
+    /// `verifyCommand` with `{url}` replaced, and `{mcp_config}` with `mcpConfig` single-quoted when given,
+    /// for Walk me through it. Nil without a template, and for a URL holding anything a shell would read as
+    /// syntax: the template is run by a shell as written.
+    public func verifyCommand(for url: String, mcpConfig: String? = nil) -> String? {
+        let template = verifyCommand?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !template.isEmpty, !url.isEmpty, url.allSatisfy(Self.isShellInert) else { return nil }
+        let command = template.replacingOccurrences(of: "{url}", with: url)
+        guard let mcpConfig else { return command }
+        let quoted = "'" + mcpConfig.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+        return command.replacingOccurrences(of: Self.mcpConfigPlaceholder, with: quoted)
+    }
+
+    /// `claude "<command>" --mcp-config {mcp_config}` for a verify command typed as a Claude Code slash
+    /// command, which a shell would run as a file path (SPEC §13.4); nil for anything else, an absolute
+    /// path included.
     public static func claudeForm(ofSlashCommand command: String) -> String? {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let first = trimmed.split(whereSeparator: \.isWhitespace).first,
@@ -112,7 +126,16 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
             if "\\\"$`".contains(c) { quoted.append("\\") }
             quoted.append(c)
         }
-        return "claude \"\(quoted)\""
+        return "claude \"\(quoted)\"" + boardToolsSuffix
+    }
+
+    /// The template with `boardToolsSuffix` appended, for a `claude` template that lacks `{mcp_config}`;
+    /// nil for anything else (SPEC §13.4).
+    public static func withBoardTools(_ template: String) -> String? {
+        let trimmed = template.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.split(whereSeparator: \.isWhitespace).first == "claude", !namesMCPConfig(trimmed)
+        else { return nil }
+        return trimmed + boardToolsSuffix
     }
 
     private static func isShellInert(_ c: Character) -> Bool {

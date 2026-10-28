@@ -474,9 +474,12 @@ settling to triage them.
 
 **Verify failures (phase 4).** What the human finds while verifying a PR by
 hand re-enters the loop as an item of kind `verify_failure`, recorded either by
-the **Send back** row action (§13.4) or by an agent through the orchestrator's
+the **Send back** row action (§13.4), by an agent through the orchestrator's
 `add_pr_item(pr_url, body, answers?)` (§6), which a manual-verification skill's agent
-calls. The item has no author, path or URL, and its node id is
+calls, or by a Walk me through it session through the verifier's
+`add_pr_item(body, answers?)` (§6), which records it on the window's own watch
+only. Both tools take the same store path, so the state moves below are the
+same whichever recorded it. The item has no author, path or URL, and its node id is
 `verify:<uuid>`, so it never collides with a GitHub id. An orchestrator that
 files a reviewer's requests this way, because they never became an item of
 their own, passes `answers`: the review's node id or the reviewer's login,
@@ -702,7 +705,7 @@ battery minimum aside, so a project that never opts in pays nothing:
 | `minBatteryPercent` | 50 — on battery, a round starts only at this charge or above; `nil` starts one at any charge and 100 effectively requires AC. On AC a round always can. Saved clamped to 0–100 (§13.1) | 4 |
 | `verificationLabel` | `nil` (the human's own merge is the verification) | 1 |
 | `requireApproval` | `true` | 1 |
-| `verifyCommand` | `nil` — a shell command template with `{url}` that the Walk me through it row action runs in a terminal through an interactive login shell; a Claude command goes through `claude`, e.g. `claude "/review:verify {url}"` | 1 (button shown only once a value is set) |
+| `verifyCommand` | `nil` — a shell command template with `{url}`, and optionally `{mcp_config}`, that the Walk me through it row action runs in a terminal through an interactive login shell; a Claude command goes through `claude`, e.g. `claude "/review:verify {url}" --mcp-config {mcp_config}`, the flag last because `--mcp-config` is variadic. The field offers **Add board tools** for a template whose first word is `claude` and which lacks `{mcp_config}`; it appends ` --mcp-config {mcp_config}` | 1 (button shown only once a value is set) |
 | `postFactualReplies` | `false` | 3 (no replies exist before phase 3) |
 | `reRequestReviews` | `false` — re-requests review after a pushed round, which notifies reviewers as the user (§13.2) | 4 |
 | `roles.triage` / `roles.fixer` / `roles.reviewer` / `roles.followupCheck` | each `{rosterAgentId?, model?}`, unset | 2 (`triage`), 3 (the rest) |
@@ -791,7 +794,19 @@ on at all.
   reads `.zshrc` and finds what a terminal would — `claude` in `~/.local/bin`
   included — in the project's checkout, with the
   human-shell environment the Worktree Shell window uses: no board token and no
-  agent-session variables. It does not type into the project's Terminal
+  agent-session variables in it. The one exception (D19, §1) is a template
+  naming `{mcp_config}`: opening the window issues a `verifier` grant (§6)
+  bound to the watch and its project, writes
+  `<support>/sessions/verify-<random>.json` (0600) holding the board server's
+  entry with that token and the server's current port, and substitutes the
+  file's single-quoted path. The token travels only in that file, named on
+  that one command line; the environment is unchanged. No
+  `--strict-mcp-config` is added, so the session keeps the user's own MCP
+  servers beside `agent-board`. The grant is revoked and the file deleted
+  when the shell exits or the window closes, whichever comes first, and app
+  launch revokes every live `verifier` grant and deletes every leftover
+  `verify-*.json`. A template without `{mcp_config}` gets no grant and no
+  file. It does not type into the project's Terminal
   screen, whose shell may be mid-command, and nothing in the app writes into a
   human's PTY on its behalf. The URL is substituted as written, so one holding
   anything but letters, digits and `:/._-` is refused and the button is
@@ -801,7 +816,8 @@ on at all.
   settings field notes any value whose first word starts with `/` and holds
   no other `/` — an absolute path such as `/usr/local/bin/verify` is not
   flagged — and offers **Use claude "…"**, which rewrites the field to
-  `claude "/review:verify {url}"` (`PRFollowThroughSettings.claudeForm`).
+  `claude "/review:verify {url}" --mcp-config {mcp_config}`
+  (`PRFollowThroughSettings.claudeForm`).
   The Verify Pull Request window never rewrites the command at run time;
   when such a command exits non-zero within its first second and no file
   exists at its first word, the window shows the same `claude "…"` form
@@ -853,7 +869,8 @@ on at all.
   Advanced (§10), holds every setting in §13.3. Its sections are **Watch**
   (`enabled`, settle window, round cap, daily budget — empty means the spawn
   caps), **Verification** (label — empty means the merge verifies — required
-  approval, the verify command with its `{url}` placeholder, and **Checks
+  approval, the verify command with its `{url}` and `{mcp_config}`
+  placeholders and **Add board tools**, and **Checks
   that wait on verification**, a comma-separated `checksAwaitingVerification`
   field whose save trims names and drops blanks and repeats),
   **Replies** (`postFactualReplies`, captioned with which verdicts count as

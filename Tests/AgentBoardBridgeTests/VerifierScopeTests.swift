@@ -40,11 +40,13 @@ final class VerifierScopeTests: XCTestCase {
         f = nil
     }
 
-    func testTheSurfaceIsThreeToolsAndNoResourcesOrPrompts() async throws {
+    func testTheSurfaceIsFourToolsAndNoResourcesOrPrompts() async throws {
         let listed = try await rpcResult("tools/list")
         let tools = try XCTUnwrap(listed["tools"] as? [[String: Any]])
-        XCTAssertEqual(Set(tools.compactMap { $0["name"] as? String }), ["propose_task", "search_notes", "read_note"])
-        XCTAssertEqual(tools.count, 3)
+        XCTAssertEqual(
+            Set(tools.compactMap { $0["name"] as? String }), ["propose_task", "add_pr_item", "search_notes", "read_note"]
+        )
+        XCTAssertEqual(tools.count, 4)
         let propose = try XCTUnwrap(tools.first { $0["name"] as? String == "propose_task" })
         let description = try XCTUnwrap(propose["description"] as? String)
         XCTAssertTrue(description.contains("Agent Board, the native macOS app"), description)
@@ -97,6 +99,46 @@ final class VerifierScopeTests: XCTestCase {
         let text = try toolText(result)
         for type in TaskType.allCases { XCTAssertTrue(text.contains(type.rawValue), text) }
         XCTAssertEqual(try f.tasks.list(projectId: f.project.id, column: .proposed), [])
+    }
+
+    func testAddPRItemMovesItsOwnWatchAsTheOrchestratorsCallDoes() async throws {
+        let watches = PRWatchStore(f.db)
+        try watches.setState(.readyToVerify, watchId: watch.id)
+        let ready = try await callTool("add_pr_item", ["body": "Saving drops the second field."])
+        XCTAssertEqual(ready["isError"] as? Bool, false, "\(ready)")
+        XCTAssertEqual(try watches.items(watchId: watch.id).map(\.kind), [.verifyFailure])
+        XCTAssertEqual(try watches.get(watch.id)?.state, .settling)
+
+        try watches.setState(.verified, watchId: watch.id)
+        let verified = try await callTool("add_pr_item", ["body": "The empty state never shows."])
+        XCTAssertEqual(verified["isError"] as? Bool, false, "\(verified)")
+        XCTAssertEqual(try watches.items(watchId: watch.id).map(\.isOpenDecision), [false, true])
+        XCTAssertEqual(try watches.get(watch.id)?.state, .verified)
+    }
+
+    func testAddPRItemRefusesABadBodyOrAFinishedWatchAndWritesNothing() async throws {
+        let watches = PRWatchStore(f.db)
+        let oversize = String(repeating: "x", count: PRWatchStore.maxVerifyFailureLength + 1)
+        for body in ["   ", oversize] {
+            let result = try await callTool("add_pr_item", ["body": body])
+            XCTAssertEqual(result["isError"] as? Bool, true, "\(result)")
+        }
+        for state in [PRWatchState.merged, .closed] {
+            try watches.setState(state, watchId: watch.id)
+            let result = try await callTool("add_pr_item", ["body": "Broken."])
+            XCTAssertEqual(result["isError"] as? Bool, true, "\(result)")
+            XCTAssertTrue(try toolText(result).contains(state.rawValue))
+        }
+        XCTAssertEqual(try watches.items(watchId: watch.id), [])
+    }
+
+    func testAddPRItemIsRefusedOnceItsWatchIsDeleted() async throws {
+        try PRWatchStore(f.db).delete(watchId: watch.id)
+        XCTAssertNil(try TokenGrantStore(f.db).lookup(token: grant.token)?.prWatchId)
+
+        let result = try await callTool("add_pr_item", ["body": "Broken."])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        XCTAssertTrue(try toolText(result).contains("no longer watched"))
     }
 
     func testARevokedVerifierTokenIsRefusedOnMCP() async throws {

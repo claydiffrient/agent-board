@@ -244,9 +244,10 @@ ledger, a plan write, an inbox refusal, a write refusal, or not offered, and
 fails on a tool it has not classified.
 
 The `verifier` grant (§6) holds the boundary the same way.
-`CrossProjectBoundaryTests` classifies its three tools — `propose_task` and
+`CrossProjectBoundaryTests` classifies its four tools — `propose_task` and
 `search_notes` as reaching only `identity.projectId`, `read_note` as refusing
-another project's id — fails when the verifier is offered a tool it has not
+another project's id, `add_pr_item` as reaching only the grant's own watch
+whatever `pr_url` it is handed — fails when the verifier is offered a tool it has not
 classified, and asserts that every other tool on every scope is refused to it.
 
 **The Coordinator's session.** It runs in the same console machinery as an
