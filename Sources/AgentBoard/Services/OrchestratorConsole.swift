@@ -7,7 +7,7 @@ import SwiftTerm
 
 /// Every byte the user types reaches the child through `send(source:data:)`; the console's own
 /// notice goes through the same path, so it flags itself to stay out of its own bookkeeping.
-final class OrchestratorTerminalView: LocalProcessTerminalView {
+final class OrchestratorTerminalView: BoardTerminalView {
     private(set) var promptIsDirty = false
     var isInjecting = false
     /// `submitted` is true for Enter and false for a cancel: only the former starts a turn.

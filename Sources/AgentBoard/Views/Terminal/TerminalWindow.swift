@@ -92,7 +92,7 @@ struct TerminalHostView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
-        let terminal = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let terminal = BoardTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         TerminalAppearanceStore.shared.attach(terminal)
         terminal.processDelegate = context.coordinator
         context.coordinator.terminal = terminal

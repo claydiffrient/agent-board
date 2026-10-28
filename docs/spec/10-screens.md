@@ -197,6 +197,14 @@ Terminal** (below), applied by `TerminalAppearanceStore.attach` at each
 construction site. An edit repaints every open terminal on the same turn, not
 only the next one opened.
 
+**⌘K** clears the terminal that has keyboard focus, in all four of those
+surfaces, as Terminal.app and iTerm2 do: its scrollback and visible screen are
+emptied locally, then a form feed (Ctrl-L, `0x0c`) is written to the child so a
+shell redraws its prompt and Claude Code repaints its interface. No signal is
+sent and nothing restarts. With focus anywhere else — a text field, the board —
+the key is not consumed. Every construction site builds a `BoardTerminalView`,
+which handles it in `performKeyEquivalent`.
+
 A worker's worktree gets its own shell instead of using this screen: the
 `apple.terminal` button beside the attach button on a session row opens a
 `worktree-shell` window keyed by session id, its working directory the
