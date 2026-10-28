@@ -160,23 +160,23 @@ public struct BackgroundSessionRuntime: AgentRuntime {
     }
 
     public func spawn(_ request: SpawnRequest) async throws -> SpawnedAgent {
-        let timeout = registrationTimeout
+        let (timeout, candidates) = (registrationTimeout, claudeCandidates)
         return try await offMain {
             let launchedAt = Date()
-            let result = try ClaudeCLI.run(Self.arguments(for: request), cwd: request.cwd)
-            return try Self.registered(from: result, timeout: timeout) { agents in
+            let result = try ClaudeCLI.run(Self.arguments(for: request), cwd: request.cwd, candidates: candidates)
+            return try Self.registered(from: result, timeout: timeout, candidates: candidates) { agents in
                 ClaudeCLI.recoveredAgent(from: agents, cwd: request.cwd, name: request.name, launchedAt: launchedAt)
             }
         }
     }
 
     public func resume(sessionId: String, cwd: URL, prompt: String) async throws -> SpawnedAgent {
-        let timeout = registrationTimeout
+        let (timeout, candidates) = (registrationTimeout, claudeCandidates)
         return try await offMain {
             // Claude Code re-applies every spawn flag from the job's saved respawnFlags, so none is re-passed
             // here (note "`claude --bg --resume` re-applies every spawn flag", 09ee63e4).
-            let result = try ClaudeCLI.run([prompt, "--bg", "--resume", sessionId], cwd: cwd)
-            return try Self.registered(from: result, timeout: timeout) { agents in
+            let result = try ClaudeCLI.run([prompt, "--bg", "--resume", sessionId], cwd: cwd, candidates: candidates)
+            return try Self.registered(from: result, timeout: timeout, candidates: candidates) { agents in
                 agents.first { $0.sessionId == sessionId && $0.id != nil }
             }
         }
@@ -202,19 +202,28 @@ public struct BackgroundSessionRuntime: AgentRuntime {
     }
 
     /// A process that exited 0 has a live session whether or not its stdout parsed, so an unparseable
-    /// stdout falls back to `claude agents --json` rather than leaving that session orphaned.
+    /// stdout falls back to `claude agents --json` rather than leaving that session orphaned. A session
+    /// whose id never comes back is stopped (SPEC §5.1): the caller fails its setup and would never track it.
     private static func registered(
         from result: CommandResult,
         timeout: TimeInterval,
+        candidates: [String],
         recovering select: ([AgentInfo]) -> AgentInfo?
     ) throws -> SpawnedAgent {
         if let shortId = ClaudeCLI.parseShortId(from: result.stdout) {
-            guard let sessionId = try ClaudeCLI.waitForAgent(shortId: shortId, timeout: timeout)?.sessionId else {
-                throw AgentRuntimeError("claude agents --json never listed short id \(shortId) within \(timeout)s")
+            do {
+                guard let sessionId = try ClaudeCLI.waitForAgent(
+                    shortId: shortId, timeout: timeout, candidates: candidates
+                )?.sessionId else {
+                    throw AgentRuntimeError("claude agents --json never listed short id \(shortId) within \(timeout)s")
+                }
+                return SpawnedAgent(shortId: shortId, sessionId: sessionId)
+            } catch {
+                try? ClaudeCLI.stop(shortId: shortId, timeout: timeout, candidates: candidates)
+                throw error
             }
-            return SpawnedAgent(shortId: shortId, sessionId: sessionId)
         }
-        if let recovered = try ClaudeCLI.waitForAgent(timeout: timeout, select: select),
+        if let recovered = try ClaudeCLI.waitForAgent(timeout: timeout, candidates: candidates, select: select),
            let shortId = recovered.id, let sessionId = recovered.sessionId {
             return SpawnedAgent(shortId: shortId, sessionId: sessionId)
         }

@@ -27,6 +27,23 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertEqual(result.status, 0)
     }
 
+    /// Each leaked pair stayed open for the app's lifetime; at the descriptor limit `Pipe()` handed out
+    /// fd 0, and `claude agents --json` read back as empty stdout with exit 0.
+    func testTimedRunsLeaveNoDescriptorsOpen() throws {
+        let runs = 20
+        let before = Self.openDescriptorCount()
+        for _ in 0..<runs {
+            try autoreleasepool {
+                _ = try ProcessRunner.run(executable: Self.shell, arguments: ["-c", "echo out"], timeout: 10)
+            }
+        }
+        XCTAssertLessThan(Self.openDescriptorCount() - before, runs)
+    }
+
+    private static func openDescriptorCount() -> Int {
+        (0..<min(getdtablesize(), 8192)).filter { fcntl($0, F_GETFD) != -1 }.count
+    }
+
     /// A grandchild flooding a pipe holds the drain open only while it wins every refill race, which no
     /// real pipe does reliably. A datagram socket yields one byte per read, so a topped-up queue always does.
     func testADrainPastTheDeadlineReturnsWhatItHasOnceTheChildHasExited() throws {

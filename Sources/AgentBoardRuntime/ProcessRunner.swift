@@ -169,6 +169,12 @@ enum ProcessRunner {
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        // Foundation frees a Process's pipes only once `waitUntilExit` or a run loop sees the exit, and
+        // `ExitWatch` is neither: without this every call leaked both read ends until the app ran out of fds.
+        defer {
+            try? stdoutPipe.fileHandleForReading.close()
+            try? stderrPipe.fileHandleForReading.close()
+        }
 
         let descriptors = DescriptorLog.descriptors("stdout", stdoutPipe) + DescriptorLog.descriptors("stderr", stderrPipe)
         do {

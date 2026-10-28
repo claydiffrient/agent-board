@@ -472,6 +472,19 @@ its own `accept_task` has nothing to decide. A reviewer that cannot be started
 leaves the task in `review` for a person and says so in a `progress` row, which
 is where `task` review would have parked it anyway.
 
+The spawn answers once the reviewer's setup row exists, so a setup that fails
+after that, launching `claude` or reading back its session, takes the same
+route as a worker's (§3.1): the row ends `failed` with a "Worker never started"
+report to the orchestrator and a notification. The task stays in `review`, and
+because the failed row is the newest session and names the reviewer, its Pending
+reviews row reads `<reviewer> stopped without a verdict` and offers Re-run
+review (§10), the one way it is retried; nothing retries it automatically. A session `claude --bg`
+started whose id `claude agents --json` then does not return is stopped before
+setup fails, because the board never records it and it would otherwise review
+the same worktree alongside the retry. `attempt` counts every session on the
+task, worker and reviewer alike, so a reviewer's attempt number is not a count
+of reviews.
+
 The stop comes after the answer, not before it. `workerCompleted` runs `claude
 stop` on the session that is waiting on this very call, so awaiting it inline
 killed the MCP client mid-request: measured on the live board 2026-09-21, 64 of

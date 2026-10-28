@@ -85,17 +85,20 @@ public enum ClaudeCLI {
         _ = try run(["rm", shortId], cwd: nil)
     }
 
-    public static func waitForAgent(shortId: String, timeout: TimeInterval) throws -> AgentInfo? {
-        try waitForAgent(timeout: timeout) { agents in agents.first { $0.id == shortId } }
+    public static func waitForAgent(
+        shortId: String, timeout: TimeInterval, candidates: [String] = candidatePaths()
+    ) throws -> AgentInfo? {
+        try waitForAgent(timeout: timeout, candidates: candidates) { agents in agents.first { $0.id == shortId } }
     }
 
     public static func waitForAgent(
         timeout: TimeInterval,
+        candidates: [String] = candidatePaths(),
         select: ([AgentInfo]) -> AgentInfo?
     ) throws -> AgentInfo? {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            if let match = select(try listAgents()) { return match }
+            if let match = select(try listAgents(candidates: candidates)) { return match }
             Thread.sleep(forTimeInterval: 0.5)
         } while Date() < deadline
         return nil
