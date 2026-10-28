@@ -617,7 +617,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         XCTAssertEqual(
             mounted.fields.map(\.placeholderString),
             [
-                nil, nil, "Spawn caps", "Any", "e.g. verified", "e.g. open {url}", "Comma-separated check names",
+                nil, nil, "Spawn caps", "Any", "e.g. verified", #"e.g. claude "/review:verify {url}" --mcp-config {mcp_config}"#, "Comma-separated check names",
                 "Press Return to add",
             ]
                 + Array(repeating: "Model id", count: roleModels.count)

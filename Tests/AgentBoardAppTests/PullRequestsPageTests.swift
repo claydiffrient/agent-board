@@ -1,5 +1,7 @@
 import AgentBoardCore
+import AgentBoardRuntime
 import AppKit
+import GRDB
 import SwiftUI
 import Vision
 import XCTest
@@ -278,11 +280,78 @@ final class PullRequestsPageTests: XCTestCase {
         project.settings.prFollowThrough.verifyCommand = #"claude "/review:verify {url}""#
         let watch = try watch(db, project, number: 7, title: "Seven", state: .readyToVerify)
 
-        let command = try XCTUnwrap(PRVerifyCommand.make(watch: watch, project: project, base: ["SHELL": "/bin/zsh"]))
+        let configDir = FileManager.default.temporaryDirectory.appendingPathComponent("pr-verify-\(UUID().uuidString)")
+        let verifier = VerifierLaunch(db: db, configDir: configDir, port: 4242)
+
+        let command = try XCTUnwrap(PRVerifyCommand.make(
+            watch: watch, project: project, verifier: verifier, base: ["SHELL": "/bin/zsh"]
+        ))
         XCTAssertEqual(command.executable, "/bin/zsh")
         XCTAssertEqual(command.execName, "-zsh")
         XCTAssertEqual(command.arguments, ["-i", "-c", #"claude "/review:verify https://github.com/example-org/app/pull/7""#])
         XCTAssertEqual(command.directory, project.repoPath)
+        XCTAssertNil(command.lease, "no {mcp_config}, no grant")
+        XCTAssertEqual(try verifierGrants(db), [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: configDir.path), "no {mcp_config}, no file")
+    }
+
+    func testAVerifyCommandNamingMCPConfigGetsAProposeOnlyGrantThroughAFileOnItsCommandLine() throws {
+        let db = try AppDatabase.inMemory()
+        var project = try project(db, label: label)
+        project.settings.prFollowThrough.verifyCommand = #"claude "/review:verify {url}" --mcp-config {mcp_config}"#
+        let watch = try watch(db, project, number: 7, title: "Seven", state: .readyToVerify)
+        let configDir = FileManager.default.temporaryDirectory.appendingPathComponent("pr-verify-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: configDir) }
+        let base = ["SHELL": "/bin/zsh", "AGENTBOARD_SUPPORT_DIR": "/support", "AGENTBOARD_TOKEN": "worker-token"]
+
+        let command = try XCTUnwrap(PRVerifyCommand.make(
+            watch: watch, project: project, verifier: VerifierLaunch(db: db, configDir: configDir, port: 4242), base: base
+        ))
+        let lease = try XCTUnwrap(command.lease)
+        let grants = try verifierGrants(db)
+        XCTAssertEqual(grants.map(\.token), [lease.token])
+        XCTAssertEqual(grants.first?.projectId, project.id)
+        XCTAssertEqual(grants.first?.prWatchId, watch.id)
+
+        let path = lease.configURL.path
+        XCTAssertEqual(command.arguments, [
+            "-i", "-c", #"claude "/review:verify https://github.com/example-org/app/pull/7" --mcp-config '\#(path)'"#,
+        ])
+        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let config = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: lease.configURL)) as? [String: Any])
+        let server = try XCTUnwrap((config["mcpServers"] as? [String: Any])?["agent-board"] as? [String: Any])
+        XCTAssertEqual(server["url"] as? String, "http://127.0.0.1:4242/mcp")
+        XCTAssertEqual((server["headers"] as? [String: String])?["Authorization"], "Bearer \(lease.token)")
+
+        let keys = command.environment.map { String($0.prefix { $0 != "=" }) }
+        XCTAssertTrue(Set(keys).isDisjoint(with: ChildEnvironment.boardAuthorityVariables))
+        XCTAssertFalse(command.environment.contains { $0.contains(path) || $0.contains(lease.token) })
+
+        lease.release()
+        lease.release()
+        XCTAssertNotNil(try TokenGrantStore(db).lookup(token: lease.token)?.revokedAt)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+    }
+
+    func testLaunchRevokesEveryVerifierGrantAndDeletesEveryLeftoverConfig() async throws {
+        let fixture = try SupervisorFixture.make()
+        let project = try project(fixture.db, label: label)
+        let watch = try watch(fixture.db, project, number: 7, title: "Seven", state: .readyToVerify)
+        let configDir = SessionConfigWriter.configDir(supportDir: fixture.supportDir)
+        let leftover = try VerifierLaunch(db: fixture.db, configDir: configDir, port: 4242)
+            .lease(projectId: project.id, prWatchId: watch.id)
+
+        await fixture.supervisor.start()
+        XCTAssertEqual(try verifierGrants(fixture.db), [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: leftover.configURL.path))
+        await fixture.cleanUp()
+    }
+
+    private func verifierGrants(_ db: AppDatabase) throws -> [TokenGrant] {
+        try db.reader.read {
+            try TokenGrant.filter(Column("scope") == TokenScope.verifier.rawValue && Column("revoked_at") == nil).fetchAll($0)
+        }
     }
 
     func testAVerifyCommandTypedAsASlashCommandGetsTheClaudeHintOnlyWhenTheShellFailsFast() {
@@ -290,7 +359,7 @@ final class PullRequestsPageTests: XCTestCase {
         let missing: (String) -> Bool = { _ in false }
         XCTAssertEqual(
             PRVerifyCommand.slashCommandHint(template: template, exitCode: 127, elapsed: .milliseconds(40), fileExists: missing),
-            #"/review:verify is a slash command, which only runs inside Claude. Set the verify command to claude "/review:verify {url}" to run it there."#
+            #"/review:verify is a slash command, which only runs inside Claude. Set the verify command to claude "/review:verify {url}" --mcp-config {mcp_config} to run it there."#
         )
         XCTAssertNil(PRVerifyCommand.slashCommandHint(template: template, exitCode: 0, elapsed: .milliseconds(40), fileExists: missing))
         XCTAssertNil(PRVerifyCommand.slashCommandHint(template: template, exitCode: 1, elapsed: .seconds(5), fileExists: missing))

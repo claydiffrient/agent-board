@@ -49,6 +49,10 @@ public enum SessionConfigWriter {
     /// `--disallowedTools` (SPEC §6).
     public static let readOnlyPreToolUseMatcher = "Bash|Edit|MultiEdit|Write|NotebookEdit"
 
+    public static func configDir(supportDir: URL) -> URL {
+        supportDir.appendingPathComponent("sessions")
+    }
+
     public static func settingsURL(configDir: URL, configId: String) -> URL {
         configDir.appendingPathComponent("settings-\(configId).json")
     }
@@ -90,6 +94,40 @@ public enum SessionConfigWriter {
         try writeJSON(settings, to: files.settingsURL)
         try writeJSON(mcp, to: files.mcpConfigURL)
         return files
+    }
+
+    static let verifierConfigPrefix = "verify-"
+
+    /// Walk me through it's MCP config (SPEC §13.4): the board server alone, under a fresh name, and
+    /// created 0600 rather than chmodded after the token is already on disk.
+    public static func writeVerifierMCPConfig(configDir: URL, port: Int, token: String) throws -> URL {
+        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        let url = configDir.appendingPathComponent("\(verifierConfigPrefix)\(UUID().uuidString.lowercased()).json")
+        let data = try JSONSerialization.data(
+            withJSONObject: mcpConfigObject(port: port, token: token, extraMcpServers: nil),
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        )
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard fd >= 0 else {
+            throw AgentRuntimeError("could not create \(url.path): \(String(cString: strerror(errno)))")
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        do {
+            try handle.write(contentsOf: data)
+            try handle.close()
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+        return url
+    }
+
+    /// Every verifier config left in `configDir`, which only a crash or a forced quit leaves behind.
+    public static func removeVerifierMCPConfigs(configDir: URL) {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: configDir.path)) ?? []
+        for name in names where name.hasPrefix(verifierConfigPrefix) && name.hasSuffix(".json") {
+            try? FileManager.default.removeItem(at: configDir.appendingPathComponent(name))
+        }
     }
 
     static func settingsObject(

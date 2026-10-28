@@ -381,7 +381,7 @@ struct ProjectSettingsSheet: View {
             TextField("Verify command", text: Binding(
                 get: { settings.prFollowThrough.verifyCommand ?? "" },
                 set: { settings.prFollowThrough.verifyCommand = $0.isEmpty ? nil : $0 }
-            ), prompt: Text("e.g. open {url}"))
+            ), prompt: Text(#"e.g. claude "/review:verify {url}" --mcp-config {mcp_config}"#))
             if let claudeForm = PRFollowThroughSettings.claudeForm(
                 ofSlashCommand: settings.prFollowThrough.verifyCommand ?? ""
             ) {
@@ -392,7 +392,11 @@ struct ProjectSettingsSheet: View {
                     Button("Use \(claudeForm)") { settings.prFollowThrough.verifyCommand = claudeForm }
                 }
             }
-            Text("Mark verified adds the label to the pull request. Left empty, your own merge is the verification. Walk me through it runs the verify command as a shell command in a terminal, the way your own terminal would, with {url} replaced by the pull request's URL; left empty, that button is hidden. A Claude command goes through claude, e.g. claude \"/review:verify {url}\".")
+            if let withBoardTools = PRFollowThroughSettings.withBoardTools(settings.prFollowThrough.verifyCommand ?? "") {
+                Button("Add board tools") { settings.prFollowThrough.verifyCommand = withBoardTools }
+                    .help("Appends --mcp-config {mcp_config}, so the claude session can propose tasks to this board.")
+            }
+            Text("Mark verified adds the label to the pull request. Left empty, your own merge is the verification. Walk me through it runs the verify command as a shell command in a terminal, the way your own terminal would, with {url} replaced by the pull request's URL; left empty, that button is hidden. A Claude command goes through claude, e.g. claude \"/review:verify {url}\" --mcp-config {mcp_config}. {mcp_config} becomes a config file giving that session board tools that can only propose tasks, revoked when the window's shell exits or the window closes. Keep --mcp-config last: it takes every argument after it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             TextField("Checks that wait on verification", text: $checksAwaitingVerification, prompt: Text("Comma-separated check names"))
