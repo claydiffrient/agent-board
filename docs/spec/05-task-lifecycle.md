@@ -552,12 +552,20 @@ project's base branch the first time one of its tasks is spawned or accepted
 from the base directly (§3.1 step 2). A task branch catches the epic branch
 back up only on resume (above), and only with the epic branch — never with the
 project's base branch directly. D21 is the rule everything else here follows
-from: an agent working a ticket owns making its work mergeable into the epic
-branch, including a conflict a sibling's already-accepted work left in its
-path. The board never resolves one for it — a resumed worker wakes inside the
-conflict rather than having the resume refused (above) — and nothing here
-defers that job to a timer or waits for the epic's later integrator to pick it
-up.
+from, scoped to that moment: an agent working a ticket owns making its own
+work mergeable into the epic branch, so a conflict a sibling's already-accepted
+work left in its path when its own task resumes is still that agent's to
+resolve. The board never resolves one for it — a resumed worker wakes inside
+the conflict rather than having the resume refused (above) — and nothing here
+defers that resume-time conflict to a timer.
+
+D21 does not reach into step 3's job above: a branch whose merge into the epic
+branch conflicted during integration is not a resuming agent's conflict to
+find, because no task is resumed to find it, and resolving it stays the
+integrator's leftover work exactly as step 3 assigns it. The two are a single
+rule read at two points in a task's life — while an agent is still working a
+ticket, a sibling's conflict in its path is its own; once a branch is already
+accepted and the agent is gone, the conflict is the integrator's.
 
 **Drift and refresh.** An epic branch advances only when a task is accepted
 into it or when you ask the orchestrator to refresh it — never on spawn, never
