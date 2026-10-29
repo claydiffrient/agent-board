@@ -188,9 +188,14 @@ final class EpicRefreshTests: XCTestCase {
         XCTAssertEqual(drift["against"] as? String, "origin/main", "\(drift)")
         XCTAssertEqual(drift["behind"] as? Int, 1, "\(drift)")
 
+        try commit("epic\n", to: "from-epic.txt", on: epic.branch)
+        let unfetched = try pushFromAnotherClone(remote, file: "unfetched.txt")
         let text = try await refresh().text
         XCTAssertTrue(try isAncestor(newer, of: epic.branch), "the refresh missed origin's newer commit: \(text)")
+        XCTAssertTrue(try isAncestor(unfetched, of: epic.branch), "the refresh did not fetch origin: \(text)")
         XCTAssertTrue(text.contains("Merged origin/main into \(epic.branch)"), text)
+        let subject = try fixture.git(["log", "-1", "--format=%s", epic.branch])
+        XCTAssertTrue(subject.hasPrefix("Merge origin/main into"), subject)
     }
 
     func testGetEpicCountsCommitsBehindAndAheadOfTheBase() async throws {

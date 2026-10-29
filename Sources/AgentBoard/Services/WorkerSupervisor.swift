@@ -753,7 +753,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         refreshes[epicId] = run
         let manager = worktreeManager(for: project)
         let branch = epic.branch
-        let message = WorktreeManager.mergeSubject(taskTitle: project.baseBranch, targetTitle: epic.title)
+        let epicTitle = epic.title
         let base = project.baseBranch
         var commands = project.settings.verification
         if let override = refreshCheckTimeoutOverride { commands.timeoutSeconds = override }
@@ -762,6 +762,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         do {
             prepared = try await offMain {
                 let start = manager.freshestBase(base)
+                let message = WorktreeManager.mergeSubject(taskTitle: start.name, targetTitle: epicTitle)
                 return (start, try manager.refreshCandidate(branch: branch, base: base, start: start, message: message))
             }
         } catch {
