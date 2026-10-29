@@ -44,6 +44,11 @@ public struct CDRReviewList: Equatable, Sendable {
     public var baseURL: URL
     public var targets: [CDRTarget]
 
+    public init(baseURL: URL, targets: [CDRTarget]) {
+        self.baseURL = baseURL
+        self.targets = targets
+    }
+
     public func pageURL(for target: CDRTarget) -> URL {
         baseURL.appendingPathComponent(target.pagePath)
     }
@@ -65,6 +70,11 @@ public struct CDRRecentReview: Equatable, Sendable {
 public struct CDRSnapshot: Equatable, Sendable {
     public var daemon: CDRDaemonState
     public var reviews: CDRReviewsState
+
+    public init(daemon: CDRDaemonState, reviews: CDRReviewsState) {
+        self.daemon = daemon
+        self.reviews = reviews
+    }
 }
 
 /// `{port, pid, token}` from `watcher.json` or `server.json`. It holds a bearer token, so it stays internal and

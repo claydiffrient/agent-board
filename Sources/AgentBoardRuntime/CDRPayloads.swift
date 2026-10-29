@@ -70,7 +70,8 @@ public struct CDRQueueEntry: Decodable, Equatable, Sendable {
     public var rule: String?
     public var match: String?
     public var reviewId: Int?
-    /// A running review's `progress.phase`: `reviewing`, `requested lenses`, `triage` or `posting`.
+    /// A running review's `progress.phase`, such as `fetching`, `preparing the clone`, `reviewing` or `posting`;
+    /// CDR's runner adds phases without notice.
     public var phase: String?
 
     public init(from decoder: Decoder) throws {

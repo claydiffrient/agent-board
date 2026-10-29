@@ -38,6 +38,7 @@ struct MainWindow: View {
     /// width for `NavigationSplitView` to react to by collapsing the sidebar on its own. `.automatic`
     /// leaves that decision to a per-OS layout heuristic SPEC §10.1 does not account for.
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var cdrInstalled = false
 
     private let collapseState: SidebarCollapseState
 
@@ -70,6 +71,10 @@ struct MainWindow: View {
             await pullRequestCounts.run(PRWatchStore(env.db).observeBadgeCounts(), in: env.db.reader)
         }
         .task { await announceReleaseNotes() }
+        .task { checkCDRInstalled() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            checkCDRInstalled()
+        }
         .sheet(item: $settingsProject) { project in
             ProjectSettingsSheet(project: project, workspaces: workspaces.value) {
                 if selection == .project(project.id) { select(.atAGlance) }
@@ -105,6 +110,8 @@ struct MainWindow: View {
             CoordinatorView()
         case .pullRequests:
             PullRequestsView(projects: projects.value, projectFilter: $pullRequestFilter)
+        case .reviews:
+            ReviewsView()
         case .atAGlance, .project:
             if let project = projects.value.first(where: { $0.id == selection.projectId }) {
                 ProjectDetailView(project: project)
@@ -144,6 +151,13 @@ struct MainWindow: View {
         }
     }
 
+    /// Rechecked whenever the app comes forward, so installing or removing CDR shows or hides the row
+    /// without a relaunch.
+    private func checkCDRInstalled() {
+        cdrInstalled = env.cdr?.isInstalled ?? false
+        if !cdrInstalled && selection == .reviews { select(.atAGlance) }
+    }
+
     /// Nil lists every project.
     private func showPullRequests(projectId: String?) {
         pullRequestFilter = projectId
@@ -177,7 +191,7 @@ struct MainWindow: View {
     private var sidebar: some View {
         VStack(spacing: 0) {
             List(selection: sidebarSelection) {
-                ForEach(SidebarSelection.pinned, id: \.self) { item in
+                ForEach(SidebarSelection.pinned(showingReviews: cdrInstalled), id: \.self) { item in
                     pinnedRow(item)
                         .tag(item)
                 }
@@ -229,6 +243,7 @@ struct MainWindow: View {
             )
         case .pullRequests:
             PullRequestsRow(count: PullRequestsRow.count(pullRequestCounts.value))
+        case .reviews: Label("Reviews", systemImage: "checkmark.bubble")
         case .project: EmptyView()
         }
     }

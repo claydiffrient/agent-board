@@ -24,11 +24,16 @@ enum CDRSettings {
 
 struct CDRSettingsPane: View {
     @AppStorage(CDRSettings.commandKey) private var command = ""
+    @State private var resolution = ""
+    @FocusState private var editing: Bool
 
     var body: some View {
         Form {
             Section {
                 TextField("CDR command", text: $command, prompt: Text("Auto-detect"))
+                    .focused($editing)
+                    .onSubmit { resolve() }
+                    .onChange(of: editing) { if !editing { resolve() } }
             } footer: {
                 Text(resolution)
                     .font(.caption)
@@ -36,10 +41,16 @@ struct CDRSettingsPane: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear { resolve() }
     }
 
-    private var resolution: String {
-        guard let cli = CDRCommand.cliPath(configured: command) else {
+    /// Reads the plugin registry and stats a file, so it runs on appear and on commit, not per keystroke.
+    private func resolve() {
+        resolution = Self.resolution(configured: command)
+    }
+
+    private static func resolution(configured: String) -> String {
+        guard let cli = CDRCommand.cliPath(configured: configured) else {
             return "CDR's watcher/cli.mjs was not found. Agent Board runs it with node to start and stop CDR."
         }
         return FileManager.default.fileExists(atPath: cli.path) ? "Using \(cli.path)" : "No file at \(cli.path)"

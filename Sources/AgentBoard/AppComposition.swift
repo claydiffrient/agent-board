@@ -26,7 +26,8 @@ enum AppComposition {
                 db: db, supervisor: supervisor, sleepGuard: sleepGuard, startup: startup,
                 listeningPorts: ports, agentDefinitions: AgentDefinitionDirectories(),
                 processSampler: LiveProcessSampler.board(db: db, supervisor: supervisor, terminals: terminals, ports: ports),
-                terminalProcesses: terminals
+                terminalProcesses: terminals,
+                cdr: LiveCDRService()
             )
             MacNotifier.shared.start(router: environment.router)
             return environment
