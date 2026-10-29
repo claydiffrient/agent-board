@@ -71,6 +71,8 @@ public struct EpicClosurePlan: Sendable, Equatable {
     /// Non-nil when the epic is already `done` or `abandoned`; closing it again is refused.
     public var alreadyClosed: EpicState?
     public var unfinished: [EpicUnfinishedTask]
+    /// Integration tasks the close retires (SPEC §5), left out of `unfinished`.
+    public var closing: [EpicUnfinishedTask]
     public var running: [EpicRunningWorker]
 
     public init(
@@ -80,6 +82,7 @@ public struct EpicClosurePlan: Sendable, Equatable {
         closure: EpicClosure,
         alreadyClosed: EpicState? = nil,
         unfinished: [EpicUnfinishedTask] = [],
+        closing: [EpicUnfinishedTask] = [],
         running: [EpicRunningWorker] = []
     ) {
         self.epicId = epicId
@@ -88,6 +91,7 @@ public struct EpicClosurePlan: Sendable, Equatable {
         self.closure = closure
         self.alreadyClosed = alreadyClosed
         self.unfinished = unfinished
+        self.closing = closing
         self.running = running
     }
 
@@ -114,7 +118,8 @@ public struct EpicClosurePlan: Sendable, Equatable {
                 + "Closing now would leave \(running.count == 1 ? "it" : "them") working against a closed epic, so it is refused. "
                 + "Stop \(running.count == 1 ? "it" : "them") first, from its card or from Stop All.\n\n\(listed)"
         }
-        return [intent, unfinishedParagraph, branchParagraph].joined(separator: "\n\n")
+        return [intent, unfinishedParagraph, closingParagraph, branchParagraph].compactMap { $0 }
+            .joined(separator: "\n\n")
     }
 
     private var intent: String {
@@ -127,7 +132,9 @@ public struct EpicClosurePlan: Sendable, Equatable {
 
     private var unfinishedParagraph: String {
         guard !unfinished.isEmpty else {
-            return "Every task in this epic is already finished, so nothing is left over."
+            return closing.isEmpty
+                ? "Every task in this epic is already finished, so nothing is left over."
+                : "Every other task in this epic is already finished."
         }
         let one = unfinished.count == 1
         let listed = unfinished.map { "- \($0.label)" }.joined(separator: "\n")
@@ -135,6 +142,14 @@ public struct EpicClosurePlan: Sendable, Equatable {
             + "\(one ? "it is" : "they are"), in this epic's lane. Nothing is deleted, moved out of the "
             + "epic, or archived; \(one ? "it keeps its" : "they keep their") card, "
             + "\(one ? "its" : "their") column and \(one ? "its" : "their") branch.\n\(listed)"
+    }
+
+    private var closingParagraph: String? {
+        guard !closing.isEmpty else { return nil }
+        let one = closing.count == 1
+        let listed = closing.map { "- \($0.label)" }.joined(separator: "\n")
+        return "\(one ? "Its integration task is" : "\(closing.count) integration tasks are") closed, since the "
+            + "epic ends without being integrated.\n\(listed)"
     }
 
     private var branchParagraph: String {

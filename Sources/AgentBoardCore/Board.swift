@@ -964,17 +964,8 @@ public struct Board: Sendable {
     /// so it is not stranded in a live column. One in `review` finished its work and waits for a person;
     /// one an active session holds is left and named. Nil when there was nothing to settle.
     static func settleIntegrationTasks(_ db: Database, epicId: String, reason: String, by: String) throws -> String? {
-        let open = try Task.fetchAll(
-            db,
-            sql: """
-            SELECT * FROM task WHERE epic_id = ? AND origin = 'integration'
-              AND column_name NOT IN ('review', 'done', 'closed')
-            ORDER BY created_at, id
-            """,
-            arguments: [epicId]
-        )
-        let lines = try open.map { task -> String in
-            if let holder = try SessionStore.activeHolder(db, taskId: task.id) {
+        let lines = try openIntegrationTasks(db, epicId: epicId).map { task, holder -> String in
+            if let holder {
                 return "Integration task \(task.id) was left in \(task.column.rawValue): its session \(holder.sessionId) "
                     + "is still active. Stop it with stop_worker, then retire the task with close_task."
             }
@@ -982,6 +973,20 @@ public struct Board: Sendable {
             return "Integration task \(task.id) was closed from \(task.column.rawValue): \(reason)"
         }
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    /// The epic's integration tasks an ending epic would settle, each with the active session holding
+    /// it; `settleIntegrationTasks` closes exactly those with no holder, and the closure plan reads the same list.
+    static func openIntegrationTasks(_ db: Database, epicId: String) throws -> [(task: Task, holder: AgentSession?)] {
+        try Task.fetchAll(
+            db,
+            sql: """
+            SELECT * FROM task WHERE epic_id = ? AND origin = 'integration'
+              AND column_name NOT IN ('review', 'done', 'closed')
+            ORDER BY created_at, id
+            """,
+            arguments: [epicId]
+        ).map { ($0, try SessionStore.activeHolder(db, taskId: $0.id)) }
     }
 
     /// Deletes the task and leaves a `decision` report behind, so an orchestrator holding the id
@@ -1521,12 +1526,17 @@ public struct Board: Sendable {
         guard let epic = try Epic.fetchOne(db, key: epicId) else {
             throw BoardError.epicNotFound(epicId)
         }
+        let closing = try openIntegrationTasks(db, epicId: epicId)
+            .filter { $0.holder == nil }
+            .map { EpicUnfinishedTask(id: $0.task.id, title: $0.task.title, column: $0.task.column) }
+        let closingIds = Set(closing.map(\.id))
         let unfinished = try Task
             .fetchAll(
                 db,
                 sql: "SELECT * FROM task WHERE epic_id = ? AND column_name NOT IN ('done', 'closed') ORDER BY ordering",
                 arguments: [epicId]
             )
+            .filter { !closingIds.contains($0.id) }
             .map { EpicUnfinishedTask(id: $0.id, title: $0.title, column: $0.column) }
         let running = try Row
             .fetchAll(
@@ -1552,6 +1562,7 @@ public struct Board: Sendable {
             closure: closure,
             alreadyClosed: epic.state.isTerminal ? epic.state : nil,
             unfinished: unfinished,
+            closing: closing,
             running: running
         )
     }

@@ -348,14 +348,17 @@ Closing is a board state change and nothing else. It does not merge
 branch. **No branch and no worktree is deleted** — exactly as a `done` task
 keeps its branch until integration. Unfinished tasks stay exactly where they
 are: same lane, same column, same `epic_id`, not deleted, not archived, not
-re-homed. Silently rewriting a human's unfinished work is not what "I am done
+re-homed. The one exception is the epic's unfinished integration task, which
+§5 closes with the epic. Silently rewriting a human's unfinished work is not what "I am done
 with this epic" asks for, and the epic is the record of what that work was for.
 Work left in a closed epic is freed with `set_epic(task_id)` and no `epic_id`
 when it still matters, which the `decision` report says in so many words.
 
 The confirmation names all of it before the human commits: the state being
-written, the specific leftover tasks and their columns, that they stay put, and
-that the branches and worktrees survive. Its copy and the write's guards read
+written, the specific leftover tasks and their columns, that they stay put, the
+integration task the close retires (listed apart from the leftovers, by the
+same query `settleIntegrationTasks` closes from), and that the branches and
+worktrees survive. Its copy and the write's guards read
 the same `EpicClosurePlan` (`AgentBoardCore.EpicClosure`, unit-tested apart
 from SwiftUI), so the dialog cannot promise something `Board.closeEpic` refuses.
 
