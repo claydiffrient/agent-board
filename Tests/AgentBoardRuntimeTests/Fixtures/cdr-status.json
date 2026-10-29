@@ -1,0 +1,66 @@
+{
+  "service": "cdr",
+  "pid": 41001,
+  "home": "/Users/someone/.cd-review",
+  "startedAt": "2026-10-29T14:02:11.093Z",
+  "port": 7718,
+  "version": "0.1.0",
+  "code": "62e7d9493168",
+  "config": { "path": "/Users/someone/.cd-review/watcher.config.json", "hash": "a1b2c3", "repos": ["octo/widgets"], "concurrency": 2 },
+  "polling": {
+    "built": true,
+    "intervalMs": 60000,
+    "delaySeconds": 300,
+    "lastPoll": { "at": "2026-10-29T15:40:00.000Z", "ok": true, "why": "search", "found": 3, "watched": 3, "unwatched": 0 },
+    "lastOkAt": "2026-10-29T15:40:00.000Z",
+    "nextPollAt": "2026-10-29T15:41:00.000Z",
+    "paused": false,
+    "runner": { "name": "claude", "available": true, "reason": null },
+    "power": { "ac": true, "source": "AC Power", "percent": 100, "hold": null, "at": "2026-10-29T15:40:00.000Z", "acPowerOnly": true, "floorPercent": 50 },
+    "concurrency": { "limit": 2, "running": 1 },
+    "budget": { "limit": 15, "used": 4, "exhausted": false, "freesAt": null },
+    "unreviewed": { "days": 7, "count": 0, "prs": [] },
+    "running": [
+      {
+        "request": 88, "repo": "octo/widgets", "pr": 412, "title": "Retry uploads on 503",
+        "url": "https://github.com/octo/widgets/pull/412", "requestedAt": "2026-10-29T15:20:00.000Z",
+        "requestedAtSource": "timeline", "capWaitMs": 0, "startedAt": "2026-10-29T15:25:03.000Z", "added": [],
+        "progress": { "phase": "reviewing", "log": "/Users/someone/.cd-review/runs/88.log", "state": "spawned" }
+      }
+    ],
+    "queued": [
+      {
+        "request": 89, "repo": "octo/widgets", "pr": 415, "title": "Drop the legacy exporter",
+        "url": "https://github.com/octo/widgets/pull/415", "requestedAt": "2026-10-29T15:30:00.000Z",
+        "requestedAtSource": "timeline", "capWaitMs": 61000, "dueAt": "2026-10-29T15:35:00.000Z", "blockedBy": "concurrency"
+      },
+      42
+    ],
+    "waiting": [
+      {
+        "request": 90, "repo": "octo/gadgets", "pr": 7, "title": "Bump the parser",
+        "url": "https://github.com/octo/gadgets/pull/7", "requestedAt": "2026-10-29T15:38:00.000Z",
+        "requestedAtSource": "observed", "capWaitMs": null, "dueAt": "2026-10-29T15:43:00.000Z"
+      }
+    ],
+    "retrying": [],
+    "maxAttempts": 5,
+    "parked": [],
+    "denied": [],
+    "reviewed": [
+      {
+        "request": 80, "repo": "octo/widgets", "pr": 401, "title": "Cache the avatar sizes",
+        "url": "https://github.com/octo/widgets/pull/401", "requestedAt": "2026-10-28T09:00:00.000Z",
+        "requestedAtSource": "timeline", "capWaitMs": 0, "reviewId": 311
+      }
+    ],
+    "unwatched": [],
+    "interruptedAtStart": 0,
+    "closures": { "at": null, "closed": 0, "why": null },
+    "control": []
+  },
+  "recovered": [],
+  "spills": [],
+  "escalations": [],
+  "checkouts": { "lastSweep": null }
+}

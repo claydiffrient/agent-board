@@ -759,7 +759,10 @@ menu is `NSApp.helpMenu` when the menu opens, and it is never an item in the
 built menu.
 
 **Settings** — the standard macOS Settings window, opened with ⌘, from the app
-menu. It has one pane, **Terminal**: the font family (installed monospaced
+menu. It has two panes. **CDR** holds the **CDR command**, the path to CDR's
+`watcher/cli.mjs` that starts and stops the review watcher (§13.7); empty means
+auto-detect, and the line under it names the file in use or says none was found.
+**Terminal** holds the font family (installed monospaced
 families only; a stored family that is no longer installed is listed as "not
 installed" and draws as the monospaced system font), the font size (8–36pt), the
 foreground, background, cursor, cursor text, selection background and selection

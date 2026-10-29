@@ -65,4 +65,5 @@ Subsections stay in their parent's file. Numbers do not change when a title does
   human's own open pull requests, triaging review feedback, fixing it, and
   publishing the fix, across four phases. §13.1 State machine · §13.2
   Verdicts · §13.3 Settings · §13.4 Where it lives in the app · §13.5
-  Guardrails · §13.6 Reports to the orchestrator.
+  Guardrails · §13.6 Reports to the orchestrator · §13.7 CDR, the review
+  watcher.

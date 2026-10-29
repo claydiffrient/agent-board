@@ -1,3 +1,4 @@
+import AgentBoardRuntime
 import AppKit
 import SwiftUI
 
@@ -9,8 +10,39 @@ struct SettingsView: View {
         TabView {
             TerminalSettingsPane(store: terminalAppearance)
                 .tabItem { Label("Terminal", systemImage: "apple.terminal") }
+            CDRSettingsPane()
+                .tabItem { Label("CDR", systemImage: "checkmark.bubble") }
         }
         .frame(width: 560, height: 760)
+    }
+}
+
+enum CDRSettings {
+    /// The path to CDR's `watcher/cli.mjs`; empty means auto-detect. SPEC §13.7.
+    static let commandKey = "cdr.command"
+}
+
+struct CDRSettingsPane: View {
+    @AppStorage(CDRSettings.commandKey) private var command = ""
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("CDR command", text: $command, prompt: Text("Auto-detect"))
+            } footer: {
+                Text(resolution)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var resolution: String {
+        guard let cli = CDRCommand.cliPath(configured: command) else {
+            return "CDR's watcher/cli.mjs was not found. Agent Board runs it with node to start and stop CDR."
+        }
+        return FileManager.default.fileExists(atPath: cli.path) ? "Using \(cli.path)" : "No file at \(cli.path)"
     }
 }
 
