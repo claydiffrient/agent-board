@@ -177,7 +177,7 @@ enum ReviewsPage {
                 let argued = escalation.argued?.split(whereSeparator: \.isWhitespace).joined(separator: " ")
                 let verdict = escalation.arguedVerdict.map { " (\($0))" } ?? ""
                 return ReviewsPageRow(
-                    id: "escalation-\(escalation.threadURL ?? escalation.replyURL ?? "#\(index)")",
+                    id: "escalation-\(escalation.targetId.map(String.init) ?? "?")-\(escalation.replyURL ?? "?")-\(index)",
                     title: escalation.title ?? name,
                     details: [name, escalation.finding, posted].compactMap { $0 }.joined(separator: " · "),
                     note: argued.map { "Argued\(verdict): \($0)" } ?? "No argument recorded\(verdict).",

@@ -62,6 +62,25 @@ final class ReviewsScreenTests: XCTestCase {
         XCTAssertEqual(unreadable.headers, 3, "an unreadable list is not an empty one")
     }
 
+    /// CDR's `openEscalations` does not dedupe rows sharing a thread; two such rows must still get distinct ids
+    /// or SwiftUI's `ForEach` drops/swaps one of them.
+    func testTwoEscalationsSharingAThreadURLGetDistinctRowIDs() throws {
+        func escalation(targetId: Int, replyURL: String?) throws -> CDREscalation {
+            try JSONDecoder().decode(CDREscalation.self, from: Data("""
+                {"target_id": \(targetId), "repo": "octo/widgets", "pr": 401, "title": "Finding \(targetId)",
+                 "finding": "finding \(targetId)", "reply_url": \(replyURL.map { "\"\($0)\"" } ?? "null"),
+                 "thread_url": "https://github.com/octo/widgets/pull/401#discussion_r9001"}
+                """.utf8))
+        }
+        let first = try escalation(targetId: 12, replyURL: nil)
+        let second = try escalation(targetId: 13, replyURL: nil)
+        let snapshot = CDRSnapshot(daemon: .stopped, reviews: try Self.reviews(), escalations: .available([first, second]))
+
+        let rows = ReviewsPage.sections(snapshot).first(where: { $0.title == "Waiting on you" })?.rows ?? []
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(Set(rows.map(\.id)).count, 2, "same thread_url must not collapse two escalations into one id")
+    }
+
     func testThePagePollsWhileMountedAndStopsWhenRemoved() throws {
         let cdr = FakeCDR(daemon: .stopped, reviews: .serverNotRunning)
         let mount = OffscreenMount(

@@ -1074,3 +1074,9 @@ daemon. Either source can send `{error}` in place
 of the list; that reads as *unavailable* with CDR's reason, never as an empty
 list. With no CDR command resolved and the daemon not running, the escalations
 are unavailable too. Not installed reads as none.
+
+CDR's `openEscalations` does not dedupe rows that share a `thread_url` — two
+escalations argued on the same PR thread are two separate rows with the same
+thread. Each row's id in `ReviewsPage` combines `target_id`, `reply_url` and
+the row's index in the list, since `thread_url` alone would collide and drop
+or swap rows under SwiftUI's `ForEach`.
