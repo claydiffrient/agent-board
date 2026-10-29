@@ -60,6 +60,11 @@ extension Board {
         try db.writer.write { db in
             guard let epic = try Self.stillAwaiting(db, epicId: epicId, pullRequest: pullRequest) else { return false }
             try EpicStore.setState(db, epicId, .done)
+            let settled = try Self.settleIntegrationTasks(
+                db, epicId: epicId,
+                reason: "Epic \(epicId) is done: its pull request #\(pullRequest.number) merged.",
+                by: "the pull request merge check"
+            )
             let detail = PullRequestLanding.mergedDetail(pullRequest, commit: commit)
             for taskId in carriage.landed {
                 try TaskStore.setLanding(db, taskId, .landed, detail: detail)
@@ -104,6 +109,9 @@ extension Board {
             }
             if let held = HeldWorktree.paragraph(try Self.heldWorktrees(db, epicId: epicId)) {
                 text += "\n\n" + held
+            }
+            if let settled {
+                text += "\n\n" + settled
             }
             try Self.recordOnEpic(db, epic: epic, text: text, kind: .status)
             return true

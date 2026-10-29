@@ -323,7 +323,7 @@ nobody reviewed.
   time and who closed it are written to `closed_reason`, `closed_at` and
   `closed_by` (§4) and to a `progress` row, so the history keeps them after a
   reopen. Nothing else moves: no branch, worktree, session row, report or
-  comment is touched, as with `close_epic`.
+  comment is touched.
 
   `closed` is not `done` and nothing that reads `done` reads it. A closed task
   does **not** satisfy a dependency — readiness asks for `done`, so a dependent
@@ -342,13 +342,27 @@ nobody reviewed.
 
   Refused, by `Board.close`: a blank reason; a task in `done` (it is already
   finished — accepted work is not retired after the fact); a task already
-  `closed`; an epic's integration task (`origin = integration`), which only
-  §5.2's own path ends; and any task an active session holds, worker or
-  rostered reviewer — stop it first. A stranded task in `running` with no live
+  `closed`; an epic's integration task (`origin = integration`) while its epic
+  is still open, since §5.2's own path or `close_epic` ends it; and any task an
+  active session holds, worker or rostered reviewer — stop it first. Once the
+  epic is `done` or `abandoned` its integration task can be closed like any
+  other: nothing else will ever end it. A stranded task in `running` with no live
   session can be closed. No spawn takes a closed task, and a session on one is
   settled: `reconcile` and `SessionStart` never revive it (§7). A spawn
   approval still waiting for the task is resolved `denied` in the same
   transaction, so the human queue does not keep an item nobody can approve.
+
+  An epic that ends any way but through its own integration task completing —
+  its pull request merging (§5.2 step 5) or `close_epic` — closes that
+  integration task in the same transaction, from any column but `review`,
+  `done` and `closed`, with a reason naming how the epic ended ("Epic … is
+  done: its pull request #N merged." or "Epic … was closed as abandoned."). One
+  in `review` finished its work and waits for a person, so it is left for an
+  accept or a `close_task`. One an active session holds is left where it is,
+  and the epic's `decision` report names it and its session; stop the worker,
+  then `close_task` it. Without this an integration task whose integrator
+  failed sat in `ready` forever after its epic's pull request merged, refused
+  by `close_task` and with no integration left to run.
 
   Closing needs no human approval, with autonomy on or off. It deletes,
   publishes and spends nothing, a human reverses it in one click, and the card
@@ -819,7 +833,8 @@ than one that is finished; they merge nothing and are not part of this sequence.
    names is in the head; one still marked `landed` otherwise becomes `pending`
    and is named in the report as unverifiable. It archives under
    `afterEpicMerge`, and queues a `decision` report naming any task that was
-   not done. `CLOSED` returns the epic to `active` and queues a `decision`
+   not done. It closes the epic's unfinished integration task (§5, `closed`)
+   and names it in that report. `CLOSED` returns the epic to `active` and queues a `decision`
    report with the reason. A `gh` failure changes nothing.
 
    The pull request's head is the **published** name (§6.1), not the local

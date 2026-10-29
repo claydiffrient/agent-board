@@ -910,14 +910,7 @@ public struct Board: Sendable {
             if let refusal = try Self.closeRefusal(db, task: task, reason: reason) {
                 throw BoardError.closeRefused(taskId: taskId, reason: refusal)
             }
-            try TaskStore.close(db, taskId, reason: reason, by: by.described, at: .nowMillis)
-            if let approval = try ApprovalStore.pendingSpawn(db, taskId: taskId) {
-                _ = try ApprovalStore.resolve(db, approval.id, .denied)
-            }
-            _ = try ProgressStore.append(
-                db, taskId: taskId, sessionId: nil, kind: .note,
-                text: "\(Self.closedLead) Closed by \(by.described) from \(task.column.rawValue): \(reason)"
-            )
+            try Self.retire(db, task: task, reason: reason, by: by.described)
             let waiting = try Task.fetchAll(
                 db,
                 sql: """
@@ -943,15 +936,52 @@ public struct Board: Sendable {
         default:
             break
         }
-        if task.origin == .integration {
-            return "Task \(task.id) is an epic's integration task. It ends through integration, or close the epic "
-                + "with close_epic."
+        if task.origin == .integration,
+           try task.epicId.flatMap({ try Epic.fetchOne(db, key: $0) })?.state.isTerminal != true {
+            return "Task \(task.id) is the integration task of an epic that is still open. It ends through "
+                + "integration, or close the epic with close_epic; once the epic is done or abandoned, close_task "
+                + "can retire it."
         }
         if let holder = try SessionStore.activeHolder(db, taskId: task.id) {
             return "Task \(task.id) has an active session, \(holder.sessionId) (\(holder.state.rawValue)). Stop it with "
                 + "stop_worker first."
         }
         return nil
+    }
+
+    static func retire(_ db: Database, task: Task, reason: String, by: String) throws {
+        try TaskStore.close(db, task.id, reason: reason, by: by, at: .nowMillis)
+        if let approval = try ApprovalStore.pendingSpawn(db, taskId: task.id) {
+            _ = try ApprovalStore.resolve(db, approval.id, .denied)
+        }
+        _ = try ProgressStore.append(
+            db, taskId: task.id, sessionId: nil, kind: .note,
+            text: "\(Self.closedLead) Closed by \(by) from \(task.column.rawValue): \(reason)"
+        )
+    }
+
+    /// SPEC §5: an epic that ends other than through its integration task completing closes that task,
+    /// so it is not stranded in a live column. One in `review` finished its work and waits for a person;
+    /// one an active session holds is left and named. Nil when there was nothing to settle.
+    static func settleIntegrationTasks(_ db: Database, epicId: String, reason: String, by: String) throws -> String? {
+        let open = try Task.fetchAll(
+            db,
+            sql: """
+            SELECT * FROM task WHERE epic_id = ? AND origin = 'integration'
+              AND column_name NOT IN ('review', 'done', 'closed')
+            ORDER BY created_at, id
+            """,
+            arguments: [epicId]
+        )
+        let lines = try open.map { task -> String in
+            if let holder = try SessionStore.activeHolder(db, taskId: task.id) {
+                return "Integration task \(task.id) was left in \(task.column.rawValue): its session \(holder.sessionId) "
+                    + "is still active. Stop it with stop_worker, then retire the task with close_task."
+            }
+            try retire(db, task: task, reason: reason, by: by)
+            return "Integration task \(task.id) was closed from \(task.column.rawValue): \(reason)"
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
     /// Deletes the task and leaves a `decision` report behind, so an orchestrator holding the id
@@ -1425,10 +1455,11 @@ public struct Board: Sendable {
     }
 
     /// A human ends the epic without driving it through integration: the terminal state is written,
-    /// a `decision` report tells the orchestrator to stop planning into it, and nothing else moves.
-    /// No branch is merged or deleted, no worktree is removed, and no task is deleted, archived or
-    /// re-homed — unfinished tasks stay in this epic's lane exactly as they are, because rewriting a
-    /// human's unfinished work is not what "I am finished with this epic" asks for.
+    /// a `decision` report tells the orchestrator to stop planning into it, and an unfinished
+    /// integration task is closed (SPEC §5). No branch is merged or deleted, no worktree is removed,
+    /// and no task is deleted, archived or re-homed — unfinished tasks stay in this epic's lane exactly
+    /// as they are, because rewriting a human's unfinished work is not what "I am finished with this
+    /// epic" asks for.
     ///
     /// Refused while any session in the epic is still active, so a live worker is never left running
     /// against a closed epic, and refused for an epic that is already terminal: `done` and
@@ -1470,6 +1501,11 @@ public struct Board: Sendable {
             }
             if let held = HeldWorktree.paragraph(try Self.heldWorktrees(db, epicId: epicId)) {
                 lines.append(held)
+            }
+            if let settled = try Self.settleIntegrationTasks(
+                db, epicId: epicId, reason: "Epic \(epicId) was closed as \(closure.state.rawValue).", by: by.described
+            ) {
+                lines.append(settled)
             }
             lines.append("Closed by: \(by.recorded)")
             return try ReportStore.insert(
