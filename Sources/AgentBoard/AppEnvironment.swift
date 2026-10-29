@@ -36,6 +36,9 @@ final class AppEnvironment {
     let processSampler: (any ProcessSampling)?
     let terminalProcesses: TerminalProcessRegistry
     let processStops: ProcessStopModel
+    /// CDR, the review watcher (SPEC §13.7). Nil unless the app wires the real one, so a preview or
+    /// render test never reads this machine's `~/.cd-review`, and the Reviews row stays hidden.
+    let cdr: (any CDRService)?
 
     var roster: RosterStore { RosterStore(db, definitions: agentDefinitions) }
 
@@ -50,7 +53,8 @@ final class AppEnvironment {
         gh: any GhRunning = SystemGh(),
         processSampler: (any ProcessSampling)? = nil,
         terminalProcesses: TerminalProcessRegistry? = nil,
-        processStops: ProcessStopModel? = nil
+        processStops: ProcessStopModel? = nil,
+        cdr: (any CDRService)? = nil
     ) {
         self.db = db
         self.supervisor = supervisor
@@ -67,5 +71,6 @@ final class AppEnvironment {
         self.processSampler = processSampler
         self.terminalProcesses = terminalProcesses ?? TerminalProcessRegistry()
         self.processStops = processStops ?? ProcessStopModel(db: db, supervisor: supervisor)
+        self.cdr = cdr
     }
 }

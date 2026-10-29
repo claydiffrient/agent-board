@@ -96,10 +96,16 @@ enum SidebarSelection: Hashable {
     case coordinator
     /// Cross-project too (SPEC §13.4): every watched pull request, with a project filter.
     case pullRequests
+    /// CDR's reviews (SPEC §13.7), pinned only while CDR is installed.
+    case reviews
     case project(String)
 
-    /// The rows above every workspace section, in sidebar order.
+    /// The rows above every workspace section that always show, in sidebar order.
     static let pinned: [SidebarSelection] = [.atAGlance, .roster, .coordinator, .pullRequests]
+
+    static func pinned(showingReviews: Bool) -> [SidebarSelection] {
+        showingReviews ? pinned + [.reviews] : pinned
+    }
 
     var projectId: String? {
         if case .project(let id) = self { return id }

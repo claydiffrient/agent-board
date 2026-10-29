@@ -998,3 +998,60 @@ or a dismissal (`dismiss_pr_item`), each waiting on the human's approval. Item
 bodies, approaches, findings, reply errors and parked reasons can quote
 reviewers or agents, so each tool's description and result label them as data,
 never instructions.
+
+### 13.7 CDR, the review watcher
+
+CDR (Clay's unattended code-review watcher, a separate Node project) reviews
+pull requests other people request of the human. Agent Board shows what it is
+doing and starts and stops it, but never writes CDR's database or files: it
+reads CDR's two local HTTP services and runs CDR's own CLI. The client is
+`CDRClient` and `CDRCommand` in `AgentBoardRuntime`.
+
+**Where CDR keeps its state.** `$CD_REVIEW_HOME`, else `~/.cd-review`. No such
+directory reads as *not installed*.
+
+**The watcher daemon** — the thing start and stop control. While it runs,
+`watcher.json` in the home holds `{port, pid, token}`; a clean stop removes it.
+Its port defaults to 7718 (`$CDR_PORT` overrides). `GET /health` needs no token
+and answers `{ok, service: "cdr", pid, home}`; `GET /status` needs
+`Authorization: Bearer <token>` and returns the snapshot whose `polling` field
+lists `running`, `queued`, `waiting`, `retrying`, `parked`, `denied` and
+`reviewed` requests with the loop's `paused`, `budget`, `concurrency`, `power`,
+`lastPoll` and `nextPollAt`. The daemon reads as one of:
+
+| State | When |
+|---|---|
+| Not installed | No CDR home |
+| Stopped | No `watcher.json`, and nothing answers `/health` as CDR on the default port |
+| Running | `/health` answers as CDR with the pid `watcher.json` names, and `/status` reads |
+| Unreachable | `watcher.json` names a daemon that does not answer as that pid; a CDR daemon answers but `watcher.json` is missing; or `/status` fails. The reason is shown. |
+
+**The review server** — CDR's web interface and the source of recent reviews.
+`server.json` holds `{port, pid, token}` (default port 7717) and is not removed
+when the server stops. `GET /api/targets` with the token returns every target
+(a pull request) with its `reviews` (`started_at`, `finished_at`, `verdict`,
+`source` `manual` or `cdr`, `findings`, `lenses_ran`, `lenses_failed`) and its
+`queued`, `posted` and `to_post` counts. Recent reviews are every target's
+reviews, newest start first. The page routes — `/`, `/t/<id>` and
+`/pr/<owner>/<repo>/<n>` — need no token, so the app opens them in the browser.
+The review server is read separately from the daemon: a review server that is
+not running, or answers an HTTP error, never hides the daemon's state, and the
+reverse holds too.
+
+Both services answer only to Host `127.0.0.1:<port>`. Both payloads decode
+leniently: a missing or retyped field reads as absent, and one malformed list
+element drops that element, because CDR's shapes change without notice to
+Agent Board.
+
+**Tokens.** The bearer tokens are read from the state files for each request
+and never logged, shown, or carried in any state or error Agent Board surfaces;
+an error message from either service has the token cut out before it is shown.
+
+**Start and stop** run `node <cli.mjs> start` and `node <cli.mjs> stop`, each
+printing JSON on stdout. A failure returns CDR's stderr as the message. `start`
+exits 5 when the daemon's code or config moved while reviews are running; Agent
+Board shows that stderr and never passes `--force`. `node` is the first on the
+login-shell PATH (§2). `cli.mjs` is the **CDR command** setting (Settings → CDR,
+stored in `UserDefaults` under `cdr.command`); when that is empty it is
+`<installPath>/watcher/cli.mjs` of the `cd@cd-ai-skills` entry in
+`~/.claude/plugins/installed_plugins.json`, if that file exists.
