@@ -734,6 +734,33 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .review)
     }
 
+    /// SPEC §13.1: a follow-up check whose stop was not confirmed may still be running in its detached
+    /// checkout, so no second one starts there; the check parks naming it, its fix task kept in review.
+    func testAFollowupCheckWhoseStopWasNotConfirmedParksTheCheckInsteadOfStartingAnother() async throws {
+        try enableChecking()
+        let fixer = try await runningFixer()
+        try await completeFixer(fixer, file: "fix.txt")
+        await poll()
+        let round = try XCTUnwrap(try watches.currentRound(watchId: try onlyWatch().id))
+        let checker = try activeSession(on: try XCTUnwrap(round.followupTaskId))
+        try fixture.board.terminate(
+            sessionId: checker.sessionId,
+            cause: .setupStopUnconfirmed(shortId: "8bc316", detail: "claude agents --json never listed short id 8bc316")
+        )
+        let spawned = await fixture.runtime.spawns.count
+
+        await poll()
+
+        let spawnedAfter = await fixture.runtime.spawns.count
+        XCTAssertEqual(spawnedAfter, spawned, "a second follow-up check started beside one that may still be running")
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .parked)
+        let firstLine = watch.parkedReason?.components(separatedBy: "\n").first ?? ""
+        XCTAssertTrue(firstLine.contains("agent 8bc316"), firstLine)
+        XCTAssertTrue(firstLine.contains("could not confirm its stop"), firstLine)
+        XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .review)
+    }
+
     func testAFixingRoundWhoseFixItemIsResolvedBeforeItsFixerStartsEndsAndReturnsToWatching() async throws {
         try enable()
         answer(threads: [thread("T_fix")])

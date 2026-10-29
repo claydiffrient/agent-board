@@ -360,7 +360,14 @@ holds:
   every item has a grade its task goes to `done` and its checkout is removed,
   as a finished triage's is. It is never assigned by hand or resumed, and one
   that ends any other way closes its task and parks the watch, unless its setup
-  failed, which clears `followup_task_id` as a check that never ran (below); a shutdown order
+  failed, which clears `followup_task_id` as a check that never ran (below).
+  One whose setup failed after launch and whose stop was not confirmed (§3.1)
+  is not a check that never ran either: it may still be running in its
+  detached checkout, so no second follow-up check is spawned there. The round
+  ends with outcome `check_unavailable`, its fix task kept in review, and the
+  watch parks at once with a `parked_reason` whose first line names the
+  agent's short id and says its stop was not confirmed. It counts in neither
+  `check_failures` nor `unavailable_checks`. A shutdown order
   stops it at delivery and clears `followup_task_id`, so a fresh one starts
   once the order lifts.
 
