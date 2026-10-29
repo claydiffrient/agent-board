@@ -178,7 +178,9 @@ final class EpicRefreshTests: XCTestCase {
         try SupervisorFixture.git(["init", "-q", "--bare", remote.path], cwd: fixture.supportDir)
         try fixture.git(["remote", "add", "origin", remote.path])
         try fixture.git(["push", "-q", "origin", "main"])
-        try fixture.git(["branch", epic.branch, try pushFromAnotherClone(remote, file: "cut.txt")])
+        let cut = try pushFromAnotherClone(remote, file: "cut.txt")
+        try fixture.git(["fetch", "-q", "origin"])
+        try fixture.git(["branch", epic.branch, cut])
         let newer = try pushFromAnotherClone(remote, file: "newer.txt")
         try fixture.git(["fetch", "-q", "origin"])
 
