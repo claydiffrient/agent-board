@@ -133,6 +133,50 @@ final class SetupHandoffTests: XCTestCase {
         XCTAssertTrue(try fixture.grants.forSession(session.sessionId).isEmpty)
     }
 
+    /// SPEC §3.1: a retry must not share the worktree with an agent whose token was revoked.
+    func testASetupStepFailingAfterTheAgentStartedStopsTheAgentAndSaysItStarted() async throws {
+        let task = try readyTask()
+        await fixture.runtime.holdSpawn()
+        try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.runtime.waitUntilSettingUp()
+        try await fixture.db.writer.write { try $0.execute(sql: "ALTER TABLE hook_event RENAME TO hook_event_gone") }
+
+        await fixture.runtime.releaseSpawn()
+        await fixture.supervisor.waitForSetup()
+
+        let session = try XCTUnwrap(sessions(for: task).first)
+        XCTAssertEqual(session.shortId, "short-1")
+        XCTAssertFalse(try fixture.grants.hasLiveGrant(sessionId: session.sessionId))
+        let stopped = await fixture.runtime.stopped
+        XCTAssertEqual(stopped, ["short-1"], "the agent kept running on a revoked token")
+        XCTAssertEqual(try fixture.tasks.get(task.id)?.column, .ready)
+
+        let report = try XCTUnwrap(reports.unconsumed(projectId: fixture.project.id).first)
+        XCTAssertTrue(report.body.contains("Worker started, then stopped"), report.body)
+        XCTAssertFalse(report.body.contains("never started"), report.body)
+    }
+
+    /// SPEC §3.1: an agent that may still be running holds its task where no spawn can retry into its worktree.
+    func testAStopThatIsNotConfirmedKeepsTheTaskOutOfReadyAndNamesTheAgent() async throws {
+        let task = try readyTask()
+        await fixture.runtime.failNextSpawn(AgentStartedThenStopped(
+            shortId: "8bc316", reason: "claude agents --json never listed short id 8bc316",
+            stopFailure: "claude stop timed out"
+        ))
+
+        try await fixture.supervisor.assign(taskId: task.id)
+        await fixture.supervisor.waitForSetup()
+
+        let held = try XCTUnwrap(fixture.tasks.get(task.id))
+        XCTAssertEqual(held.column, .review)
+        XCTAssertTrue(held.failed)
+        let worktree = try XCTUnwrap(sessions(for: task).first?.worktreePath)
+        let report = try XCTUnwrap(reports.unconsumed(projectId: fixture.project.id).first)
+        XCTAssertTrue(report.body.hasPrefix("Worker started; stop not confirmed"), report.body)
+        XCTAssertTrue(report.body.contains("claude stop 8bc316"), report.body)
+        XCTAssertTrue(report.body.contains(worktree), report.body)
+    }
+
     /// The background half of a spawn dies with the process, so the row it was going to resolve
     /// would otherwise hold its task in `running` forever.
     func testASetupInterruptedByAQuitIsFailedOnNextLaunch() async throws {

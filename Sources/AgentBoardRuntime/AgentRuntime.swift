@@ -103,6 +103,37 @@ public struct SpawnedAgent: Sendable, Equatable {
     }
 }
 
+/// `claude --bg` started an agent, a later setup step failed, and the agent was stopped (SPEC §3.1).
+/// `stopFailure` is `claude stop`'s error; the stop still counts once the board ended the process itself.
+public struct AgentStartedThenStopped: Error, CustomStringConvertible, Sendable {
+    public var shortId: String
+    /// Nil when the failure came before the board recorded the session.
+    public var sessionId: String?
+    public var reason: String
+    public var stopFailure: String?
+    public var endedBySignal = false
+    public var cwd: String?
+
+    public init(shortId: String, sessionId: String? = nil, reason: String, stopFailure: String? = nil) {
+        self.shortId = shortId
+        self.sessionId = sessionId
+        self.reason = reason
+        self.stopFailure = stopFailure
+    }
+
+    public var stopConfirmed: Bool { stopFailure == nil || endedBySignal }
+
+    public var description: String {
+        guard let stopFailure else { return reason }
+        if endedBySignal {
+            return "\(reason) (`claude stop \(shortId)` failed: \(stopFailure); Agent Board ended its process instead)"
+        }
+        return "\(reason)\n`claude stop \(shortId)` failed: \(stopFailure), and Agent Board could not confirm it ended, "
+            + "so agent \(shortId) may still be running in \(cwd ?? "its worktree"). "
+            + "Run `claude stop \(shortId)` and confirm it is gone before reopening the task."
+    }
+}
+
 public protocol AgentRuntime: Sendable {
     func spawn(_ request: SpawnRequest) async throws -> SpawnedAgent
     /// The caller must have rewritten the session's config files for the current port first.
@@ -219,8 +250,15 @@ public struct BackgroundSessionRuntime: AgentRuntime {
                 }
                 return SpawnedAgent(shortId: shortId, sessionId: sessionId)
             } catch {
-                try? ClaudeCLI.stop(shortId: shortId, timeout: timeout, candidates: candidates)
-                throw error
+                var stopFailure: String?
+                do {
+                    try ClaudeCLI.stop(shortId: shortId, timeout: timeout, candidates: candidates)
+                } catch let stopError {
+                    stopFailure = String(describing: stopError)
+                }
+                throw AgentStartedThenStopped(
+                    shortId: shortId, reason: String(describing: error), stopFailure: stopFailure
+                )
             }
         }
         if let recovered = try ClaudeCLI.waitForAgent(timeout: timeout, candidates: candidates, select: select),

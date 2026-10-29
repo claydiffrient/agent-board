@@ -707,6 +707,33 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .review, "a resume checks the same round again")
     }
 
+    /// SPEC §13.1: a reviewer whose stop was not confirmed may still be running in the round's worktree, so
+    /// no second reviewer starts there; the check parks naming it, its fix task kept in review.
+    func testAReviewerWhoseStopWasNotConfirmedParksTheCheckInsteadOfStartingAnother() async throws {
+        try enableChecking()
+        let fixer = try await runningFixer()
+        try await completeFixer(fixer, file: "fix.txt")
+        await poll()
+        let reviewer = try activeSession(on: fixer.id)
+        XCTAssertNotNil(reviewer.reviewHead)
+        try fixture.board.terminate(
+            sessionId: reviewer.sessionId,
+            cause: .setupStopUnconfirmed(shortId: "8bc316", detail: "claude agents --json never listed short id 8bc316")
+        )
+        let spawned = await fixture.runtime.spawns.count
+
+        await poll()
+
+        let spawnedAfter = await fixture.runtime.spawns.count
+        XCTAssertEqual(spawnedAfter, spawned, "a second reviewer started beside one that may still be running")
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .parked)
+        let firstLine = watch.parkedReason?.components(separatedBy: "\n").first ?? ""
+        XCTAssertTrue(firstLine.contains("agent 8bc316"), firstLine)
+        XCTAssertTrue(firstLine.contains("could not confirm its stop"), firstLine)
+        XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .review)
+    }
+
     func testAFixingRoundWhoseFixItemIsResolvedBeforeItsFixerStartsEndsAndReturnsToWatching() async throws {
         try enable()
         answer(threads: [thread("T_fix")])

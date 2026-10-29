@@ -329,7 +329,15 @@ holds:
   branch with no change beyond `base_head_oid` is reopened on the spot with
   that reason, with no reviewer spawned. A reviewer session that ends without
   a verdict parks the watch, unless its setup failed, which is a check that
-  never ran (below); one left idle without one is raised as §5.1 says.
+  never ran (below); one left idle without one is raised as §5.1 says. A
+  reviewer whose setup failed after launch and whose stop was not confirmed
+  (§3.1) is not a check that never ran: it may still be running in the round's
+  worktree, so no second reviewer is started there. The round ends with
+  outcome `check_unavailable`, its fix task kept in review, and the watch parks
+  at once with a `parked_reason` whose first line names the agent's short id
+  and says its stop was not confirmed. It counts in neither `check_failures` nor
+  `unavailable_checks`; once a resume follows, a reviewer that ended that way
+  before it no longer holds the check.
 - **The follow-up check.** When the round has items to grade, a synthetic task
   of origin `followup_check` is created and recorded in `followup_task_id`
   with the round branch's tip as `checked_head_oid`, and a session holding a
@@ -389,8 +397,8 @@ whose setup fails, or one that cannot start for a reason a later poll may
 clear: a worktree that cannot be recreated, a git failure, a checkout still
 held or being set up. A §8 cap or a shutdown order is a hold instead. The watch
 stays checking and the next poll retries the half that never ran, counting
-each attempt in `unavailable_checks` (a reviewer whose setup failed counts
-through its session). An attempt counts even when git cannot read the round
+each attempt in `unavailable_checks` (a reviewer whose setup failed, with its
+agent confirmed stopped, counts through its session). An attempt counts even when git cannot read the round
 branch's tip. The third since the watch was last resumed ends the round with
 outcome `check_unavailable`, keeps its fix task in review, and parks the watch
 with a `parked_reason` whose first line names the unpushed commit and its
