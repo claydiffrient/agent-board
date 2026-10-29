@@ -5,11 +5,31 @@ import Foundation
 public struct VerificationCommands: Sendable, Equatable {
     public var build: String?
     public var test: String?
+    /// How long `refresh_epic` lets each step of its check run before stopping it (SPEC §5.2).
+    public var timeoutSeconds: Int
     public var integration: IntegrationVerification
 
-    public init(build: String? = nil, test: String? = nil, integration: IntegrationVerification = .buildAndTest) {
+    /// A cold `swift build` in a scratch checkout with no `.build` takes about 9 minutes here, and
+    /// its tests build their own targets before running; 30 minutes is over three times that.
+    public static let defaultTimeoutSeconds = 30 * 60
+
+    /// One minute to 24 hours. The ceiling is over 150 cold builds, and far enough below any
+    /// nanosecond or minutes-to-seconds conversion's limit that no clamped value can overflow one.
+    public static let timeoutRange = 60...(24 * 60 * 60)
+
+    public static func clampedTimeout(_ seconds: Int) -> Int {
+        min(max(seconds, timeoutRange.lowerBound), timeoutRange.upperBound)
+    }
+
+    public init(
+        build: String? = nil,
+        test: String? = nil,
+        timeoutSeconds: Int? = nil,
+        integration: IntegrationVerification = .buildAndTest
+    ) {
         self.build = Self.normalized(build)
         self.test = Self.normalized(test)
+        self.timeoutSeconds = timeoutSeconds.map(Self.clampedTimeout) ?? Self.defaultTimeoutSeconds
         self.integration = integration
     }
 
@@ -123,6 +143,21 @@ public struct VerificationCommands: Sendable, Equatable {
 
 extension ProjectSettings {
     public var verification: VerificationCommands {
-        VerificationCommands(build: buildCommand, test: testCommand, integration: integrationVerification)
+        VerificationCommands(
+            build: buildCommand,
+            test: testCommand,
+            timeoutSeconds: verificationTimeoutSeconds,
+            integration: integrationVerification
+        )
+    }
+
+    /// The Verification tab's minutes field. Zero or less clears it back to the default.
+    public var verificationTimeoutMinutes: Int? {
+        get { verificationTimeoutSeconds.map { $0 / 60 } }
+        set {
+            verificationTimeoutSeconds = newValue.flatMap {
+                $0 > 0 ? min($0, VerificationCommands.timeoutRange.upperBound / 60) * 60 : nil
+            }
+        }
     }
 }

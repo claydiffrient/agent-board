@@ -318,11 +318,32 @@ public final class OrchestratorToolHandler: ToolHandler {
         ToolDescriptor(
             name: "get_epic",
             description: "One epic in full: its goal, integration branch, newest pull request, its tasks grouped by column, "
-                + "whether it is ready for integration, and `next_step` when the epic is waiting on you to open its "
-                + "pull request or on that pull request to merge (null otherwise). A done or abandoned epic also "
-                + "lists `held_worktrees`: the worktrees of it and its integration task still on disk, which only "
-                + "a human removes.",
+                + "whether it is ready for integration, `next_step` when the epic is waiting on you to open its "
+                + "pull request or on that pull request to merge (null otherwise), and `base_drift`: how many commits "
+                + "the epic branch is behind and ahead of the project's base branch, `against` naming the ref "
+                + "counted from (`origin/<base>` as last fetched, when it is at or ahead of local; this call never "
+                + "fetches), or why that cannot be counted "
+                + "(`behind` and `ahead` are null and `unavailable` says why). Drift is information for the human, "
+                + "not an alarm: raise it when it bears on a decision, and never refresh on your own because of it. "
+                + "A done or abandoned epic also lists `held_worktrees`: the worktrees of it and its integration task "
+                + "still on disk, which only a human removes.",
             inputSchema: ToolSchema.object(properties: ["id": ToolSchema.string()], required: ["id"])
+        ),
+        ToolDescriptor(
+            name: "refresh_epic",
+            description: "Merge the project's base branch into an epic branch: `origin/<base>`, freshly fetched, "
+                + "when local is behind or equal to it, local otherwise; the answer names the ref merged. Only when the human asks for it: an "
+                + "epic branch is never refreshed on your own initiative, on spawn, or because get_epic shows drift. "
+                + "The merge is built and tested with the project's configured build and test commands in a "
+                + "scratch checkout before the epic branch moves; if either fails, or the merge conflicts, the epic "
+                + "branch is left exactly as it was and the answer says why. With no command configured, the merge "
+                + "is applied and the answer says plainly that nothing was verified and what you must run. Refused "
+                + "for a done or abandoned epic, while any working tree has the epic branch checked out, and while "
+                + "another refresh of the same epic is still running. With a command configured the call answers "
+                + "before anything is built, and the outcome arrives later as a `refresh` report through "
+                + "list_reports: a build can outlast the time Claude Code waits for a tool's answer. Each command "
+                + "is stopped once it runs past the project's verification timeout.",
+            inputSchema: ToolSchema.object(properties: ["epic_id": ToolSchema.string()], required: ["epic_id"])
         ),
         ToolDescriptor(
             name: "request_integration",
@@ -531,7 +552,8 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "promote_proposal": return try promoteProposal(arguments, identity: identity)
         case "create_epic": return try createEpic(arguments, identity: identity)
         case "list_epics": return try listEpics(identity: identity)
-        case "get_epic": return try getEpic(arguments, identity: identity)
+        case "get_epic": return try await getEpic(arguments, identity: identity)
+        case "refresh_epic": return try await refreshEpic(arguments, identity: identity)
         case "request_integration": return try requestIntegration(arguments, identity: identity)
         case "close_epic": return try closeEpic(arguments, identity: identity)
         case "push_branch": return try pushBranch(arguments, identity: identity)
@@ -1161,7 +1183,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         }))
     }
 
-    private func getEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+    private func getEpic(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
         let epic = try projectEpic(try ToolArguments.requiredString("id", in: arguments), identity: identity)
         let epicTasks = try tasks.list(projectId: identity.projectId, epicId: epic.id, includeArchived: true)
         var columns: [String: JSONValue] = [:]
@@ -1191,9 +1213,48 @@ public final class OrchestratorToolHandler: ToolHandler {
             "closed_tasks": .number(Double(counts.closed)),
             "total_tasks": .number(Double(counts.total)),
             "ready_for_integration": .bool(try board.epicReadyForIntegration(epicId: epic.id)),
+            "base_drift": try await renderDrift(epic),
             "next_step": .optional(Board.nextStep(for: epic)),
             "columns": .object(columns),
         ]) { $1 }))
+    }
+
+    private func renderDrift(_ epic: Epic) async throws -> JSONValue {
+        let base = try projects.get(epic.projectId)?.baseBranch
+        let drift: BaseDrift
+        do {
+            drift = try await control.baseDrift(epicId: epic.id)
+        } catch {
+            drift = .unavailable(Self.describe(error))
+        }
+        var fields: [String: JSONValue] = ["base": .optional(base), "behind": .null, "ahead": .null]
+        switch drift {
+        case let .measured(behind, ahead, against):
+            fields["behind"] = .number(Double(behind))
+            fields["ahead"] = .number(Double(ahead))
+            fields["against"] = .string(against)
+        case .noEpicBranch(let branch):
+            fields["unavailable"] = .string("\(branch) does not exist yet; it is cut from the base branch on first use.")
+        case .noBaseBranch(let branch):
+            fields["unavailable"] = .string("the project's base branch \(branch) does not exist in the repository.")
+        case .unavailable(let reason):
+            fields["unavailable"] = .string(reason)
+        }
+        return .object(fields)
+    }
+
+    private func refreshEpic(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
+        let epic = try projectEpic(try ToolArguments.requiredString("epic_id", in: arguments), identity: identity)
+        if let refusal = EpicRefresh.refusal(for: epic) { throw ToolError(refusal) }
+        let answer: EpicRefreshAnswer
+        do {
+            answer = try await control.refreshEpic(epicId: epic.id)
+        } catch {
+            throw ToolError("Refresh failed before \(epic.branch) moved, so it is untouched: \(Self.describe(error))")
+        }
+        let text = answer.message(branch: epic.branch)
+        if answer.outcome.isFailure { throw ToolError(text) }
+        return ToolResult(text: text)
     }
 
     private func requestIntegration(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
@@ -1349,6 +1410,10 @@ public final class OrchestratorToolHandler: ToolHandler {
     }
 
     // MARK: Helpers
+
+    private static func describe(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+    }
 
     private func projectEpic(_ id: String, identity: TokenIdentity) throws -> Epic {
         guard let epic = try epics.get(id), epic.projectId == identity.projectId else {

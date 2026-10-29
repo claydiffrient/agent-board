@@ -154,6 +154,8 @@ public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, Data
     case request
     /// A project's orchestrator answered a request; queued for the Coordinator only.
     case reply
+    /// How a `refresh_epic` that returned before its build and tests ran came out (SPEC §5.2).
+    case refresh
     /// PR follow-through reached a milestone on one of the project's pull requests (SPEC §13.6).
     case prFollowThrough = "pr_follow_through"
 }

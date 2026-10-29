@@ -80,6 +80,11 @@ public enum BranchMerge: Sendable, Equatable {
     case noTargetBranch(String)
 }
 
+public enum RefreshCandidate: Sendable, Equatable {
+    case settled(EpicRefresh)
+    case merge(previousHead: String, candidate: String)
+}
+
 public enum SlotRelease: Sendable, Equatable {
     case released
     /// The slot's directory is gone or no longer a worktree of this repository.
@@ -92,11 +97,14 @@ public enum SlotRelease: Sendable, Equatable {
 public struct BaseStartPoint: Sendable, Equatable {
     /// The remote's base commit when local `base` is behind or equal to it, otherwise `base` itself.
     public var ref: String
+    /// The ref `ref` was read from, `origin/main` or `main`, for messages.
+    public var name: String
     /// Set when the fetch failed, so `ref` is local `base` and may be behind.
     public var warning: String?
 
-    public init(ref: String, warning: String? = nil) {
+    public init(ref: String, name: String? = nil, warning: String? = nil) {
         self.ref = ref
+        self.name = name ?? ref
         self.warning = warning
     }
 }
@@ -267,7 +275,7 @@ public struct WorktreeManager: Sendable {
                 throw AgentRuntimeError(Self.failure(PublishCommand.remoteURL(remote), remoteURL))
             }
             let fetched = try gitRaw(args, cwd: repoPath, timeout: timeout)
-            if fetched.status == 0 { return startPoint(local: "refs/heads/\(base)", remote: tracking, base: base) }
+            if fetched.status == 0 { return startPoint(base, remote: remote) }
             let stderr = fetched.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             problem = stderr.isEmpty ? "git fetch exited \(fetched.status)" : stderr
         } catch {
@@ -275,17 +283,19 @@ public struct WorktreeManager: Sendable {
         }
         return BaseStartPoint(
             ref: base,
-            warning: "Could not fetch \(base) from \(remote), so this branch was cut from local \(base), "
-                + "which may be behind \(remote)/\(base): \(problem)"
+            warning: "Could not fetch \(base) from \(remote), so local \(base) was used, which may be behind "
+                + "\(remote)/\(base): \(problem)"
         )
     }
 
     /// Behind or equal takes the remote; ahead or diverged keeps local, which holds unpushed work.
-    private func startPoint(local: String, remote: String, base: String) -> BaseStartPoint {
-        guard let remoteTip = try? refCommit(remote), let localTip = try? refCommit(local),
+    /// Reads the remote-tracking ref as the last fetch left it, and fetches nothing.
+    public func startPoint(_ base: String, remote: String = "origin") -> BaseStartPoint {
+        guard let remoteTip = try? refCommit("refs/remotes/\(remote)/\(base)"),
+              let localTip = try? refCommit("refs/heads/\(base)"),
               (try? isAncestor(localTip, of: remoteTip)) == true
         else { return BaseStartPoint(ref: base) }
-        return BaseStartPoint(ref: remoteTip)
+        return BaseStartPoint(ref: remoteTip, name: "\(remote)/\(base)")
     }
 
     /// A standalone task's recorded cut point while local `base` is still behind it (SPEC §3.1
@@ -342,22 +352,126 @@ public struct WorktreeManager: Sendable {
         }
         let targetHead = try resolve(targetRef)
         let taskHead = try resolve("refs/heads/\(taskBranch)")
-        if try isAncestor(targetHead, of: taskHead) {
+        let message = Self.mergeSubject(taskTitle: taskTitle, targetTitle: targetTitle)
+        switch try combine(targetHead, taskHead, message: message) {
+        case .fastForward:
             try git(["update-ref", "-m", "fast-forward to \(taskBranch)", targetRef, taskHead, targetHead])
             return .fastForwarded(head: taskHead)
+        case .conflicted(let files):
+            return .conflicted(files: files)
+        case .commit(let commit):
+            try git(["update-ref", "-m", "merge \(taskBranch)", targetRef, commit, targetHead])
+            return .merged(head: commit)
         }
+    }
 
+    private enum Combination {
+        case fastForward
+        case commit(String)
+        case conflicted(files: [String])
+    }
+
+    /// The commit that would carry both heads, written to the object store but to no ref.
+    private func combine(_ targetHead: String, _ sourceHead: String, message: String) throws -> Combination {
+        if try isAncestor(targetHead, of: sourceHead) { return .fastForward }
         let tree: String
-        switch try mergeTree(targetHead, taskHead) {
+        switch try mergeTree(targetHead, sourceHead) {
         case .conflicted(let files): return .conflicted(files: files)
         case .clean(let written): tree = written
         }
-        let message = Self.mergeSubject(taskTitle: taskTitle, targetTitle: targetTitle)
         let commit = try gitChecked(
-            mergeConfig() + ["commit-tree", tree, "-p", targetHead, "-p", taskHead, "-m", message], cwd: repoPath
+            mergeConfig() + ["commit-tree", tree, "-p", targetHead, "-p", sourceHead, "-m", message], cwd: repoPath
         ).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        try git(["update-ref", "-m", "merge \(taskBranch)", targetRef, commit, targetHead])
-        return .merged(head: commit)
+        return .commit(commit)
+    }
+
+    /// One `rev-list` for both counts, so `get_epic` can afford it on every call. SPEC §5.2: counted
+    /// against the last-fetched `origin/<base>` when it is at or ahead of local, never fetching.
+    public func drift(of branch: String, from base: String) throws -> BaseDrift {
+        let against = startPoint(base)
+        let result = try gitRaw(
+            ["rev-list", "--left-right", "--count", "\(qualified(against, base: base))...refs/heads/\(branch)"],
+            cwd: repoPath
+        )
+        if result.status == 0 {
+            let counts = result.stdout.split(whereSeparator: { $0.isWhitespace }).compactMap { Int($0) }
+            if counts.count == 2 { return .measured(behind: counts[0], ahead: counts[1], against: against.name) }
+        }
+        if try !branchExists(branch) { return .noEpicBranch(branch) }
+        if try !branchExists(base) { return .noBaseBranch(base) }
+        throw AgentRuntimeError(Self.failure(["rev-list", "--left-right", "--count", "\(base)...\(branch)"], result))
+    }
+
+    /// Where merging `start` into `branch` would leave it, without moving anything: a settled
+    /// outcome, or a commit on no ref for the caller to verify and then `applyRefresh`.
+    public func refreshCandidate(
+        branch: String, base: String, start: BaseStartPoint, message: String
+    ) throws -> RefreshCandidate {
+        guard try branchExists(base) else { return .settled(.noBaseBranch) }
+        guard try branchExists(branch) else { return .settled(.noEpicBranch) }
+        if let holder = try list().first(where: { $0.branch == branch }) {
+            return .settled(.checkedOut(path: holder.path.path, holder: nil))
+        }
+        let head = try resolve("refs/heads/\(branch)")
+        let baseHead = try resolve(qualified(start, base: base))
+        if try isAncestor(baseHead, of: head) { return .settled(.alreadyCurrent(head: head)) }
+        switch try combine(head, baseHead, message: message) {
+        case .fastForward: return .merge(previousHead: head, candidate: baseHead)
+        case .commit(let commit): return .merge(previousHead: head, candidate: commit)
+        case .conflicted(let files): return .settled(.conflicted(head: head, files: files))
+        }
+    }
+
+    /// Moves `branch` from `previousHead` to `candidate`, unless something checked it out or moved
+    /// it since `refreshCandidate` looked.
+    public func applyRefresh(branch: String, from previousHead: String, to candidate: String) throws -> EpicRefresh? {
+        if let holder = try list().first(where: { $0.branch == branch }) {
+            return .checkedOut(path: holder.path.path, holder: nil)
+        }
+        let ref = "refs/heads/\(branch)"
+        let result = try gitRaw(["update-ref", "-m", "refresh from base", ref, candidate, previousHead], cwd: repoPath)
+        guard result.status != 0 else { return nil }
+        if let now = try refCommit(ref), now != previousHead { return .moved(from: previousHead, to: now) }
+        throw AgentRuntimeError(Self.failure(["update-ref", ref, candidate, previousHead], result))
+    }
+
+    /// A throwaway checkout of `commit` on no branch. `git worktree add` runs the repository's
+    /// `post-checkout` hook, so the timeout bounds the hook too, and stops its whole process group.
+    public func createDetached(
+        name: String, commit: String, timeout: TimeInterval, isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) throws -> URL {
+        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
+        let path = worktreeRoot.appendingPathComponent(name)
+        var env = environment()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        let args = ["worktree", "add", "--detach", path.path, commit]
+        let result = try BoundedCommand.run(
+            executable: Self.gitPath, arguments: args, cwd: repoPath, environment: env,
+            timeout: timeout, isCancelled: isCancelled
+        )
+        let failure: String
+        switch result.ending {
+        case .exited(0): return path
+        case .exited(let status): failure = "git \(args.joined(separator: " ")) exited \(status)"
+        case .timedOut: failure = "git \(args.joined(separator: " ")) timed out after \(Int(timeout))s and was stopped"
+        case .canceled: failure = "git \(args.joined(separator: " ")) was canceled"
+        }
+        removeScratch(path: path)
+        throw AgentRuntimeError(failure + (result.output.isEmpty ? "" : "\n\(RefreshVerifier.tail(result.output))"))
+    }
+
+    /// Scratch checkouts under `worktreeRoot` whose directory name starts with `prefix`.
+    public func scratchCheckouts(prefix: String) throws -> [URL] {
+        try list().map(\.path).filter { $0.lastPathComponent.hasPrefix(prefix) }
+    }
+
+    /// Forced: a scratch checkout holds build output and nobody's work.
+    public func removeScratch(path: URL) {
+        _ = try? gitRaw(["worktree", "remove", "--force", path.path], cwd: repoPath)
+        if FileManager.default.fileExists(atPath: path.path) {
+            try? FileManager.default.removeItem(at: path)
+            _ = try? gitRaw(["worktree", "prune"], cwd: repoPath)
+        }
     }
 
     private enum TreeMerge {
@@ -404,6 +518,12 @@ public struct WorktreeManager: Sendable {
             config += ["-c", "user.email=agent-board@localhost", "-c", "user.name=Agent Board"]
         }
         return config
+    }
+
+    /// A start point that is local `base` names it by its full ref, so a tag or remote of the same
+    /// name cannot shadow it.
+    private func qualified(_ start: BaseStartPoint, base: String) -> String {
+        start.ref == base ? "refs/heads/\(base)" : start.ref
     }
 
     private func resolve(_ ref: String) throws -> String {

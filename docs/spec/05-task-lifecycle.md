@@ -85,6 +85,26 @@ nobody reviewed.
   the fourth termination shape alongside a cap kill, a human stop, and an
   acknowledged wind-down; each is distinguishable by report kind
   (`handoff`, `failed`, none, `decision`) and by the session's `stop_reason`.
+- **Resumed** — before a stopped worker in its own worktree is woken, a task in
+  an epic has `agentboard/epic-<id>` merged into its branch, in that worktree,
+  so it sees what siblings accepted since it last ran. Only the epic branch,
+  never the project's base; a task in no epic, a shared placement, a reviewer
+  and a wind-down delivery (§8.1) merge nothing, and spawn never merges — it
+  already cuts from the epic head. An epic branch already in the task's
+  history does nothing and says nothing. Uncommitted work the previous run left
+  is first committed, unchanged and hook-free, as `Save uncommitted work left
+  by an interrupted run`: a stash would go on the stack every worktree of the
+  repository shares, and git refuses to reapply one over a conflicted merge,
+  which is exactly when it matters. The merge commit is titled from the epic's
+  and task's titles, never branch names (§5.2). A conflict never refuses the
+  resume and is never resolved by the board: the worker wakes in the
+  conflicted tree, and the resume prompt says before anything else that the
+  epic branch was merged, which files conflicted, that resolving them is part
+  of the task (D21), and that it is not done until the tree builds and the
+  suite passes. A clean merge names the commits and files it brought in; a merge
+  still unresolved from an earlier resume is reported again rather than
+  retried; a merge git refused tells the worker to merge the epic branch
+  itself. The prompt names any commit made of the worker's uncommitted work.
 - `blocked` — a flag, not a column. Set by the `Notification` hook, cleared on
   the next `PostToolUse`. The card keeps its position and shows why.
 - `review` — worker has committed and called `report_complete`, and the review
@@ -831,6 +851,116 @@ than one that is finished; they merge nothing and are not part of this sequence.
    workflow and the approval is already a human gate; the approval row names
    how many tasks are unfinished, so the mistake is visible to the person
    deciding rather than pre-empted for them.
+
+**The epic branch's lifecycle, in one place.** An epic branch is cut from the
+project's base branch the first time one of its tasks is spawned or accepted
+(§3.1 step 1); every task branch inside it is cut from the epic branch, never
+from the base directly (§3.1 step 2). A task branch catches the epic branch
+back up only on resume (above), and only with the epic branch — never with the
+project's base branch directly. D21 is the rule everything else here follows
+from, scoped to that moment: an agent working a ticket owns making its own
+work mergeable into the epic branch, so a conflict a sibling's already-accepted
+work left in its path when its own task resumes is still that agent's to
+resolve. The board never resolves one for it — a resumed worker wakes inside
+the conflict rather than having the resume refused (above) — and nothing here
+defers that resume-time conflict to a timer.
+
+D21 does not reach into step 3's job above: a branch whose merge into the epic
+branch conflicted during integration is not a resuming agent's conflict to
+find, because no task is resumed to find it, and resolving it stays the
+integrator's leftover work exactly as step 3 assigns it. The two are a single
+rule read at two points in a task's life — while an agent is still working a
+ticket, a sibling's conflict in its path is its own; once a branch is already
+accepted and the agent is gone, the conflict is the integrator's.
+
+**Drift and refresh.** An epic branch advances only when a task is accepted
+into it or when you ask the orchestrator to refresh it — never on spawn, never
+on a timer. `get_epic` reports `base_drift` next to `ready_for_integration`:
+`behind` (the base branch's commits the epic branch lacks) and `ahead` (the
+epic's own), from one `git rev-list --left-right --count` per call, measured
+under 10ms on this repository. The count is taken against
+`refs/remotes/origin/<base>` as the last fetch left it, when that ref exists and
+local `<base>` is behind or equal to it, and against local `<base>` otherwise —
+the rule §3.1 step 1 cuts epic branches by, so an epic cut from `origin/main`
+is not read as current against a lagging local `main`. `get_epic` never
+fetches, since orchestrators call it constantly and a fetch can take 10
+seconds, so `against` names the ref counted from (`origin/main` or `main`) and
+a count can be read as only as fresh as the last fetch. An epic branch not cut
+yet, or a missing base branch, reports `behind` and `ahead` as null with
+`unavailable` saying which. Drift is reporting only: it raises no attention
+badge and no notification.
+
+`refresh_epic(epic_id)` merges the project's freshest base branch into the epic
+branch: it fetches `origin/<base>` as §3.1 step 1 does and merges the fetched
+tip when local `<base>` is behind or equal to it, local `<base>` otherwise. A
+failed fetch falls back to local `<base>`, and the answer says so. Every answer
+names the ref merged (`Merged origin/main into …`, `already has every commit on
+origin/main`).
+The merge commit is built with `merge-tree --write-tree` and `commit-tree` on
+no ref, as an accept's merge is (§5), and its subject names that same ref
+(`Merge origin/main into <epic title>`). If the project configures a build or test
+command (§4), the commit is checked out detached in a scratch worktree
+(`<worktree-root>/refresh-<epic-id>-<random>`, removed afterwards) and the
+configured commands run there, build first; the epic branch moves, by an
+`update-ref` guarded by its old head and serialized with accepts' merges, only
+once every configured command passes. A command the project does not configure
+is never guessed at: the refresh applies and its answer says `NOT VERIFIED`,
+names what was not run, tells the orchestrator to work it out and run it — the
+integrator's Build and test wording (step 3) — and gives the head the branch had
+before. `integrationVerification` governs only the integrator; a refresh runs
+every configured command whatever it says. A
+conflict, a failing command, or an accept landing on the epic branch while the
+build ran leaves the branch exactly as it was; a conflict names its files, and
+both a conflict and a failure say that fixing it by hand or by a dispatched
+task is the human's call. Refused for a `done` or `abandoned` epic, for a
+missing base branch, and while any working tree has the epic branch checked
+out — naming the path and, when one is on record, the session working there —
+because moving a checked-out branch leaves that tree showing the merged files
+as deleted.
+
+*It answers before anything is built.* Claude Code 2.1.285 abandons a call to
+an HTTP MCP server whose response headers have not arrived 60 seconds after the
+request (measured: a stub server that answered in 5s returned, one that took
+90s got "The operation timed out." at 60s), and the board answers a tool call
+only once it is done. A cold `swift build` in a checkout with no `.build` takes
+about 9 minutes here. So with a command configured, `refresh_epic` answers as
+soon as the merge commit exists: the commit, the commands and the timeout, and
+that the branch stays where it is until they pass. The verdict — every outcome
+above — is queued later as a `refresh` report (§9.1) and announced like any
+other. With no command configured nothing needs to wait, and the answer is the
+verdict.
+
+*One refresh per epic at a time.* A second `refresh_epic` for an epic whose
+check is still running is refused, naming the commit being verified; nothing
+new starts. Each check's scratch worktree also has a name of its own, and
+leftovers a crash stranded under `refresh-<epic-id>` are removed before a new
+check starts — safe only because no other check of that epic can be running.
+An orphan reap (§5) leaves a running check's scratch worktree alone; an epic
+with no commits of its own fast-forwards, so that worktree sits on the base
+head and would otherwise read as merged.
+
+*Each step is bounded.* Creating the scratch worktree, the build and the test
+are each stopped once they run past the project's verification timeout
+(`verificationTimeoutSeconds`, default 30 minutes — over three times a cold
+build here; the settings sheet takes it in minutes, and §4 gives its range).
+Time is counted on `CLOCK_UPTIME_RAW`, so a Mac asleep mid-build does not use
+it up. A step past
+its timeout gets SIGTERM for its whole process group, then SIGKILL 5 seconds
+later; anything left in the group when the command exits is killed too. The
+branch does not move and the report says "timed out after" the timeout.
+
+*The checkout runs the repository's hooks.* `git worktree add` fires
+`post-checkout` for the scratch worktree, exactly as it does for a task's
+worktree (§3.1 step 2), because the check is meant to say whether the merge
+builds the way a task spawned from it will — and for a repository whose hook
+is its setup (one project's runs a full `setup.sh`), a build without it fails for
+a reason that has nothing to do with the merge. The cost is the hook's full
+runtime on every check, inside the same timeout.
+
+*A failure the board caused is never a verdict.* A scratch worktree that cannot
+be set up (including a failing or timed-out hook) and Agent Board quitting
+mid-check both report that the refresh did not finish, that the branch did not
+move, and that no build or test failed — never that the merge is broken.
 
 **Worktrees a closed epic leaves behind.** Nothing reaps an epic's integration
 worktree (`<worktree-root>/epic-<epic-id>`, on the epic branch), and a task
