@@ -531,7 +531,14 @@ switch, one line gives the daemon's state: stopped, the unreachable reason, or,
 while it runs, a usage-limit pause with its end, a power hold, the 24-hour
 budget used, concurrency running of its limit, and the next poll. The list
 mirrors CDR's own pages, in the Pull Requests page's row style (title as a
-link, details in caption): **Running** (`owner/repo #n`, title, started,
+link, details in caption). It opens with **Waiting on you**: CDR's open
+escalations (§13.7), each with `owner/repo #n`, the PR title, the finding,
+when CDR asked, and a line under it with the argument and CDR's verdict on it
+(`uncertain` or `rejected`); clicking one opens the PR thread CDR argued on, or
+its reply when there is no thread. The section is absent while nothing waits,
+whether the daemon runs or not, and an escalation list CDR could not read
+shows the section with the reason instead of reading as none. Then
+**Running** (`owner/repo #n`, title, started,
 phase), then **Queued — due, not started** (due, what holds it),
 **Waiting out the delay** (due, requested), **Retrying** (attempts, next retry)
 and **Parked** (attempts), each queue row with its last error and each absent
@@ -542,8 +549,7 @@ daemon leaves only Running, saying so, and Recent reviews still lists; a review
 server that is not running says so in Recent reviews and leaves the daemon's
 sections alone. Clicking a row opens its CDR page in the default browser —
 `/t/<id>` for a review, `/pr/<owner>/<repo>/<n>` for a queue entry — or the PR
-on GitHub while the review server is down. Open escalations are not shown: the
-client does not read them.
+on GitHub while the review server is down.
 
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each

@@ -2,8 +2,8 @@ import AgentBoardRuntime
 import AppKit
 import SwiftUI
 
-/// The Reviews page (SPEC §10, §13.7): what CDR, the review watcher, is running and queued now, its
-/// recent reviews, and a toggle that starts and stops its daemon.
+/// The Reviews page (SPEC §10, §13.7): what CDR, the review watcher, has waiting on the human, is running
+/// and queued now, its recent reviews, and a toggle that starts and stops its daemon.
 struct ReviewsView: View {
     var pollInterval: Duration = .seconds(10)
 
@@ -36,16 +36,14 @@ struct ReviewsView: View {
             }
         }
         .navigationTitle("Reviews")
-        .task {
+        .task(id: configuredCommand) {
             guard let cdr = env.cdr else { return }
+            // The first read needs the command: a stopped daemon's escalations come from CDR's CLI.
+            await model.resolveCommand(configured: configuredCommand, cdr: cdr)
             while !_Concurrency.Task.isCancelled {
                 await model.refresh(cdr)
                 try? await _Concurrency.Task.sleep(for: pollInterval)
             }
-        }
-        .task(id: configuredCommand) {
-            guard let cdr = env.cdr else { return }
-            await model.resolveCommand(configured: configuredCommand, cdr: cdr)
         }
     }
 
@@ -115,7 +113,7 @@ final class ReviewsModel {
     }
 
     func refresh(_ cdr: any CDRService) async {
-        snapshot = await cdr.snapshot()
+        snapshot = await cdr.snapshot(command: try? command?.get())
     }
 
     func resolveCommand(configured: String, cdr: any CDRService) async {
@@ -160,7 +158,34 @@ enum ReviewsPage {
     static func sections(_ snapshot: CDRSnapshot?) -> [ReviewsPageSection] {
         guard let snapshot else { return [ReviewsPageSection(title: "Running", emptyText: "Reading CDR…")] }
         let reviewServer: URL? = if case .available(let list) = snapshot.reviews { list.baseURL } else { nil }
-        return daemonSections(snapshot.daemon, reviewServer: reviewServer) + [recentSection(snapshot.reviews)]
+        return escalationSections(snapshot.escalations)
+            + daemonSections(snapshot.daemon, reviewServer: reviewServer)
+            + [recentSection(snapshot.reviews)]
+    }
+
+    /// Absent while nothing waits; an unreadable list says so rather than reading as none.
+    private static func escalationSections(_ escalations: CDREscalations) -> [ReviewsPageSection] {
+        var section = ReviewsPageSection(title: "Waiting on you")
+        switch escalations {
+        case .unavailable(let reason):
+            section.message = "CDR's open escalations can't be read: \(reason)"
+        case .available(let list):
+            guard !list.isEmpty else { return [] }
+            section.rows = list.enumerated().map { index, escalation in
+                let name = "\(escalation.repo ?? "?") #\(escalation.pr.map(String.init) ?? "?")"
+                let posted = escalation.postedDate.map { "asked \(Format.relative($0))" }
+                let argued = escalation.argued?.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+                let verdict = escalation.arguedVerdict.map { " (\($0))" } ?? ""
+                return ReviewsPageRow(
+                    id: "escalation-\(escalation.threadURL ?? escalation.replyURL ?? "#\(index)")",
+                    title: escalation.title ?? name,
+                    details: [name, escalation.finding, posted].compactMap { $0 }.joined(separator: " · "),
+                    note: argued.map { "Argued\(verdict): \($0)" } ?? "No argument recorded\(verdict).",
+                    url: escalation.link
+                )
+            }
+        }
+        return [section]
     }
 
     private static func daemonSections(_ daemon: CDRDaemonState, reviewServer: URL?) -> [ReviewsPageSection] {

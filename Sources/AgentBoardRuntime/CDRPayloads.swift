@@ -7,6 +7,8 @@ public struct CDRStatus: Decodable, Equatable, Sendable {
     public var version: String?
     public var startedAt: String?
     public var polling: CDRPolling?
+    /// Nil when the field is missing or `null`, which the daemon sends when its database read failed.
+    public var escalations: CDREscalations?
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CDRKey.self)
@@ -14,6 +16,81 @@ public struct CDRStatus: Decodable, Equatable, Sendable {
         version = c.lenient("version")
         startedAt = c.lenient("startedAt")
         polling = c.lenient("polling")
+        escalations = c.lenient("escalations")
+    }
+}
+
+/// CDR's open escalations: findings it argued on a PR thread that now wait on the human. CDR sends `{error}` in
+/// place of the list when its database read fails, which is unavailable, not empty (SPEC §13.7).
+public enum CDREscalations: Decodable, Equatable, Sendable {
+    case available([CDREscalation])
+    case unavailable(String)
+
+    public init(from decoder: Decoder) throws {
+        if let list = try? [Lossy<CDREscalation>](from: decoder) {
+            self = .available(list.compactMap(\.value))
+        } else if let error: String = (try? decoder.container(keyedBy: CDRKey.self))?.lenient("error") {
+            self = .unavailable(error)
+        } else {
+            self = .unavailable("CDR's escalations were neither a list nor an error.")
+        }
+    }
+}
+
+/// One row of `openEscalations` in CDR's `server/db.mjs`.
+public struct CDREscalation: Decodable, Equatable, Sendable {
+    public var targetId: Int?
+    /// `owner/repo`.
+    public var repo: String?
+    public var pr: Int?
+    public var title: String?
+    public var finding: String?
+    public var argued: String?
+    /// `uncertain` or `rejected`; CDR leaves out `accepted`, which no longer waits on anyone.
+    public var arguedVerdict: String?
+    /// SQLite UTC text.
+    public var postedAt: String?
+    public var replyURL: String?
+    public var threadURL: String?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CDRKey.self)
+        targetId = c.lenient("target_id")
+        repo = c.lenient("repo")
+        pr = c.lenient("pr")
+        title = c.lenient("title")
+        finding = c.lenient("finding")
+        argued = c.lenient("argued")
+        arguedVerdict = c.lenient("argued_verdict")
+        postedAt = c.lenient("posted_at")
+        replyURL = c.lenient("reply_url")
+        threadURL = c.lenient("thread_url")
+    }
+
+    public var postedDate: Date? { postedAt.flatMap(CDRTime.parse) }
+
+    /// The PR thread CDR argued on, else its reply.
+    public var link: URL? {
+        [threadURL, replyURL].lazy.compactMap { $0.flatMap(URL.init(string:)) }.first
+    }
+}
+
+/// `node <cli.mjs> status --json`, reduced to its escalations. As in CDR's own `escalationList`, its database
+/// read wins and the daemon snapshot it carries is the fallback when that read failed.
+struct CDRStatusReport: Decodable {
+    var escalations: CDREscalations?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CDRKey.self)
+        let own: CDREscalations? = c.lenient("escalations")
+        let daemon = (c.lenient("snapshot") as CDRStatus?)?.escalations
+        if case .available? = own {
+            escalations = own
+        } else if case .available? = daemon {
+            escalations = daemon
+        } else {
+            escalations = own ?? daemon
+        }
     }
 }
 

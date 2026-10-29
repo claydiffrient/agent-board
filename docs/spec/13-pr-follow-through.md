@@ -1055,3 +1055,22 @@ login-shell PATH (§2). `cli.mjs` is the **CDR command** setting (Settings → C
 stored in `UserDefaults` under `cdr.command`); when that is empty it is
 `<installPath>/watcher/cli.mjs` of the `cd@cd-ai-skills` entry in
 `~/.claude/plugins/installed_plugins.json`, if that file exists.
+
+**Open escalations** — findings CDR argued on a PR thread whose argument it
+could not settle, so they wait on the human. Each carries `target_id`, `repo`
+(`owner/repo`), `pr`, `title`, `finding`, `argued`, `argued_verdict`,
+`posted_at`, `reply_url` and `thread_url` (`openEscalations` in CDR's
+`server/db.mjs`). While the daemon runs they come from the top-level
+`escalations` of its `/status`. Otherwise — stopped, unreachable, or a running
+daemon whose `escalations` is `null` because its own database read failed —
+they come from `node <cli.mjs> status --json`, which reads CDR's database
+directly, exits 1 while the daemon is stopped and still prints its JSON, and
+strips the token from what it prints; Agent Board decodes only the escalations
+from that stdout and never logs or shows the rest. As in CDR's own
+`escalationList`, that report's top-level list wins and the daemon snapshot it
+carries is the fallback. The CLI runs off the main thread, only as part of the
+page's read: every 10 seconds, and once after the switch starts or stops the
+daemon. Either source can send `{error}` in place
+of the list; that reads as *unavailable* with CDR's reason, never as an empty
+list. With no CDR command resolved and the daemon not running, the escalations
+are unavailable too. Not installed reads as none.

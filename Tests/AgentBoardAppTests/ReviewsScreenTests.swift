@@ -47,6 +47,21 @@ final class ReviewsScreenTests: XCTestCase {
         XCTAssertEqual(page.switches.map(\.isEnabled), [true])
     }
 
+    func testEscalationsListUnderWaitingOnYouAndAnUnreadableListStillShowsTheSection() throws {
+        let escalation = try JSONDecoder().decode(CDREscalation.self, from: Data("""
+            {"target_id": 12, "repo": "octo/widgets", "pr": 401, "title": "Cache the avatar sizes",
+             "finding": "The cache key ignores the device scale", "argued": "Scale is already folded in.",
+             "argued_verdict": "uncertain", "posted_at": "2026-10-28 16:02:11",
+             "reply_url": null, "thread_url": "https://github.com/octo/widgets/pull/401#discussion_r9001"}
+            """.utf8))
+        let waiting = try mountPage(FakeCDR(daemon: .stopped, reviews: try Self.reviews(), escalations: .available([escalation])))
+        XCTAssertEqual(waiting.headers, 3, "Waiting on you, Running and Recent reviews")
+        XCTAssertEqual(waiting.cells, 1 + 1 + 3, "the escalation, Running's placeholder and the three recent reviews")
+
+        let unreadable = try mountPage(FakeCDR(daemon: .stopped, reviews: try Self.reviews(), escalations: .unavailable("database is locked")))
+        XCTAssertEqual(unreadable.headers, 3, "an unreadable list is not an empty one")
+    }
+
     func testThePagePollsWhileMountedAndStopsWhenRemoved() throws {
         let cdr = FakeCDR(daemon: .stopped, reviews: .serverNotRunning)
         let mount = OffscreenMount(
@@ -214,8 +229,8 @@ final class FakeCDR: CDRService, @unchecked Sendable {
     )
     var failure: CDRCommandError?
 
-    init(daemon: CDRDaemonState, reviews: CDRReviewsState) {
-        current = CDRSnapshot(daemon: daemon, reviews: reviews)
+    init(daemon: CDRDaemonState, reviews: CDRReviewsState, escalations: CDREscalations = .available([])) {
+        current = CDRSnapshot(daemon: daemon, reviews: reviews, escalations: escalations)
     }
 
     var installed: Bool {
@@ -228,7 +243,7 @@ final class FakeCDR: CDRService, @unchecked Sendable {
 
     var isInstalled: Bool { installed }
 
-    func snapshot() async -> CDRSnapshot {
+    func snapshot(command: CDRCommand?) async -> CDRSnapshot {
         lock.withLock { _snapshotCalls += 1 }
         return current
     }
