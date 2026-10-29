@@ -172,6 +172,25 @@ final class EpicRefreshTests: XCTestCase {
         XCTAssertTrue(message.contains("/worktrees/\(holder.lastPathComponent) by worker session integrator-session"), message)
     }
 
+    /// An epic cut from `origin/main` while local `main` lags reads as current against local `main`.
+    func testDriftAndRefreshUseOriginsBaseWhenLocalMainIsBehindIt() async throws {
+        let remote = fixture.supportDir.appendingPathComponent("remote.git")
+        try SupervisorFixture.git(["init", "-q", "--bare", remote.path], cwd: fixture.supportDir)
+        try fixture.git(["remote", "add", "origin", remote.path])
+        try fixture.git(["push", "-q", "origin", "main"])
+        try fixture.git(["branch", epic.branch, try pushFromAnotherClone(remote, file: "cut.txt")])
+        let newer = try pushFromAnotherClone(remote, file: "newer.txt")
+        try fixture.git(["fetch", "-q", "origin"])
+
+        let drift = try await baseDrift()
+        XCTAssertEqual(drift["against"] as? String, "origin/main", "\(drift)")
+        XCTAssertEqual(drift["behind"] as? Int, 1, "\(drift)")
+
+        let text = try await refresh().text
+        XCTAssertTrue(try isAncestor(newer, of: epic.branch), "the refresh missed origin's newer commit: \(text)")
+        XCTAssertTrue(text.contains("Merged origin/main into \(epic.branch)"), text)
+    }
+
     func testGetEpicCountsCommitsBehindAndAheadOfTheBase() async throws {
         let drift = try await baseDrift()
         XCTAssertEqual(drift["behind"] as? NSNull, NSNull())
@@ -264,6 +283,16 @@ final class EpicRefreshTests: XCTestCase {
         try SupervisorFixture.git(["add", "."], cwd: checkout)
         try SupervisorFixture.commit("Change \(file) on \(branch)", cwd: checkout)
         if !isMain { try fixture.manager.remove(path: checkout) }
+    }
+
+    private func pushFromAnotherClone(_ remote: URL, file: String) throws -> String {
+        let clone = fixture.supportDir.appendingPathComponent("clone-\(file)")
+        try SupervisorFixture.git(["clone", "-q", remote.path, clone.path], cwd: fixture.supportDir)
+        try "merged\n".write(to: clone.appendingPathComponent(file), atomically: true, encoding: .utf8)
+        try SupervisorFixture.git(["add", file], cwd: clone)
+        try SupervisorFixture.commit("Merge \(file) on the remote", cwd: clone)
+        try SupervisorFixture.git(["push", "-q", "origin", "main"], cwd: clone)
+        return try SupervisorFixture.git(["rev-parse", "HEAD"], cwd: clone).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func head(_ ref: String) throws -> String {

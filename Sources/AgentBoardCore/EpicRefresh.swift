@@ -4,7 +4,8 @@ import Foundation
 /// alarmed on: nothing raises the attention signal or a notification from it.
 public enum BaseDrift: Sendable, Equatable {
     /// `behind` counts the base's commits the epic branch lacks; `ahead`, the epic's the base lacks.
-    case measured(behind: Int, ahead: Int)
+    /// `against` names the ref counted from, `origin/main` or `main`.
+    case measured(behind: Int, ahead: Int, against: String)
     case noEpicBranch(String)
     case noBaseBranch(String)
     case unavailable(String)
@@ -39,6 +40,25 @@ public struct RefreshCheck: Sendable, Equatable {
                 + "the project's Verification settings)"
         }
         return "`\(command)` exited \(status) on the result"
+    }
+}
+
+/// A refresh's outcome and the ref it merged, which is `origin/<base>` whenever the fetch found
+/// that at or ahead of local `<base>` (SPEC §5.2).
+public struct EpicRefreshAnswer: Sendable, Equatable {
+    public var outcome: EpicRefresh
+    public var merged: String
+    /// Set when the fetch failed, so local `<base>` was merged and may be behind.
+    public var warning: String?
+
+    public init(_ outcome: EpicRefresh, merged: String, warning: String? = nil) {
+        self.outcome = outcome
+        self.merged = merged
+        self.warning = warning
+    }
+
+    public func message(branch: String) -> String {
+        outcome.message(branch: branch, base: merged) + (warning.map { " \($0)" } ?? "")
     }
 }
 

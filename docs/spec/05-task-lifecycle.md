@@ -861,11 +861,24 @@ into it or when you ask the orchestrator to refresh it — never on spawn, never
 on a timer. `get_epic` reports `base_drift` next to `ready_for_integration`:
 `behind` (the base branch's commits the epic branch lacks) and `ahead` (the
 epic's own), from one `git rev-list --left-right --count` per call, measured
-under 10ms on this repository. An epic branch not cut yet, or a missing base
-branch, reports `behind` and `ahead` as null with `unavailable` saying which.
-Drift is reporting only: it raises no attention badge and no notification.
+under 10ms on this repository. The count is taken against
+`refs/remotes/origin/<base>` as the last fetch left it, when that ref exists and
+local `<base>` is behind or equal to it, and against local `<base>` otherwise —
+the rule §3.1 step 1 cuts epic branches by, so an epic cut from `origin/main`
+is not read as current against a lagging local `main`. `get_epic` never
+fetches, since orchestrators call it constantly and a fetch can take 10
+seconds, so `against` names the ref counted from (`origin/main` or `main`) and
+a count can be read as only as fresh as the last fetch. An epic branch not cut
+yet, or a missing base branch, reports `behind` and `ahead` as null with
+`unavailable` saying which. Drift is reporting only: it raises no attention
+badge and no notification.
 
-`refresh_epic(epic_id)` merges the project's base branch into the epic branch.
+`refresh_epic(epic_id)` merges the project's freshest base branch into the epic
+branch: it fetches `origin/<base>` as §3.1 step 1 does and merges the fetched
+tip when local `<base>` is behind or equal to it, local `<base>` otherwise. A
+failed fetch falls back to local `<base>`, and the answer says so. Every answer
+names the ref merged (`Merged origin/main into …`, `already has every commit on
+origin/main`).
 The merge commit is built with `merge-tree --write-tree` and `commit-tree` on
 no ref, as an accept's merge is (§5). If the project configures a build or test
 command (§4), the commit is checked out detached in a scratch worktree

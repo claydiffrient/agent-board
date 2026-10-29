@@ -320,7 +320,9 @@ public final class OrchestratorToolHandler: ToolHandler {
             description: "One epic in full: its goal, integration branch, newest pull request, its tasks grouped by column, "
                 + "whether it is ready for integration, `next_step` when the epic is waiting on you to open its "
                 + "pull request or on that pull request to merge (null otherwise), and `base_drift`: how many commits "
-                + "the epic branch is behind and ahead of the project's base branch, or why that cannot be counted "
+                + "the epic branch is behind and ahead of the project's base branch, `against` naming the ref "
+                + "counted from (`origin/<base>` as last fetched, when it is at or ahead of local; this call never "
+                + "fetches), or why that cannot be counted "
                 + "(`behind` and `ahead` are null and `unavailable` says why). Drift is information for the human, "
                 + "not an alarm: raise it when it bears on a decision, and never refresh on your own because of it. "
                 + "A done or abandoned epic also lists `held_worktrees`: the worktrees of it and its integration task "
@@ -329,7 +331,8 @@ public final class OrchestratorToolHandler: ToolHandler {
         ),
         ToolDescriptor(
             name: "refresh_epic",
-            description: "Merge the project's base branch into an epic branch. Only when the human asks for it: an "
+            description: "Merge the project's base branch into an epic branch: `origin/<base>`, freshly fetched, "
+                + "when local is behind or equal to it, local otherwise; the answer names the ref merged. Only when the human asks for it: an "
                 + "epic branch is never refreshed on your own initiative, on spawn, or because get_epic shows drift. "
                 + "The merge is built and tested with the project's configured build and test commands in a "
                 + "scratch checkout before the epic branch moves; if either fails, or the merge conflicts, the epic "
@@ -1226,9 +1229,10 @@ public final class OrchestratorToolHandler: ToolHandler {
         }
         var fields: [String: JSONValue] = ["base": .optional(base), "behind": .null, "ahead": .null]
         switch drift {
-        case let .measured(behind, ahead):
+        case let .measured(behind, ahead, against):
             fields["behind"] = .number(Double(behind))
             fields["ahead"] = .number(Double(ahead))
+            fields["against"] = .string(against)
         case .noEpicBranch(let branch):
             fields["unavailable"] = .string("\(branch) does not exist yet; it is cut from the base branch on first use.")
         case .noBaseBranch(let branch):
@@ -1242,15 +1246,14 @@ public final class OrchestratorToolHandler: ToolHandler {
     private func refreshEpic(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
         let epic = try projectEpic(try ToolArguments.requiredString("epic_id", in: arguments), identity: identity)
         if let refusal = EpicRefresh.refusal(for: epic) { throw ToolError(refusal) }
-        let base = try requireProject(identity).baseBranch
-        let outcome: EpicRefresh
+        let answer: EpicRefreshAnswer
         do {
-            outcome = try await control.refreshEpic(epicId: epic.id)
+            answer = try await control.refreshEpic(epicId: epic.id)
         } catch {
             throw ToolError("Refresh failed before \(epic.branch) moved, so it is untouched: \(Self.describe(error))")
         }
-        let text = outcome.message(branch: epic.branch, base: base)
-        if outcome.isFailure { throw ToolError(text) }
+        let text = answer.message(branch: epic.branch)
+        if answer.outcome.isFailure { throw ToolError(text) }
         return ToolResult(text: text)
     }
 

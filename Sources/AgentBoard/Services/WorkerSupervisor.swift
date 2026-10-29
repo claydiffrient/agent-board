@@ -738,14 +738,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return try await offMain { try manager.drift(of: branch, from: base) }
     }
 
-    /// SPEC §5.2: the merge result is built and tested in a scratch checkout before the epic branch
-    /// moves, and only the final move waits on the merge queue, so an accept is not held up by a build.
-    /// With commands configured the call answers `.verifying` at once and the verdict is queued as a
-    /// `refresh` report; one refresh per epic runs at a time.
-    func refreshEpic(epicId: String) async throws -> EpicRefresh {
+    /// SPEC §5.2: the freshest base (§3.1 step 1) is merged, and the merge result is built and tested
+    /// in a scratch checkout before the epic branch moves; only the final move waits on the merge
+    /// queue, so an accept is not held up by a build. With commands configured the call answers
+    /// `.verifying` at once and the verdict is queued as a `refresh` report; one refresh per epic runs
+    /// at a time.
+    func refreshEpic(epicId: String) async throws -> EpicRefreshAnswer {
         guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
         guard let project = try projects.get(epic.projectId) else { throw SupervisorError.projectNotFound(epic.projectId) }
-        if let running = refreshes[epicId] { return .inProgress(candidate: running.candidate) }
+        if let running = refreshes[epicId] {
+            return EpicRefreshAnswer(.inProgress(candidate: running.candidate), merged: project.baseBranch)
+        }
         let run = RefreshRun()
         refreshes[epicId] = run
         let manager = worktreeManager(for: project)
@@ -755,23 +758,30 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var commands = project.settings.verification
         if let override = refreshCheckTimeoutOverride { commands.timeoutSeconds = override }
 
-        let plan: RefreshCandidate
+        let prepared: (start: BaseStartPoint, plan: RefreshCandidate)
         do {
-            plan = try await offMain { try manager.refreshCandidate(branch: branch, base: base, message: message) }
+            prepared = try await offMain {
+                let start = manager.freshestBase(base)
+                return (start, try manager.refreshCandidate(branch: branch, base: base, start: start, message: message))
+            }
         } catch {
             refreshes[epicId] = nil
             throw error
         }
-        switch plan {
+        let start = prepared.start
+        let answer = { @Sendable (outcome: EpicRefresh) in
+            EpicRefreshAnswer(outcome, merged: start.name, warning: start.warning)
+        }
+        switch prepared.plan {
         case .settled(let outcome):
             refreshes[epicId] = nil
-            return try named(outcome, projectId: project.id)
+            return answer(try named(outcome, projectId: project.id))
         case let .merge(previousHead, candidate) where commands.isEmpty:
             defer { refreshes[epicId] = nil }
-            return try await applyRefresh(
+            return answer(try await applyRefresh(
                 RefreshVerifier.Outcome(unverified: [.build, .test]), branch: branch, from: previousHead,
                 to: candidate, manager: manager, project: project
-            )
+            ))
         case let .merge(previousHead, candidate):
             run.candidate = candidate
             run.task = _Concurrency.Task { [weak self] in
@@ -781,12 +791,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     manager: manager, project: project, run: run
                 )
                 self.refreshes[epicId] = nil
-                self.queueRefreshReport(outcome, projectId: project.id, branch: branch, base: base)
+                self.queueRefreshReport(answer(outcome), projectId: project.id, branch: branch)
             }
             let steps = [commands.build, commands.test].compactMap { $0 }
-            return .verifying(
+            return answer(.verifying(
                 head: previousHead, candidate: candidate, commands: steps, timeoutSeconds: commands.timeoutSeconds
-            )
+            ))
         }
     }
 
@@ -852,11 +862,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
     }
 
-    private func queueRefreshReport(_ outcome: EpicRefresh, projectId: String, branch: String, base: String) {
+    private func queueRefreshReport(_ answer: EpicRefreshAnswer, projectId: String, branch: String) {
         do {
             try ReportStore(db).insert(
                 projectId: projectId, taskId: nil, sessionId: nil, kind: .refresh,
-                body: outcome.message(branch: branch, base: base)
+                body: answer.message(branch: branch)
             )
         } catch {
             lastError = describe(error)

@@ -99,9 +99,9 @@ public protocol WorkerControl: Sendable {
     /// or nothing recorded where it started. Nil when the checkout is as the reviewer found it.
     func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String?
     func baseDrift(epicId: String) async throws -> BaseDrift
-    /// Merges the project's base branch into the epic branch, only on request (SPEC §5.2). The
-    /// caller has already refused a terminal epic.
-    func refreshEpic(epicId: String) async throws -> EpicRefresh
+    /// Merges the freshest project base branch into the epic branch, only on request (SPEC §5.2).
+    /// The caller has already refused a terminal epic.
+    func refreshEpic(epicId: String) async throws -> EpicRefreshAnswer
 }
 
 /// `assignAgent(scope: .reviewer)` refusing a task whose branch has no diff against its base: a

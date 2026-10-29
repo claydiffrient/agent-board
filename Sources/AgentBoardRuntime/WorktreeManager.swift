@@ -97,11 +97,14 @@ public enum SlotRelease: Sendable, Equatable {
 public struct BaseStartPoint: Sendable, Equatable {
     /// The remote's base commit when local `base` is behind or equal to it, otherwise `base` itself.
     public var ref: String
+    /// The ref `ref` was read from, `origin/main` or `main`, for messages.
+    public var name: String
     /// Set when the fetch failed, so `ref` is local `base` and may be behind.
     public var warning: String?
 
-    public init(ref: String, warning: String? = nil) {
+    public init(ref: String, name: String? = nil, warning: String? = nil) {
         self.ref = ref
+        self.name = name ?? ref
         self.warning = warning
     }
 }
@@ -272,7 +275,7 @@ public struct WorktreeManager: Sendable {
                 throw AgentRuntimeError(Self.failure(PublishCommand.remoteURL(remote), remoteURL))
             }
             let fetched = try gitRaw(args, cwd: repoPath, timeout: timeout)
-            if fetched.status == 0 { return startPoint(local: "refs/heads/\(base)", remote: tracking, base: base) }
+            if fetched.status == 0 { return startPoint(base, remote: remote) }
             let stderr = fetched.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             problem = stderr.isEmpty ? "git fetch exited \(fetched.status)" : stderr
         } catch {
@@ -280,17 +283,19 @@ public struct WorktreeManager: Sendable {
         }
         return BaseStartPoint(
             ref: base,
-            warning: "Could not fetch \(base) from \(remote), so this branch was cut from local \(base), "
-                + "which may be behind \(remote)/\(base): \(problem)"
+            warning: "Could not fetch \(base) from \(remote), so local \(base) was used, which may be behind "
+                + "\(remote)/\(base): \(problem)"
         )
     }
 
     /// Behind or equal takes the remote; ahead or diverged keeps local, which holds unpushed work.
-    private func startPoint(local: String, remote: String, base: String) -> BaseStartPoint {
-        guard let remoteTip = try? refCommit(remote), let localTip = try? refCommit(local),
+    /// Reads the remote-tracking ref as the last fetch left it, and fetches nothing.
+    public func startPoint(_ base: String, remote: String = "origin") -> BaseStartPoint {
+        guard let remoteTip = try? refCommit("refs/remotes/\(remote)/\(base)"),
+              let localTip = try? refCommit("refs/heads/\(base)"),
               (try? isAncestor(localTip, of: remoteTip)) == true
         else { return BaseStartPoint(ref: base) }
-        return BaseStartPoint(ref: remoteTip)
+        return BaseStartPoint(ref: remoteTip, name: "\(remote)/\(base)")
     }
 
     /// A standalone task's recorded cut point while local `base` is still behind it (SPEC §3.1
@@ -380,30 +385,35 @@ public struct WorktreeManager: Sendable {
         return .commit(commit)
     }
 
-    /// One `rev-list` for both counts, so `get_epic` can afford it on every call.
+    /// One `rev-list` for both counts, so `get_epic` can afford it on every call. SPEC §5.2: counted
+    /// against the last-fetched `origin/<base>` when it is at or ahead of local, never fetching.
     public func drift(of branch: String, from base: String) throws -> BaseDrift {
+        let against = startPoint(base)
         let result = try gitRaw(
-            ["rev-list", "--left-right", "--count", "refs/heads/\(base)...refs/heads/\(branch)"], cwd: repoPath
+            ["rev-list", "--left-right", "--count", "\(qualified(against, base: base))...refs/heads/\(branch)"],
+            cwd: repoPath
         )
         if result.status == 0 {
             let counts = result.stdout.split(whereSeparator: { $0.isWhitespace }).compactMap { Int($0) }
-            if counts.count == 2 { return .measured(behind: counts[0], ahead: counts[1]) }
+            if counts.count == 2 { return .measured(behind: counts[0], ahead: counts[1], against: against.name) }
         }
         if try !branchExists(branch) { return .noEpicBranch(branch) }
         if try !branchExists(base) { return .noBaseBranch(base) }
         throw AgentRuntimeError(Self.failure(["rev-list", "--left-right", "--count", "\(base)...\(branch)"], result))
     }
 
-    /// Where merging `base` into `branch` would leave it, without moving anything: a settled
+    /// Where merging `start` into `branch` would leave it, without moving anything: a settled
     /// outcome, or a commit on no ref for the caller to verify and then `applyRefresh`.
-    public func refreshCandidate(branch: String, base: String, message: String) throws -> RefreshCandidate {
+    public func refreshCandidate(
+        branch: String, base: String, start: BaseStartPoint, message: String
+    ) throws -> RefreshCandidate {
         guard try branchExists(base) else { return .settled(.noBaseBranch) }
         guard try branchExists(branch) else { return .settled(.noEpicBranch) }
         if let holder = try list().first(where: { $0.branch == branch }) {
             return .settled(.checkedOut(path: holder.path.path, holder: nil))
         }
         let head = try resolve("refs/heads/\(branch)")
-        let baseHead = try resolve("refs/heads/\(base)")
+        let baseHead = try resolve(qualified(start, base: base))
         if try isAncestor(baseHead, of: head) { return .settled(.alreadyCurrent(head: head)) }
         switch try combine(head, baseHead, message: message) {
         case .fastForward: return .merge(previousHead: head, candidate: baseHead)
@@ -508,6 +518,12 @@ public struct WorktreeManager: Sendable {
             config += ["-c", "user.email=agent-board@localhost", "-c", "user.name=Agent Board"]
         }
         return config
+    }
+
+    /// A start point that is local `base` names it by its full ref, so a tag or remote of the same
+    /// name cannot shadow it.
+    private func qualified(_ start: BaseStartPoint, base: String) -> String {
+        start.ref == base ? "refs/heads/\(base)" : start.ref
     }
 
     private func resolve(_ ref: String) throws -> String {
