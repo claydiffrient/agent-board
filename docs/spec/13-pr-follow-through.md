@@ -138,9 +138,12 @@ triage.
   or the PR is from a fork. Waits for the human to Resume or Stop watching
   from the Pull Requests page (§13.4).
 - **stopped** *(phase 4)* — the human chose Stop watching on a parked PR. Its
-  open items are dismissed, the poll records nothing more on it, and the page
-  lists it nowhere; the row stays so the next poll's search does not start a new
-  watch. A PR that merges or closes still settles to merged or closed.
+  open items are dismissed and the poll records nothing more on it; the row
+  stays so the next poll's search does not start a new watch. The page lists it
+  under a collapsed **Stopped** group, where **Watch again** returns it to
+  settling exactly as Resume does from parked (§13.4); items dismissed when it
+  stopped stay dismissed. A PR that merges or closes still settles to merged or
+  closed.
 - **merged** / **closed** *(phase 1)* — terminal states. The round tasks are
   archived.
 
@@ -741,8 +744,8 @@ on at all.
   `Coordinator` (§10) — opening a cross-project page rather than a project
   tab.
 - The page groups every watched PR as **Ready to verify**, **Needs you**,
-  **In progress**, **Waiting on reviewers**, **Verified**, and **Parked**,
-  with a project filter. Needs you and the decision items inside it ship in
+  **In progress**, **Waiting on reviewers**, **Verified**, **Parked**, and
+  **Stopped**, with a project filter. Needs you and the decision items inside it ship in
   phase 2; the other groups read directly off `pr_watch.state` from phase 1.
 - **Parked (phase 4).** A parked row shows its `parked_reason`, and offers
   **Resume** and **Stop watching** in place of Pause. Resume
@@ -759,6 +762,18 @@ on at all.
   `resume_pr_watch` (§6). It shows on Pending Approvals as "Resume a parked
   pull request", with the PR, the parked reason and the orchestrator's reason
   beneath, and granting it runs the same `PRWatchStore.resume`.
+- **Stopped.** Stopped watches sit in their own **Stopped** group after
+  Parked, collapsed by default and absent while empty. A stopped row offers
+  only **Watch again**, which runs `PRWatchStore.resume` as Resume does: the
+  watch goes to settling, `parked_reason` clears and `resumed_at` restarts the
+  round cap and failed-session streak. Items dismissed when it stopped stay
+  dismissed; an item still open, such as one `add_pr_item` added while it was
+  stopped, is taken up by the next round like any open item at a resume. A
+  stopped watch never counts toward the badge, Needs you or the attention
+  signal, even with an open decision item. `resume_pr_watch` on a stopped watch
+  shows on Pending Approvals as "Watch a stopped pull request again", with the
+  PR, the reason it had parked before it was stopped, and the orchestrator's
+  reason.
 - **Dismiss one item.** Under a row with open items, a collapsed "N open
   items" list shows each one's author, kind, first line, and "graded partly" or
   "graded not fixed" when its last check fell short. Each has **Dismiss…**,

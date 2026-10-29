@@ -487,8 +487,9 @@ watching (§13). The row's count badge is PRs in Ready to verify plus open
 decision items across every project with follow-through on, leaving out paused
 watches (`PRWatchStore.observeBadgeCounts`). The page observes `PRWatchStore.observePage`
 and groups the watches as **Ready to verify**, **Needs you**, **In progress**,
-**Waiting on reviewers**, **Verified**, and **Parked**, newest change first in
-each. Needs you and Parked are absent while empty; the other four always show,
+**Waiting on reviewers**, **Verified**, **Parked**, and **Stopped**, newest
+change first in each. Needs you, Parked and Stopped are absent while empty, and
+Stopped is collapsed until its header is clicked; the other four always show,
 with a one-line placeholder when empty. A **Project** menu above the list
 narrows it to one project with follow-through on; while it shows every project,
 each row names its project. A row shows the title (a link that opens the PR in
@@ -505,7 +506,8 @@ while it or any poll runs and its failure inline in the group (§13.4). Row acti
 In progress until the next poll settles it, adds "restarted: head moved" to its
 details. A parked row shows its `parked_reason` under the details, and in place
 of Pause offers **Resume**, which returns it to settling with a fresh round cap
-and failure streak, and **Stop watching**, which drops it from the page for good
+and failure streak, and **Stop watching**, which moves it to Stopped. A stopped
+row offers only **Watch again**, which returns it to settling as Resume does
 (§13.4). A row in Needs you lists
 each open decision under it (`PRDecisionRow`): the comment's author and text
 on one or two lines, triage's question, one button per option, and a **Reply

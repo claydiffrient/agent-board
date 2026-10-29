@@ -82,6 +82,33 @@ final class ResumePRWatchToolTests: XCTestCase {
         ])
     }
 
+    /// SPEC §13.4 Watch again: a stopped watch comes back through the same grant, and the poll reads it again.
+    func testAGrantedRequestWatchesAStoppedPullRequestAgain() async throws {
+        let f = try BridgeFixture.make()
+        let watches = PRWatchStore(f.db)
+        let stopped = try watch(f, number: 12, in: f.project.id)
+        try watches.stopWatching(watchId: stopped.id)
+
+        _ = try await f.call("resume_pr_watch", ["number": .number(12), "reason": .string("Still open; take it back.")])
+
+        let approval = try XCTUnwrap(f.approvals.pending(projectId: f.project.id).first)
+        XCTAssertEqual(approval.reason, "#12 Change 12\nStopped watching; it had parked because: Hit the round cap of 2."
+            + "\nReason: Still open; take it back.")
+        try f.board.resolveApproval(approval.id, approved: true, by: "human")
+        try f.board.applyWatchResume(approval, now: 5_000)
+        let resumed = try XCTUnwrap(watches.get(stopped.id))
+        XCTAssertEqual(resumed.state, .settling)
+        XCTAssertNil(resumed.parkedReason)
+        XCTAssertEqual(resumed.resumedAt, 5_000)
+
+        let polled = try watches.upsert(projectId: f.project.id, snapshot: PRSnapshot(
+            repoOwner: "example-org", repoName: "app", number: 12,
+            url: "https://github.com/example-org/app/pull/12", title: "Change 12, renamed",
+            headRef: "feature-12", headOid: String(repeating: "b", count: 40), baseRef: "main", items: []
+        ))
+        XCTAssertEqual(polled.title, "Change 12, renamed")
+    }
+
     func testAResumeThatThrowsStillFilesANotResumedDecisionReport() throws {
         let f = try BridgeFixture.make()
         let parked = try watch(f, number: 12, in: f.project.id)

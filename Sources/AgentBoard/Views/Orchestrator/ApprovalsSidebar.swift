@@ -315,7 +315,7 @@ struct ApprovalsSidebar: View {
         VStack(alignment: .leading, spacing: 2) {
             Text("#\(request.number) \(request.title)")
                 .lineLimit(2)
-            Text("Parked: \(request.parkedReason ?? "no reason recorded")")
+            Text(request.parkedLine)
                 .lineLimit(3)
             Text("Reason: \(request.reason)")
                 .lineLimit(4)
@@ -338,7 +338,8 @@ struct ApprovalsSidebar: View {
         case .prItemDismissal:
             return "Dismiss a pull request item"
         case .prWatchResume:
-            return "Resume a parked pull request"
+            return (try? PRWatchResumeRequest.decode(approval.payload))?.stopped == true
+                ? "Watch a stopped pull request again" : "Resume a parked pull request"
         }
     }
 

@@ -202,7 +202,7 @@ public struct ProjectAttentionStore: Sendable {
             SELECT w.project_id AS project_id, COUNT(*) AS n, MAX(i.updated_at),
                    '#' || w.number || ': ' || COALESCE(i.decision_question, 'a decision') AS detail
             FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id JOIN project p ON p.id = w.project_id
-            WHERE i.state = 'open' AND i.verdict = 'decision' AND w.state NOT IN ('merged', 'closed')
+            WHERE i.state = 'open' AND i.verdict = 'decision' AND w.state NOT IN ('merged', 'closed', 'stopped')
               AND \(PRWatchStore.countsTowardAttention)
             GROUP BY w.project_id
         ) dc ON dc.project_id = p.id

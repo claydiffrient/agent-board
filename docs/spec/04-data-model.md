@@ -343,7 +343,7 @@ CREATE TABLE pr_watch (
   est_cost_usd     REAL NOT NULL DEFAULT 0,
   ready_notified_oid TEXT,            -- the head whose Ready to verify banner fired (§13.4)
   parked_reason    TEXT,              -- why follow-through parked it, e.g. the last of three failed triages (§13.1)
-  resumed_at       INTEGER,           -- the last Resume from parked; bounds the round cap and failure streak (§13.4)
+  resumed_at       INTEGER,           -- the last Resume from parked or Watch again from stopped; bounds the round cap and failure streak (§13.4)
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,  -- moves only when something other than last_polled_at changes
   UNIQUE (project_id, repo_owner, repo_name, number)

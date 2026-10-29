@@ -17,10 +17,12 @@ public enum PRWatchState: String, Codable, Sendable, CaseIterable, Equatable, Da
     case parked
     case merged
     case closed
-    /// The human chose Stop watching: the poll records nothing more on it and the page lists it nowhere.
+    /// The human chose Stop watching: the poll records nothing more on it until Watch again (SPEC §13.4).
     case stopped
 
     public var isTerminal: Bool { self == .merged || self == .closed }
+    /// What Resume and Watch again accept (SPEC §13.4).
+    public var isResumable: Bool { self == .parked || self == .stopped }
 }
 
 public enum PRItemKind: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
@@ -473,20 +475,23 @@ public enum PRPageGroup: String, Sendable, CaseIterable, Equatable {
     case waitingOnReviewers
     case verified
     case parked
+    case stopped
 
-    /// Needs you and Parked are absent from the page while empty; every other group always shows.
-    public var hidesWhenEmpty: Bool { self == .needsYou || self == .parked }
+    /// Needs you, Parked and Stopped are absent from the page while empty; every other group always shows.
+    public var hidesWhenEmpty: Bool { self == .needsYou || self == .parked || self == .stopped }
 
+    /// A stopped watch is Stopped whatever items it holds, so it never counts as needing you (SPEC §13.4).
     public static func of(_ state: PRWatchState, openDecisions: Int) -> PRPageGroup? {
         if state.isTerminal { return nil }
-        if openDecisions > 0 { return .needsYou }
+        if openDecisions > 0, state != .stopped { return .needsYou }
         switch state {
         case .readyToVerify: return .readyToVerify
         case .verified: return .verified
         case .parked: return .parked
         case .watching: return .waitingOnReviewers
         case .settling, .triaging, .fixing, .checking, .publishing, .awaitingCI, .stale: return .inProgress
-        case .merged, .closed, .stopped: return nil
+        case .stopped: return .stopped
+        case .merged, .closed: return nil
         }
     }
 }
