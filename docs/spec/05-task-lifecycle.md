@@ -953,7 +953,7 @@ branch does not move and the report says "timed out after" the timeout.
 `post-checkout` for the scratch worktree, exactly as it does for a task's
 worktree (§3.1 step 2), because the check is meant to say whether the merge
 builds the way a task spawned from it will — and for a repository whose hook
-is its setup (Derivita's runs a full `setup.sh`), a build without it fails for
+is its setup (one project's runs a full `setup.sh`), a build without it fails for
 a reason that has nothing to do with the merge. The cost is the hook's full
 runtime on every check, inside the same timeout.
 
