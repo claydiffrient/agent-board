@@ -140,4 +140,14 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         guard let target else { throw SupervisorError.serverNotRunning }
         return try await target.reviewCheckoutChange(taskId: taskId, sessionId: sessionId)
     }
+
+    func baseDrift(epicId: String) async throws -> BaseDrift {
+        guard let target else { throw SupervisorError.serverNotRunning }
+        return try await target.baseDrift(epicId: epicId)
+    }
+
+    func refreshEpic(epicId: String) async throws -> EpicRefreshAnswer {
+        guard let target else { throw SupervisorError.serverNotRunning }
+        return try await target.refreshEpic(epicId: epicId)
+    }
 }

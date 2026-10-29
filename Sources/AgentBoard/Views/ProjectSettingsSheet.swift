@@ -264,7 +264,8 @@ struct ProjectSettingsSheet: View {
                 get: { settings.testCommand ?? "" },
                 set: { settings.testCommand = $0.isEmpty ? nil : $0 }
             ), prompt: Text("e.g. swift test"))
-            Text("How this project builds and tests itself. Handed to every worker and to the integrator; left empty, they work it out from the repo and report what they ran.")
+            TextField("Refresh check timeout (minutes)", value: $settings.verificationTimeoutMinutes, format: .number, prompt: Text("\(VerificationCommands.defaultTimeoutSeconds / 60)"))
+            Text("How this project builds and tests itself. Handed to every worker and to the integrator; left empty, they work it out from the repo and report what they ran. Refreshing an epic runs both on the merge first, stopping each one that runs past the timeout.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Picker("Integration verification", selection: $settings.integrationVerification) {

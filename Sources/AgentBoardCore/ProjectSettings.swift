@@ -237,6 +237,11 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var buildCommand: String? = nil
     /// Shell command that runs this project's tests. Empty leaves the agent to work it out.
     public var testCommand: String? = nil
+    /// Nil uses `VerificationCommands.defaultTimeoutSeconds`; any other value is clamped into
+    /// `VerificationCommands.timeoutRange` (SPEC §4).
+    public var verificationTimeoutSeconds: Int? = nil {
+        didSet { verificationTimeoutSeconds = verificationTimeoutSeconds.map(VerificationCommands.clampedTimeout) }
+    }
     public var integrationVerification: IntegrationVerification = .buildAndTest
     /// Run in a worktree just before Agent Board removes it (SPEC §3.1, §4). Nil removes the
     /// worktree and nothing else.
@@ -274,6 +279,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         reviewRouting: ReviewRoutingTable = ReviewRoutingTable(),
         buildCommand: String? = nil,
         testCommand: String? = nil,
+        verificationTimeoutSeconds: Int? = nil,
         integrationVerification: IntegrationVerification = .buildAndTest,
         worktreeTeardownCommand: String? = nil,
         worktreeTeardownTimeoutSeconds: Int = WorktreeTeardownCommand.defaultTimeoutSeconds,
@@ -296,6 +302,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.reviewRouting = reviewRouting
         self.buildCommand = buildCommand
         self.testCommand = testCommand
+        self.verificationTimeoutSeconds = verificationTimeoutSeconds.map(VerificationCommands.clampedTimeout)
         self.integrationVerification = integrationVerification
         self.worktreeTeardownCommand = worktreeTeardownCommand
         self.worktreeTeardownTimeoutSeconds = worktreeTeardownTimeoutSeconds
@@ -327,6 +334,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         }
         buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
+        verificationTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .verificationTimeoutSeconds)
+            .map(VerificationCommands.clampedTimeout)
         integrationVerification = try c.decodeIfPresent(IntegrationVerification.self, forKey: .integrationVerification)
             ?? .buildAndTest
         worktreeTeardownCommand = try c.decodeIfPresent(String.self, forKey: .worktreeTeardownCommand)

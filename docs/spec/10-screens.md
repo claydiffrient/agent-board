@@ -515,6 +515,36 @@ open it already filtered; the banner's route
 filtered page has loaded. See §13 for the state machine, verdicts, and settings
 behind all of it.
 
+**Reviews** — the fifth pinned sidebar row, directly below Pull Requests
+(`SidebarSelection.reviews`), shown only while CDR, the review watcher, is
+installed: its home directory (`$CD_REVIEW_HOME`, else `~/.cd-review`) exists.
+The app checks at launch and each time it comes forward, so installing or
+removing CDR shows or hides the row without a relaunch. The page reads CDR
+through `CDRClient` (§13.7) on appear and every 10 seconds while it is shown,
+and stops when another row is selected. Its header holds a **CDR daemon**
+switch, on while the daemon runs; switching it runs CDR's `start` or `stop`
+off the main thread, disabled with a spinner until the command returns, and a
+failure shows CDR's stderr under it, the exit-5 "reviews are running" refusal
+included. When no CDR command resolves, the switch is disabled and the line
+under it says why, with **Open Settings…** for Settings → CDR. Beside the
+switch, one line gives the daemon's state: stopped, the unreachable reason, or,
+while it runs, a usage-limit pause with its end, a power hold, the 24-hour
+budget used, concurrency running of its limit, and the next poll. The list
+mirrors CDR's own pages, in the Pull Requests page's row style (title as a
+link, details in caption): **Running** (`owner/repo #n`, title, started,
+phase), then **Queued — due, not started** (due, what holds it),
+**Waiting out the delay** (due, requested), **Retrying** (attempts, next retry)
+and **Parked** (attempts), each queue row with its last error and each absent
+while empty, then **Recent reviews**: every review of every target, newest
+start first, with `owner/repo #n`, title, verdict, findings, source (`cdr` or
+`manual`), finished time and the count still to post. A stopped or unreachable
+daemon leaves only Running, saying so, and Recent reviews still lists; a review
+server that is not running says so in Recent reviews and leaves the daemon's
+sections alone. Clicking a row opens its CDR page in the default browser —
+`/t/<id>` for a review, `/pr/<owner>/<repo>/<n>` for a queue entry — or the PR
+on GitHub while the review server is down. Open escalations are not shown: the
+client does not read them.
+
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each
 section. Each section header carries a copy button that puts that section on the
@@ -759,7 +789,10 @@ menu is `NSApp.helpMenu` when the menu opens, and it is never an item in the
 built menu.
 
 **Settings** — the standard macOS Settings window, opened with ⌘, from the app
-menu. It has one pane, **Terminal**: the font family (installed monospaced
+menu. It has two panes. **CDR** holds the **CDR command**, the path to CDR's
+`watcher/cli.mjs` that starts and stops the review watcher (§13.7); empty means
+auto-detect, and the line under it names the file in use or says none was found.
+**Terminal** holds the font family (installed monospaced
 families only; a stored family that is no longer installed is listed as "not
 installed" and draws as the monospaced system font), the font size (8–36pt), the
 foreground, background, cursor, cursor text, selection background and selection

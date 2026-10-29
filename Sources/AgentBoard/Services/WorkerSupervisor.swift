@@ -239,8 +239,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// a teardown hook never runs twice in one worktree (SPEC §3.1).
     @ObservationIgnored private var tearingDown: Set<String> = []
     @ObservationIgnored private var teardownWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
-    /// Worktree paths a spawn is setting up, from before it touches git until setup ends. A reap keeps
-    /// them, since a new worktree is clean and at its base, and a second spawn for the task is refused (SPEC §5).
+    /// Worktree paths a spawn is setting up, from before it touches git until setup ends, and a refresh
+    /// check's scratch checkout while it runs. A reap keeps them, since a new worktree is clean and at
+    /// its base, and a second spawn for the task is refused (SPEC §5).
     @ObservationIgnored private var placing: Set<String> = []
     /// Runs once a spawn's worktree exists and before its agent launches, so a test can act in that gap.
     @ObservationIgnored var afterCheckoutCreated: @MainActor () async -> Void = {}
@@ -255,6 +256,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// A resume starts the process before it moves the task back to `running`, so until then its
     /// session looks like a stray one on a settled task to `reconcile`.
     @ObservationIgnored private var resuming: Set<String> = []
+    /// Keyed by epic id; present from the moment a refresh is asked for until its outcome is known.
+    @ObservationIgnored private var refreshes: [String: RefreshRun] = [:]
+    /// Test-only: overrides the refresh check's timeout below what a project's settings can express
+    /// (`VerificationCommands.timeoutRange` floors at 60s), so a test can drive the timeout path
+    /// without a build that actually runs a minute.
+    @ObservationIgnored var refreshCheckTimeoutOverride: Int?
     /// When a human last opened a terminal on each session. `claude attach` resumes a stopped one.
     @ObservationIgnored private var attachRequestedAt: [String: Int64] = [:]
     /// When each session was last sent `SleepCutTurn.continuation`, on the wall clock (SPEC §8).
@@ -379,6 +386,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func stop() async {
         meteringTask?.cancel()
         meteringTask = nil
+        let running = refreshes.values
+        running.forEach { $0.cancel() }
+        for run in running { await run.task?.value }
         if let wakeObserver { wakeCenter.removeObserver(wakeObserver) }
         wakeObserver = nil
         await server.stop()
@@ -717,6 +727,164 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         let cwd = URL(fileURLWithPath: session.cwd)
         return try await offMain { try ReviewCheckout.change(since: head, in: cwd) }
+    }
+
+    func baseDrift(epicId: String) async throws -> BaseDrift {
+        guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
+        guard let project = try projects.get(epic.projectId) else { throw SupervisorError.projectNotFound(epic.projectId) }
+        let manager = worktreeManager(for: project)
+        let branch = epic.branch
+        let base = project.baseBranch
+        return try await offMain { try manager.drift(of: branch, from: base) }
+    }
+
+    /// SPEC §5.2: the freshest base (§3.1 step 1) is merged, and the merge result is built and tested
+    /// in a scratch checkout before the epic branch moves; only the final move waits on the merge
+    /// queue, so an accept is not held up by a build. With commands configured the call answers
+    /// `.verifying` at once and the verdict is queued as a `refresh` report; one refresh per epic runs
+    /// at a time.
+    func refreshEpic(epicId: String) async throws -> EpicRefreshAnswer {
+        guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
+        guard let project = try projects.get(epic.projectId) else { throw SupervisorError.projectNotFound(epic.projectId) }
+        if let running = refreshes[epicId] {
+            return EpicRefreshAnswer(.inProgress(candidate: running.candidate), merged: project.baseBranch)
+        }
+        let run = RefreshRun()
+        refreshes[epicId] = run
+        let manager = worktreeManager(for: project)
+        let branch = epic.branch
+        let epicTitle = epic.title
+        let base = project.baseBranch
+        var commands = project.settings.verification
+        if let override = refreshCheckTimeoutOverride { commands.timeoutSeconds = override }
+
+        let prepared: (start: BaseStartPoint, plan: RefreshCandidate)
+        do {
+            prepared = try await offMain {
+                let start = manager.freshestBase(base)
+                let message = WorktreeManager.mergeSubject(taskTitle: start.name, targetTitle: epicTitle)
+                return (start, try manager.refreshCandidate(branch: branch, base: base, start: start, message: message))
+            }
+        } catch {
+            refreshes[epicId] = nil
+            throw error
+        }
+        let start = prepared.start
+        let answer = { @Sendable (outcome: EpicRefresh) in
+            EpicRefreshAnswer(outcome, merged: start.name, warning: start.warning)
+        }
+        switch prepared.plan {
+        case .settled(let outcome):
+            refreshes[epicId] = nil
+            return answer(try named(outcome, projectId: project.id))
+        case let .merge(previousHead, candidate) where commands.isEmpty:
+            defer { refreshes[epicId] = nil }
+            return answer(try await applyRefresh(
+                RefreshVerifier.Outcome(unverified: [.build, .test]), branch: branch, from: previousHead,
+                to: candidate, manager: manager, project: project
+            ))
+        case let .merge(previousHead, candidate):
+            run.candidate = candidate
+            run.task = _Concurrency.Task { [weak self] in
+                guard let self else { return }
+                let outcome = await self.verifyRefresh(
+                    epicId: epicId, branch: branch, from: previousHead, to: candidate, commands: commands,
+                    manager: manager, project: project, run: run
+                )
+                self.refreshes[epicId] = nil
+                self.queueRefreshReport(answer(outcome), projectId: project.id, branch: branch)
+            }
+            let steps = [commands.build, commands.test].compactMap { $0 }
+            return answer(.verifying(
+                head: previousHead, candidate: candidate, commands: steps, timeoutSeconds: commands.timeoutSeconds
+            ))
+        }
+    }
+
+    private func verifyRefresh(
+        epicId: String, branch: String, from previousHead: String, to candidate: String,
+        commands: VerificationCommands, manager: WorktreeManager, project: Project, run: RefreshRun
+    ) async -> EpicRefresh {
+        let isCancelled: @Sendable () -> Bool = { run.isCanceled }
+        let scratchName = "refresh-\(epicId)-\(UUID().uuidString.prefix(8).lowercased())"
+        // A fast-forward's scratch sits on the base head, which an orphan reap reads as merged.
+        let scratchPath = manager.worktreeRoot.appendingPathComponent(scratchName).path
+        placing.insert(scratchPath)
+        defer { placing.remove(scratchPath) }
+        let verification: RefreshVerifier.Outcome
+        do {
+            verification = try await offMain {
+                for leftover in try manager.scratchCheckouts(prefix: "refresh-\(epicId)") {
+                    manager.removeScratch(path: leftover)
+                }
+                let scratch = try manager.createDetached(
+                    name: scratchName, commit: candidate,
+                    timeout: TimeInterval(commands.timeoutSeconds), isCancelled: isCancelled
+                )
+                defer { manager.removeScratch(path: scratch) }
+                return RefreshVerifier.run(commands, in: scratch, isCancelled: isCancelled)
+            }
+        } catch {
+            return .interrupted(
+                head: previousHead,
+                reason: "Agent Board could not set up the scratch checkout the check runs in (creating it runs "
+                    + "this repository's post-checkout hook): \(describe(error))"
+            )
+        }
+        if let command = verification.canceled {
+            return .interrupted(head: previousHead, reason: "Agent Board stopped while `\(command)` was running, and stopped it")
+        }
+        if let failure = verification.failure {
+            return .verificationFailed(
+                head: previousHead, candidate: candidate, failure: failure, passed: verification.passed
+            )
+        }
+        do {
+            return try await applyRefresh(
+                verification, branch: branch, from: previousHead, to: candidate, manager: manager, project: project
+            )
+        } catch {
+            return .interrupted(head: previousHead, reason: "moving the branch failed: \(describe(error))")
+        }
+    }
+
+    private func applyRefresh(
+        _ verification: RefreshVerifier.Outcome, branch: String, from previousHead: String, to candidate: String,
+        manager: WorktreeManager, project: Project
+    ) async throws -> EpicRefresh {
+        let applied = try await mergeQueue.serialize(repo: project.repoPath, branch: branch) {
+            await _Concurrency.Task.detached(priority: .userInitiated) {
+                Result { try manager.applyRefresh(branch: branch, from: previousHead, to: candidate) }
+            }.value
+        }.get()
+        if let applied { return try named(applied, projectId: project.id) }
+        return .refreshed(
+            previousHead: previousHead, head: candidate, passed: verification.passed, unverified: verification.unverified
+        )
+    }
+
+    private func queueRefreshReport(_ answer: EpicRefreshAnswer, projectId: String, branch: String) {
+        do {
+            try ReportStore(db).insert(
+                projectId: projectId, taskId: nil, sessionId: nil, kind: .refresh,
+                body: answer.message(branch: branch)
+            )
+        } catch {
+            lastError = describe(error)
+            return
+        }
+        announceReports(projectId: projectId)
+    }
+
+    /// Names the session working in a checkout that holds the branch, when one is on record.
+    private func named(_ outcome: EpicRefresh, projectId: String) throws -> EpicRefresh {
+        guard case .checkedOut(let path, nil) = outcome else { return outcome }
+        let holder = try sessions.active(projectId: projectId).first { session in
+            session.worktreePath.map { Self.resolved($0) == Self.resolved(path) } ?? false
+        }
+        return .checkedOut(path: path, holder: holder.map { session in
+            "\(session.role.rawValue) session \(session.sessionId)" + (session.taskId.map { " on task \($0)" } ?? "")
+        })
     }
 
     /// Where a worker will run, once the strategy, the group holding the checkout and git have all
@@ -1786,14 +1954,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let placement = try projects.get(session.projectId).map {
                 WorkerStanding.recorded(session: session, project: $0, taskId: session.taskId ?? "").placement
             } ?? .worktree
-            try await resume(
-                session,
-                prompt: Self.resumePrompt(previousStop: session.stopReason, placement: placement)
-            )
+            try await resume(session, mergingEpic: true) { merge in
+                Self.resumePrompt(previousStop: session.stopReason, placement: placement, merge: merge)
+            }
         }
     }
 
-    private func resume(_ session: AgentSession, prompt: String) async throws {
+    private func resume(
+        _ session: AgentSession, mergingEpic: Bool = false, prompt: (ResumeMerge?) -> String
+    ) async throws {
         do {
             let sessionId = session.sessionId
             // SPEC §5: until the row is active again only this mark keeps a reap out of the worktree.
@@ -1832,6 +2001,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if let task = try tasks.get(taskId), task.origin.isPullRequestReader {
                 throw SupervisorError.triageNotResumable(title: task.title)
             }
+            let merge = mergingEpic ? try await epicMerge(for: session, taskId: taskId, project: project) : nil
             let token: String
             if let grant = live {
                 token = grant.token
@@ -1852,7 +2022,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let resumed = try await runtime.resume(
                 sessionId: sessionId,
                 cwd: URL(fileURLWithPath: session.cwd),
-                prompt: prompt
+                prompt: prompt(merge)
             )
             if resumed.shortId != session.shortId {
                 try sessions.setShortId(sessionId, resumed.shortId)
@@ -1865,6 +2035,23 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             lastError = describe(error)
             throw error
+        }
+    }
+
+    /// SPEC §5 "Resumed": a worker in its own worktree on an epic task sees what its siblings
+    /// finished while it was stopped.
+    private func epicMerge(for session: AgentSession, taskId: String, project: Project) async throws -> ResumeMerge? {
+        guard session.reviewHead == nil,
+              let worktreePath = session.worktreePath,
+              FileManager.default.fileExists(atPath: worktreePath),
+              let task = try tasks.get(taskId),
+              let epic = try task.epicId.flatMap({ try epics.get($0) })
+        else { return nil }
+        let manager = worktreeManager(for: project)
+        let epicBranch = epic.branch
+        let message = WorktreeManager.mergeSubject(taskTitle: epic.title, targetTitle: task.title)
+        return try await offMain {
+            manager.mergeEpicBranch(epicBranch, intoWorktree: URL(fileURLWithPath: worktreePath), message: message)
         }
     }
 
@@ -2637,7 +2824,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// SPEC §13.1 checking: starts the round's reviewer and follow-up check under the settling holds,
     /// then settles the round once both are in. A round that cannot be checked parks its watch; one whose
     /// check never ran is retried at the next point, up to `unavailableChecksBeforePark` times, unless its
-    /// error is one no retry can fix. A reviewer whose stop was not confirmed parks it rather than being retried.
+    /// error is one no retry can fix. A reviewer or follow-up check whose stop was not confirmed parks it
+    /// rather than being retried.
     private func advanceCheck(_ watch: PRWatch, project: Project) async {
         guard let round = try? prWatches.currentRound(watchId: watch.id), let taskId = round.fixTaskId,
               let task = try? tasks.get(taskId), task.column == .review
@@ -2679,6 +2867,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard try prWatches.get(watch.id)?.state == .checking else { return }
             if let checkId = round.followupTaskId {
                 if let check = try tasks.get(checkId), check.column == .closed {
+                    if let agent = SessionTermination.unconfirmedAgent(check.closedReason) {
+                        try board.recordUnavailableCheck(
+                            watchId: watch.id, tip: await roundTip(branch, manager: manager), counted: false,
+                            retryable: false,
+                            reason: "Round \(round.number)'s follow-up check, agent \(agent), may still be running: "
+                                + "Agent Board could not confirm its stop. Run `claude stop \(agent)` before "
+                                + "resuming.\n\n" + (check.closedReason ?? "")
+                        )
+                        return
+                    }
                     if SessionTermination.isSetupFailure(check.closedReason) {
                         try board.recordUnavailableCheck(
                             watchId: watch.id, tip: await roundTip(branch, manager: manager), dropFollowupCheck: true,
@@ -4449,7 +4647,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )) ?? false
         guard claimed else { return }
         do {
-            try await resume(session, prompt: ShutdownOrder.windDownOrder(reason: order.reason, via: .resume))
+            try await resume(session) { _ in ShutdownOrder.windDownOrder(reason: order.reason, via: .resume) }
         } catch {
             try? deliveries.releaseDelivery(orderId: order.id, sessionId: session.sessionId)
         }
@@ -4777,7 +4975,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let sessionId = session.sessionId
         sleepContinuedAt[sessionId] = now
         do {
-            try await resume(session, prompt: SleepCutTurn.continuation)
+            try await resume(session) { _ in SleepCutTurn.continuation }
             _ = try? ProgressStore(db).append(
                 taskId: taskId, sessionId: sessionId, kind: .status,
                 text: "System sleep cut off \(session.displayShortId)'s turn; Agent Board sent it one continuation\(when)."
@@ -5178,8 +5376,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// The commit step differs by placement: `git commit` is refused in a shared checkout, so a
     /// resumed co-resident worker told to "commit on this branch" is sent at a command that fails.
-    static func resumePrompt(previousStop: String?, placement: WorkerPlacement = .worktree) -> String {
-        var lines = ["Agent Board resumed this session. Continue your task from where you left off; check `git status` and `git log` first."]
+    static func resumePrompt(
+        previousStop: String?, placement: WorkerPlacement = .worktree, merge: ResumeMerge? = nil
+    ) -> String {
+        var lines = ["Agent Board resumed this session."]
+        if let merge { lines += mergeNotice(merge) }
+        lines.append("Continue your task from where you left off; check `git status` and `git log` first.")
         if let previousStop, !previousStop.isEmpty {
             lines.append("The previous run was stopped by Agent Board: \(previousStop).")
         }
@@ -5192,6 +5394,68 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             + "read the MCP resource `\(BriefingResourceURI.worker)` — it returns them in full."
         )
         return lines.joined(separator: " ")
+    }
+
+    /// SPEC §5 "Resumed": a conflict comes first, so a worker waking into conflict markers
+    /// cannot read them as its own damage.
+    private static func mergeNotice(_ merge: ResumeMerge) -> [String] {
+        let epic = "`\(merge.epicBranch)`"
+        let owned = "Resolving them is part of this task: you have the context for it. Keep both your work "
+            + "and the epic branch's, then commit the merge. Your task is not done until the tree builds and "
+            + "the test suite passes with the merge committed."
+        var lines: [String]
+        switch merge.outcome {
+        case .upToDate:
+            lines = []
+        case .conflicted(let files):
+            lines = [
+                "Before you do anything else: Agent Board merged the epic branch \(epic) into this branch, so that "
+                    + "you see what your sibling tasks finished while you were stopped, and the merge conflicted. "
+                    + "Conflicted files: \(listed(files, limit: 50)). The conflict markers in them come from that "
+                    + "merge, not from anything you did.",
+                owned,
+            ]
+        case .stillConflicted(let files):
+            lines = [files.isEmpty
+                ? "Before you do anything else: the merge of the epic branch \(epic) into this branch that Agent "
+                    + "Board started on an earlier resume has no conflicted files left but is not committed. "
+                    + "Committing it is part of this task; your task is not done until the tree builds and the "
+                    + "test suite passes with the merge committed."
+                : "Before you do anything else: the merge of the epic branch \(epic) into this branch that Agent "
+                    + "Board started on an earlier resume is still unresolved. Conflicted files: "
+                    + "\(listed(files, limit: 50)). The conflict markers in them come from that merge, not from "
+                    + "anything you did. " + owned]
+        case .merged(let commits, let files):
+            lines = [
+                "While you were stopped, your sibling tasks' finished work reached the epic branch \(epic), and "
+                    + "Agent Board merged it into this branch without conflicts. It brought in "
+                    + "\(listed(commits.map { "\"\($0)\"" }, limit: 8, quoted: false))"
+                    + (files.isEmpty
+                        ? ", which changed no files."
+                        : ", which is why these files you did not touch have changed: \(listed(files, limit: 20))."),
+            ]
+        case .failed(let reason):
+            lines = [
+                "Before you do anything else: Agent Board tried to merge the epic branch \(epic) into this branch, "
+                    + "so that you see what your sibling tasks finished while you were stopped, and could not: "
+                    + "\(String(reason.prefix(600))). Merge \(epic) into this branch yourself; resolving any "
+                    + "conflict it raises is part of this task.",
+            ]
+        }
+        if let savedWork = merge.savedWork {
+            lines.append(
+                "Your previous run left uncommitted changes in this worktree. Agent Board committed them "
+                    + "unchanged as `\(savedWork)` (\"\(ResumeMerge.savedWorkSubject)\") before merging, so none "
+                    + "of it is lost; `git show \(savedWork)` is exactly that unfinished work, and it is yours, "
+                    + "not a sibling's."
+            )
+        }
+        return lines
+    }
+
+    private static func listed(_ items: [String], limit: Int, quoted: Bool = true) -> String {
+        let shown = items.prefix(limit).map { quoted ? "`\($0)`" : $0 }.joined(separator: ", ")
+        return items.count > limit ? shown + ", and \(items.count - limit) more" : shown
     }
 
     static func configId(taskId: String, attempt: Int) -> String {
@@ -5277,4 +5541,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private nonisolated func offMain<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
         try await _Concurrency.Task.detached(priority: .userInitiated) { try body() }.value
     }
+}
+
+/// One in-flight `refresh_epic`. The cancel flag is read from the thread running its commands.
+private final class RefreshRun: @unchecked Sendable {
+    var candidate: String?
+    var task: _Concurrency.Task<Void, Never>?
+    private let lock = NSLock()
+    private var canceled = false
+
+    var isCanceled: Bool { lock.withLock { canceled } }
+    func cancel() { lock.withLock { canceled = true } }
 }
