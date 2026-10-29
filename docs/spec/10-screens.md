@@ -542,14 +542,17 @@ shows the section with the reason instead of reading as none. Then
 phase), then **Queued — due, not started** (due, what holds it),
 **Waiting out the delay** (due, requested), **Retrying** (attempts, next retry)
 and **Parked** (attempts), each queue row with its last error and each absent
-while empty, then **Recent reviews**: every review of every target, newest
+while empty, then **Recent reviews**: every review whose finished time, or
+started time when it has not finished, falls within the last 7 days, newest
 start first, with `owner/repo #n`, title, verdict, findings, source (`cdr` or
-`manual`), finished time and the count still to post. A stopped or unreachable
-daemon leaves only Running, saying so, and Recent reviews still lists; a review
-server that is not running says so in Recent reviews and leaves the daemon's
-sections alone. Clicking a row opens its CDR page in the default browser —
-`/t/<id>` for a review, `/pr/<owner>/<repo>/<n>` for a queue entry — or the PR
-on GitHub while the review server is down.
+`manual`), finished time and the count still to post; a target whose only
+reviews are older drops out entirely, and the section says "No reviews in the
+last 7 days" rather than disappearing when the window leaves nothing (§13.7).
+A stopped or unreachable daemon leaves only Running, saying so, and Recent
+reviews still lists; a review server that is not running says so in Recent
+reviews and leaves the daemon's sections alone. Clicking a row opens its CDR
+page in the default browser — `/t/<id>` for a review, `/pr/<owner>/<repo>/<n>`
+for a queue entry — or the PR on GitHub while the review server is down.
 
 **Notes** — list and full-text search, sectioned editor, pin toggle, and the set
 of tasks/epics each note is attached to. Shows which agent last wrote each

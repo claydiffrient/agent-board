@@ -1031,8 +1031,13 @@ lists `running`, `queued`, `waiting`, `retrying`, `parked`, `denied` and
 when the server stops. `GET /api/targets` with the token returns every target
 (a pull request) with its `reviews` (`started_at`, `finished_at`, `verdict`,
 `source` `manual` or `cdr`, `findings`, `lenses_ran`, `lenses_failed`) and its
-`queued`, `posted` and `to_post` counts. Recent reviews are every target's
-reviews, newest start first. The page routes — `/`, `/t/<id>` and
+`queued`, `posted` and `to_post` counts. Recent reviews lists a review only
+when its `finished_at`, or `started_at` when it has not finished, falls within
+the last 7 days against the device clock (an injectable `now` in
+`ReviewsPage.sections`, pinned by its test); a target whose only reviews are
+older drops out entirely, newest start first among what remains, and the
+section reads "No reviews in the last 7 days" rather than disappearing when
+the window leaves nothing. The page routes — `/`, `/t/<id>` and
 `/pr/<owner>/<repo>/<n>` — need no token, so the app opens them in the browser.
 The review server is read separately from the daemon: a review server that is
 not running, or answers an HTTP error, never hides the daemon's state, and the

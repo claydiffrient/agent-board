@@ -155,12 +155,12 @@ struct ReviewsPageSection: Identifiable, Equatable {
 
 /// Grouping and wording follow CDR's own pages (`renderIndex` and the status queue in its `server/render.mjs`).
 enum ReviewsPage {
-    static func sections(_ snapshot: CDRSnapshot?) -> [ReviewsPageSection] {
+    static func sections(_ snapshot: CDRSnapshot?, now: Date = .now) -> [ReviewsPageSection] {
         guard let snapshot else { return [ReviewsPageSection(title: "Running", emptyText: "Reading CDR…")] }
         let reviewServer: URL? = if case .available(let list) = snapshot.reviews { list.baseURL } else { nil }
         return escalationSections(snapshot.escalations)
             + daemonSections(snapshot.daemon, reviewServer: reviewServer)
-            + [recentSection(snapshot.reviews)]
+            + [recentSection(snapshot.reviews, now: now)]
     }
 
     /// Absent while nothing waits; an unreadable list says so rather than reading as none.
@@ -234,7 +234,10 @@ enum ReviewsPage {
         return [running] + queue.filter { !$0.rows.isEmpty }
     }
 
-    private static func recentSection(_ reviews: CDRReviewsState) -> ReviewsPageSection {
+    /// Reviews older than this never show; a target whose only reviews are older drops out entirely. SPEC §10, §13.7.
+    private static let recentWindow: TimeInterval = 7 * 24 * 60 * 60
+
+    private static func recentSection(_ reviews: CDRReviewsState, now: Date) -> ReviewsPageSection {
         var section = ReviewsPageSection(title: "Recent reviews", emptyText: "CDR has not reviewed anything yet.")
         switch reviews {
         case .serverNotRunning:
@@ -242,7 +245,13 @@ enum ReviewsPage {
         case .failed(let reason):
             section.message = reason
         case .available(let list):
-            section.rows = list.recent.enumerated().map { index, recent in
+            let cutoff = now.addingTimeInterval(-recentWindow)
+            let withinWindow = list.recent.filter { recent in
+                guard let activity = recent.review.finishedDate ?? recent.review.startedDate else { return false }
+                return activity >= cutoff
+            }
+            section.emptyText = "No reviews in the last 7 days."
+            section.rows = withinWindow.enumerated().map { index, recent in
                 let target = recent.target
                 let review = recent.review
                 let name = "\(target.owner ?? "?")/\(target.repo ?? "?") #\(target.pr.map(String.init) ?? "?")"

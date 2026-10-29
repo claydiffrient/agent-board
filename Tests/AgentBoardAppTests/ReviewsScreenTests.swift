@@ -217,22 +217,60 @@ final class ReviewsScreenTests: XCTestCase {
         return try JSONDecoder().decode(CDRStatus.self, from: Data(json.utf8))
     }
 
+    /// All three reviews land inside the 7-day window relative to whenever the suite actually runs.
     private static func reviews() throws -> CDRReviewsState {
         let json = """
             [
               {"id": 12, "owner": "octo", "repo": "widgets", "pr": 401, "title": "Cache the avatar sizes",
                "reviews": [
-                 {"id": 300, "started_at": "2026-10-20 10:00:05", "finished_at": "2026-10-20 10:09:40",
+                 {"id": 300, "started_at": "\(sqliteText(daysAgo: 5))", "finished_at": "\(sqliteText(daysAgo: 5))",
                   "verdict": "changes requested", "source": "manual", "findings": 3},
-                 {"id": 311, "started_at": "2026-10-28 09:05:00", "finished_at": "2026-10-28 09:12:30",
+                 {"id": 311, "started_at": "\(sqliteText(daysAgo: 1))", "finished_at": "\(sqliteText(daysAgo: 1))",
                   "verdict": "approve", "source": "cdr", "findings": 0}
                ], "to_post": 2},
               {"id": 15, "owner": "octo", "repo": "gadgets", "pr": 3, "title": "Teach the parser about tabs",
-               "reviews": [{"id": 305, "started_at": "2026-10-26 12:00:00", "source": "cdr"}], "to_post": 0}
+               "reviews": [{"id": 305, "started_at": "\(sqliteText(daysAgo: 3))", "source": "cdr"}], "to_post": 0}
             ]
             """
         let targets = try JSONDecoder().decode([CDRTarget].self, from: Data(json.utf8))
         return .available(CDRReviewList(baseURL: URL(string: "http://127.0.0.1:7717")!, targets: targets))
+    }
+
+    private static func sqliteText(daysAgo: Int, from now: Date = .now) -> String {
+        sqliteFormatter.string(from: now.addingTimeInterval(-Double(daysAgo) * 86400))
+    }
+
+    private static let sqliteFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter
+    }()
+
+    /// Rework 1B: a review's finished_at (or started_at when there is none) gates it out past 7 days.
+    func testRecentReviewsDropsAnythingOlderThanSevenDaysAndSaysSoWhenNothingIsLeft() throws {
+        let now = Self.sqliteFormatter.date(from: "2026-10-29 12:00:00")!
+        func target(id: Int, reviewId: Int, finishedDaysAgo: Int) throws -> CDRTarget {
+            let text = Self.sqliteText(daysAgo: finishedDaysAgo, from: now)
+            return try JSONDecoder().decode(CDRTarget.self, from: Data("""
+                {"id": \(id), "owner": "octo", "repo": "widgets", "pr": \(400 + id), "title": "T\(id)",
+                 "reviews": [{"id": \(reviewId), "started_at": "\(text)", "finished_at": "\(text)",
+                 "verdict": "approve", "source": "cdr"}]}
+                """.utf8))
+        }
+        let old = try target(id: 1, reviewId: 900, finishedDaysAgo: 8)
+        let recent = try target(id: 2, reviewId: 901, finishedDaysAgo: 6)
+        let list = CDRReviewList(baseURL: URL(string: "http://127.0.0.1:7717")!, targets: [old, recent])
+        let snapshot = CDRSnapshot(daemon: .stopped, reviews: .available(list))
+
+        let section = ReviewsPage.sections(snapshot, now: now).first { $0.title == "Recent reviews" }
+        XCTAssertEqual(section?.rows.map(\.id), ["review-901"], "the review finished 8 days ago must drop, the one finished 6 days ago must stay")
+
+        let emptySnapshot = CDRSnapshot(daemon: .stopped, reviews: .available(CDRReviewList(baseURL: list.baseURL, targets: [old])))
+        let emptySection = ReviewsPage.sections(emptySnapshot, now: now).first { $0.title == "Recent reviews" }
+        XCTAssertEqual(emptySection?.rows, [])
+        XCTAssertEqual(emptySection?.emptyText, "No reviews in the last 7 days.")
     }
 }
 
