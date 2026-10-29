@@ -119,10 +119,33 @@ public enum SessionProcessReaper {
         startedAtMicros: Int64,
         facts: (pid_t) -> ProcessFacts?
     ) -> Set<pid_t> {
+        inWorktree(table, worktree: worktree, startedAtMicros: startedAtMicros, facts: facts) { entry, fact in
+            entry.ppid == 1 && !fact.hasControllingTerminal
+        }
+    }
+
+    /// SPEC §3.1: a `claude` process working in `worktree`, started no earlier than `startedAtMicros`.
+    /// A `--bg` host runs under its `bg-pty-host` with a terminal, so `worktreeOrphans` never names one.
+    public static func worktreeHosts(worktree: String, startedAtMicros: Int64) -> Set<PIDIdentity> {
+        let table = ProcessTable.current()
+        let pids = inWorktree(table, worktree: worktree, startedAtMicros: startedAtMicros, facts: LibProc.facts) {
+            $1.isClaude
+        }
+        let protected = table.ancestors(of: getpid()).union([getpid()])
+        return Set(pids.subtracting(protected).compactMap(table.identity(of:)))
+    }
+
+    private static func inWorktree(
+        _ table: ProcessTable,
+        worktree: String,
+        startedAtMicros: Int64,
+        facts: (pid_t) -> ProcessFacts?,
+        where matches: (ProcessTable.Entry, ProcessFacts) -> Bool
+    ) -> Set<pid_t> {
         let worktree = canonical(worktree)
         var found: Set<pid_t> = []
-        for (pid, entry) in table.entries where entry.ppid == 1 && entry.startedAtMicros >= startedAtMicros {
-            guard let fact = facts(pid), !fact.hasControllingTerminal,
+        for (pid, entry) in table.entries where entry.startedAtMicros >= startedAtMicros {
+            guard let fact = facts(pid), matches(entry, fact),
                   let cwd = fact.cwd.map(canonical), cwd == worktree || cwd.hasPrefix(worktree + "/")
             else { continue }
             found.insert(pid)

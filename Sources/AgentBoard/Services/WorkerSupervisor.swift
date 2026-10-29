@@ -957,8 +957,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func failSetup(sessionId: String, projectId: String, error: Error) {
         let detail = describe(error)
-        let started = error is AgentStartedThenStopped
-        let cause: SessionTermination = started ? .setupFailedAfterStart(detail) : .setupFailed(detail)
+        let cause: SessionTermination
+        let title: String
+        switch (error as? AgentStartedThenStopped)?.stopConfirmed {
+        case .none: (cause, title) = (.setupFailed(detail), "Worker never started")
+        case .some(true): (cause, title) = (.setupFailedAfterStart(detail), "Worker started, then stopped")
+        case .some(false): (cause, title) = (.setupStopUnconfirmed(detail), "Worker started; stop not confirmed")
+        }
         let queued = (try? terminateSession(sessionId, cause: cause)) ?? nil
         guard queued != nil else { return }
         announceReports(projectId: projectId)
@@ -967,10 +972,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         // because the Status row it would land on carries no diagnosis — no transcript, no spend, a
         // bare `failed` state — while `detail` is the actual worktree-prep failure, which only the
         // queued report on the Orchestrator screen shows.
-        post(
-            started ? "Worker started, then stopped" : "Worker never started",
-            body: detail, projectId: projectId, category: .workerFailures
-        )
+        post(title, body: detail, projectId: projectId, category: .workerFailures)
     }
 
     private func reportSetupEnded(_ plan: LaunchPlan, sessionId: String) {
@@ -1096,7 +1098,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 model: plan.model,
                 pluginDirs: (plan.rosterAgent?.pluginDirs ?? []).map(expandingHome)
             )
-            let spawned = try await runtime.spawn(request)
+            let spawned: SpawnedAgent
+            do {
+                spawned = try await runtime.spawn(request)
+            } catch let started as AgentStartedThenStopped {
+                throw await confirmingStop(started, of: placeholder, cwd: plan.cwd)
+            }
             let recorded: AgentSession
             do {
                 recorded = try sessions.promoteSetupSession(
@@ -1106,7 +1113,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 // Something ended the setup row while the agent was starting, so nothing owns the
                 // agent that just came up. Leaving it running would be an untracked worker.
                 let stopFailure = await stopFailure { try await self.runtime.stop(shortId: spawned.shortId) }
-                throw AgentStartedThenStopped(shortId: spawned.shortId, reason: describe(error), stopFailure: stopFailure)
+                throw await confirmingStop(
+                    AgentStartedThenStopped(shortId: spawned.shortId, reason: describe(error), stopFailure: stopFailure),
+                    of: placeholder, cwd: plan.cwd
+                )
             }
             do {
                 // §3.1 step 8: the grant binds after the session row exists, or the foreign key rejects it.
@@ -1115,9 +1125,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             } catch {
                 // SPEC §3.1: stopped before the grant is revoked below, so no agent runs on a dead token.
                 let stopFailure = await stopFailure { try await self.stopAgent(recorded, shortId: spawned.shortId) }
-                throw AgentStartedThenStopped(
-                    shortId: spawned.shortId, sessionId: spawned.sessionId, reason: describe(error),
-                    stopFailure: stopFailure
+                throw await confirmingStop(
+                    AgentStartedThenStopped(
+                        shortId: spawned.shortId, sessionId: spawned.sessionId, reason: describe(error),
+                        stopFailure: stopFailure
+                    ),
+                    of: recorded, cwd: plan.cwd
                 )
             }
             return recorded
@@ -1134,6 +1147,43 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             return describe(error)
         }
+    }
+
+    /// SPEC §3.1: a `claude stop` that failed is escalated to the agent's process, as `stopAgent` does.
+    private func confirmingStop(
+        _ started: AgentStartedThenStopped, of session: AgentSession, cwd: URL
+    ) async -> AgentStartedThenStopped {
+        var started = started
+        started.cwd = cwd.path
+        if started.stopFailure != nil {
+            started.endedBySignal = await endAgentProcess(of: session, shortId: started.shortId)
+        }
+        return started
+    }
+
+    /// True only on positive evidence the agent is gone: a fresh listing names no live host for it, or
+    /// every `claude` working in the session's own worktree since it started ended under the signals.
+    private func endAgentProcess(of session: AgentSession, shortId: String) async -> Bool {
+        var session = session
+        session.shortId = shortId
+        let listed = await agentListing(nil)
+        let hosts: Set<PIDIdentity>
+        if let info = listed.agents.first(where: { $0.id == shortId }) {
+            guard let pid = info.pid, let host = verifiedHost(pid_t(pid), in: listed) else { return true }
+            hosts = [host]
+        } else {
+            guard let worktree = session.worktreePath, !sharesWorktree(session) else { return false }
+            let others = Set(listed.agents.compactMap { $0.pid.map { pid_t($0) } })
+            hosts = SessionProcessReaper.worktreeHosts(worktree: worktree, startedAtMicros: session.startedAt * 1000)
+                .filter { !others.contains($0.pid) }
+            guard !hosts.isEmpty else { return false }
+        }
+        var tree: Set<PIDIdentity> = []
+        for host in hosts { tree.formUnion(await SessionProcessReaper.tree(ofHost: host.pid)) }
+        await reapProcesses(of: session, tree: tree, listing: listed.agents)
+        var ended = true
+        for host in hosts where !(await SessionProcessReaper.end(host: host)) { ended = false }
+        return ended
     }
 
     nonisolated static func disallowedTools(scope: AgentBoardCore.TokenScope, supportDir: URL, home: URL) -> [String] {
@@ -1679,18 +1729,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     ) async {
         let listed = await listingOrFetch(listing)
         let host = Self.hostPID(of: session, in: listed)
-        let shared = session.worktreePath.map { path in
-            ((try? sessions.all(projectId: session.projectId)) ?? []).contains {
-                $0.sessionId != session.sessionId && $0.state.isActive && $0.worktreePath == path
-            }
-        } ?? true
         let scope = SessionProcessScope(
             tree: tree,
-            worktree: shared ? nil : session.worktreePath,
+            worktree: sharesWorktree(session) ? nil : session.worktreePath,
             startedAtMicros: session.startedAt * 1000,
             otherHosts: Set(listed.compactMap { $0.pid.map { pid_t($0) } }.filter { $0 != host })
         )
         await SessionProcessReaper.reap(scope)
+    }
+
+    /// True for a shared checkout too, whose processes could be anyone's.
+    private func sharesWorktree(_ session: AgentSession) -> Bool {
+        guard let path = session.worktreePath else { return true }
+        return ((try? sessions.all(projectId: session.projectId)) ?? []).contains {
+            $0.sessionId != session.sessionId && $0.state.isActive && $0.worktreePath == path
+        }
     }
 
     private func listingOrFetch(_ listing: [AgentInfo]?) async -> [AgentInfo] {
