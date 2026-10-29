@@ -70,10 +70,12 @@ public struct CDRRecentReview: Equatable, Sendable {
 public struct CDRSnapshot: Equatable, Sendable {
     public var daemon: CDRDaemonState
     public var reviews: CDRReviewsState
+    public var escalations: CDREscalations
 
-    public init(daemon: CDRDaemonState, reviews: CDRReviewsState) {
+    public init(daemon: CDRDaemonState, reviews: CDRReviewsState, escalations: CDREscalations = .available([])) {
         self.daemon = daemon
         self.reviews = reviews
+        self.escalations = escalations
     }
 }
 
@@ -113,10 +115,28 @@ public struct CDRClient: Sendable {
         self.timeout = timeout
     }
 
-    public func snapshot() async -> CDRSnapshot {
-        async let daemon = daemonState()
+    /// `command` reads the escalations while the daemon is not running; without it they read as unavailable.
+    public func snapshot(command: CDRCommand? = nil) async -> CDRSnapshot {
         async let reviews = reviews()
-        return await CDRSnapshot(daemon: daemon, reviews: reviews)
+        let daemon = await daemonState()
+        let escalations = await escalations(daemon: daemon, command: command)
+        return await CDRSnapshot(daemon: daemon, reviews: reviews, escalations: escalations)
+    }
+
+    /// The running daemon's own list, else CDR's `status --json`, which reads its database directly. SPEC §13.7.
+    func escalations(daemon: CDRDaemonState, command: CDRCommand?) async -> CDREscalations {
+        switch daemon {
+        case .notInstalled:
+            return .available([])
+        case .running(let status):
+            if let escalations = status.escalations { return escalations }
+        case .stopped, .unreachable:
+            break
+        }
+        guard let command else {
+            return .unavailable("CDR's CLI was not found, so escalations can't be read while the daemon is not running.")
+        }
+        return await Task.detached { command.escalations() }.value
     }
 
     public func daemonState() async -> CDRDaemonState {
@@ -297,6 +317,25 @@ public struct CDRCommand: Equatable, Sendable {
 
     public func stop() throws -> CDRCommandReport {
         try run("stop")
+    }
+
+    /// `status --json` exits 1 while the daemon is stopped and still prints its JSON. Its stdout is never logged or
+    /// shown: only the escalations are decoded from it. Blocking; call it off the main actor.
+    public func escalations() -> CDREscalations {
+        let result: CommandResult
+        do {
+            result = try ProcessRunner.run(
+                executable: node, arguments: [cli.path, "status", "--json"], environment: ChildEnvironment.sanitized(),
+                timeout: timeout
+            )
+        } catch {
+            return .unavailable("CDR's status did not finish: \(error)")
+        }
+        guard let report = try? JSONDecoder().decode(CDRStatusReport.self, from: Data(result.stdout.utf8)) else {
+            let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .unavailable(stderr.isEmpty ? "CDR's status --json exited \(result.status) without JSON." : stderr)
+        }
+        return report.escalations ?? .unavailable("This CDR's status --json does not report escalations.")
     }
 
     private func run(_ subcommand: String) throws -> CDRCommandReport {

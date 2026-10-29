@@ -37,6 +37,38 @@ final class CDRClientTests: XCTestCase {
         XCTAssertEqual(polling.budget?.used, 4)
         XCTAssertEqual(polling.concurrency?.limit, 2)
         XCTAssertEqual(snapshot.reviews, .serverNotRunning)
+        XCTAssertEqual(snapshot.escalations, .available([]), "the running daemon's own list, with no CLI to fall back on")
+    }
+
+    func testAStoppedDaemonsEscalationsComeFromCDRsCLIAndAnErrorReadsAsUnavailable() async throws {
+        let refused = try RefusingPort()
+        let output = home.appendingPathComponent("status.json")
+        let cli = home.appendingPathComponent("cli.sh")
+        try """
+        [ "$*" = 'status --json' ] || exit 9
+        cat '\(output.path)'
+        exit 1
+        """.write(to: cli, atomically: true, encoding: .utf8)
+        let command = CDRCommand(node: URL(fileURLWithPath: "/bin/sh"), cli: cli)
+        let client = CDRClient(home: CDRHome(url: home), watcherDefaultPort: refused.port)
+        try fixture("cdr-status-cli").write(to: output)
+
+        let snapshot = await client.snapshot(command: command)
+
+        XCTAssertEqual(snapshot.daemon, .stopped)
+        guard case .available(let list) = snapshot.escalations else { return XCTFail("escalations read as \(snapshot.escalations)") }
+        XCTAssertEqual(list.map(\.pr), [401, 3], "the malformed element is dropped, not the list")
+        XCTAssertEqual(list.first?.repo, "octo/widgets")
+        XCTAssertEqual(list.first?.finding, "The cache key ignores the device scale")
+        XCTAssertEqual(list.first?.arguedVerdict, "uncertain")
+        XCTAssertEqual(list.first?.postedDate, CDRTime.parse("2026-10-28 16:02:11"))
+        XCTAssertEqual(list.first?.link?.absoluteString, "https://github.com/octo/widgets/pull/401#discussion_r9001")
+        XCTAssertNil(list.last?.argued)
+
+        try Data(#"{"state":"stopped","escalations":{"error":"database is locked"}}"#.utf8).write(to: output)
+        let failed = await client.snapshot(command: command)
+
+        XCTAssertEqual(failed.escalations, .unavailable("database is locked"))
     }
 
     func testAStoppedDaemonStillListsRecentReviewsNewestFirst() async throws {

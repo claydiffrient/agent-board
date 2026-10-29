@@ -1031,8 +1031,13 @@ lists `running`, `queued`, `waiting`, `retrying`, `parked`, `denied` and
 when the server stops. `GET /api/targets` with the token returns every target
 (a pull request) with its `reviews` (`started_at`, `finished_at`, `verdict`,
 `source` `manual` or `cdr`, `findings`, `lenses_ran`, `lenses_failed`) and its
-`queued`, `posted` and `to_post` counts. Recent reviews are every target's
-reviews, newest start first. The page routes — `/`, `/t/<id>` and
+`queued`, `posted` and `to_post` counts. Recent reviews lists a review only
+when its `finished_at`, or `started_at` when it has not finished, falls within
+the last 7 days against the device clock (an injectable `now` in
+`ReviewsPage.sections`, pinned by its test); a target whose only reviews are
+older drops out entirely, newest start first among what remains, and the
+section reads "No reviews in the last 7 days" rather than disappearing when
+the window leaves nothing. The page routes — `/`, `/t/<id>` and
 `/pr/<owner>/<repo>/<n>` — need no token, so the app opens them in the browser.
 The review server is read separately from the daemon: a review server that is
 not running, or answers an HTTP error, never hides the daemon's state, and the
@@ -1055,3 +1060,28 @@ login-shell PATH (§2). `cli.mjs` is the **CDR command** setting (Settings → C
 stored in `UserDefaults` under `cdr.command`); when that is empty it is
 `<installPath>/watcher/cli.mjs` of the `cd@cd-ai-skills` entry in
 `~/.claude/plugins/installed_plugins.json`, if that file exists.
+
+**Open escalations** — findings CDR argued on a PR thread whose argument it
+could not settle, so they wait on the human. Each carries `target_id`, `repo`
+(`owner/repo`), `pr`, `title`, `finding`, `argued`, `argued_verdict`,
+`posted_at`, `reply_url` and `thread_url` (`openEscalations` in CDR's
+`server/db.mjs`). While the daemon runs they come from the top-level
+`escalations` of its `/status`. Otherwise — stopped, unreachable, or a running
+daemon whose `escalations` is `null` because its own database read failed —
+they come from `node <cli.mjs> status --json`, which reads CDR's database
+directly, exits 1 while the daemon is stopped and still prints its JSON, and
+strips the token from what it prints; Agent Board decodes only the escalations
+from that stdout and never logs or shows the rest. As in CDR's own
+`escalationList`, that report's top-level list wins and the daemon snapshot it
+carries is the fallback. The CLI runs off the main thread, only as part of the
+page's read: every 10 seconds, and once after the switch starts or stops the
+daemon. Either source can send `{error}` in place
+of the list; that reads as *unavailable* with CDR's reason, never as an empty
+list. With no CDR command resolved and the daemon not running, the escalations
+are unavailable too. Not installed reads as none.
+
+CDR's `openEscalations` does not dedupe rows that share a `thread_url` — two
+escalations argued on the same PR thread are two separate rows with the same
+thread. Each row's id in `ReviewsPage` combines `target_id`, `reply_url` and
+the row's index in the list, since `thread_url` alone would collide and drop
+or swap rows under SwiftUI's `ForEach`.

@@ -47,6 +47,40 @@ final class ReviewsScreenTests: XCTestCase {
         XCTAssertEqual(page.switches.map(\.isEnabled), [true])
     }
 
+    func testEscalationsListUnderWaitingOnYouAndAnUnreadableListStillShowsTheSection() throws {
+        let escalation = try JSONDecoder().decode(CDREscalation.self, from: Data("""
+            {"target_id": 12, "repo": "octo/widgets", "pr": 401, "title": "Cache the avatar sizes",
+             "finding": "The cache key ignores the device scale", "argued": "Scale is already folded in.",
+             "argued_verdict": "uncertain", "posted_at": "2026-10-28 16:02:11",
+             "reply_url": null, "thread_url": "https://github.com/octo/widgets/pull/401#discussion_r9001"}
+            """.utf8))
+        let waiting = try mountPage(FakeCDR(daemon: .stopped, reviews: try Self.reviews(), escalations: .available([escalation])))
+        XCTAssertEqual(waiting.headers, 3, "Waiting on you, Running and Recent reviews")
+        XCTAssertEqual(waiting.cells, 1 + 1 + 3, "the escalation, Running's placeholder and the three recent reviews")
+
+        let unreadable = try mountPage(FakeCDR(daemon: .stopped, reviews: try Self.reviews(), escalations: .unavailable("database is locked")))
+        XCTAssertEqual(unreadable.headers, 3, "an unreadable list is not an empty one")
+    }
+
+    /// CDR's `openEscalations` does not dedupe rows sharing a thread; two such rows must still get distinct ids
+    /// or SwiftUI's `ForEach` drops/swaps one of them.
+    func testTwoEscalationsSharingAThreadURLGetDistinctRowIDs() throws {
+        func escalation(targetId: Int, replyURL: String?) throws -> CDREscalation {
+            try JSONDecoder().decode(CDREscalation.self, from: Data("""
+                {"target_id": \(targetId), "repo": "octo/widgets", "pr": 401, "title": "Finding \(targetId)",
+                 "finding": "finding \(targetId)", "reply_url": \(replyURL.map { "\"\($0)\"" } ?? "null"),
+                 "thread_url": "https://github.com/octo/widgets/pull/401#discussion_r9001"}
+                """.utf8))
+        }
+        let first = try escalation(targetId: 12, replyURL: nil)
+        let second = try escalation(targetId: 13, replyURL: nil)
+        let snapshot = CDRSnapshot(daemon: .stopped, reviews: try Self.reviews(), escalations: .available([first, second]))
+
+        let rows = ReviewsPage.sections(snapshot).first(where: { $0.title == "Waiting on you" })?.rows ?? []
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(Set(rows.map(\.id)).count, 2, "same thread_url must not collapse two escalations into one id")
+    }
+
     func testThePagePollsWhileMountedAndStopsWhenRemoved() throws {
         let cdr = FakeCDR(daemon: .stopped, reviews: .serverNotRunning)
         let mount = OffscreenMount(
@@ -183,22 +217,60 @@ final class ReviewsScreenTests: XCTestCase {
         return try JSONDecoder().decode(CDRStatus.self, from: Data(json.utf8))
     }
 
+    /// All three reviews land inside the 7-day window relative to whenever the suite actually runs.
     private static func reviews() throws -> CDRReviewsState {
         let json = """
             [
               {"id": 12, "owner": "octo", "repo": "widgets", "pr": 401, "title": "Cache the avatar sizes",
                "reviews": [
-                 {"id": 300, "started_at": "2026-10-20 10:00:05", "finished_at": "2026-10-20 10:09:40",
+                 {"id": 300, "started_at": "\(sqliteText(daysAgo: 5))", "finished_at": "\(sqliteText(daysAgo: 5))",
                   "verdict": "changes requested", "source": "manual", "findings": 3},
-                 {"id": 311, "started_at": "2026-10-28 09:05:00", "finished_at": "2026-10-28 09:12:30",
+                 {"id": 311, "started_at": "\(sqliteText(daysAgo: 1))", "finished_at": "\(sqliteText(daysAgo: 1))",
                   "verdict": "approve", "source": "cdr", "findings": 0}
                ], "to_post": 2},
               {"id": 15, "owner": "octo", "repo": "gadgets", "pr": 3, "title": "Teach the parser about tabs",
-               "reviews": [{"id": 305, "started_at": "2026-10-26 12:00:00", "source": "cdr"}], "to_post": 0}
+               "reviews": [{"id": 305, "started_at": "\(sqliteText(daysAgo: 3))", "source": "cdr"}], "to_post": 0}
             ]
             """
         let targets = try JSONDecoder().decode([CDRTarget].self, from: Data(json.utf8))
         return .available(CDRReviewList(baseURL: URL(string: "http://127.0.0.1:7717")!, targets: targets))
+    }
+
+    private static func sqliteText(daysAgo: Int, from now: Date = .now) -> String {
+        sqliteFormatter.string(from: now.addingTimeInterval(-Double(daysAgo) * 86400))
+    }
+
+    private static let sqliteFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter
+    }()
+
+    /// Rework 1B: a review's finished_at (or started_at when there is none) gates it out past 7 days.
+    func testRecentReviewsDropsAnythingOlderThanSevenDaysAndSaysSoWhenNothingIsLeft() throws {
+        let now = Self.sqliteFormatter.date(from: "2026-10-29 12:00:00")!
+        func target(id: Int, reviewId: Int, finishedDaysAgo: Int) throws -> CDRTarget {
+            let text = Self.sqliteText(daysAgo: finishedDaysAgo, from: now)
+            return try JSONDecoder().decode(CDRTarget.self, from: Data("""
+                {"id": \(id), "owner": "octo", "repo": "widgets", "pr": \(400 + id), "title": "T\(id)",
+                 "reviews": [{"id": \(reviewId), "started_at": "\(text)", "finished_at": "\(text)",
+                 "verdict": "approve", "source": "cdr"}]}
+                """.utf8))
+        }
+        let old = try target(id: 1, reviewId: 900, finishedDaysAgo: 8)
+        let recent = try target(id: 2, reviewId: 901, finishedDaysAgo: 6)
+        let list = CDRReviewList(baseURL: URL(string: "http://127.0.0.1:7717")!, targets: [old, recent])
+        let snapshot = CDRSnapshot(daemon: .stopped, reviews: .available(list))
+
+        let section = ReviewsPage.sections(snapshot, now: now).first { $0.title == "Recent reviews" }
+        XCTAssertEqual(section?.rows.map(\.id), ["review-901"], "the review finished 8 days ago must drop, the one finished 6 days ago must stay")
+
+        let emptySnapshot = CDRSnapshot(daemon: .stopped, reviews: .available(CDRReviewList(baseURL: list.baseURL, targets: [old])))
+        let emptySection = ReviewsPage.sections(emptySnapshot, now: now).first { $0.title == "Recent reviews" }
+        XCTAssertEqual(emptySection?.rows, [])
+        XCTAssertEqual(emptySection?.emptyText, "No reviews in the last 7 days.")
     }
 }
 
@@ -214,8 +286,8 @@ final class FakeCDR: CDRService, @unchecked Sendable {
     )
     var failure: CDRCommandError?
 
-    init(daemon: CDRDaemonState, reviews: CDRReviewsState) {
-        current = CDRSnapshot(daemon: daemon, reviews: reviews)
+    init(daemon: CDRDaemonState, reviews: CDRReviewsState, escalations: CDREscalations = .available([])) {
+        current = CDRSnapshot(daemon: daemon, reviews: reviews, escalations: escalations)
     }
 
     var installed: Bool {
@@ -228,7 +300,7 @@ final class FakeCDR: CDRService, @unchecked Sendable {
 
     var isInstalled: Bool { installed }
 
-    func snapshot() async -> CDRSnapshot {
+    func snapshot(command: CDRCommand?) async -> CDRSnapshot {
         lock.withLock { _snapshotCalls += 1 }
         return current
     }

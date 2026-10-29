@@ -1,0 +1,35 @@
+{
+  "state": "stopped",
+  "info": null,
+  "port": 7718,
+  "checkoutCode": "5c1e0a9b",
+  "postProblems": [],
+  "escalations": [
+    {
+      "target_id": 12,
+      "repo": "octo/widgets",
+      "pr": 401,
+      "title": "Cache the avatar sizes",
+      "finding": "The cache key ignores the device scale",
+      "argued": "Scale is folded into\n  the size already.",
+      "argued_verdict": "uncertain",
+      "posted_at": "2026-10-28 16:02:11",
+      "reply_url": "https://github.com/octo/widgets/pull/401#discussion_r9002",
+      "thread_url": "https://github.com/octo/widgets/pull/401#discussion_r9001"
+    },
+    "not an escalation",
+    {
+      "target_id": 15,
+      "repo": "octo/gadgets",
+      "pr": 3,
+      "title": "Teach the parser about tabs",
+      "finding": "Tabs inside strings are expanded",
+      "argued": null,
+      "argued_verdict": "rejected",
+      "posted_at": "2026-10-27 09:15:40",
+      "reply_url": null,
+      "thread_url": "https://github.com/octo/gadgets/pull/3#discussion_r7004"
+    }
+  ],
+  "config": { "ok": false, "path": "/x/config.json", "problems": [] }
+}
