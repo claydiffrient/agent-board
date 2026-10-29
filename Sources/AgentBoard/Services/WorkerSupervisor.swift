@@ -738,9 +738,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return try await offMain { try manager.drift(of: branch, from: base) }
     }
 
-    /// SPEC §5.2: the freshest base (§3.1 step 1) is merged, and the merge result is built and tested
-    /// in a scratch checkout before the epic branch moves; only the final move waits on the merge
-    /// queue, so an accept is not held up by a build. With commands configured the call answers
+    /// SPEC §5.2: the freshest base (§3.1 step 1) is merged, and the merge result is checked in a
+    /// scratch checkout with the commands the project's integration verification allows before the
+    /// epic branch moves; only the final move waits on the merge queue, so an accept is not held up
+    /// by a build. With a command to run the call answers
     /// `.verifying` at once and the verdict is queued as a `refresh` report; one refresh per epic runs
     /// at a time.
     func refreshEpic(epicId: String) async throws -> EpicRefreshAnswer {
@@ -757,6 +758,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let base = project.baseBranch
         var commands = project.settings.verification
         if let override = refreshCheckTimeoutOverride { commands.timeoutSeconds = override }
+        let steps = commands.refreshSteps.compactMap(\.command)
 
         let prepared: (start: BaseStartPoint, plan: RefreshCandidate)
         do {
@@ -777,10 +779,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         case .settled(let outcome):
             refreshes[epicId] = nil
             return answer(try named(outcome, projectId: project.id))
-        case let .merge(previousHead, candidate) where commands.isEmpty:
+        case let .merge(previousHead, candidate) where steps.isEmpty:
             defer { refreshes[epicId] = nil }
             return answer(try await applyRefresh(
-                RefreshVerifier.Outcome(unverified: [.build, .test]), branch: branch, from: previousHead,
+                RefreshVerifier.Outcome(nothingRunFor: commands), branch: branch, from: previousHead,
                 to: candidate, manager: manager, project: project
             ))
         case let .merge(previousHead, candidate):
@@ -794,7 +796,6 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 self.refreshes[epicId] = nil
                 self.queueRefreshReport(answer(outcome), projectId: project.id, branch: branch)
             }
-            let steps = [commands.build, commands.test].compactMap { $0 }
             return answer(.verifying(
                 head: previousHead, candidate: candidate, commands: steps, timeoutSeconds: commands.timeoutSeconds
             ))
@@ -859,7 +860,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }.get()
         if let applied { return try named(applied, projectId: project.id) }
         return .refreshed(
-            previousHead: previousHead, head: candidate, passed: verification.passed, unverified: verification.unverified
+            previousHead: previousHead, head: candidate, passed: verification.passed, unverified: verification.unverified,
+            testsLeftToCI: verification.testsLeftToCI
         )
     }
 

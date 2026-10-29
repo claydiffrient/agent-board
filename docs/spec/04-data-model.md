@@ -626,12 +626,14 @@ it did. `epic.review_level` overrides it for that epic's tasks; NULL inherits.
 Nothing else reads either value — the level is resolved once, on completion (§5).
 
 `settings_json.integrationVerification` is how much the epic integrator
-verifies on the board's machine after its merges (§5.2 step 3): `buildAndTest`,
+verifies on the board's machine after its merges (§5.2 step 3), and how much an
+epic refresh does (§5.2): `buildAndTest`,
 `buildOnly` or `ciVerifies`, shown on Project settings' Workflow tab under
 Verification as **Build and test**, **Build only** and **None: CI verifies**. An
 absent key decodes to **`buildAndTest`**, so a project that predates the setting
-keeps running its build and full test suite. It changes only the integrator's
-prompt; workers and reviewers get the build and test commands as before.
+keeps running its build and full test suite. It changes the integrator's prompt
+and which commands an epic refresh runs (§5.2); workers and reviewers get the
+build and test commands as before.
 
 `archived_at` is a flag on a task, not a column — D7 fixes the columns, and
 `blocked`/`failed` are the precedent. Only a task in a terminal column, `done`

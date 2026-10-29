@@ -1,25 +1,36 @@
 import AgentBoardCore
 import Foundation
 
-/// Runs a project's configured build, then test, command in a checkout of a refresh's merge result
-/// (SPEC §5.2). A command the project does not configure is not guessed at: it is left for the
-/// caller to report as unverified.
+/// Runs the build, then test, commands a project's integration verification lets a refresh run, in a
+/// checkout of its merge result (SPEC §5.2). A command the project does not configure is not guessed
+/// at: it is left for the caller to report as unverified.
 public enum RefreshVerifier {
     public struct Outcome: Sendable, Equatable {
         public var passed: [RefreshCheck]
         public var failure: RefreshCheck?
         public var unverified: [RefreshCheck.Kind]
+        public var testsLeftToCI: Bool
         /// The command that was running when the caller canceled the run; it was stopped, not failed.
         public var canceled: String?
 
         public init(
             passed: [RefreshCheck] = [], failure: RefreshCheck? = nil, unverified: [RefreshCheck.Kind] = [],
-            canceled: String? = nil
+            testsLeftToCI: Bool = false, canceled: String? = nil
         ) {
             self.passed = passed
             self.failure = failure
             self.unverified = unverified
+            self.testsLeftToCI = testsLeftToCI
             self.canceled = canceled
+        }
+
+        /// Before anything has run: each of `commands.refreshSteps` with no command is unverified.
+        public init(nothingRunFor commands: VerificationCommands) {
+            let steps = commands.refreshSteps
+            self.init(
+                unverified: steps.filter { $0.command == nil }.map(\.kind),
+                testsLeftToCI: !steps.contains { $0.kind == .test }
+            )
         }
     }
 
@@ -32,9 +43,8 @@ public enum RefreshVerifier {
         environment: [String: String] = ChildEnvironment.sanitized(),
         isCancelled: @escaping @Sendable () -> Bool = { false }
     ) -> Outcome {
-        let steps: [(RefreshCheck.Kind, String?)] = [(.build, commands.build), (.test, commands.test)]
-        var outcome = Outcome(passed: [], failure: nil, unverified: steps.filter { $0.1 == nil }.map(\.0))
-        for case let (kind, command?) in steps {
+        var outcome = Outcome(nothingRunFor: commands)
+        for case let (kind, command?) in commands.refreshSteps {
             let result: BoundedCommand.Result
             do {
                 result = try BoundedCommand.run(

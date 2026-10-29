@@ -53,6 +53,32 @@ final class EpicRefreshTests: XCTestCase {
         XCTAssertFalse(text.contains("passed"), text)
     }
 
+    func testARefreshUnderCIVerifiesRunsTheBuildAndLeavesTheTestsToCI() async throws {
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        try commit("main\n", to: "from-main.txt", on: "main")
+        try setCommands(build: "test -f from-main.txt", test: "exit 7", integration: .ciVerifies)
+
+        let started = try await refresh().text
+        XCTAssertFalse(started.contains("exit 7"), "the refresh says it will run the tests: \(started)")
+        let report = try await awaitRefreshReport()
+
+        XCTAssertTrue(try isAncestor(try head("main"), of: epic.branch), "the tests ran and failed the refresh: \(report)")
+        XCTAssertTrue(report.contains("`test -f from-main.txt` passed"), report)
+        XCTAssertTrue(report.contains("No tests ran"), report)
+    }
+
+    func testARefreshUnderBuildOnlyWithNoBuildCommandRunsNothingAndSaysSo() async throws {
+        try fixture.manager.ensureBranch(epic.branch, from: "main")
+        try commit("main\n", to: "from-main.txt", on: "main")
+        try setCommands(build: nil, test: "true", integration: .buildOnly)
+
+        let text = try await refresh().text
+
+        XCTAssertTrue(text.contains("NOT VERIFIED: this project configures no build command"), text)
+        XCTAssertTrue(text.contains("No tests ran"), text)
+        XCTAssertFalse(text.contains("passed"), text)
+    }
+
     func testAConflictingRefreshLeavesTheEpicBranchAsItWasAndNamesTheFiles() async throws {
         try fixture.manager.ensureBranch(epic.branch, from: "main")
         try commit("epic side\n", to: "schema.sql", on: epic.branch)
@@ -274,10 +300,13 @@ final class EpicRefreshTests: XCTestCase {
         return try XCTUnwrap(object?["base_drift"] as? [String: Any], result.text)
     }
 
-    private func setCommands(build: String?, test: String?) throws {
+    private func setCommands(
+        build: String?, test: String?, integration: IntegrationVerification = .buildAndTest
+    ) throws {
         var settings = fixture.project.settings
         settings.buildCommand = build
         settings.testCommand = test
+        settings.integrationVerification = integration
         try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
     }
 
