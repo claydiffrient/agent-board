@@ -100,6 +100,22 @@ public enum StandaloneIntegration: String, Codable, Sendable, CaseIterable, Equa
     }
 }
 
+/// How much the epic integrator verifies on this machine after its merges (SPEC §4, §5.2 step 3).
+public enum IntegrationVerification: String, Codable, Sendable, CaseIterable, Equatable {
+    case buildAndTest
+    case buildOnly
+    /// Checks ancestry and conflict markers only; the pull request's CI builds and tests.
+    case ciVerifies
+
+    public var title: String {
+        switch self {
+        case .buildAndTest: return "Build and test"
+        case .buildOnly: return "Build only"
+        case .ciVerifies: return "None: CI verifies"
+        }
+    }
+}
+
 /// The rostered agent a project names as its reviewer. `name` is a snapshot taken when it was
 /// chosen, so a reason can still name the agent after it is deleted from the roster.
 public struct ReviewAgentChoice: Codable, Sendable, Equatable {
@@ -221,6 +237,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var buildCommand: String? = nil
     /// Shell command that runs this project's tests. Empty leaves the agent to work it out.
     public var testCommand: String? = nil
+    public var integrationVerification: IntegrationVerification = .buildAndTest
     /// Run in a worktree just before Agent Board removes it (SPEC §3.1, §4). Nil removes the
     /// worktree and nothing else.
     public var worktreeTeardownCommand: String? = nil
@@ -257,6 +274,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         reviewRouting: ReviewRoutingTable = ReviewRoutingTable(),
         buildCommand: String? = nil,
         testCommand: String? = nil,
+        integrationVerification: IntegrationVerification = .buildAndTest,
         worktreeTeardownCommand: String? = nil,
         worktreeTeardownTimeoutSeconds: Int = WorktreeTeardownCommand.defaultTimeoutSeconds,
         archivePolicy: ArchivePolicy = .afterEpicMerge,
@@ -278,6 +296,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.reviewRouting = reviewRouting
         self.buildCommand = buildCommand
         self.testCommand = testCommand
+        self.integrationVerification = integrationVerification
         self.worktreeTeardownCommand = worktreeTeardownCommand
         self.worktreeTeardownTimeoutSeconds = worktreeTeardownTimeoutSeconds
         self.archivePolicy = archivePolicy
@@ -308,6 +327,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         }
         buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
+        integrationVerification = try c.decodeIfPresent(IntegrationVerification.self, forKey: .integrationVerification)
+            ?? .buildAndTest
         worktreeTeardownCommand = try c.decodeIfPresent(String.self, forKey: .worktreeTeardownCommand)
         worktreeTeardownTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .worktreeTeardownTimeoutSeconds)
             ?? WorktreeTeardownCommand.defaultTimeoutSeconds

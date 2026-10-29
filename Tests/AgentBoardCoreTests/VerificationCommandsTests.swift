@@ -18,6 +18,7 @@ final class VerificationCommandsTests: XCTestCase {
         XCTAssertNil(settings.buildCommand)
         XCTAssertNil(settings.testCommand)
         XCTAssertTrue(settings.verification.isEmpty)
+        XCTAssertEqual(settings.integrationVerification, .buildAndTest)
         XCTAssertEqual(settings.notifications, NotificationPreferences())
         for category in NotificationCategory.allCases {
             XCTAssertTrue(settings.notifications.isEnabled(category), category.rawValue)

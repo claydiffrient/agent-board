@@ -536,10 +536,12 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         )
 
         let sheet = try seededSheet(tab: .workflow) {
+            $0.integrationVerification = .ciVerifies
             $0.worktreeStrategy = .shared
             $0.standaloneIntegration = .localMerge
         }
         let settings: ProjectSettings? = seededState(sheet, "_settings")
+        XCTAssertEqual(settings?.integrationVerification, .ciVerifies)
         XCTAssertEqual(settings?.worktreeStrategy, .shared)
         XCTAssertEqual(settings?.standaloneIntegration, .localMerge)
     }
