@@ -309,6 +309,26 @@ final class IntegrationPlanTests: XCTestCase {
         XCTAssertTrue(prompt.contains("build and test this project"), prompt)
     }
 
+    func testCIVerifiesPolicyReplacesBuildAndTestWithTheAncestryCheck() throws {
+        let f = try Fixture.make()
+        let epic = try epic(f)
+        let only = task("api")
+        let settings = ProjectSettings(buildCommand: "swift build", testCommand: "swift test", integrationVerification: .ciVerifies)
+        let prompt = IntegrationPlan.compose(
+            epic: epic, baseBranch: "main",
+            branches: [IntegrationBranch(taskId: only.id, title: "api", branch: "agentboard/\(only.id)", disposition: .merge)],
+            verification: settings.verification
+        )
+
+        XCTAssertTrue(prompt.contains("`git merge-base --is-ancestor agentboard/\(only.id) \(epic.branch)` exits 0"), prompt)
+        XCTAssertTrue(prompt.contains("<<<<<<<"), prompt)
+        XCTAssertTrue(prompt.contains("left to CI"), prompt)
+        XCTAssertFalse(prompt.contains("run `swift build`"), prompt)
+        XCTAssertFalse(prompt.contains("swift test"), prompt)
+        XCTAssertFalse(prompt.contains("leave the build green"), prompt)
+        XCTAssertFalse(prompt.contains("tests in the foreground"), prompt)
+    }
+
     // MARK: - epic state on completion
 
     /// Under `manual` the integration task lands in `review` for a human, as every worker report

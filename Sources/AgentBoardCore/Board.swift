@@ -60,6 +60,12 @@ public enum SessionTermination: Sendable, Equatable {
     /// Preparing the worktree failed after `spawn_worker` had already answered, so the session
     /// never became an agent. Nothing ran, but the task is in `running` with a row attached.
     case setupFailed(String)
+    /// Setup failed after `claude --bg` had started the agent, and the agent was stopped before the
+    /// task went back to `ready` (SPEC §3.1), so it never ran alongside a retry.
+    case setupFailedAfterStart(String)
+    /// As `setupFailedAfterStart`, but neither `claude stop` nor signalling its process confirmed the
+    /// agent ended, so the task is held in `review` where no spawn can retry into its worktree (SPEC §3.1).
+    case setupStopUnconfirmed(shortId: String, detail: String)
     /// The worker was told to wind down, committed, and answered. Neither a kill nor a cap breach:
     /// the task is unfinished work with a note on it, so it must not read as failed or accepted.
     case shutdownAcknowledged(note: String?)
@@ -70,12 +76,30 @@ public enum SessionTermination: Sendable, Equatable {
     /// stop neither moves the task nor reports.
     case taskClosing(by: BoardActor)
 
-    /// Opens the stop reason of every session whose setup failed, so nothing it launched ever ran.
+    /// Opens the stop reason of every session whose setup failed before `claude --bg` started anything.
     public static let setupFailedLead = "setting up the worktree failed before the worker started:"
+    public static let setupFailedAfterStartLead = "setup failed after the worker started, so Agent Board stopped it:"
+    public static let setupStopUnconfirmedLead =
+        "setup failed after the worker started, and Agent Board could not confirm it stopped:"
+    /// Leads of the setup failures whose agent is known to have ended, so a retry is safe. Not
+    /// `setupStopUnconfirmedLead`: that agent may still be running in the worktree a retry would use.
+    public static let setupFailureLeads = [setupFailedLead, setupFailedAfterStartLead]
+
+    public static func isSetupFailure(_ stopReason: String?) -> Bool {
+        guard let stopReason else { return false }
+        return setupFailureLeads.contains { stopReason.hasPrefix($0) }
+    }
+
+    /// The short id of the agent a `setupStopUnconfirmed` session may have left running; nil for any other stop.
+    public static func unconfirmedAgent(_ stopReason: String?) -> String? {
+        let lead = "\(setupStopUnconfirmedLead) agent "
+        guard let stopReason, stopReason.hasPrefix(lead) else { return nil }
+        return String(stopReason.dropFirst(lead.count).prefix { $0 != ":" })
+    }
 
     var sessionState: SessionState {
         switch self {
-        case .capBreach, .setupFailed: return .failed
+        case .capBreach, .setupFailed, .setupFailedAfterStart, .setupStopUnconfirmed: return .failed
         case .stopped, .vanished, .shutdownAcknowledged, .taskSettled, .taskClosing: return .stopped
         }
     }
@@ -86,13 +110,15 @@ public enum SessionTermination: Sendable, Equatable {
     var salvagesBranchWork: Bool {
         switch self {
         case .capBreach, .vanished, .stopped: return true
-        case .setupFailed, .shutdownAcknowledged, .taskSettled, .taskClosing: return false
+        case .setupFailed, .setupFailedAfterStart, .setupStopUnconfirmed, .shutdownAcknowledged, .taskSettled,
+             .taskClosing:
+            return false
         }
     }
 
     var flagsTaskFailed: Bool {
         switch self {
-        case .capBreach, .vanished, .setupFailed: return true
+        case .capBreach, .vanished, .setupFailed, .setupFailedAfterStart, .setupStopUnconfirmed: return true
         case .stopped, .shutdownAcknowledged, .taskSettled, .taskClosing: return false
         }
     }
@@ -103,6 +129,9 @@ public enum SessionTermination: Sendable, Equatable {
         case .stopped(let actor): return "stopped from Agent Board by \(actor.described)"
         case .vanished: return "the session is no longer running and Agent Board did not stop it"
         case .setupFailed(let detail): return "\(Self.setupFailedLead) \(detail)"
+        case .setupFailedAfterStart(let detail): return "\(Self.setupFailedAfterStartLead) \(detail)"
+        case .setupStopUnconfirmed(let shortId, let detail):
+            return "\(Self.setupStopUnconfirmedLead) agent \(shortId): \(detail)"
         case .shutdownAcknowledged: return "wound down for the project shutdown order and acknowledged"
         case .taskSettled: return "claude agents still listed it as running on a task with no work left for it"
         case .taskClosing(let actor): return "stopped from Agent Board by \(actor.described) to close its task for a dismissed item"
@@ -112,7 +141,7 @@ public enum SessionTermination: Sendable, Equatable {
     var reportKind: ReportKind {
         switch self {
         case .shutdownAcknowledged, .taskSettled, .taskClosing: return .decision
-        case .capBreach, .stopped, .vanished, .setupFailed: return .failed
+        case .capBreach, .stopped, .vanished, .setupFailed, .setupFailedAfterStart, .setupStopUnconfirmed: return .failed
         }
     }
 
@@ -120,6 +149,8 @@ public enum SessionTermination: Sendable, Equatable {
         switch self {
         case .shutdownAcknowledged: return "Worker wound down for the shutdown order: \(reason)"
         case .setupFailed: return "Worker never started: \(reason)"
+        case .setupFailedAfterStart: return "Worker started, then stopped: \(reason)"
+        case .setupStopUnconfirmed: return "Worker started; stop not confirmed: \(reason)"
         case .capBreach, .stopped, .vanished: return "Worker session ended without reporting: \(reason)"
         case .taskSettled: return "Session ended after its task was settled: \(reason)"
         case .taskClosing: return "Session ended so its task could close: \(reason)"
@@ -132,7 +163,9 @@ public enum SessionTermination: Sendable, Equatable {
         case .shutdownAcknowledged(let note):
             guard let note, !note.isEmpty else { return nil }
             return note
-        case .capBreach, .stopped, .vanished, .setupFailed, .taskSettled, .taskClosing: return nil
+        case .capBreach, .stopped, .vanished, .setupFailed, .setupFailedAfterStart, .setupStopUnconfirmed, .taskSettled,
+             .taskClosing:
+            return nil
         }
     }
 }
@@ -1007,8 +1040,7 @@ public struct Board: Sendable {
             if cause.flagsTaskFailed {
                 try TaskStore.setFailed(db, taskId, true, reason: reason)
             }
-            let destination = task.origin == .fixRound && stranded
-                ? .ready : Self.landingColumn(stranded: stranded, cause: cause, salvage: salvage)
+            let destination = Self.landingColumn(stranded: stranded, cause: cause, salvage: salvage, origin: task.origin)
             if let destination {
                 try TaskStore.move(db, taskId, to: destination, before: nil)
             }
@@ -1018,7 +1050,14 @@ public struct Board: Sendable {
                 "Session: \(sessionId) (attempt \(session.attempt))",
             ]
             if let salvage { lines.append(salvage.sentence) }
-            lines.append(Self.landingLine(destination: destination, stayedIn: task.column))
+            if case .setupStopUnconfirmed = cause, destination == .review {
+                lines.append(
+                    "The task is in review, not ready, so no retry starts a second worker in that worktree. "
+                        + "Stop the agent named above, then reopen the task to retry it."
+                )
+            } else {
+                lines.append(Self.landingLine(destination: destination, stayedIn: task.column))
+            }
             if let detail = cause.detail {
                 lines.append("Where the worker stopped and what remains:\n\(detail)")
             }
@@ -1072,9 +1111,11 @@ public struct Board: Sendable {
 
     /// Nil when the task was not in `running` and so is not moved at all.
     static func landingColumn(
-        stranded: Bool, cause: SessionTermination, salvage: BranchSalvage?
+        stranded: Bool, cause: SessionTermination, salvage: BranchSalvage?, origin: TaskOrigin
     ) -> TaskColumn? {
         guard stranded else { return nil }
+        if case .setupStopUnconfirmed = cause { return .review }
+        if origin == .fixRound { return .ready }
         guard cause.salvagesBranchWork, salvage?.hasCommittedWork == true else { return .ready }
         return .review
     }

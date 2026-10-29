@@ -495,7 +495,10 @@ is where `task` review would have parked it anyway.
 The spawn answers once the reviewer's setup row exists, so a setup that fails
 after that, launching `claude` or reading back its session, takes the same
 route as a worker's (§3.1): the row ends `failed` with a "Worker never started"
-report to the orchestrator and a notification. The task stays in `review`, and
+report to the orchestrator and a notification, or "Worker started, then stopped"
+when the failure came after `claude --bg` launched it, or "Worker started; stop
+not confirmed" when that agent could not be confirmed stopped. All three count as
+a setup failure wherever §13 counts one. The task stays in `review`, and
 because the failed row is the newest session and names the reviewer, its Pending
 reviews row reads `<reviewer> stopped without a verdict` and offers Re-run
 review (§10), the one way it is retried; nothing retries it automatically. A session `claude --bg`
@@ -709,6 +712,20 @@ than one that is finished; they merge nothing and are not part of this sequence.
    drop verification: it tells the integrator to work out how this project
    builds and tests itself, run both, and name in its report exactly what it
    ran. Nothing in the prompt assumes a language or a build tool.
+   How much of that the integrator runs is `settings_json.integrationVerification`
+   (§4). **Build and test**, the default, is the above. **Build only** runs the
+   build — the command, or one worked out — and no tests. **None: CI verifies**
+   runs neither: for every branch it merged or found already merged it checks
+   `git merge-base --is-ancestor <branch> <epic branch>`, checks that the
+   epic's diff against the base branch adds no `<<<<<<<` or `>>>>>>>` line, and
+   says in its report that the build and tests were left to CI. The prompt's
+   opening line drops "leave the build green" under that policy. Under it a
+   conflict the integrator resolved by hand still gets the narrowest build that
+   compiles the resolved files, and no tests: that resolution is code no worker
+   compiled and no reviewer saw, while every other line on the epic branch was
+   tested by its worker. The policy exists because a whole-tree suite on the
+   board's machine re-verifies already-tested commits while competing with live
+   workers for CPU and disk, and the epic's pull request runs it in CI anyway.
    It tells the integrator never to end its turn to wait for a command, and
    ends with the same *How your turns end* section a worker's prompt does
    (§3.1 step 6). Without them an integrator with nothing to merge started its
@@ -889,7 +906,9 @@ configured commands run there, build first; the epic branch moves, by an
 once every configured command passes. A command the project does not configure
 is never guessed at: the refresh applies and its answer says `NOT VERIFIED`,
 names what was not run, tells the orchestrator to work it out and run it — the
-integrator wording (step 3) — and gives the head the branch had before. A
+integrator's Build and test wording (step 3) — and gives the head the branch had
+before. `integrationVerification` governs only the integrator; a refresh runs
+every configured command whatever it says. A
 conflict, a failing command, or an accept landing on the epic branch while the
 build ran leaves the branch exactly as it was; a conflict names its files, and
 both a conflict and a failure say that fixing it by hand or by a dispatched

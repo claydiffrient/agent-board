@@ -1101,8 +1101,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 lastError = describe(error)
                 // The placeholder may already have been resolved into a real session, in which case
                 // that is the row to end — the placeholder no longer exists to be reported against.
-                let live = ((try? sessions.forTask(plan.taskId)) ?? [])
-                    .first { $0.state.isActive }?.sessionId ?? sessionId
+                let live = (error as? AgentStartedThenStopped)?.sessionId
+                    ?? ((try? sessions.forTask(plan.taskId)) ?? []).first { $0.state.isActive }?.sessionId
+                    ?? sessionId
                 failSetup(sessionId: live, projectId: plan.project.id, error: error)
             } catch {}
             placing.subtract(placingMarks)
@@ -1124,7 +1125,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private func failSetup(sessionId: String, projectId: String, error: Error) {
         let detail = describe(error)
-        let queued = (try? terminateSession(sessionId, cause: .setupFailed(detail))) ?? nil
+        let cause: SessionTermination
+        let title: String
+        switch error as? AgentStartedThenStopped {
+        case .none: (cause, title) = (.setupFailed(detail), "Worker never started")
+        case .some(let started) where started.stopConfirmed:
+            (cause, title) = (.setupFailedAfterStart(detail), "Worker started, then stopped")
+        case .some(let started):
+            (cause, title) = (
+                .setupStopUnconfirmed(shortId: started.shortId, detail: detail), "Worker started; stop not confirmed"
+            )
+        }
+        let queued = (try? terminateSession(sessionId, cause: cause)) ?? nil
         guard queued != nil else { return }
         announceReports(projectId: projectId)
         // `sessionId` always names a real row (`assign` writes it before setup runs), so this could
@@ -1132,7 +1144,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         // because the Status row it would land on carries no diagnosis — no transcript, no spend, a
         // bare `failed` state — while `detail` is the actual worktree-prep failure, which only the
         // queued report on the Orchestrator screen shows.
-        post("Worker never started", body: detail, projectId: projectId, category: .workerFailures)
+        post(title, body: detail, projectId: projectId, category: .workerFailures)
     }
 
     private func reportSetupEnded(_ plan: LaunchPlan, sessionId: String) {
@@ -1258,7 +1270,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 model: plan.model,
                 pluginDirs: (plan.rosterAgent?.pluginDirs ?? []).map(expandingHome)
             )
-            let spawned = try await runtime.spawn(request)
+            let spawned: SpawnedAgent
+            do {
+                spawned = try await runtime.spawn(request)
+            } catch let started as AgentStartedThenStopped {
+                throw await confirmingStop(started, of: placeholder, cwd: plan.cwd)
+            }
             let recorded: AgentSession
             do {
                 recorded = try sessions.promoteSetupSession(
@@ -1267,17 +1284,81 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             } catch {
                 // Something ended the setup row while the agent was starting, so nothing owns the
                 // agent that just came up. Leaving it running would be an untracked worker.
-                try? await runtime.stop(shortId: spawned.shortId)
-                throw error
+                let stopFailure = await stopFailure { try await self.runtime.stop(shortId: spawned.shortId) }
+                throw await confirmingStop(
+                    AgentStartedThenStopped(shortId: spawned.shortId, reason: describe(error), stopFailure: stopFailure),
+                    of: placeholder, cwd: plan.cwd
+                )
             }
-            // §3.1 step 8: the grant binds after the session row exists, or the foreign key rejects it.
-            try grants.bind(token: grant.token, sessionId: spawned.sessionId)
-            try replayEarlyHooks(sessionId: spawned.sessionId)
+            do {
+                // §3.1 step 8: the grant binds after the session row exists, or the foreign key rejects it.
+                try grants.bind(token: grant.token, sessionId: spawned.sessionId)
+                try replayEarlyHooks(sessionId: spawned.sessionId)
+            } catch {
+                // SPEC §3.1: stopped before the grant is revoked below, so no agent runs on a dead token.
+                let stopFailure = await stopFailure { try await self.stopAgent(recorded, shortId: spawned.shortId) }
+                throw await confirmingStop(
+                    AgentStartedThenStopped(
+                        shortId: spawned.shortId, sessionId: spawned.sessionId, reason: describe(error),
+                        stopFailure: stopFailure
+                    ),
+                    of: recorded, cwd: plan.cwd
+                )
+            }
             return recorded
         } catch {
             try? grants.revoke(token: grant.token)
             throw error
         }
+    }
+
+    private func stopFailure(_ stop: () async throws -> Void) async -> String? {
+        do {
+            try await stop()
+            return nil
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// SPEC §3.1: a `claude stop` that failed is escalated to the agent's process, as `stopAgent` does.
+    private func confirmingStop(
+        _ started: AgentStartedThenStopped, of session: AgentSession, cwd: URL
+    ) async -> AgentStartedThenStopped {
+        var started = started
+        started.cwd = cwd.path
+        if started.stopFailure != nil {
+            started.endedBySignal = await endAgentProcess(of: session, shortId: started.shortId)
+        }
+        return started
+    }
+
+    /// True only on positive evidence the agent is gone: a fresh listing shows it stopped, or every host
+    /// found — its listed pid, else each `claude` working in the session's own worktree since it started —
+    /// ended under the signals. A listed agent with no pid, or one that is not a verifiable host, is unconfirmed.
+    private func endAgentProcess(of session: AgentSession, shortId: String) async -> Bool {
+        var session = session
+        session.shortId = shortId
+        let listed = await agentListing(nil)
+        let hosts: Set<PIDIdentity>
+        if let info = listed.agents.first(where: { $0.id == shortId }) {
+            guard let host = verifiedHost(info.pid.map { pid_t($0) }, in: listed) else {
+                return [info.state, info.status].contains { $0?.lowercased() == "stopped" }
+            }
+            hosts = [host]
+        } else {
+            guard let worktree = session.worktreePath, !sharesWorktree(session) else { return false }
+            let others = Set(listed.agents.compactMap { $0.pid.map { pid_t($0) } })
+            hosts = SessionProcessReaper.worktreeHosts(worktree: worktree, startedAtMicros: session.startedAt * 1000)
+                .filter { !others.contains($0.pid) }
+            guard !hosts.isEmpty else { return false }
+        }
+        var tree: Set<PIDIdentity> = []
+        for host in hosts { tree.formUnion(await SessionProcessReaper.tree(ofHost: host.pid)) }
+        await reapProcesses(of: session, tree: tree, listing: listed.agents)
+        var ended = true
+        for host in hosts where !(await SessionProcessReaper.end(host: host)) { ended = false }
+        return ended
     }
 
     nonisolated static func disallowedTools(scope: AgentBoardCore.TokenScope, supportDir: URL, home: URL) -> [String] {
@@ -1823,18 +1904,21 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     ) async {
         let listed = await listingOrFetch(listing)
         let host = Self.hostPID(of: session, in: listed)
-        let shared = session.worktreePath.map { path in
-            ((try? sessions.all(projectId: session.projectId)) ?? []).contains {
-                $0.sessionId != session.sessionId && $0.state.isActive && $0.worktreePath == path
-            }
-        } ?? true
         let scope = SessionProcessScope(
             tree: tree,
-            worktree: shared ? nil : session.worktreePath,
+            worktree: sharesWorktree(session) ? nil : session.worktreePath,
             startedAtMicros: session.startedAt * 1000,
             otherHosts: Set(listed.compactMap { $0.pid.map { pid_t($0) } }.filter { $0 != host })
         )
         await SessionProcessReaper.reap(scope)
+    }
+
+    /// True for a shared checkout too, whose processes could be anyone's.
+    private func sharesWorktree(_ session: AgentSession) -> Bool {
+        guard let path = session.worktreePath else { return true }
+        return ((try? sessions.all(projectId: session.projectId)) ?? []).contains {
+            $0.sessionId != session.sessionId && $0.state.isActive && $0.worktreePath == path
+        }
     }
 
     private func listingOrFetch(_ listing: [AgentInfo]?) async -> [AgentInfo] {
@@ -2740,7 +2824,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// SPEC §13.1 checking: starts the round's reviewer and follow-up check under the settling holds,
     /// then settles the round once both are in. A round that cannot be checked parks its watch; one whose
     /// check never ran is retried at the next point, up to `unavailableChecksBeforePark` times, unless its
-    /// error is one no retry can fix.
+    /// error is one no retry can fix. A reviewer whose stop was not confirmed parks it rather than being retried.
     private func advanceCheck(_ watch: PRWatch, project: Project) async {
         guard let round = try? prWatches.currentRound(watchId: watch.id), let taskId = round.fixTaskId,
               let task = try? tasks.get(taskId), task.column == .review
@@ -2751,8 +2835,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         do {
             if round.reviewVerdict == nil, try sessions.activeHolder(taskId: taskId) == nil {
                 let reviewers = try sessions.forTask(taskId).filter { $0.reviewHead != nil }
-                let neverRan = reviewers.filter { $0.stopReason?.hasPrefix(SessionTermination.setupFailedLead) == true }
-                if reviewers.count - neverRan.count > round.checkFailures {
+                let unconfirmed = reviewers.filter { SessionTermination.unconfirmedAgent($0.stopReason) != nil }
+                if let held = unconfirmed.first(where: { $0.startedAt >= watch.resumedAt ?? 0 }) {
+                    let agent = SessionTermination.unconfirmedAgent(held.stopReason) ?? ""
+                    try board.recordUnavailableCheck(
+                        watchId: watch.id, tip: await roundTip(branch, manager: manager), counted: false,
+                        retryable: false,
+                        reason: "Round \(round.number)'s reviewer, agent \(agent), may still be running: Agent Board "
+                            + "could not confirm its stop. Run `claude stop \(agent)` before resuming.\n\n"
+                            + (held.stopReason ?? "")
+                    )
+                    return
+                }
+                let neverRan = reviewers.filter { SessionTermination.isSetupFailure($0.stopReason) }
+                if reviewers.count - neverRan.count - unconfirmed.count > round.checkFailures {
                     try board.parkCheck(
                         watchId: watch.id, reason: "Round \(round.number)'s reviewer ended without a verdict."
                     )
@@ -2770,7 +2866,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard try prWatches.get(watch.id)?.state == .checking else { return }
             if let checkId = round.followupTaskId {
                 if let check = try tasks.get(checkId), check.column == .closed {
-                    if check.closedReason?.hasPrefix(SessionTermination.setupFailedLead) == true {
+                    if SessionTermination.isSetupFailure(check.closedReason) {
                         try board.recordUnavailableCheck(
                             watchId: watch.id, tip: await roundTip(branch, manager: manager), dropFollowupCheck: true,
                             reason: "Round \(round.number)'s follow-up check never started: \(check.closedReason ?? "")"

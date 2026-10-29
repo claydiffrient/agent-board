@@ -255,7 +255,31 @@ clock is measuring setup, not the agent), and is skipped by `reconcile`, whose
 join against `claude agents --json` cannot see a placeholder id. A failure in
 steps 3-8 has nowhere to be thrown: it terminates the session, puts the task
 back in `ready` flagged failed, and queues a `failed` report, which is also what
-happens to a setup still running when Agent Board quits.
+happens to a setup still running when Agent Board quits. The report and its
+notification read "Worker never started" when the failure came before `claude
+--bg` launched anything. A failure after the launch — `claude agents --json`
+never listing the short id, or step 8's promotion, grant binding or hook replay
+throwing — first stops the agent it launched (the full §8.5 stop once the row is
+promoted), then revokes its grant, and reads "Worker started, then stopped".
+Stopping first is what keeps an agent from running on in the worktree with a
+revoked token, invisible to the board, while the orchestrator retries into the
+same worktree. Keeping such an agent tracked instead is not offered: the failed
+step is the one that would have tracked it. A `claude stop` that fails or times
+out — the load that delays the listing delays it too — is escalated as §8.5
+escalates one: a fresh `claude agents --json` read finds the host by short id,
+or, when it does not list the short id, any `claude` process working in the
+task's own worktree since the session started (none is looked for in a shared
+checkout, or in a worktree another live session holds) is taken for the host;
+its tree is reaped and it gets SIGTERM, then SIGKILL. The stop counts as
+confirmed only when the listing shows the short id stopped, or when every host
+found ended; a listing that names the short id with no pid, or with a pid that
+is not a `claude` host started before the read, confirms nothing. Otherwise the outcome is a third one: the grant is still
+revoked, but the task goes to `review` flagged failed rather than `ready`, so
+neither `spawn_worker` nor PR follow-through's fix-round retry starts a second
+worker beside it (`backlog` would not hold it — readiness promotes a `backlog`
+task with no unmet dependency straight back to `ready`), and the report reads
+"Worker started; stop not confirmed", naming the short id and the worktree so a
+human can run `claude stop <id>` before reopening the task.
 
 **Removing a worktree.** Every path that removes a task or epic worktree goes
 through `WorktreeManager.remove`: accepting a task, discarding one, the

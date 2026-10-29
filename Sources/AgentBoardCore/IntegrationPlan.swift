@@ -156,7 +156,10 @@ public enum IntegrationPlan {
         var sections: [String] = []
         sections.append("# Task: \(taskTitle(epic: epic))")
         sections.append(
-            "Merge this epic's task branches into the epic branch `\(epic.branch)` and leave the build green. "
+            "Merge this epic's task branches into the epic branch `\(epic.branch)` and "
+                + (verification.integration == .ciVerifies
+                    ? "confirm they all reached it; this project's CI builds and tests the result. "
+                    : "leave the build green. ")
                 + "You are the integrator: no other agent is working on these branches."
         )
         sections.append("## Epic goal\n\(epic.goal?.isEmpty == false ? epic.goal! : "(No goal was recorded for this epic.)")")
@@ -217,15 +220,17 @@ public enum IntegrationPlan {
             """)
         }
 
+        var merged: [String] = []
+        for entry in toMerge + alreadyMerged where !merged.contains(entry.branch) { merged.append(entry.branch) }
+        let verify = verification.integratorInstruction(epicBranch: epic.branch, baseBranch: baseBranch, mergedBranches: merged)
         sections.append("""
         ## How to work
         - You are in a dedicated git worktree checked out on `\(epic.branch)`. Work only in this directory.
         - Merge the branches under **Branches to merge**, in that order, one at a time: `git merge --no-ff <branch>`. Nothing listed in any other section is yours to merge.
         - Resolve every conflict yourself. Read both sides before choosing; do not drop one side's work to make the merge go through.
-        - After the merges, \(verification.integratorInstruction)
+        - After the merges, \(verify)
         - Never end your turn to wait for a command. A `run_in_background` command makes no activity while it runs, and the \
-        idle cap stops a silent session before that command's notification can wake it. Run the build and tests in the \
-        foreground; if one is moved to the background, keep reading its output until it finishes.
+        idle cap stops a silent session before that command's notification can wake it. \(verification.foregroundInstruction)
         - The `agent-board` MCP server holds this assignment. Use `log_progress` at meaningful milestones, not after every merge.
         - If you are stuck on something that needs a human decision, call `report_blocked(reason)` and stop.
         """)
