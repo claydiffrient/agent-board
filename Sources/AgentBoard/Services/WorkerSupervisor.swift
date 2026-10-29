@@ -2637,7 +2637,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// SPEC §13.1 checking: starts the round's reviewer and follow-up check under the settling holds,
     /// then settles the round once both are in. A round that cannot be checked parks its watch; one whose
     /// check never ran is retried at the next point, up to `unavailableChecksBeforePark` times, unless its
-    /// error is one no retry can fix. A reviewer whose stop was not confirmed parks it rather than being retried.
+    /// error is one no retry can fix. A reviewer or follow-up check whose stop was not confirmed parks it
+    /// rather than being retried.
     private func advanceCheck(_ watch: PRWatch, project: Project) async {
         guard let round = try? prWatches.currentRound(watchId: watch.id), let taskId = round.fixTaskId,
               let task = try? tasks.get(taskId), task.column == .review
@@ -2679,6 +2680,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard try prWatches.get(watch.id)?.state == .checking else { return }
             if let checkId = round.followupTaskId {
                 if let check = try tasks.get(checkId), check.column == .closed {
+                    if let agent = SessionTermination.unconfirmedAgent(check.closedReason) {
+                        try board.recordUnavailableCheck(
+                            watchId: watch.id, tip: await roundTip(branch, manager: manager), counted: false,
+                            retryable: false,
+                            reason: "Round \(round.number)'s follow-up check, agent \(agent), may still be running: "
+                                + "Agent Board could not confirm its stop. Run `claude stop \(agent)` before "
+                                + "resuming.\n\n" + (check.closedReason ?? "")
+                        )
+                        return
+                    }
                     if SessionTermination.isSetupFailure(check.closedReason) {
                         try board.recordUnavailableCheck(
                             watchId: watch.id, tip: await roundTip(branch, manager: manager), dropFollowupCheck: true,
