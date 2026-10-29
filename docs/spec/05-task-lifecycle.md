@@ -880,7 +880,8 @@ failed fetch falls back to local `<base>`, and the answer says so. Every answer
 names the ref merged (`Merged origin/main into …`, `already has every commit on
 origin/main`).
 The merge commit is built with `merge-tree --write-tree` and `commit-tree` on
-no ref, as an accept's merge is (§5). If the project configures a build or test
+no ref, as an accept's merge is (§5), and its subject names that same ref
+(`Merge origin/main into <epic title>`). If the project configures a build or test
 command (§4), the commit is checked out detached in a scratch worktree
 (`<worktree-root>/refresh-<epic-id>-<random>`, removed afterwards) and the
 configured commands run there, build first; the epic branch moves, by an
