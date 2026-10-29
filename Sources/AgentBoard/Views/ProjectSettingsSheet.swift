@@ -267,6 +267,14 @@ struct ProjectSettingsSheet: View {
             Text("How this project builds and tests itself. Handed to every worker and to the integrator; left empty, they work it out from the repo and report what they ran.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Picker("Integration verification", selection: $settings.integrationVerification) {
+                ForEach(IntegrationVerification.allCases, id: \.self) { policy in
+                    Text(policy.title).tag(policy)
+                }
+            }
+            Text("What the epic integrator runs on this Mac after its merges. Build only skips the tests; None checks that every task branch reached the epic branch and no conflict marker was committed, builds only a conflict it resolved by hand, and leaves the rest to the pull request's CI.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .teardown:
             TextField("Teardown command", text: Binding(
                 get: { settings.worktreeTeardownCommand ?? "" },

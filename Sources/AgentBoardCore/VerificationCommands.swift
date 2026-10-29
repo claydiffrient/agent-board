@@ -5,10 +5,12 @@ import Foundation
 public struct VerificationCommands: Sendable, Equatable {
     public var build: String?
     public var test: String?
+    public var integration: IntegrationVerification
 
-    public init(build: String? = nil, test: String? = nil) {
+    public init(build: String? = nil, test: String? = nil, integration: IntegrationVerification = .buildAndTest) {
         self.build = Self.normalized(build)
         self.test = Self.normalized(test)
+        self.integration = integration
     }
 
     static func normalized(_ value: String?) -> String? {
@@ -20,9 +22,23 @@ public struct VerificationCommands: Sendable, Equatable {
 
     private static let workItOut = "work out how this project does it — read its build files, scripts and CI config"
 
-    /// The integrator's verification instruction. Never degrades to silence when nothing is
-    /// configured: a merge that compiles nothing is worse than one that names an unfamiliar command.
-    public var integratorInstruction: String {
+    /// The integrator's verification instruction under `integration` (SPEC §5.2 step 3). Never
+    /// degrades to silence when no command is configured: a merge that compiles nothing is worse
+    /// than one that names an unfamiliar command.
+    public func integratorInstruction(epicBranch: String, baseBranch: String, mergedBranches: [String]) -> String {
+        switch integration {
+        case .buildAndTest:
+            return buildAndTestInstruction
+        case .buildOnly:
+            let build = build.map { "run `\($0)`" } ?? "build this project — \(Self.workItOut)"
+            return "\(build). Do not run the tests: this project's CI runs them when the pull request opens. "
+                + "Fix what breaks and build again until it is green. Name in your report exactly what you ran."
+        case .ciVerifies:
+            return ciVerifiesInstruction(epicBranch: epicBranch, baseBranch: baseBranch, mergedBranches: mergedBranches)
+        }
+    }
+
+    private var buildAndTestInstruction: String {
         switch (build, test) {
         case let (build?, test?):
             return "run `\(build)` and then `\(test)`. Fix what breaks and run them again until both are green."
@@ -38,12 +54,48 @@ public struct VerificationCommands: Sendable, Equatable {
         }
     }
 
+    /// A conflict resolved by hand is new code no worker compiled, so it still gets a build.
+    private func ciVerifiesInstruction(epicBranch: String, baseBranch: String, mergedBranches: [String]) -> String {
+        let ancestry = mergedBranches.isEmpty
+            ? "  - for each task branch you merged, `git merge-base --is-ancestor <branch> \(epicBranch)` exits 0"
+            : mergedBranches.map { "  - `git merge-base --is-ancestor \($0) \(epicBranch)` exits 0" }.joined(separator: "\n")
+        let fullBuild = build.map { " (the full build is `\($0)`)" } ?? ""
+        return """
+        do not build and do not run tests: this project's CI builds and tests the epic when its pull request opens. Check only that the merges are complete:
+        \(ancestry)
+          - `git diff \(baseBranch)...\(epicBranch) | grep -nE '^\\+(<<<<<<<|>>>>>>>)( |$)'` prints nothing, so no conflict marker was committed
+          Fix anything either check finds. If you resolved a conflict by hand, run the narrowest build that compiles the files you resolved\(fullBuild), because nobody has compiled that resolution; still run no tests.
+        """
+    }
+
+    /// The integrator's "keep it in the foreground" sentence, naming only what `integration` lets it run.
+    public var foregroundInstruction: String {
+        switch integration {
+        case .buildAndTest:
+            return "Run the build and tests in the foreground; if one is moved to the background, keep reading its output until it finishes."
+        case .buildOnly:
+            return "Run the build in the foreground; if it is moved to the background, keep reading its output until it finishes."
+        case .ciVerifies:
+            return "If you build a hand-resolved conflict, run that build in the foreground; if it is moved to the background, "
+                + "keep reading its output until it finishes."
+        }
+    }
+
     /// Completes "…and <this>." in the integrator's report instruction.
     public var reportInstruction: String {
-        if let build, let test {
-            return "the final result of `\(build)` and `\(test)`"
+        switch integration {
+        case .buildAndTest:
+            if let build, let test {
+                return "the final result of `\(build)` and `\(test)`"
+            }
+            return "the build and test commands you ran, named exactly, and how they came out"
+        case .buildOnly:
+            let build = build.map { "the final result of `\($0)`" } ?? "the build command you ran, named exactly, and how it came out"
+            return "\(build), and that the tests were left to CI"
+        case .ciVerifies:
+            return "the outcome of the ancestry and conflict-marker checks, any build you ran for a hand-resolved conflict, "
+                + "and that the build and tests were left to CI"
         }
-        return "the build and test commands you ran, named exactly, and how they came out"
     }
 
     /// The worker's verification section, or nil when the project configured neither command —
@@ -71,6 +123,6 @@ public struct VerificationCommands: Sendable, Equatable {
 
 extension ProjectSettings {
     public var verification: VerificationCommands {
-        VerificationCommands(build: buildCommand, test: testCommand)
+        VerificationCommands(build: buildCommand, test: testCommand, integration: integrationVerification)
     }
 }
