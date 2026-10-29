@@ -326,6 +326,7 @@ final class IntegrationPlanTests: XCTestCase {
         XCTAssertFalse(prompt.contains("run `swift build`"), prompt)
         XCTAssertFalse(prompt.contains("swift test"), prompt)
         XCTAssertFalse(prompt.contains("leave the build green"), prompt)
+        XCTAssertFalse(prompt.contains("tests in the foreground"), prompt)
     }
 
     // MARK: - epic state on completion

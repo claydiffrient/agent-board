@@ -68,6 +68,19 @@ public struct VerificationCommands: Sendable, Equatable {
         """
     }
 
+    /// The integrator's "keep it in the foreground" sentence, naming only what `integration` lets it run.
+    public var foregroundInstruction: String {
+        switch integration {
+        case .buildAndTest:
+            return "Run the build and tests in the foreground; if one is moved to the background, keep reading its output until it finishes."
+        case .buildOnly:
+            return "Run the build in the foreground; if it is moved to the background, keep reading its output until it finishes."
+        case .ciVerifies:
+            return "If you build a hand-resolved conflict, run that build in the foreground; if it is moved to the background, "
+                + "keep reading its output until it finishes."
+        }
+    }
+
     /// Completes "…and <this>." in the integrator's report instruction.
     public var reportInstruction: String {
         switch integration {

@@ -230,8 +230,7 @@ public enum IntegrationPlan {
         - Resolve every conflict yourself. Read both sides before choosing; do not drop one side's work to make the merge go through.
         - After the merges, \(verify)
         - Never end your turn to wait for a command. A `run_in_background` command makes no activity while it runs, and the \
-        idle cap stops a silent session before that command's notification can wake it. Run the build and tests in the \
-        foreground; if one is moved to the background, keep reading its output until it finishes.
+        idle cap stops a silent session before that command's notification can wake it. \(verification.foregroundInstruction)
         - The `agent-board` MCP server holds this assignment. Use `log_progress` at meaningful milestones, not after every merge.
         - If you are stuck on something that needs a human decision, call `report_blocked(reason)` and stop.
         """)
