@@ -32,9 +32,13 @@ final class EpicClosureTests: XCTestCase {
         let f = try Fixture.make()
         let e = try epic(f, tasks: [NewEpicTask(title: "One")])
         let integrator = try f.board.createIntegrationTask(epicId: e.id)
-        try f.board.closeEpic(epicId: e.id, as: .abandoned, by: .human)
+        let report = try f.board.closeEpic(epicId: e.id, as: .abandoned, by: .human)
         XCTAssertEqual(try EpicStore(f.db).get(e.id)?.state, .abandoned)
         XCTAssertEqual(try f.tasks.get(integrator.id)?.closedReason, "Epic \(e.id) was closed as abandoned.")
+        let leftUnfinished = try XCTUnwrap(
+            report.body.components(separatedBy: "\n\n").first { $0.contains("left unfinished") }, report.body
+        )
+        XCTAssertFalse(leftUnfinished.contains(integrator.id), report.body)
     }
 
     /// The epic branch is never rewritten by closing: the row keeps the name it was cut with, and

@@ -1477,6 +1477,10 @@ public struct Board: Sendable {
             guard let epic = try Epic.fetchOne(db, key: epicId) else {
                 throw BoardError.epicNotFound(epicId)
             }
+            let settled = try Self.settleIntegrationTasks(
+                db, epicId: epicId, reason: "Epic \(epicId) was closed as \(closure.state.rawValue).", by: by.described
+            )
+            let unfinished = try Self.closurePlan(db, epicId: epicId, as: closure).unfinished
             try EpicStore.setState(db, epicId, closure.state)
 
             var lines = [
@@ -1485,13 +1489,13 @@ public struct Board: Sendable {
                 "Nothing was merged, pushed or deleted: the epic branch \(epic.branch) and every "
                     + "`agentboard/<task-id>` branch and worktree are untouched.",
             ]
-            if plan.unfinished.isEmpty {
+            if unfinished.isEmpty {
                 lines.append("Every task in the epic was already finished.")
             } else {
-                let listed = plan.unfinished.map { "- \($0.id) (\($0.title)) in \($0.column.rawValue)" }
+                let listed = unfinished.map { "- \($0.id) (\($0.title)) in \($0.column.rawValue)" }
                     .joined(separator: "\n")
                 lines.append(
-                    "\(plan.unfinished.count) task(s) were left unfinished and stay in this epic exactly "
+                    "\(unfinished.count) task(s) were left unfinished and stay in this epic exactly "
                         + "as they are — not deleted, not archived, not moved out:\n\(listed)"
                 )
                 lines.append(
@@ -1502,9 +1506,7 @@ public struct Board: Sendable {
             if let held = HeldWorktree.paragraph(try Self.heldWorktrees(db, epicId: epicId)) {
                 lines.append(held)
             }
-            if let settled = try Self.settleIntegrationTasks(
-                db, epicId: epicId, reason: "Epic \(epicId) was closed as \(closure.state.rawValue).", by: by.described
-            ) {
+            if let settled {
                 lines.append(settled)
             }
             lines.append("Closed by: \(by.recorded)")
