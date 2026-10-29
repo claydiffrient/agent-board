@@ -65,7 +65,7 @@ public enum SessionTermination: Sendable, Equatable {
     case setupFailedAfterStart(String)
     /// As `setupFailedAfterStart`, but neither `claude stop` nor signalling its process confirmed the
     /// agent ended, so the task is held in `review` where no spawn can retry into its worktree (SPEC §3.1).
-    case setupStopUnconfirmed(String)
+    case setupStopUnconfirmed(shortId: String, detail: String)
     /// The worker was told to wind down, committed, and answered. Neither a kill nor a cap breach:
     /// the task is unfinished work with a note on it, so it must not read as failed or accepted.
     case shutdownAcknowledged(note: String?)
@@ -81,12 +81,20 @@ public enum SessionTermination: Sendable, Equatable {
     public static let setupFailedAfterStartLead = "setup failed after the worker started, so Agent Board stopped it:"
     public static let setupStopUnconfirmedLead =
         "setup failed after the worker started, and Agent Board could not confirm it stopped:"
-    public static let setupFailureLeads = [setupFailedLead, setupFailedAfterStartLead, setupStopUnconfirmedLead]
+    /// Leads of the setup failures whose agent is known to have ended, so a retry is safe. Not
+    /// `setupStopUnconfirmedLead`: that agent may still be running in the worktree a retry would use.
+    public static let setupFailureLeads = [setupFailedLead, setupFailedAfterStartLead]
 
-    /// Whether a stop reason is any kind of setup failure: a session that never did any board work.
     public static func isSetupFailure(_ stopReason: String?) -> Bool {
         guard let stopReason else { return false }
         return setupFailureLeads.contains { stopReason.hasPrefix($0) }
+    }
+
+    /// The short id of the agent a `setupStopUnconfirmed` session may have left running; nil for any other stop.
+    public static func unconfirmedAgent(_ stopReason: String?) -> String? {
+        let lead = "\(setupStopUnconfirmedLead) agent "
+        guard let stopReason, stopReason.hasPrefix(lead) else { return nil }
+        return String(stopReason.dropFirst(lead.count).prefix { $0 != ":" })
     }
 
     var sessionState: SessionState {
@@ -122,7 +130,8 @@ public enum SessionTermination: Sendable, Equatable {
         case .vanished: return "the session is no longer running and Agent Board did not stop it"
         case .setupFailed(let detail): return "\(Self.setupFailedLead) \(detail)"
         case .setupFailedAfterStart(let detail): return "\(Self.setupFailedAfterStartLead) \(detail)"
-        case .setupStopUnconfirmed(let detail): return "\(Self.setupStopUnconfirmedLead) \(detail)"
+        case .setupStopUnconfirmed(let shortId, let detail):
+            return "\(Self.setupStopUnconfirmedLead) agent \(shortId): \(detail)"
         case .shutdownAcknowledged: return "wound down for the project shutdown order and acknowledged"
         case .taskSettled: return "claude agents still listed it as running on a task with no work left for it"
         case .taskClosing(let actor): return "stopped from Agent Board by \(actor.described) to close its task for a dismissed item"

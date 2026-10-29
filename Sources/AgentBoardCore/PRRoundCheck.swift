@@ -403,7 +403,7 @@ extension Board {
                 sql: """
                 SELECT COUNT(*) FROM agent_session
                 WHERE task_id = ? AND review_head IS NOT NULL AND started_at >= ?
-                  AND (stop_reason LIKE ? OR stop_reason LIKE ? OR stop_reason LIKE ?)
+                  AND (stop_reason LIKE ? OR stop_reason LIKE ?)
                 """,
                 arguments: [taskId, watch.resumedAt ?? 0]
                     + StatementArguments(SessionTermination.setupFailureLeads.map { $0 + "%" })

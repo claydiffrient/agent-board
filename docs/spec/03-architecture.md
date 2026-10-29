@@ -271,8 +271,9 @@ or, when it does not list the short id, any `claude` process working in the
 task's own worktree since the session started (none is looked for in a shared
 checkout, or in a worktree another live session holds) is taken for the host;
 its tree is reaped and it gets SIGTERM, then SIGKILL. The stop counts as
-confirmed when the listing names no live host for the short id, or when every
-host found ended. Otherwise the outcome is a third one: the grant is still
+confirmed only when the listing shows the short id stopped, or when every host
+found ended; a listing that names the short id with no pid, or with a pid that
+is not a `claude` host started before the read, confirms nothing. Otherwise the outcome is a third one: the grant is still
 revoked, but the task goes to `review` flagged failed rather than `ready`, so
 neither `spawn_worker` nor PR follow-through's fix-round retry starts a second
 worker beside it (`backlog` would not hold it — readiness promotes a `backlog`

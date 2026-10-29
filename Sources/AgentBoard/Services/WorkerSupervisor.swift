@@ -959,10 +959,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let detail = describe(error)
         let cause: SessionTermination
         let title: String
-        switch (error as? AgentStartedThenStopped)?.stopConfirmed {
+        switch error as? AgentStartedThenStopped {
         case .none: (cause, title) = (.setupFailed(detail), "Worker never started")
-        case .some(true): (cause, title) = (.setupFailedAfterStart(detail), "Worker started, then stopped")
-        case .some(false): (cause, title) = (.setupStopUnconfirmed(detail), "Worker started; stop not confirmed")
+        case .some(let started) where started.stopConfirmed:
+            (cause, title) = (.setupFailedAfterStart(detail), "Worker started, then stopped")
+        case .some(let started):
+            (cause, title) = (
+                .setupStopUnconfirmed(shortId: started.shortId, detail: detail), "Worker started; stop not confirmed"
+            )
         }
         let queued = (try? terminateSession(sessionId, cause: cause)) ?? nil
         guard queued != nil else { return }
@@ -1161,15 +1165,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return started
     }
 
-    /// True only on positive evidence the agent is gone: a fresh listing names no live host for it, or
-    /// every `claude` working in the session's own worktree since it started ended under the signals.
+    /// True only on positive evidence the agent is gone: a fresh listing shows it stopped, or every host
+    /// found — its listed pid, else each `claude` working in the session's own worktree since it started —
+    /// ended under the signals. A listed agent with no pid, or one that is not a verifiable host, is unconfirmed.
     private func endAgentProcess(of session: AgentSession, shortId: String) async -> Bool {
         var session = session
         session.shortId = shortId
         let listed = await agentListing(nil)
         let hosts: Set<PIDIdentity>
         if let info = listed.agents.first(where: { $0.id == shortId }) {
-            guard let pid = info.pid, let host = verifiedHost(pid_t(pid), in: listed) else { return true }
+            guard let host = verifiedHost(info.pid.map { pid_t($0) }, in: listed) else {
+                return [info.state, info.status].contains { $0?.lowercased() == "stopped" }
+            }
             hosts = [host]
         } else {
             guard let worktree = session.worktreePath, !sharesWorktree(session) else { return false }
@@ -2630,7 +2637,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// SPEC §13.1 checking: starts the round's reviewer and follow-up check under the settling holds,
     /// then settles the round once both are in. A round that cannot be checked parks its watch; one whose
     /// check never ran is retried at the next point, up to `unavailableChecksBeforePark` times, unless its
-    /// error is one no retry can fix.
+    /// error is one no retry can fix. A reviewer whose stop was not confirmed parks it rather than being retried.
     private func advanceCheck(_ watch: PRWatch, project: Project) async {
         guard let round = try? prWatches.currentRound(watchId: watch.id), let taskId = round.fixTaskId,
               let task = try? tasks.get(taskId), task.column == .review
@@ -2641,8 +2648,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         do {
             if round.reviewVerdict == nil, try sessions.activeHolder(taskId: taskId) == nil {
                 let reviewers = try sessions.forTask(taskId).filter { $0.reviewHead != nil }
+                let unconfirmed = reviewers.filter { SessionTermination.unconfirmedAgent($0.stopReason) != nil }
+                if let held = unconfirmed.first(where: { $0.startedAt >= watch.resumedAt ?? 0 }) {
+                    let agent = SessionTermination.unconfirmedAgent(held.stopReason) ?? ""
+                    try board.recordUnavailableCheck(
+                        watchId: watch.id, tip: await roundTip(branch, manager: manager), counted: false,
+                        retryable: false,
+                        reason: "Round \(round.number)'s reviewer, agent \(agent), may still be running: Agent Board "
+                            + "could not confirm its stop. Run `claude stop \(agent)` before resuming.\n\n"
+                            + (held.stopReason ?? "")
+                    )
+                    return
+                }
                 let neverRan = reviewers.filter { SessionTermination.isSetupFailure($0.stopReason) }
-                if reviewers.count - neverRan.count > round.checkFailures {
+                if reviewers.count - neverRan.count - unconfirmed.count > round.checkFailures {
                     try board.parkCheck(
                         watchId: watch.id, reason: "Round \(round.number)'s reviewer ended without a verdict."
                     )
