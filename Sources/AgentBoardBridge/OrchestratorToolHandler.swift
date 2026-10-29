@@ -361,7 +361,7 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "get, or `abandoned` when it was the wrong idea. This is a board state change and nothing else: "
                 + "the epic branch is not merged, no pull request is opened, no branch or worktree is deleted, and "
                 + "no task is deleted, archived, or moved out of the epic — unfinished tasks stay in the epic's lane "
-                + "exactly as they are. Refused while any worker is still running in the epic; stop those first. "
+                + "exactly as they are, except its unfinished integration task, which is closed. Refused while any worker is still running in the epic; stop those first. "
                 + "Refused for an epic that is already `done` or `abandoned`: the two mean different things and one "
                 + "does not become the other. If work left in a closed epic still matters, take it out with "
                 + "`set_epic(task_id)` and no `epic_id` and it stands alone on the board.",
@@ -1290,11 +1290,17 @@ public final class OrchestratorToolHandler: ToolHandler {
         let plan = try board.epicClosurePlan(epicId: epic.id, as: closure)
         if plan.isRefused { throw ToolError(plan.message) }
         try board.closeEpic(epicId: epic.id, as: closure, by: .orchestrator(sessionId: identity.sessionId))
+        let unfinished = try board.epicClosurePlan(epicId: epic.id, as: closure).unfinished
+        let closed = plan.closing.filter { task in !unfinished.contains { $0.id == task.id } }
         var text = "Epic \(epic.id) is \(closure.state.rawValue). Nothing was merged, pushed or deleted; "
             + "\(epic.branch) and every task branch are untouched."
-        if !plan.unfinished.isEmpty {
-            text += " \(plan.unfinished.count) unfinished task(s) stay in the epic as they are: "
-                + plan.unfinished.map { "\($0.id) (\($0.column.rawValue))" }.joined(separator: ", ")
+        if !closed.isEmpty {
+            text += " Integration task(s) closed with the epic: "
+                + closed.map { "\($0.id) (was \($0.column.rawValue))" }.joined(separator: ", ") + "."
+        }
+        if !unfinished.isEmpty {
+            text += " \(unfinished.count) unfinished task(s) stay in the epic as they are: "
+                + unfinished.map { "\($0.id) (\($0.column.rawValue))" }.joined(separator: ", ")
                 + ". Do not plan further work into this epic."
         }
         return ToolResult(text: text)

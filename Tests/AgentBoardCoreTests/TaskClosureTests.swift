@@ -35,6 +35,20 @@ final class TaskClosureTests: XCTestCase {
         }
     }
 
+    func testAnIntegrationTaskClosesOnlyOnceItsEpicIsOver() throws {
+        let f = try Fixture.make()
+        let (epic, _) = try f.board.createEpic(
+            projectId: f.project.id, title: "Ship it", goal: nil, tasks: [NewEpicTask(title: "One")]
+        )
+        let integrator = try f.board.createIntegrationTask(epicId: epic.id)
+        XCTAssertNotNil(refusal(f, integrator.id))
+
+        try EpicStore(f.db).setState(epic.id, .done)
+
+        XCTAssertNil(refusal(f, integrator.id))
+        XCTAssertEqual(try f.tasks.get(integrator.id)?.column, .closed)
+    }
+
     func testADependentOfAClosedTaskStaysInBacklog() throws {
         let f = try Fixture.make()
         let dependency = try f.task("design the toggle", column: .ready)

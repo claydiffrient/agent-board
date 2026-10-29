@@ -28,11 +28,20 @@ final class EpicClosureTests: XCTestCase {
         XCTAssertTrue(after.allSatisfy { !$0.isArchived }, "closing archived a task")
     }
 
-    func testAbandonWritesAbandoned() throws {
+    func testAbandonWritesAbandonedAndClosesTheIntegrationTask() throws {
         let f = try Fixture.make()
         let e = try epic(f, tasks: [NewEpicTask(title: "One")])
-        try f.board.closeEpic(epicId: e.id, as: .abandoned, by: .human)
+        let integrator = try f.board.createIntegrationTask(epicId: e.id)
+        let plan = try f.board.epicClosurePlan(epicId: e.id, as: .abandoned)
+        XCTAssertEqual(plan.unfinished.count, 1, plan.message)
+        XCTAssertTrue(plan.message.contains("Its integration task is closed"), plan.message)
+        let report = try f.board.closeEpic(epicId: e.id, as: .abandoned, by: .human)
         XCTAssertEqual(try EpicStore(f.db).get(e.id)?.state, .abandoned)
+        XCTAssertEqual(try f.tasks.get(integrator.id)?.closedReason, "Epic \(e.id) was closed as abandoned.")
+        let leftUnfinished = try XCTUnwrap(
+            report.body.components(separatedBy: "\n\n").first { $0.contains("left unfinished") }, report.body
+        )
+        XCTAssertFalse(leftUnfinished.contains(integrator.id), report.body)
     }
 
     /// The epic branch is never rewritten by closing: the row keeps the name it was cut with, and
@@ -321,5 +330,47 @@ final class EpicClosureTests: XCTestCase {
         XCTAssertEqual(EpicLaneAction.abandon.closure?.state, .abandoned)
         XCTAssertNil(EpicLaneAction.requestIntegration.closure)
         XCTAssertNil(EpicLaneAction.openPullRequest.closure)
+    }
+
+    // MARK: The integration task ends with the epic (SPEC §5)
+
+    private func mergePullRequest(_ f: Fixture, _ epic: Epic) throws {
+        let approval = try f.board.requestPublish(
+            projectId: f.project.id, kind: .pullRequest,
+            request: PublishRequest(branch: epic.branch, base: "main", title: epic.title, body: ""),
+            epicId: epic.id, requestedBy: "orch-session"
+        )
+        _ = try f.board.resolveApproval(approval.id, approved: true, by: "human")
+        try f.board.recordPublished(approval: approval, summary: "Opened.", url: "https://github.com/acme/widgets/pull/7")
+        let pullRequest = try XCTUnwrap(f.board.epicPullRequestChecks(epicId: epic.id).first?.pullRequest)
+        XCTAssertTrue(try f.board.landEpicPullRequest(
+            epicId: epic.id, pullRequest: pullRequest, commit: nil, carriage: EpicCarriage()
+        ))
+    }
+
+    func testAMergedPullRequestClosesTheEpicsUnfinishedIntegrationTask() throws {
+        let f = try Fixture.make()
+        let e = try epic(f, tasks: [NewEpicTask(title: "One")])
+        let integrator = try f.board.createIntegrationTask(epicId: e.id)
+        try f.tasks.setFailed(integrator.id, true, reason: "merge conflict")
+
+        try mergePullRequest(f, e)
+
+        XCTAssertEqual(try EpicStore(f.db).get(e.id)?.state, .done)
+        let settled = try XCTUnwrap(f.tasks.get(integrator.id))
+        XCTAssertEqual(settled.column, .closed)
+        XCTAssertEqual(settled.closedReason, "Epic \(e.id) is done: its pull request #7 merged.")
+    }
+
+    func testAMergedPullRequestLeavesAnIntegrationTaskALiveSessionHolds() throws {
+        let f = try Fixture.make()
+        let e = try epic(f, tasks: [NewEpicTask(title: "One")])
+        let integrator = try f.board.createIntegrationTask(epicId: e.id)
+        try f.tasks.move(integrator.id, to: .running)
+        try f.sessions.insert(f.session("integ", state: .running, taskId: integrator.id))
+
+        try mergePullRequest(f, e)
+
+        XCTAssertEqual(try f.tasks.get(integrator.id)?.column, .running)
     }
 }

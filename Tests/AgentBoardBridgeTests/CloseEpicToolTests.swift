@@ -14,6 +14,7 @@ final class CloseEpicToolTests: XCTestCase {
     func testClosingAsDoneWritesTheStateAndSaysWhatSurvived() async throws {
         let epic = try f.epic("Ship it")
         try f.task("half done", column: .ready, epicId: epic.id)
+        let integration = try f.board.createIntegrationTask(epicId: epic.id)
 
         let result = try await f.call("close_epic", [
             "epic_id": .string(epic.id), "state": .string("done"),
@@ -23,6 +24,7 @@ final class CloseEpicToolTests: XCTestCase {
         XCTAssertTrue(result.text.contains(epic.branch), result.text)
         XCTAssertTrue(result.text.contains("Nothing was merged, pushed or deleted"), result.text)
         XCTAssertTrue(result.text.contains("1 unfinished task(s) stay in the epic"), result.text)
+        XCTAssertTrue(result.text.contains("Integration task(s) closed with the epic: \(integration.id)"), result.text)
     }
 
     func testAbandoningWritesAbandoned() async throws {
