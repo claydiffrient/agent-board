@@ -101,6 +101,16 @@ public struct VerificationCommands: Sendable, Equatable {
         }
     }
 
+    /// The checks `refresh_epic` runs on its merge result, build first, each with its configured
+    /// command or nil (SPEC §5.2). Only `buildAndTest` runs the tests; the others still build,
+    /// because CI never sees the task branches that resume from a refreshed epic.
+    public var refreshSteps: [(kind: RefreshCheck.Kind, command: String?)] {
+        switch integration {
+        case .buildAndTest: return [(.build, build), (.test, test)]
+        case .buildOnly, .ciVerifies: return [(.build, build)]
+        }
+    }
+
     /// Completes "…and <this>." in the integrator's report instruction.
     public var reportInstruction: String {
         switch integration {

@@ -75,9 +75,12 @@ public enum EpicRefresh: Sendable, Equatable {
     /// The board, not the merge, stopped the refresh before a verdict: its scratch checkout could
     /// not be set up, or Agent Board stopped mid-run.
     case interrupted(head: String, reason: String)
-    /// `passed` is every configured command, all green; `unverified` is what nothing was
-    /// configured for, and so was never run.
-    case refreshed(previousHead: String, head: String, passed: [RefreshCheck], unverified: [RefreshCheck.Kind])
+    /// `passed` is every command the project's policy runs, all green; `unverified` is what nothing
+    /// was configured for, and so was never run; `testsLeftToCI` when the policy runs no tests.
+    case refreshed(
+        previousHead: String, head: String, passed: [RefreshCheck], unverified: [RefreshCheck.Kind],
+        testsLeftToCI: Bool
+    )
     case conflicted(head: String, files: [String])
     /// The merge was clean but did not build or pass its tests. `candidate` is on no branch.
     case verificationFailed(head: String, candidate: String, failure: RefreshCheck, passed: [RefreshCheck])
@@ -119,7 +122,7 @@ public enum EpicRefresh: Sendable, Equatable {
         case let .interrupted(head, reason):
             return "Refresh did not finish: \(reason). \(branch) was not moved: it is still at \(short(head)). "
                 + "This is not a verdict on the merge — no build or test failed. Refresh again once the cause is dealt with."
-        case let .refreshed(previous, head, passed, unverified):
+        case let .refreshed(previous, head, passed, unverified, testsLeftToCI):
             var text = "Merged \(base) into \(branch): it moved from \(short(previous)) to \(short(head))."
             if !passed.isEmpty {
                 text += " Verified on the merge result before the branch moved: "
@@ -127,6 +130,10 @@ public enum EpicRefresh: Sendable, Equatable {
             }
             if !unverified.isEmpty {
                 text += " " + Self.unverifiedClause(unverified, branch: branch, previous: previous)
+            }
+            if testsLeftToCI {
+                text += " No tests ran: this project's integration verification setting leaves them to the epic's "
+                    + "pull request CI."
             }
             return text
         case let .conflicted(head, files):

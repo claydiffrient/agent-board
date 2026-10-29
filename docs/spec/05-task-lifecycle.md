@@ -913,17 +913,24 @@ names the ref merged (`Merged origin/main into …`, `already has every commit o
 origin/main`).
 The merge commit is built with `merge-tree --write-tree` and `commit-tree` on
 no ref, as an accept's merge is (§5), and its subject names that same ref
-(`Merge origin/main into <epic title>`). If the project configures a build or test
-command (§4), the commit is checked out detached in a scratch worktree
-(`<worktree-root>/refresh-<epic-id>-<random>`, removed afterwards) and the
-configured commands run there, build first; the epic branch moves, by an
-`update-ref` guarded by its old head and serialized with accepts' merges, only
-once every configured command passes. A command the project does not configure
-is never guessed at: the refresh applies and its answer says `NOT VERIFIED`,
-names what was not run, tells the orchestrator to work it out and run it — the
-integrator's Build and test wording (step 3) — and gives the head the branch had
-before. `integrationVerification` governs only the integrator; a refresh runs
-every configured command whatever it says. A
+(`Merge origin/main into <epic title>`). Which commands a refresh runs follows
+`integrationVerification` (§4), as the integrator's do (step 3): **Build and
+test** runs the build and test commands; **Build only** and **None: CI
+verifies** run the build only, and their answers say no tests ran because the
+epic's pull request CI runs them. Neither skips the build: CI never sees the
+task branches that resume from the refreshed epic, so the build is all that
+stops a worker resuming on a branch that does not compile. If the project
+configures a command its policy runs, the commit is checked out detached in a
+scratch worktree (`<worktree-root>/refresh-<epic-id>-<random>`, removed
+afterwards) and those commands run there, build first; the epic branch moves,
+by an `update-ref` guarded by its old head and serialized with accepts' merges,
+only once every one of them passes. A command the policy runs but the project
+does not configure is never guessed at: the refresh applies and its answer says
+`NOT VERIFIED`, names what was not run, tells the orchestrator to work it out
+and run it — the integrator's Build and test wording (step 3) — and gives the
+head the branch had before. So a **Build only** project with a test command and
+no build command runs nothing, and its answer says both that nothing was built
+and that no tests ran. A
 conflict, a failing command, or an accept landing on the epic branch while the
 build ran leaves the branch exactly as it was; a conflict names its files, and
 both a conflict and a failure say that fixing it by hand or by a dispatched
@@ -938,11 +945,11 @@ an HTTP MCP server whose response headers have not arrived 60 seconds after the
 request (measured: a stub server that answered in 5s returned, one that took
 90s got "The operation timed out." at 60s), and the board answers a tool call
 only once it is done. A cold `swift build` in a checkout with no `.build` takes
-about 9 minutes here. So with a command configured, `refresh_epic` answers as
+about 9 minutes here. So with a command to run, `refresh_epic` answers as
 soon as the merge commit exists: the commit, the commands and the timeout, and
 that the branch stays where it is until they pass. The verdict — every outcome
 above — is queued later as a `refresh` report (§9.1) and announced like any
-other. With no command configured nothing needs to wait, and the answer is the
+other. With no command to run nothing needs to wait, and the answer is the
 verdict.
 
 *One refresh per epic at a time.* A second `refresh_epic` for an epic whose
