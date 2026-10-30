@@ -93,6 +93,17 @@ struct TerminalSettingsPane: View {
                 Button("Restore Defaults") { store.restoreDefaults() }
                     .disabled(store.appearance == .defaults)
             }
+            Section {
+                Toggle("Use GPU rendering (Metal)", isOn: $store.usesMetal)
+            } header: {
+                Text("Rendering")
+            } footer: {
+                if store.usesMetal, let failure = store.metalFailure {
+                    Text("Metal did not start, so terminals are using CoreGraphics: \(failure)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         .formStyle(.grouped)
     }

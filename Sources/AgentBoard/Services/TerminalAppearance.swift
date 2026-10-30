@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import os
 import SwiftTerm
 
 struct TerminalColor: Codable, Hashable {
@@ -98,12 +99,13 @@ extension TerminalView {
     }
 }
 
-/// The stored appearance, and every open terminal it is applied to, so an edit in Settings
-/// repaints them all rather than only the next one opened.
+/// The stored appearance and renderer choice, and every open terminal they are applied to, so an
+/// edit in Settings repaints them all rather than only the next one opened.
 @Observable
 @MainActor
 final class TerminalAppearanceStore {
     static let defaultsKey = "terminal.appearance"
+    static let metalKey = "terminal.metal"
     static let shared = TerminalAppearanceStore()
 
     var appearance: TerminalAppearance {
@@ -116,21 +118,70 @@ final class TerminalAppearanceStore {
         }
     }
 
+    /// Draw with SwiftTerm's Metal renderer rather than CoreGraphics. SPEC §10, Terminal.
+    var usesMetal: Bool {
+        didSet {
+            guard usesMetal != oldValue else { return }
+            defaults.set(usesMetal, forKey: Self.metalKey)
+            metalFailure = nil
+            for terminal in terminals.allObjects {
+                applyRenderer(to: terminal)
+            }
+        }
+    }
+
+    /// Why Metal last failed to start or stopped; the terminal it failed on draws with CoreGraphics.
+    private(set) var metalFailure: String?
+
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let terminals = NSHashTable<TerminalView>.weakObjects()
+    @ObservationIgnored private var statusObserver: NSObjectProtocol?
+    @ObservationIgnored private let logger = Logger(subsystem: "AgentBoard", category: "terminal-renderer")
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         appearance = Self.load(defaults)
+        usesMetal = defaults.object(forKey: Self.metalKey) as? Bool ?? true
+        // SwiftTerm drops to CoreGraphics on its own when it cannot rebuild the Metal view after a
+        // window change or a GPU fault; this is the only signal it gives.
+        statusObserver = NotificationCenter.default.addObserver(
+            forName: .terminalViewMetalRendererStatusDidChange, object: nil, queue: nil
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let terminal = note.object as? TerminalView,
+                      self.terminals.contains(terminal),
+                      terminal.metalRendererStatus.state == .fellBackToCoreGraphics
+                else { return }
+                self.recordMetalFailure("The Metal renderer stopped and could not restart.")
+            }
+        }
+    }
+
+    deinit {
+        statusObserver.map(NotificationCenter.default.removeObserver)
     }
 
     func attach(_ terminal: TerminalView) {
         terminals.add(terminal)
         terminal.apply(appearance)
+        applyRenderer(to: terminal)
     }
 
     func restoreDefaults() {
         appearance = .defaults
+    }
+
+    private func applyRenderer(to terminal: TerminalView) {
+        do {
+            try terminal.setUseMetal(usesMetal)
+        } catch {
+            recordMetalFailure(String(describing: error))
+        }
+    }
+
+    private func recordMetalFailure(_ reason: String) {
+        logger.error("Terminal Metal renderer unavailable, drawing with CoreGraphics: \(reason, privacy: .public)")
+        metalFailure = reason
     }
 
     private static func load(_ defaults: UserDefaults) -> TerminalAppearance {

@@ -62,6 +62,22 @@ final class TerminalAppearanceTests: XCTestCase {
         XCTAssertEqual(terminal.font.pointSize, 18)
     }
 
+    /// CI runners may have no usable Metal device, so a recorded fallback counts as asking for it.
+    func testAnAttachedTerminalAsksForMetalByDefaultAndTurningItOffRevertsLive() {
+        let appearances = store()
+        let terminal = BoardTerminalView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        appearances.attach(terminal)
+
+        XCTAssertTrue(terminal.isUsingMetalRenderer || appearances.metalFailure != nil)
+        if appearances.metalFailure != nil {
+            XCTAssertFalse(terminal.isUsingMetalRenderer)
+        }
+
+        appearances.usesMetal = false
+        XCTAssertFalse(terminal.isUsingMetalRenderer)
+        XCTAssertFalse(store().usesMetal)
+    }
+
     /// `ColorPicker` mounts as a real `NSColorWell`, whose `color` is readable offscreen.
     func testThePaneShowsTheStoredColorsAndRestoreDefaultsRepaintsThem() throws {
         let appearances = store()
