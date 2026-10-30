@@ -395,6 +395,7 @@ struct PRDecisionRow: View {
     let answer: (PRDecisionChoice) async -> Bool
 
     @State private var reply = ""
+    @State private var answering = false
 
     private var trimmedReply: String { reply.trimmingCharacters(in: .whitespacesAndNewlines) }
 
@@ -418,6 +419,7 @@ struct PRDecisionRow: View {
                     .disabled(trimmedReply.isEmpty)
                     .help("Answer the reviewer with this text; no code changes")
             }
+            .disabled(answering)
         }
         .padding(.leading, 16)
         .padding(.vertical, 4)
@@ -425,8 +427,9 @@ struct PRDecisionRow: View {
 
     private var options: some View {
         ForEach(decision.decisionOptions, id: \.self) { option in
-            Button(option.label) { _Concurrency.Task { _ = await answer(.option(option.label)) } }
+            Button(option.label) { send(.option(option.label)) }
                 .help(option.verdict == .answer ? "Reply: \(option.replyBody ?? "")" : "Fix the comment this way")
+                .disabled(answering)
         }
     }
 
@@ -437,9 +440,15 @@ struct PRDecisionRow: View {
 
     private func sendReply() {
         guard !trimmedReply.isEmpty else { return }
-        let text = trimmedReply
+        send(.reply(trimmedReply)) { reply = "" }
+    }
+
+    private func send(_ choice: PRDecisionChoice, onRecorded: @escaping () -> Void = {}) {
+        guard !answering else { return }
+        answering = true
         _Concurrency.Task {
-            if await answer(.reply(text)) { reply = "" }
+            defer { answering = false }
+            if await answer(choice) { onRecorded() }
         }
     }
 }

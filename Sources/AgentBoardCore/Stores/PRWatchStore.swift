@@ -142,6 +142,10 @@ public struct PRWatchStore: Sendable {
         try db.reader.read { try PRWatch.fetchOne($0, key: id) }
     }
 
+    public func item(_ id: Int64) throws -> PRItem? {
+        try db.reader.read { try PRItem.fetchOne($0, key: id) }
+    }
+
     public func items(watchId: String) throws -> [PRItem] {
         try db.reader.read { db in
             try PRItem.filter(Column("watch_id") == watchId).order(Column("created_at"), Column("id")).fetchAll(db)

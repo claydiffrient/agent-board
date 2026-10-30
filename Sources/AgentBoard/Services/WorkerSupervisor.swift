@@ -3042,7 +3042,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// URL recorded. Nothing is resolved. A failed post is recorded on the item, and abandoned when GitHub
     /// says its comment is gone while the pull request still reads: GitHub says the same of a whole
     /// repository the token cannot see.
-    private func postReplies(_ items: [PRItem], watchId: String, project: Project) async {
+    func postReplies(_ items: [PRItem], watchId: String, project: Project) async {
         guard let watch = try? prWatches.get(watchId) else { return }
         let pushed = Dictionary(
             ((try? prWatches.rounds(watchId: watchId)) ?? []).map { ($0.number, $0.pushedHeadOid) },
@@ -3051,12 +3051,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let replier = pullRequestReplies
         let cwd = URL(fileURLWithPath: project.repoPath)
         var readable: Bool?
-        for item in items {
-            guard let id = item.id, !postingReplies.contains(id),
-                  let body = item.postedBody(pushedHeadOid: pushed[item.round] ?? nil)
-            else { continue }
+        for snapshot in items {
+            guard let id = snapshot.id, !postingReplies.contains(id) else { continue }
             postingReplies.insert(id)
             defer { postingReplies.remove(id) }
+            // `items` can predate a post another caller finished while this loop awaited an earlier item.
+            guard let item = try? prWatches.item(id), item.state == .handled,
+                  item.replyURL == nil, item.replyAbandonedAt == nil,
+                  let body = item.postedBody(pushedHeadOid: pushed[item.round] ?? nil)
+            else { continue }
             do {
                 let url: String
                 if item.kind == .thread {

@@ -825,6 +825,31 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
     /// SPEC §13.4: a reply the human chose is theirs, so it posts at once, with replies off and no round.
     func testADecisionAnsweredWithAReplyPostsItWithRepliesOffAndNoRound() async throws {
+        let item = try await openDecision()
+        fixture.gh.answerReplies(url: "\(url)#discussion_r9")
+
+        try await fixture.supervisor.answerPRDecision(itemId: try XCTUnwrap(item.id), choice: .option("No"))
+
+        XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_choice"])
+        XCTAssertEqual(replyCalls.map(\.last), ["body=It stays sync.\(mark)"])
+        let watch = try onlyWatch()
+        XCTAssertEqual(try watches.items(watchId: watch.id).first?.replyURL, "\(url)#discussion_r9")
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.number), [1])
+    }
+
+    /// A round point's `pendingReplies` can be read before an answer's post lands, then reach the item after.
+    func testAReplyPostedSinceTheSnapshotIsNotPostedAgain() async throws {
+        let item = try await openDecision()
+        let id = try XCTUnwrap(item.id)
+        let snapshot = try fixture.board.answerDecision(itemId: id, choice: .option("No"))
+        try watches.recordReply(itemId: id, url: "\(url)#discussion_r9")
+
+        await fixture.supervisor.postReplies([snapshot], watchId: item.watchId, project: fixture.project)
+
+        XCTAssertEqual(replyCalls, [])
+    }
+
+    private func openDecision() async throws -> PRItem {
         try enable()
         answer(threads: [thread("T_choice", body: "Should this be async?")])
         await poll()
@@ -842,15 +867,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         )
         await result.afterResponse?()
         await poll()
-        fixture.gh.answerReplies(url: "\(url)#discussion_r9")
-
-        try await fixture.supervisor.answerPRDecision(itemId: try XCTUnwrap(item.id), choice: .option("No"))
-
-        XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_choice"])
-        XCTAssertEqual(replyCalls.map(\.last), ["body=It stays sync.\(mark)"])
-        let watch = try onlyWatch()
-        XCTAssertEqual(try watches.items(watchId: watch.id).first?.replyURL, "\(url)#discussion_r9")
-        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.number), [1])
+        return item
     }
 
     // MARK: - Publishing
