@@ -197,6 +197,18 @@ Terminal** (below), applied by `TerminalAppearanceStore.attach` at each
 construction site. An edit repaints every open terminal on the same turn, not
 only the next one opened.
 
+The same call picks the renderer. With **Use GPU rendering (Metal)** on, the
+default, every terminal draws through SwiftTerm's Metal renderer
+(`setUseMetal(true)`) instead of its CoreGraphics path, which Claude Code's
+constant full-screen repaints make expensive; turning it off returns every open
+terminal to CoreGraphics on the same turn. If Metal cannot start — no device, a
+missing shader library — or SwiftTerm later drops a terminal to CoreGraphics
+because it could not rebuild the Metal view after a window change or a GPU
+fault, that terminal keeps working on CoreGraphics, the reason is logged
+(subsystem `AgentBoard`, category `terminal-renderer`) and kept for Settings to
+show. A console's view keeps its renderer across tab switches: SwiftTerm
+rebuilds the Metal view only when the view lands in a different window.
+
 **⌘K** clears the terminal that has keyboard focus, in all four of those
 surfaces, as Terminal.app and iTerm2 do: its scrollback and visible screen are
 emptied locally, then a form feed (Ctrl-L, `0x0c`) is written to the child so a
@@ -814,7 +826,11 @@ foreground colors, the 16 ANSI colors in two rows of eight, a small preview, and
 **Restore Defaults**, disabled while nothing differs from the defaults. The
 setting is app-wide, not per project — the same person looks at every project's
 terminal — and is stored in `UserDefaults` under `terminal.appearance`. Colors
-16–255 stay SwiftTerm's xterm cube.
+16–255 stay SwiftTerm's xterm cube. Below them, **Use GPU rendering (Metal)**
+picks the renderer (Terminal, above); it is on by default, stored under its own
+key, `terminal.metal`, so stored appearances keep decoding, and is not touched by
+**Restore Defaults**. When Metal failed to start, a caption under it gives the
+reason and says terminals are using CoreGraphics.
 
 The defaults are a snapshot of Clay's Ghostty on 2026-10-19 (theme "Night Owl"),
 not a read of Ghostty's config, so Agent Board does not depend on Ghostty being
