@@ -155,7 +155,16 @@ forms alike, runs one `gh search prs --author=@me --state=open`, and for each
 mapped repository one `gh api graphql` query covering its non-draft PRs. Drafts
 are never watched. A thread becomes an item while it is neither resolved nor
 outdated and its latest comment is not the viewer's; that comment is the item's
-body, so a reply changes it. A review body becomes an item while it is its
+body, so a reply changes it. An outdated thread, or one whose latest comment is
+the viewer's (a reply the board posted included), creates no item but still
+keeps a pending one: an open item with verdict `fix` (an answered decision
+among them), `decision`, or none stays open with its verdict, round, decision
+fields, body, path and line untouched, so the next round triages or fixes it as
+stored. Any other item treats such a thread as gone. A push touching a thread's
+lines outdates it, so without this a poll would silently handle a fix still
+awaiting its round; a fix a round already made is handled by publishing itself
+before any poll can see its thread outdated. A resolved thread is handled
+whatever else holds. A review body becomes an item while it is its
 author's latest review and that review is not an approval, since a review is
 never resolved and an approving body is not feedback. A conversation comment
 on the PR (the query's last 100 `comments`) becomes an item of kind `comment`
@@ -524,7 +533,8 @@ settling until the order lifts.
 Items are keyed by the GitHub node id of the thread, review, comment or check they came from,
 so each is handled once per round; a new reply on a thread reopens it for
 triage (§4), whether it was handled or still open with a verdict. The human's own comments, resolved threads, and outdated threads
-are never turned into items.
+are never turned into items, though an outdated or viewer-latest thread keeps a
+pending item open (phase 1 above).
 
 **Dismissed items.** An open item can be retired by hand, with a required
 reason, when it was settled outside follow-through — a description edited with

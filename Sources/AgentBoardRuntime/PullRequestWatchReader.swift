@@ -199,13 +199,16 @@ public struct PullRequestWatchReader: Sendable {
             return login.caseInsensitiveCompare(viewer) == .orderedSame
         }
         var items: [PRSnapshotItem] = []
-        for thread in pr.reviewThreads?.nodes ?? [] where !thread.isResolved && !thread.isOutdated {
-            guard let latest = thread.comments?.nodes.last, !byViewer(latest.author) else { continue }
+        for thread in pr.reviewThreads?.nodes ?? [] where !thread.isResolved {
+            guard let latest = thread.comments?.nodes.last else { continue }
+            let viewerLatest = byViewer(latest.author)
             let body = PRSnapshotItem.visibleText(latest.body)
-            guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            guard thread.isOutdated || viewerLatest || !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { continue }
             items.append(PRSnapshotItem(
                 githubNodeId: thread.id, kind: .thread, author: latest.author?.login, body: body,
-                path: latest.path, line: latest.line, url: latest.url
+                path: latest.path, line: latest.line, url: latest.url,
+                isOutdated: thread.isOutdated, viewerLatest: viewerLatest
             ))
         }
         // A review body stands until its author reviews again; an approval's body is not feedback.

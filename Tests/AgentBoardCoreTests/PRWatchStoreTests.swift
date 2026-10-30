@@ -52,6 +52,37 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertEqual(try store.get(created.id)?.lastFeedbackAt, 4_000)
     }
 
+    /// SPEC §13.1: a push that outdates a thread must not drop the fix or decision still owed on it.
+    func testAnOutdatedThreadKeepsAPendingFixAndDecisionOpenWhileAResolvedOneIsHandled() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(
+            projectId: f.project.id, snapshot: snapshot(items: [thread("FIX"), thread("ASK"), thread("DONE")]), now: 1_000
+        )
+        try f.db.writer.write { db in
+            try db.execute(sql: "UPDATE pr_item SET verdict = 'fix', round = 5 WHERE github_node_id = 'FIX'")
+            try db.execute(sql: "UPDATE pr_item SET verdict = 'decision', decision_question = 'Async?' WHERE github_node_id = 'ASK'")
+        }
+        let before = Dictionary(uniqueKeysWithValues: try store.items(watchId: watch.id).map { ($0.githubNodeId, $0) })
+
+        func outdated(_ id: String) -> PRSnapshotItem {
+            var item = thread(id, body: "A later reply")
+            item.line = nil
+            item.isOutdated = true
+            return item
+        }
+        try store.upsert(
+            projectId: f.project.id,
+            snapshot: snapshot(head: "def456", items: [outdated("FIX"), outdated("ASK"), thread("DONE", resolved: true)]),
+            now: 2_000
+        )
+
+        let after = Dictionary(uniqueKeysWithValues: try store.items(watchId: watch.id).map { ($0.githubNodeId, $0) })
+        XCTAssertEqual(after["FIX"], before["FIX"])
+        XCTAssertEqual(after["ASK"], before["ASK"])
+        XCTAssertEqual(after["DONE"]?.state, .handled)
+    }
+
     func testANewHeadOidStampsHeadChangedAtAndAnUnchangedSnapshotLeavesItAlone() throws {
         let f = try Fixture.make()
         let store = PRWatchStore(f.db)
