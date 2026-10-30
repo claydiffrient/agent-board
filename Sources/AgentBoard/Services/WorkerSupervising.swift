@@ -100,12 +100,15 @@ protocol WorkerSupervising: AnyObject {
     /// The human's dismissal of one open item (SPEC §13.1 dismissed items), after stopping any session
     /// still working the round it ends.
     func dismissPRItem(itemId: Int64, reason: String) async throws
+    /// The human's answer to an open decision (SPEC §13.4), posting the reply it chose.
+    func answerPRDecision(itemId: Int64, choice: PRDecisionChoice) async throws
 }
 
 extension WorkerSupervising {
     var isPollingPRWatches: Bool { false }
     func pollPRWatches(watchIds: Set<String>) async throws {}
     func dismissPRItem(itemId: Int64, reason: String) async throws {}
+    func answerPRDecision(itemId: Int64, choice: PRDecisionChoice) async throws {}
     func focusChanged(projectId: String?) {}
     func reportQueued(projectId: String) async {}
     func previewLeakedAgentSweep() async -> AgentSweepReport? { nil }

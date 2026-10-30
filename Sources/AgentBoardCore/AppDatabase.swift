@@ -248,6 +248,21 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("token_grant_pr_watch") { db in
             try db.execute(sql: Schema.tokenGrantPRWatch)
         }
+        migrator.registerMigration("pr_item_answered_replies") { db in
+            // SPEC §13.4: unposted answers from before replies posted on answer may have been posted by hand.
+            try db.execute(
+                sql: """
+                UPDATE pr_item SET reply_abandoned_at = ?
+                WHERE state = 'handled' AND verdict = 'answer' AND decision_answer IS NOT NULL
+                AND reply_body IS NOT NULL AND reply_url IS NULL AND reply_abandoned_at IS NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM pr_watch w JOIN project p ON p.id = w.project_id WHERE w.id = pr_item.watch_id
+                  AND pr_item.handled_at >= json_extract(p.settings_json, '$.prFollowThrough.postFactualRepliesSince')
+                )
+                """,
+                arguments: [Int64.nowMillis]
+            )
+        }
         return migrator
     }
 }

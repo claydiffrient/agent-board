@@ -594,17 +594,23 @@ triage reads from the current title and description in its prompt. One that
 reaches a fix round anyway is graded by the check from the same text (§13.1):
 `fixed` when the author has made the edit, `needs_author` when not.
 
-A reply posts automatically only when the project's `postFactualReplies`
-setting is on, and only for a factual verdict — fix, answer, already_done, or
-follow_up. A decision is never auto-replied, since it is, by definition,
-something argued rather than settled.
+A reply triage wrote posts automatically only when the project's
+`postFactualReplies` setting is on, and only for a factual verdict — fix,
+answer, already_done, or follow_up. A decision is never auto-replied, since it
+is, by definition, something argued rather than settled. A reply the human
+chose by answering a decision (§13.4) is theirs, not triage's, so it posts
+whatever the setting says.
 
 **Posting replies (phase 3).** Replies go out after a round's push, when a
 publishing round goes stale or parks, or, for a round with no fix item, once its
-verdicts are applied. Each time, every handled thread, review or comment item whose
+verdicts are applied; an answered decision's reply also goes out the moment the
+human answers it (§13.4), with no round. Each time, every handled thread, review or comment item whose
 `reply_url` is empty gets one, whatever round handled it, so an answer from a
-round that never pushed is still replied to at the next of those points. Only an
-item whose `handled_at` is at or after `postFactualRepliesSince` qualifies:
+round that never pushed is still replied to at the next of those points. An
+`answer` item with a `decision_answer` and a `reply_body` always qualifies, so
+a chosen reply whose first post failed is retried at the next point with
+replies off. Any other item qualifies only when its `handled_at` is at or after
+`postFactualRepliesSince`:
 `ProjectStore.updateSettings` stamps that time when `postFactualReplies` turns
 on and clears it when it turns off, so turning replies on never posts the
 backlog triage wrote while they were off, and an item handled before
@@ -863,7 +869,15 @@ on at all.
   `answer` option handles the item with the option's `reply_body` and makes no
   task; the app's own decisions (the verified freeze, §13.1)
   carry `answer` options with no reply, which handle it with nothing to post. A typed reply answers it as an `answer`: the item is handled, with the
-  reply as its `reply_body`. Either way it is no longer a decision.
+  reply as its `reply_body`. Either way it is no longer a decision. The page
+  answers through `WorkerSupervisor.answerPRDecision`, which posts a handled
+  item's reply right away through the same posting code as §13.2 "Posting
+  replies", mark included, and records its `reply_url` or `reply_error`. It
+  needs no round and starts none, and `postFactualReplies` does not gate it:
+  the human chose that reply. A post that fails stays owed for the next
+  posting point. The `pr_item_answered_replies` migration marks abandoned
+  every answered reply still unposted when it ran that the setting did not
+  already owe, since some of those were posted by hand.
 - The row's badge counts Ready to verify plus open decision items, both only in
   projects with follow-through on and only on watches that are not paused —
   one rule, read by the badge and At a Glance alike from

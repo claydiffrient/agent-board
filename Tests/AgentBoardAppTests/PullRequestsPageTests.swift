@@ -139,10 +139,10 @@ final class PullRequestsPageTests: XCTestCase {
             .cause(.pullRequestDecision))
         XCTAssertTrue(cause.text.contains("3 pull request decisions"), cause.text)
 
-        let actions = PullRequestActions(db: db, gh: FakeGh())
-        try actions.answer(chosen, choice: .option("Change the helper"))
-        try actions.answer(kept, choice: .option("Keep it local"))
-        try actions.answer(replied, choice: .reply("The old name is public API."))
+        let board = Board(db)
+        try board.answerDecision(itemId: try XCTUnwrap(chosen.id), choice: .option("Change the helper"))
+        try board.answerDecision(itemId: try XCTUnwrap(kept.id), choice: .option("Keep it local"))
+        try board.answerDecision(itemId: try XCTUnwrap(replied.id), choice: .reply("The old name is public API."))
 
         XCTAssertNil(try PRWatchStore(db).badgeCounts()[project.id])
         XCTAssertNil(try ProjectAttentionStore(db).attention(projectId: project.id)?.cause(.pullRequestDecision))
