@@ -292,11 +292,13 @@ round with no task and no open `fix` item — every one answered on GitHub or
 reopened for triage before its task was made — ends with outcome `triaged`,
 and the watch goes to settling when an item awaits triage, else to watching. It holds under the
 same settling holds, and its spawn approval is skipped while follow-through is
-on (§13.5). Spawning fetches the PR's head ref from `origin` into
-`refs/remotes/origin/<head>`, and the round's `base_head_oid` if the repository
-lacks it, refusing the spawn when either fails; then it cuts
-`agentboard/pr-<n>-r<round>` at `base_head_oid` in a worktree under the
-project's worktree root named for the task. A retry reuses both. The session
+on (§13.5). The spawn answers once the fixer's `setup` row exists, as a task
+worker's does (§3.1); its setup then fetches the PR's head ref from `origin`
+into `refs/remotes/origin/<head>`, and the round's `base_head_oid` if the
+repository lacks it, and cuts `agentboard/pr-<n>-r<round>` at `base_head_oid`
+in a worktree under the project's worktree root named for the task. A fetch
+that fails ends the setup as "Worker never started", which counts toward the
+three failed fixers that park the watch. A retry reuses both. The session
 is an ordinary worker's with the opening prompt (§5), `roles.fixer`'s roster
 agent, and the task's model, else the agent's, else the project's default.
 Besides the worker deny list it is denied `git commit --amend` and

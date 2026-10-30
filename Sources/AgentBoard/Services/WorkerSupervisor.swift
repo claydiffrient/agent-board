@@ -918,6 +918,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var base: String?
         /// The pooled slot to occupy instead of a worktree named for the task (SPEC §3.1 step 2).
         var slot: Int? = nil
+        /// Runs off the main actor before git touches the path, as a fixer's fetch of its PR does (SPEC §13.1).
+        var fetch: (@Sendable () throws -> Void)? = nil
 
         var path: String {
             manager.worktreeRoot.appendingPathComponent(slot.map(WorktreeSlot.name) ?? name).path
@@ -1040,6 +1042,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         await beforeCheckoutCreated()
         try _Concurrency.Task.checkCancellation()
         try await offMain {
+            try pending.fetch?()
             if let slot = pending.slot {
                 _ = try pending.manager.occupySlot(slot, branch: pending.branch, start: pending.base ?? pending.branch)
                 return
@@ -1282,12 +1285,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
             let recorded: AgentSession
             do {
+                try _Concurrency.Task.checkCancellation()
                 recorded = try sessions.promoteSetupSession(
                     placeholder.sessionId, to: spawned.sessionId, shortId: spawned.shortId
                 )
             } catch {
-                // Something ended the setup row while the agent was starting, so nothing owns the
-                // agent that just came up. Leaving it running would be an untracked worker.
+                // A stop cancelled this setup, or something ended its row, while the agent was starting;
+                // a stop cancels before it ends the row, so the row alone cannot tell. Nothing owns the
+                // agent that just came up, and leaving it running would be an untracked worker.
                 let stopFailure = await stopFailure { try await self.runtime.stop(shortId: spawned.shortId) }
                 throw await confirmingStop(
                     AgentStartedThenStopped(shortId: spawned.shortId, reason: describe(error), stopFailure: stopFailure),
@@ -1420,7 +1425,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             taskId: task.id, watchId: watch.id, baseOid: baseOid, headOid: headOid, round: watch.round,
             createdAt: task.createdAt
         )
-        _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(task.id))
+        let path = manager.worktreeRoot.appendingPathComponent(task.id)
+        _ = preflightWorktreePath(path)
+        // SPEC §5: a checkout at a head some base already holds is a clean orphan to a reap until its row exists.
+        placing.insert(path.path)
+        var setupHoldsMark = false
+        defer { if !setupHoldsMark { placing.remove(path.path) } }
         var assigned: AgentSession?
         do {
             let worktree = try await offMain { try manager.createDetached(name: task.id, commit: headOid) }
@@ -1451,21 +1461,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     scope: .triager
                 ),
                 placeholder: placeholder,
-                port: port
+                port: port,
+                placingMarks: [path.path]
             )
+            setupHoldsMark = true
             return placeholder
         } catch {
             if assigned == nil { try? tasks.delete(task.id) }
-            throw SupervisorError.spawnFailed(
-                worktree: manager.worktreeRoot.appendingPathComponent(task.id).path, underlying: describe(error)
-            )
+            throw SupervisorError.spawnFailed(worktree: path.path, underlying: describe(error))
         }
     }
 
     /// SPEC §13.1 fixing: an ordinary worker on the round's branch, cut at the head its triage read
     /// once the PR's head ref is fetched from origin, in a worktree named for the task. A retry reuses
     /// both. A round holding a conflict also fetches the base, which its fixer merges. The role's roster
-    /// agent and model apply unless the caller names an agent.
+    /// agent and model apply unless the caller names an agent. The fetches and the checkout run in
+    /// setup, after this answers and under the worktree's mark, as a task worker's do (SPEC §3.1).
     private func spawnFixer(
         task: BoardTask, rosterAgentId: String?, project: Project, port: Int
     ) async throws -> WorkerSpawn {
@@ -1484,39 +1495,37 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
 
         let manager = worktreeManager(for: project)
-        let headRef = watch.headRef
-        let baseHeadOid = round.baseHeadOid
-        let mergeBase = try prWatches.items(watchId: watch.id)
-            .contains { $0.fixTaskId == task.id && $0.kind == .conflict && $0.state == .open } ? watch.baseRef : nil
-        do {
-            try await offMain {
-                _ = try manager.fetchRemoteTip(headRef)
-                guard try manager.fetchCommitIfMissing(baseHeadOid, from: "origin") else {
-                    throw AgentRuntimeError("origin has no commit \(baseHeadOid)")
-                }
-                if let mergeBase { _ = try manager.fetchRemoteTip(mergeBase) }
-            }
-        } catch {
-            throw SupervisorError.pullRequestNotFetched(describe(error))
-        }
-
-        let name = task.id
-        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
-        let warnings = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(name))
-        let worktree: URL
-        do {
-            worktree = try await offMain {
-                try Self.existingWorktree(manager, name: name)
-                    ?? manager.create(name: name, branch: branch, base: baseHeadOid)
-            }
-        } catch {
-            throw SupervisorError.spawnFailed(
-                worktree: manager.worktreeRoot.appendingPathComponent(name).path, underlying: describe(error)
-            )
+        let worktree = manager.worktreeRoot.appendingPathComponent(task.id)
+        guard !placing.contains(worktree.path) else {
+            throw SupervisorError.setupStillRunning(title: task.title, path: worktree.path)
         }
         if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
             throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
         }
+        placing.insert(worktree.path)
+        var setupHoldsMark = false
+        defer { if !setupHoldsMark { placing.remove(worktree.path) } }
+
+        let headRef = watch.headRef
+        let baseHeadOid = round.baseHeadOid
+        let mergeBase = try prWatches.items(watchId: watch.id)
+            .contains { $0.fixTaskId == task.id && $0.kind == .conflict && $0.state == .open } ? watch.baseRef : nil
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let warnings = preflightWorktreePath(worktree)
+        let checkout = PendingCheckout(
+            manager: manager, taskId: task.id, name: task.id, branch: branch, base: baseHeadOid,
+            fetch: { [self] in
+                do {
+                    _ = try manager.fetchRemoteTip(headRef)
+                    guard try manager.fetchCommitIfMissing(baseHeadOid, from: "origin") else {
+                        throw AgentRuntimeError("origin has no commit \(baseHeadOid)")
+                    }
+                    if let mergeBase { _ = try manager.fetchRemoteTip(mergeBase) }
+                } catch {
+                    throw SupervisorError.pullRequestNotFetched(self.describe(error))
+                }
+            }
+        )
 
         do {
             let site = CheckoutSite(
@@ -1554,8 +1563,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     extraDisallowedTools: SpawnRequest.fixerDisallowedTools
                 ),
                 placeholder: placeholder,
-                port: port
+                port: port,
+                checkout: checkout,
+                placingMarks: [worktree.path]
             )
+            setupHoldsMark = true
             return WorkerSpawn(
                 setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch,
                 sharesCheckout: false, warnings: warnings
@@ -1663,7 +1675,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw AgentRuntimeError("the round branch `\(branch)` does not exist")
         }
         guard let task = try board.createFollowupCheckTask(watchId: watch.id, headOid: headOid) else { return }
-        _ = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(task.id))
+        let path = manager.worktreeRoot.appendingPathComponent(task.id)
+        _ = preflightWorktreePath(path)
+        // SPEC §5: a checkout at a head some base already holds is a clean orphan to a reap until its row exists.
+        placing.insert(path.path)
+        var setupHoldsMark = false
+        defer { if !setupHoldsMark { placing.remove(path.path) } }
         var assigned: AgentSession?
         do {
             let worktree = try await offMain { try manager.createDetached(name: task.id, commit: headOid) }
@@ -1695,13 +1712,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     scope: .triager
                 ),
                 placeholder: placeholder,
-                port: port
+                port: port,
+                placingMarks: [path.path]
             )
+            setupHoldsMark = true
         } catch {
             if assigned == nil { try? tasks.delete(task.id) }
-            throw SupervisorError.spawnFailed(
-                worktree: manager.worktreeRoot.appendingPathComponent(task.id).path, underlying: describe(error)
-            )
+            throw SupervisorError.spawnFailed(worktree: path.path, underlying: describe(error))
         }
     }
 
