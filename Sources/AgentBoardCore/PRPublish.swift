@@ -115,10 +115,11 @@ extension PRWatchStore {
         }
     }
 
-    /// Every handled thread, review and comment item, from any round, with a factual reply not yet posted (SPEC
-    /// §13.2), handled since `postFactualReplies` was last turned on and not given up on. A `fix` item
-    /// qualifies only once its own round pushed it, so a stale or parked round's fixes never claim
-    /// "Fixed in"; `IS` keeps that match when the round's fix task was deleted and both sides are null.
+    /// Every handled thread, review and comment item, from any round, with a reply not yet posted and not
+    /// given up on (SPEC §13.2): a reply the human chose by answering a decision, whatever the setting, or a
+    /// factual reply handled since `postFactualReplies` was last turned on. A `fix` item qualifies only once
+    /// its own round pushed it, so a stale or parked round's fixes never claim "Fixed in"; `IS` keeps that
+    /// match when the round's fix task was deleted and both sides are null.
     public func pendingReplies(watchId: String) throws -> [PRItem] {
         try db.reader.read { db in
             try PRItem.fetchAll(
@@ -129,12 +130,14 @@ extension PRWatchStore {
                 JOIN project p ON p.id = w.project_id
                 WHERE i.watch_id = ? AND i.state = 'handled' AND i.reply_url IS NULL AND i.reply_abandoned_at IS NULL
                 AND i.kind IN ('thread', 'review', 'comment')
-                AND i.handled_at >= json_extract(p.settings_json, '$.prFollowThrough.postFactualRepliesSince')
                 AND (
-                  (i.verdict IN ('answer', 'already_done', 'follow_up') AND i.reply_body IS NOT NULL)
-                  OR (i.verdict = 'fix' AND EXISTS (
-                    SELECT 1 FROM pr_round r WHERE r.watch_id = i.watch_id AND r.number = i.round
-                    AND r.pushed_head_oid IS NOT NULL AND r.fix_task_id IS i.fix_task_id
+                  (i.verdict = 'answer' AND i.decision_answer IS NOT NULL AND i.reply_body IS NOT NULL)
+                  OR (i.handled_at >= json_extract(p.settings_json, '$.prFollowThrough.postFactualRepliesSince') AND (
+                    (i.verdict IN ('answer', 'already_done', 'follow_up') AND i.reply_body IS NOT NULL)
+                    OR (i.verdict = 'fix' AND EXISTS (
+                      SELECT 1 FROM pr_round r WHERE r.watch_id = i.watch_id AND r.number = i.round
+                      AND r.pushed_head_oid IS NOT NULL AND r.fix_task_id IS i.fix_task_id
+                    ))
                   ))
                 )
                 ORDER BY i.id

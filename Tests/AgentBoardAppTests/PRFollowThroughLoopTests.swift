@@ -823,6 +823,36 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try milestones(), reported, "an answered decision and its fix round report nothing new")
     }
 
+    /// SPEC §13.4: a reply the human chose is theirs, so it posts at once, with replies off and no round.
+    func testADecisionAnsweredWithAReplyPostsItWithRepliesOffAndNoRound() async throws {
+        try enable()
+        answer(threads: [thread("T_choice", body: "Should this be async?")])
+        await poll()
+        let item = try XCTUnwrap(try watches.items(watchId: try onlyWatch().id).first)
+        let result = try await TriagerToolHandler(db: fixture.db, events: sink).call(
+            "set_verdicts",
+            arguments: .object(["verdicts": .array([.object([
+                "item_id": .number(Double(item.id ?? 0)), "verdict": .string("decision"), "approach": .string("Direction."),
+                "decision_question": .string("Make it async?"), "decision_options": .array([
+                    .object(["label": .string("Yes"), "verdict": .string("fix")]),
+                    .object(["label": .string("No"), "verdict": .string("answer"), "reply_body": .string("It stays sync.")]),
+                ]),
+            ])])]),
+            identity: try await identity(of: try runningTriager())
+        )
+        await result.afterResponse?()
+        await poll()
+        fixture.gh.answerReplies(url: "\(url)#discussion_r9")
+
+        try await fixture.supervisor.answerPRDecision(itemId: try XCTUnwrap(item.id), choice: .option("No"))
+
+        XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_choice"])
+        XCTAssertEqual(replyCalls.map(\.last), ["body=It stays sync.\(mark)"])
+        let watch = try onlyWatch()
+        XCTAssertEqual(try watches.items(watchId: watch.id).first?.replyURL, "\(url)#discussion_r9")
+        XCTAssertEqual(try watches.rounds(watchId: watch.id).map(\.number), [1])
+    }
+
     // MARK: - Publishing
 
     private func rev(_ ref: String, in directory: URL? = nil) throws -> String {

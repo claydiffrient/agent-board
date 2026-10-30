@@ -190,6 +190,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var prWatchPoll: (scope: Set<String>?, task: _Concurrency.Task<[PRWatchPollFailure], Never>)?
     private(set) var isPollingPRWatches = false
     @ObservationIgnored private var prWatchSearchFailures = 0
+    /// Items with a post in flight, so an answer's post and a round point's never both post one.
+    @ObservationIgnored private var postingReplies: Set<Int64> = []
     /// Consecutive polls on which git could not read a project's `origin`, by project id.
     @ObservationIgnored private var prWatchRemoteFailures: [String: Int] = [:]
     /// Watches whose pull request could not be read after a reply to it came back not found (SPEC
@@ -3030,14 +3032,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )
     }
 
-    /// SPEC §13.2: with `postFactualReplies` on, each handled thread item still owed a reply gets one and
-    /// each review body a PR comment, its URL recorded. Nothing is resolved. A failed post is recorded on
-    /// the item, and abandoned when GitHub says its comment is gone while the pull request still reads:
-    /// GitHub says the same of a whole repository the token cannot see.
+    /// SPEC §13.2: every reply the watch still owes, as `pendingReplies` gates them.
     private func postFactualReplies(watchId: String, project: Project) async {
-        guard project.settings.prFollowThrough.postFactualReplies, let watch = try? prWatches.get(watchId),
-              let items = try? prWatches.pendingReplies(watchId: watchId), !items.isEmpty
-        else { return }
+        guard let items = try? prWatches.pendingReplies(watchId: watchId), !items.isEmpty else { return }
+        await postReplies(items, watchId: watchId, project: project)
+    }
+
+    /// SPEC §13.2: each thread item gets a thread reply and each review body or comment a PR comment, its
+    /// URL recorded. Nothing is resolved. A failed post is recorded on the item, and abandoned when GitHub
+    /// says its comment is gone while the pull request still reads: GitHub says the same of a whole
+    /// repository the token cannot see.
+    private func postReplies(_ items: [PRItem], watchId: String, project: Project) async {
+        guard let watch = try? prWatches.get(watchId) else { return }
         let pushed = Dictionary(
             ((try? prWatches.rounds(watchId: watchId)) ?? []).map { ($0.number, $0.pushedHeadOid) },
             uniquingKeysWith: { first, _ in first }
@@ -3046,7 +3052,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let cwd = URL(fileURLWithPath: project.repoPath)
         var readable: Bool?
         for item in items {
-            guard let id = item.id, let body = item.postedBody(pushedHeadOid: pushed[item.round] ?? nil) else { continue }
+            guard let id = item.id, !postingReplies.contains(id),
+                  let body = item.postedBody(pushedHeadOid: pushed[item.round] ?? nil)
+            else { continue }
+            postingReplies.insert(id)
+            defer { postingReplies.remove(id) }
             do {
                 let url: String
                 if item.kind == .thread {
@@ -4382,6 +4392,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 try board.applyWatchResume(approval)
             }
         }
+    }
+
+    /// SPEC §13.4: a reply the human chose posts now, with no round and whatever `postFactualReplies` says.
+    func answerPRDecision(itemId: Int64, choice: PRDecisionChoice) async throws {
+        let item = try await recording { try board.answerDecision(itemId: itemId, choice: choice) }
+        guard item.state == .handled, let watch = try? prWatches.get(item.watchId),
+              let project = try? projects.get(watch.projectId)
+        else { return }
+        await postReplies([item], watchId: watch.id, project: project)
     }
 
     func dismissPRItem(itemId: Int64, reason: String) async throws {

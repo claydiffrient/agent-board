@@ -189,7 +189,7 @@ struct PullRequestsView: View {
             )
             ForEach(listing.decisions) { decision in
                 PRDecisionRow(decision: decision) { choice in
-                    answer(decision, choice: choice)
+                    await answer(decision, choice: choice)
                 }
             }
             if !listing.items.isEmpty {
@@ -211,9 +211,10 @@ struct PullRequestsView: View {
         }
     }
 
-    private func answer(_ decision: PRItem, choice: PRDecisionChoice) -> Bool {
+    private func answer(_ decision: PRItem, choice: PRDecisionChoice) async -> Bool {
+        guard let id = decision.id else { return false }
         do {
-            try actions.answer(decision, choice: choice)
+            try await env.supervisor.answerPRDecision(itemId: id, choice: choice)
             return true
         } catch {
             errorMessage = errorText(error)
@@ -291,11 +292,6 @@ struct PullRequestActions {
 
     func stopWatching(_ watch: PRWatch) throws {
         try PRWatchStore(db).stopWatching(watchId: watch.id)
-    }
-
-    func answer(_ decision: PRItem, choice: PRDecisionChoice) throws {
-        guard let id = decision.id else { return }
-        try Board(db).answerDecision(itemId: id, choice: choice)
     }
 
 }
@@ -396,7 +392,7 @@ struct PRItemRow: View {
 struct PRDecisionRow: View {
     let decision: PRItem
     /// Returns whether the answer was recorded.
-    let answer: (PRDecisionChoice) -> Bool
+    let answer: (PRDecisionChoice) async -> Bool
 
     @State private var reply = ""
 
@@ -429,7 +425,7 @@ struct PRDecisionRow: View {
 
     private var options: some View {
         ForEach(decision.decisionOptions, id: \.self) { option in
-            Button(option.label) { _ = answer(.option(option.label)) }
+            Button(option.label) { _Concurrency.Task { _ = await answer(.option(option.label)) } }
                 .help(option.verdict == .answer ? "Reply: \(option.replyBody ?? "")" : "Fix the comment this way")
         }
     }
@@ -441,7 +437,10 @@ struct PRDecisionRow: View {
 
     private func sendReply() {
         guard !trimmedReply.isEmpty else { return }
-        if answer(.reply(trimmedReply)) { reply = "" }
+        let text = trimmedReply
+        _Concurrency.Task {
+            if await answer(.reply(text)) { reply = "" }
+        }
     }
 }
 
