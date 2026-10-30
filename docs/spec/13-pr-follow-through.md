@@ -287,7 +287,11 @@ fixer that ends without a report puts its task back in `ready` (never `review`,
 since the next fixer reuses the worktree and branch) and is retried; the third
 in a row, not counting one wound down for a shutdown order, ends the round
 `fixer_failed`, closes its task, and parks the watch with the last session's
-stop reason. A fixing
+stop reason. A fixer whose worktree setup fails — the repository's
+`post-checkout` hook exiting non-zero, say — is one such session: the worktree
+is created after its session row is written, so the row fails with the setup
+error as its stop reason, the task goes back to `ready`, the orchestrator gets
+the ordinary `failed` report (§6), and the next poll retries it. A fixing
 round with no task and no open `fix` item — every one answered on GitHub or
 reopened for triage before its task was made — ends with outcome `triaged`,
 and the watch goes to settling when an item awaits triage, else to watching. It holds under the
@@ -1005,7 +1009,10 @@ reason one line of at most 200 characters. It never carries a comment body, a
 CI log or a reply, which are untrusted and long; a decision's question is
 triage's own wording. A round that ends `check_failed`, `check_unavailable` or
 `publish_failed` parks, and that park is its report; `triage_failed`, `interrupted` and
-`frozen` rounds report nothing of their own.
+`frozen` rounds report nothing of their own. A fixer session that ends without
+a report, its setup failing included, also queues the ordinary `failed` report
+any worker's does (§6), so the orchestrator hears each attempt, not only the
+park.
 
 The banners' gate applies: a paused watch, or one in a project with
 follow-through off, queues nothing, and since the claims are still made while
