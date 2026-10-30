@@ -1465,7 +1465,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// SPEC §13.1 fixing: an ordinary worker on the round's branch, cut at the head its triage read
     /// once the PR's head ref is fetched from origin, in a worktree named for the task. A retry reuses
     /// both. A round holding a conflict also fetches the base, which its fixer merges. The role's roster
-    /// agent and model apply unless the caller names an agent.
+    /// agent and model apply unless the caller names an agent. The worktree is created in setup, after
+    /// the session row exists, so a failing `post-checkout` hook ends a fixer session like any other.
     private func spawnFixer(
         task: BoardTask, rosterAgentId: String?, project: Project, port: Int
     ) async throws -> WorkerSpawn {
@@ -1500,20 +1501,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             throw SupervisorError.pullRequestNotFetched(describe(error))
         }
 
-        let name = task.id
         let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
-        let warnings = preflightWorktreePath(manager.worktreeRoot.appendingPathComponent(name))
-        let worktree: URL
-        do {
-            worktree = try await offMain {
-                try Self.existingWorktree(manager, name: name)
-                    ?? manager.create(name: name, branch: branch, base: baseHeadOid)
-            }
-        } catch {
-            throw SupervisorError.spawnFailed(
-                worktree: manager.worktreeRoot.appendingPathComponent(name).path, underlying: describe(error)
-            )
-        }
+        let checkout = PendingCheckout(manager: manager, taskId: task.id, name: task.id, branch: branch, base: baseHeadOid)
+        let worktree = URL(fileURLWithPath: checkout.path)
+        let warnings = preflightWorktreePath(worktree)
         if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
             throw SupervisorError.worktreeAlreadyHeld(path: worktree.path, sessionId: holder.sessionId)
         }
@@ -1554,7 +1545,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     extraDisallowedTools: SpawnRequest.fixerDisallowedTools
                 ),
                 placeholder: placeholder,
-                port: port
+                port: port,
+                checkout: checkout
             )
             return WorkerSpawn(
                 setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch,
