@@ -276,12 +276,16 @@ nobody reviewed.
   "Integrate standalone tasks and epics by" is *Pull request* or *Local merge*. A project
   that never chose stores neither, and the accept resolves it by running
   `git remote get-url origin` off the main actor: a repository with an `origin`
-  integrates by pull request, and one git reports has none (exit 2, "No such
-  remote") by local merge. Any other git failure — no repository, no git, an
-  unreadable config — never means local merge: the accept keeps the answer it
+  integrates by pull request, and only one git explicitly reports has none
+  (exit 2, "No such remote") by local merge. Any other read — no repository,
+  no git, an unreadable config, no pipe to read git's output through, or exit 0
+  with an empty URL — is a failure and never means local merge: the accept keeps the answer it
   last resolved for that project in this run, and with none it merges nothing,
   leaving the task `unlanded` with git's exit status and stderr in its detail;
-  an integrator spawn fails with the same error. The picker's first entry is that default, labelled with
+  an integrator spawn is refused with the same error and tells the orchestrator
+  to call `request_integration` again or choose an integration in Publishing.
+  Each derived answer, and each refusal, is logged (subsystem `AgentBoard`,
+  category `integration`) with git's exit status and stderr. The picker's first entry is that default, labelled with
   what it resolved to ("Pull request (default: has origin)"); a stored choice
   always wins. The same resolved choice decides whether an integrated epic
   waits on its pull request (§5.2 step 4), which is why the picker reads
@@ -777,7 +781,9 @@ than one that is finished; they merge nothing and are not part of this sequence.
    repository has an `origin`. `spawnIntegrator` resolves it — the `origin`
    check runs git, which `Board` cannot — and records it on the epic as
    `ships_by_pull_request` (§4), so the report is settled by what was true when
-   the integrator started.
+   the integrator started. A respawned integrator, or a fresh one for an epic
+   already set to ship by pull request, keeps it so without resolving again: a
+   later answer never turns the flag back to local merge.
 
    **A project that ships epics by pull request.** Integration only merged the
    task branches into the epic branch; nothing has reached the base branch and

@@ -1,5 +1,6 @@
 import AgentBoardCore
 import Foundation
+import os
 
 /// Why publishing stopped. Each case names one cause, so "you are not logged in to gh" never
 /// reaches the orchestrator as a generic failure it has to spend a round trip diagnosing.
@@ -181,29 +182,51 @@ public struct BranchPublisher: Sendable {
 
     // MARK: Preconditions
 
-    /// `noRemote` only when git says the remote is not configured (exit 2, "No such remote") or
-    /// prints an empty URL; any other failure is `gitFailed`.
+    /// `noRemote` only when git says the remote is not configured (exit 2, "No such remote"); any
+    /// other failure, an empty URL on exit 0 included, is `gitFailed` (SPEC §5).
     @discardableResult
     public func requireRemote(_ remote: String = "origin") throws -> String {
         let arguments = PublishCommand.remoteURL(remote)
-        let result = try git(arguments)
+        return try remoteURL(remote, arguments, try git(arguments))
+    }
+
+    private func remoteURL(_ remote: String, _ arguments: [String], _ result: CommandResult) throws -> String {
         let url = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         if result.status == 0, !url.isEmpty { return url }
-        guard result.status == 0 || (result.status == 2 && result.stderr.contains("No such remote")) else {
-            throw gitFailure(arguments, result)
-        }
+        guard result.status == 2, result.stderr.contains("No such remote") else { throw gitFailure(arguments, result) }
         throw PublishFailure.noRemote(name: remote, repoPath: repoPath.path)
     }
 
     /// SPEC §5: what a project with no stored choice integrates standalone tasks by. Only an
     /// `origin` git reports as absent means local merge; any other failure to read it throws.
     public func defaultStandaloneIntegration() throws -> StandaloneIntegration {
+        let arguments = PublishCommand.remoteURL("origin")
+        var result: CommandResult?
         do {
-            try requireRemote()
+            let read = try git(arguments)
+            result = read
+            _ = try remoteURL("origin", arguments, read)
+            logResolution("pull request", result)
             return .pullRequest
         } catch PublishFailure.noRemote {
+            logResolution("local merge", result)
             return .localMerge
+        } catch {
+            logResolution("refused (\(error))", result, level: .error)
+            throw error
         }
+    }
+
+    private static let logger = Logger(subsystem: "AgentBoard", category: "integration")
+
+    private func logResolution(_ outcome: String, _ result: CommandResult?, level: OSLogType = .default) {
+        let git = result.map {
+            "exited \($0.status), stderr: \($0.stderr.trimmingCharacters(in: .whitespacesAndNewlines).debugDescription)"
+        } ?? "did not run"
+        Self.logger.log(
+            level: level,
+            "standalone integration default for \(repoPath.path, privacy: .public): \(outcome, privacy: .public); `git remote get-url origin` \(git, privacy: .public)"
+        )
     }
 
     public func requireBranch(_ branch: String) throws {

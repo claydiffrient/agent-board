@@ -30,6 +30,7 @@ enum SupervisorError: LocalizedError {
     case taskNotAssignable(title: String, column: TaskColumn)
     case noReviewToRerun(title: String)
     case integrationNotRosterable(title: String)
+    case integrationUnresolved(projectName: String, underlying: String)
     case capRefused(String)
     case taskAlreadyHeld(title: String, sessionId: String)
     case worktreeAlreadyHeld(path: String, sessionId: String)
@@ -86,6 +87,10 @@ enum SupervisorError: LocalizedError {
         case .integrationNotRosterable(let title):
             return "\"\(title)\" is an integration task, which a roster agent cannot run; call spawn_worker "
                 + "to respawn its integrator on the epic checkout, or request_integration to start a new one"
+        case .integrationUnresolved(let projectName, let underlying):
+            return "integrator not spawned: Agent Board could not read \(projectName)'s origin remote to tell whether "
+                + "the epic ships by pull request or local merge. Call request_integration again, or choose an "
+                + "integration in the project's Publishing settings. \(underlying)"
         case .capRefused(let reason): return "spawn refused: \(reason)"
         case .taskAlreadyHeld(let title, let sessionId):
             return "\"\(title)\" is still held by session \(sessionId); a second agent would share its worktree"
@@ -1719,7 +1724,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if case .refused(let reason) = try CapCheck(db).canSpawn(projectId: project.id) {
             throw SupervisorError.capRefused(reason)
         }
-        let shipsByPullRequest = try await standaloneIntegration(of: project) == .pullRequest
+        let shipsByPullRequest = try await integratesByPullRequest(epic, project: project)
 
         let manager = worktreeManager(for: project)
         let worktreeName = HeldWorktree.epicWorktreeName(epicId: epicId)
@@ -2280,6 +2285,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             guard let previous = integrationDefaults[project.id] else { throw error }
             return previous
+        }
+    }
+
+    /// SPEC §5.2 step 4: an epic already shipping by pull request keeps it; a respawn never re-resolves it to local merge.
+    private func integratesByPullRequest(_ epic: Epic, project: Project) async throws -> Bool {
+        if epic.shipsByPullRequest == true { return true }
+        do {
+            return try await standaloneIntegration(of: project) == .pullRequest
+        } catch {
+            throw SupervisorError.integrationUnresolved(projectName: project.name, underlying: describe(error))
         }
     }
 
