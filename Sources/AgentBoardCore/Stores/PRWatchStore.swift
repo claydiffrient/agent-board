@@ -236,18 +236,19 @@ public struct PRWatchStore: Sendable {
         }
     }
 
-    /// Parked → settling (SPEC §13.4 Resume). Stamping `resumed_at` restarts the round cap and the
-    /// failure streak, and each open `fix` item moves past the current round, so the next round takes it
-    /// up without a fresh triage. A round whose check never ran keeps its items and goes back to checking,
-    /// since their fixes sit in its unpushed commit (SPEC §13.1). Nil unless the watch is parked.
+    /// Parked or stopped → settling (SPEC §13.4 Resume and Watch again). Stamping `resumed_at` restarts the
+    /// round cap and the failure streak, and each open `fix` item moves past the current round, so the next
+    /// round takes it up without a fresh triage. A parked round whose check never ran keeps its items and goes
+    /// back to checking, since their fixes sit in its unpushed commit (SPEC §13.1). Nil unless the watch is
+    /// parked or stopped.
     @discardableResult
     public func resume(watchId: String, now: Int64 = .nowMillis) throws -> PRWatch? {
         try db.writer.write { try Self.resume($0, watchId: watchId, now: now) }
     }
 
     static func resume(_ db: Database, watchId: String, now: Int64) throws -> PRWatch? {
-        guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .parked else { return nil }
-        if var round = try Self.round(db, watchId: watchId, number: watch.round),
+        guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state.isResumable else { return nil }
+        if watch.state == .parked, var round = try Self.round(db, watchId: watchId, number: watch.round),
            round.outcome == PRRoundOutcome.checkUnavailable.rawValue,
            let taskId = round.fixTaskId, try Task.fetchOne(db, key: taskId)?.column == .review {
             round.outcome = nil
@@ -434,7 +435,7 @@ public struct PRWatchStore: Sendable {
             sql: """
             SELECT w.project_id, COUNT(*) AS n
             FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id JOIN project p ON p.id = w.project_id
-            WHERE i.state = 'open' AND i.verdict = 'decision' AND w.state NOT IN ('merged', 'closed')
+            WHERE i.state = 'open' AND i.verdict = 'decision' AND w.state NOT IN ('merged', 'closed', 'stopped')
               AND \(countsTowardAttention)
             GROUP BY w.project_id
             """

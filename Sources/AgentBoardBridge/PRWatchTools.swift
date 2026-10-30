@@ -77,17 +77,18 @@ struct PRWatchTools: Sendable {
         ToolDescriptor(
             name: "resume_pr_watch",
             description: "Ask the human to resume a parked pull request once you have dealt with why it parked (its "
-                + "`parked_reason`, from list_pr_watches or get_pr_watch). Resuming returns it to settling and "
-                + "restarts its round cap, as Resume on the Pull Requests page does. Returns a pending approval and "
-                + "changes nothing until the human grants it on Pending Approvals; the outcome comes back as a "
-                + "`decision` report. Refused unless the watch is parked. Name the pull request by `number` or "
-                + "`watch_id`.",
+                + "`parked_reason`, from list_pr_watches or get_pr_watch), or to watch a stopped one again. Resuming "
+                + "returns it to settling and restarts its round cap, as Resume and Watch again on the Pull Requests "
+                + "page do. Returns a pending approval and changes nothing until the human grants it on Pending "
+                + "Approvals; the outcome comes back as a `decision` report. Refused unless the watch is parked or "
+                + "stopped. Name the pull request by `number` or `watch_id`.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "number": ToolSchema.integer("The pull request's number."),
                     "watch_id": ToolSchema.string("The watch's id, from list_pr_watches."),
                     "reason": ToolSchema.string(
-                        "What was done about the parked reason, shown to the human. Required."
+                        "What was done about the parked reason, or why a stopped pull request should be watched "
+                            + "again, shown to the human. Required."
                     ),
                 ],
                 required: ["reason"]
@@ -193,8 +194,8 @@ struct PRWatchTools: Sendable {
                 projectId: identity.projectId, watchId: watch.id, reason: reason,
                 requestedBy: identity.sessionId ?? "orchestrator"
             )
-            return ToolResult(text: "resume approval \(approval.id) pending; #\(watch.number) stays parked until the "
-                + "human grants it. The outcome reaches you via list_reports.")
+            return ToolResult(text: "resume approval \(approval.id) pending; #\(watch.number) stays "
+                + "\(watch.state.rawValue) until the human grants it. The outcome reaches you via list_reports.")
         } catch let rejection as PRVerdictRejection {
             throw ToolError(rejection.reason)
         }

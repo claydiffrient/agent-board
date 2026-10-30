@@ -508,16 +508,18 @@ final class PRWatchStoreTests: XCTestCase {
         let decided = try store.upsert(projectId: f.project.id, snapshot: snapshot(number: 2, items: [thread("D1")]))
         let waiting = try store.upsert(projectId: other.id, snapshot: snapshot(number: 3, items: []))
         let merged = try store.upsert(projectId: f.project.id, snapshot: snapshot(number: 4, items: []))
+        let stopped = try store.upsert(projectId: f.project.id, snapshot: snapshot(number: 5, items: [thread("D2")]))
         try store.setState(.readyToVerify, watchId: ready.id)
         try store.setState(.merged, watchId: merged.id)
+        try store.setState(.stopped, watchId: stopped.id)
         try f.db.writer.write { db in
-            try db.execute(sql: "UPDATE pr_item SET verdict = 'decision' WHERE github_node_id = 'D1'")
+            try db.execute(sql: "UPDATE pr_item SET verdict = 'decision' WHERE github_node_id IN ('D1', 'D2')")
         }
         try store.setPaused(true, watchId: waiting.id)
 
         let page = try store.page()
-        XCTAssertEqual(page.map(\.group), [.readyToVerify, .needsYou, .waitingOnReviewers])
-        XCTAssertEqual(page.map { $0.listings.map(\.watch.id) }, [[ready.id], [decided.id], [waiting.id]])
+        XCTAssertEqual(page.map(\.group), [.readyToVerify, .needsYou, .waitingOnReviewers, .stopped])
+        XCTAssertEqual(page.map { $0.listings.map(\.watch.id) }, [[ready.id], [decided.id], [waiting.id], [stopped.id]])
         XCTAssertEqual(page[1].listings[0].openItems, 1)
         XCTAssertEqual(page[1].listings[0].openDecisions, 1)
         XCTAssertEqual(page[2].listings[0].watch.paused, true)

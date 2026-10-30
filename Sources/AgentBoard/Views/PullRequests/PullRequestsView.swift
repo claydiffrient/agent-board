@@ -18,6 +18,7 @@ struct PullRequestsView: View {
     @State private var routedWatchId: String?
     @State private var refreshing: Set<PRPageGroup> = []
     @State private var refreshErrors: [PRPageGroup: String] = [:]
+    @State private var showsStopped = false
 
     init(projects: [Project], projectFilter: Binding<String?> = .constant(nil)) {
         self.projects = projects
@@ -93,8 +94,10 @@ struct PullRequestsView: View {
                                 Text(section.group.emptyText)
                                     .foregroundStyle(.secondary)
                             }
-                            ForEach(section.listings) { listing in
-                                row(listing)
+                            if section.group != .stopped || showsStopped {
+                                ForEach(section.listings) { listing in
+                                    row(listing)
+                                }
                             }
                         } header: {
                             header(section)
@@ -111,7 +114,18 @@ struct PullRequestsView: View {
         let title = section.group.title
         let inFlight = refreshing.contains(section.group) || env.supervisor.isPollingPRWatches
         return HStack {
-            Text(title)
+            if section.group == .stopped {
+                Button {
+                    showsStopped.toggle()
+                } label: {
+                    Label("\(title) (\(section.listings.count))", systemImage: showsStopped ? "chevron.down" : "chevron.right")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityValue(showsStopped ? "Expanded" : "Collapsed")
+                .help(showsStopped ? "Hide the pull requests you stopped watching" : "Show the pull requests you stopped watching")
+            } else {
+                Text(title)
+            }
             Spacer()
             if inFlight {
                 ProgressView()
@@ -454,6 +468,7 @@ struct PullRequestRow: View {
     private var canSendBack: Bool { watch.state == .readyToVerify || watch.state == .verified }
     private var trimmedFailure: String { failure.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var isParked: Bool { watch.state == .parked }
+    private var isStopped: Bool { watch.state == .stopped }
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -476,7 +491,7 @@ struct PullRequestRow: View {
             ForEach(listing.sessions) { session in
                 attachButton(session)
             }
-            if watch.state != .verified {
+            if watch.state != .verified && !isStopped {
                 Button(isMarking ? "Marking…" : "Mark verified", action: markVerified)
                     .disabled(verificationLabel == nil || isMarking)
                     .help(verificationLabel.map { "Add the \($0) label on GitHub" }
@@ -493,11 +508,14 @@ struct PullRequestRow: View {
                         : "Record what verifying turned up, so follow-through fixes it")
                     .popover(isPresented: $sendingBack, arrowEdge: .bottom) { sendBackForm }
             }
-            if isParked {
+            if isStopped {
+                Button("Watch again", action: resume)
+                    .help("Start follow-through on this pull request again, with a fresh round cap")
+            } else if isParked {
                 Button("Resume", action: resume)
                     .help("Start follow-through on this pull request again, with a fresh round cap")
                 Button("Stop watching", action: stopWatching)
-                    .help("Leave this pull request to you; follow-through will not watch it again")
+                    .help("Leave this pull request to you; it moves to Stopped until you choose Watch again")
             } else {
                 Button(watch.paused ? "Resume" : "Pause", action: togglePause)
             }
@@ -571,6 +589,7 @@ extension PRPageGroup {
         case .waitingOnReviewers: "Waiting on reviewers"
         case .verified: "Verified"
         case .parked: "Parked"
+        case .stopped: "Stopped"
         }
     }
 
@@ -582,6 +601,7 @@ extension PRPageGroup {
         case .waitingOnReviewers: "Nothing is waiting on reviewers."
         case .verified: "Nothing is verified yet."
         case .parked: "Nothing is parked."
+        case .stopped: "Nothing is stopped."
         }
     }
 }
