@@ -27,17 +27,42 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertEqual(result.status, 0)
     }
 
-    /// Each leaked pair stayed open for the app's lifetime; at the descriptor limit `Pipe()` handed out
-    /// fd 0, and `claude agents --json` read back as empty stdout with exit 0.
-    func testTimedRunsLeaveNoDescriptorsOpen() throws {
+    /// Each leaked pair stayed open until the app's lifetime (timed) or the thread's autorelease pool (untimed)
+    /// ended; at the descriptor limit `Pipe()` handed out fd 0, and git read back as empty stdout with exit 0.
+    func testRunsLeaveNoDescriptorsOpen() throws {
         let runs = 20
         let before = Self.openDescriptorCount()
         for _ in 0..<runs {
-            try autoreleasepool {
-                _ = try ProcessRunner.run(executable: Self.shell, arguments: ["-c", "echo out"], timeout: 10)
-            }
+            _ = try ProcessRunner.run(executable: Self.shell, arguments: ["-c", "echo out"], timeout: 10)
+            _ = try ProcessRunner.run(executable: Self.shell, arguments: ["-c", "echo out"])
         }
         XCTAssertLessThan(Self.openDescriptorCount() - before, runs)
+    }
+
+    /// With one descriptor free, `git remote get-url origin` came back exit 0 with empty stdout, which read as
+    /// "no origin" and shipped an epic by local merge.
+    func testARunWithNoDescriptorsLeftThrowsRatherThanReturningEmptyOutput() throws {
+        let echo = URL(fileURLWithPath: "/bin/echo")
+        // The first launch in a process can raise the soft limit, which would undo the one set below.
+        _ = try ProcessRunner.run(executable: echo, arguments: ["warm"])
+        var original = rlimit()
+        XCTAssertEqual(getrlimit(RLIMIT_NOFILE, &original), 0)
+        let highest = (0..<min(getdtablesize(), 8192)).last { fcntl($0, F_GETFD) != -1 } ?? 2
+        var lowered = rlimit(rlim_cur: rlim_t(highest + 32), rlim_max: original.rlim_max)
+        XCTAssertEqual(setrlimit(RLIMIT_NOFILE, &lowered), 0)
+        var held: [Int32] = []
+        while true {
+            let fd = open("/dev/null", O_RDONLY)
+            guard fd >= 0 else { break }
+            held.append(fd)
+        }
+        close(try XCTUnwrap(held.popLast()))
+
+        let outcome = Result { try ProcessRunner.run(executable: echo, arguments: ["origin-url"]) }
+        held.forEach { close($0) }
+        XCTAssertEqual(setrlimit(RLIMIT_NOFILE, &original), 0)
+
+        XCTAssertThrowsError(try outcome.get())
     }
 
     private static func openDescriptorCount() -> Int {

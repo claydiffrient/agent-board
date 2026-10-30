@@ -37,14 +37,20 @@ enum ProcessRunner {
         process.currentDirectoryURL = cwd
         process.environment = environment ?? ChildEnvironment.sanitized()
 
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
+        let stdoutPipe = try pipe("stdout")
+        let stderrPipe = try pipe("stderr")
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        // Even after `waitUntilExit` the read ends stay open until the thread's autorelease pool drains, so a
+        // sweep running hundreds of git calls in one closure held thousands of fds until the app ran out.
+        defer {
+            try? stdoutPipe.fileHandleForReading.close()
+            try? stderrPipe.fileHandleForReading.close()
+        }
 
         let stdinPipe: Pipe?
         if stdin != nil {
-            stdinPipe = Pipe()
+            stdinPipe = try pipe("stdin")
             process.standardInput = stdinPipe
         } else {
             stdinPipe = nil
@@ -77,6 +83,16 @@ enum ProcessRunner {
             stdout: String(decoding: output.stdout, as: UTF8.self),
             stderr: String(decoding: output.stderr, as: UTF8.self)
         )
+    }
+
+    /// With no descriptors left `Pipe()` does not fail: both ends read as fd 0, and a child launched on it
+    /// exits 0 with its output lost.
+    static func pipe(_ name: String) throws -> Pipe {
+        let pipe = Pipe()
+        guard pipe.fileHandleForReading.fileDescriptor != pipe.fileHandleForWriting.fileDescriptor else {
+            throw AgentRuntimeError("could not open a \(name) pipe: this process has no file descriptors left")
+        }
+        return pipe
     }
 
     /// Feeds stdin and drains both pipes on the calling thread; nil past `deadline`, or, without an `exitWatch`,
@@ -165,12 +181,12 @@ enum ProcessRunner {
         process.currentDirectoryURL = cwd
         process.environment = environment ?? ChildEnvironment.sanitized()
         process.standardInput = FileHandle.nullDevice
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
+        let stdoutPipe = try pipe("stdout")
+        let stderrPipe = try pipe("stderr")
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
-        // Foundation frees a Process's pipes only once `waitUntilExit` or a run loop sees the exit, and
-        // `ExitWatch` is neither: without this every call leaked both read ends until the app ran out of fds.
+        // Without this every call leaked both read ends until the app ran out of fds; `ExitWatch` never lets
+        // Foundation see the exit.
         defer {
             try? stdoutPipe.fileHandleForReading.close()
             try? stderrPipe.fileHandleForReading.close()
