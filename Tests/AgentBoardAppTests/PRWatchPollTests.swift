@@ -459,6 +459,30 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertEqual(open.map(\.githubNodeId), ["T_open"])
     }
 
+    /// SPEC §13.1: a push outdating a thread keeps the fix or triage owed on it; the viewer's own reply retires an untriaged item.
+    func testAnOutdatedThreadKeepsItsItemOpenWhileTheViewersReplyRetiresAnUntriagedOne() async throws {
+        try enable()
+        answer(pullRequest(threads: [
+            thread("T_fix", by: "reviewer"), thread("T_moved", by: "reviewer"), thread("T_replied", by: "reviewer"),
+        ]))
+        await fixture.supervisor.pollPRWatches()
+        try await fixture.db.writer.write {
+            try $0.execute(sql: "UPDATE pr_item SET verdict = 'fix' WHERE github_node_id = 'T_fix'")
+        }
+
+        answer(pullRequest(head: "decaf0", threads: [
+            thread("T_fix", by: "reviewer", outdated: true), thread("T_moved", by: "reviewer", outdated: true),
+            thread("T_replied", by: "me", body: "Won't fix."),
+        ]))
+        await fixture.supervisor.pollPRWatches()
+
+        let items = Dictionary(uniqueKeysWithValues: try watches.items(watchId: try onlyWatch().id).map { ($0.githubNodeId, $0) })
+        XCTAssertEqual(items["T_fix"]?.state, .open)
+        XCTAssertEqual(items["T_fix"]?.verdict, .fix)
+        XCTAssertEqual(items["T_moved"]?.state, .open)
+        XCTAssertEqual(items["T_replied"]?.state, .handled)
+    }
+
     /// SPEC §13.1: triage never sees what a reviewer hid from humans in an HTML comment.
     func testHiddenHTMLCommentsAreStrippedAndFeedbackWithNothingVisibleIsNoItem() async throws {
         try enable()

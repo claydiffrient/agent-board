@@ -11,6 +11,7 @@ public struct PRWatchStore: Sendable {
     /// Records one poll (SPEC §4). Idempotent by node id: an unchanged snapshot moves only
     /// `last_polled_at`, and a new head oid stamps `head_changed_at`. An open item that resolved or left the snapshot becomes handled,
     /// except a verify failure, which GitHub never reports; a check item does once its run is no longer a failed check.
+    /// An outdated or viewer-latest thread leaves an owed item untouched and counts as gone for any other (SPEC §13.1).
     /// An item whose body changed (a new reply) is open and untriaged again, owing a fresh reply; one that
     /// reopens also drops its task. A fork parks from any state the poll moves (SPEC §13.1), and a stopped
     /// watch records nothing.
@@ -59,7 +60,7 @@ public struct PRWatchStore: Sendable {
             )
             for incoming in snapshot.items {
                 guard var item = stored.removeValue(forKey: incoming.githubNodeId) else {
-                    if incoming.isResolved || !incoming.opensItem { continue }
+                    if incoming.isResolved || !incoming.opensItem || incoming.onlyKeepsOwedItems { continue }
                     var item = PRItem(
                         id: nil, watchId: watch.id, githubNodeId: incoming.githubNodeId, kind: incoming.kind,
                         author: incoming.author, body: incoming.body, path: incoming.path, line: incoming.line,
@@ -67,6 +68,10 @@ public struct PRWatchStore: Sendable {
                     )
                     try item.insert(db)
                     feedbackArrived = true
+                    continue
+                }
+                if !incoming.isResolved, incoming.onlyKeepsOwedItems {
+                    if !item.staysOpen(under: incoming) { stored[incoming.githubNodeId] = item }
                     continue
                 }
                 let before = item
