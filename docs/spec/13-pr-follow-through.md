@@ -157,10 +157,13 @@ are never watched. A thread becomes an item while it is neither resolved nor
 outdated and its latest comment is not the viewer's; that comment is the item's
 body, so a reply changes it. An outdated thread, or one whose latest comment is
 the viewer's (a reply the board posted included), creates no item but still
-keeps a pending one: an open item with verdict `fix` (an answered decision
-among them), `decision`, or none stays open with its verdict, round, decision
-fields, body, path and line untouched, so the next round triages or fixes it as
-stored. Any other item treats such a thread as gone. A push touching a thread's
+keeps an owed one: an open item with verdict `fix` (an answered decision among
+them) or `decision` stays open with its verdict, round, decision fields, body,
+path and line untouched, so the next round fixes or asks about it as stored. An
+untriaged item stays open the same way under an outdated thread, since code
+moving under a comment does not address it, but the viewer's own latest comment
+retires it, so replying on GitHub still settles an item by hand. Any other item
+treats such a thread as gone. A push touching a thread's
 lines outdates it, so without this a poll would silently handle a fix still
 awaiting its round; a fix a round already made is handled by publishing itself
 before any poll can see its thread outdated. A resolved thread is handled
@@ -533,8 +536,8 @@ settling until the order lifts.
 Items are keyed by the GitHub node id of the thread, review, comment or check they came from,
 so each is handled once per round; a new reply on a thread reopens it for
 triage (§4), whether it was handled or still open with a verdict. The human's own comments, resolved threads, and outdated threads
-are never turned into items, though an outdated or viewer-latest thread keeps a
-pending item open (phase 1 above).
+are never turned into items, though an outdated or viewer-latest thread keeps an
+owed item open (phase 1 above).
 
 **Dismissed items.** An open item can be retired by hand, with a required
 reason, when it was settled outside follow-through — a description edited with

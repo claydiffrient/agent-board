@@ -227,8 +227,16 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
 
     public var isOpenDecision: Bool { state == .open && verdict == .decision }
 
-    /// Open and still owed work: untriaged, a decision awaiting the human, or a fix awaiting its round (SPEC §13.1).
-    var isPending: Bool { state == .open && (verdict == nil || verdict == .fix || verdict == .decision) }
+    /// SPEC §13.1: an open fix or decision outlives an outdated or viewer-latest thread; an untriaged item
+    /// outlives only an outdated one, since the viewer's own reply retires it.
+    func staysOpen(under incoming: PRSnapshotItem) -> Bool {
+        guard state == .open else { return false }
+        switch verdict {
+        case .fix?, .decision?: return true
+        case nil: return !incoming.viewerLatest
+        default: return false
+        }
+    }
 
     /// A `CHANGES_REQUESTED` review with no text of its own (SPEC §13.1).
     public var isEmptyChangeRequest: Bool {
@@ -442,7 +450,7 @@ public struct PRSnapshotItem: Sendable, Equatable {
     public var isResolved: Bool
     /// False for feedback too old to start triage: it updates a stored item but creates none (SPEC §13.1).
     public var opensItem: Bool
-    /// An outdated thread, or one whose latest comment is the viewer's, only keeps a pending item open (SPEC §13.1).
+    /// An outdated thread, or one whose latest comment is the viewer's, only keeps an owed item open (SPEC §13.1).
     public var isOutdated: Bool
     public var viewerLatest: Bool
 
@@ -464,7 +472,7 @@ public struct PRSnapshotItem: Sendable, Equatable {
         self.viewerLatest = viewerLatest
     }
 
-    var keepsPendingOnly: Bool { isOutdated || viewerLatest }
+    var onlyKeepsOwedItems: Bool { isOutdated || viewerLatest }
 
     /// SPEC §13.1: the body of a CHANGES_REQUESTED review that has no visible text of its own.
     public static func emptyChangeRequestBody(author: String) -> String {
