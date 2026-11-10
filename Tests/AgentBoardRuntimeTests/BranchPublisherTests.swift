@@ -142,6 +142,18 @@ final class BranchPublisherRepoTests: XCTestCase {
         XCTAssertEqual(try publisher.requireRemote(), remote.path)
     }
 
+    /// SPEC §5: exit 0 with nothing on stdout is a failed read, not git saying there is no origin.
+    func testAnOriginReadAsAnEmptyURLThrowsRatherThanChoosingLocalMerge() throws {
+        try addRemote()
+        try git(["config", "url..insteadOf", remote.path], in: repo)
+        XCTAssertThrowsError(try publisher.defaultStandaloneIntegration()) { error in
+            guard case PublishFailure.gitFailed(_, _, let status, _)? = error as? PublishFailure else {
+                return XCTFail("expected gitFailed, got \(error)")
+            }
+            XCTAssertEqual(status, 0)
+        }
+    }
+
     private func commit(_ file: String, _ contents: String, message: String) throws {
         try contents.write(to: repo.appendingPathComponent(file), atomically: true, encoding: .utf8)
         try git(["add", "."], in: repo)
