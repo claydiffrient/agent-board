@@ -67,6 +67,26 @@ final class StallAndCapRouteTests: XCTestCase {
         )
     }
 
+    /// SPEC §8: a `post-checkout` hook that outlasts the idle cap is setup time, not agent idleness.
+    func testASetupLongerThanTheTimeCapsIsNotChargedToTheAgentItLaunches() async throws {
+        let task = try runningTask()
+        try fixture.sessions.insert(AgentSession(
+            sessionId: "setup-slow-hook", projectId: fixture.project.id, taskId: task.id, role: .worker,
+            cwd: fixture.repo.path, state: .setup, startedAt: millis(Date().addingTimeInterval(-21 * 60))
+        ))
+        let promoted = try fixture.sessions.promoteSetupSession("setup-slow-hook", to: "session-launched", shortId: "launched")
+
+        await supervisor.meter(
+            promoted,
+            limits: CapLimits(maxTokens: nil, maxWallClockSeconds: 1_200, maxIdleSeconds: 600),
+            stallSeconds: 100_000,
+            awake: .init(nowMillis: .nowMillis)
+        )
+
+        XCTAssertEqual(posted.map(\.title), [])
+        XCTAssertEqual(try fixture.sessions.get("session-launched")?.state, .starting)
+    }
+
     func testACapBreachBannerRoutesToTheSessionItNames() async throws {
         let task = try runningTask()
         let session = AgentSession(

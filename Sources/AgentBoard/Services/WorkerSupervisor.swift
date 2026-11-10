@@ -5329,7 +5329,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         if sleepCutAwaitingWake.contains(current.sessionId) { limits.maxIdleSeconds = nil }
         guard let breach = CapEvaluator.evaluate(
             totals: totals,
-            startedAt: current.startedDate,
+            startedAt: current.clockStartedDate,
             lastActivity: lastActivity,
             toolStartedAt: current.toolStartedDate,
             awake: awake,
@@ -5344,7 +5344,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func noteStall(_ session: AgentSession, lastActivity: Date?, stallSeconds: Int, awake: AwakeElapsed) {
         let stalled = session.state == .running && AttentionSelection.isStalled(
             lastActivity: lastActivity,
-            startedAt: session.startedDate,
+            startedAt: session.clockStartedDate,
             toolStartedAt: session.toolStartedDate,
             awake: awake,
             threshold: TimeInterval(stallSeconds)
