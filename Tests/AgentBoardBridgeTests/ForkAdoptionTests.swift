@@ -4,7 +4,7 @@ import AgentBoardServer
 import Foundation
 import XCTest
 
-/// SPEC §2: `/clear` emits `SessionEnd` for the old id, then `SessionStart` with `source: "fork"`
+/// SPEC §2: `/clear` emits `SessionEnd` for the old id, then `SessionStart` with `source: "clear"`
 /// under a new id that names no parent. The token grant is the only link back.
 final class ForkAdoptionTests: XCTestCase {
     private var f: BridgeFixture!
@@ -32,7 +32,10 @@ final class ForkAdoptionTests: XCTestCase {
         try f.projects.setOrchestratorSession(f.project.id, sessionId: "3ecc45ba")
         let identity = try await identity(scope: .orchestrator, boundTo: "3ecc45ba")
 
-        let event = HookEvent(name: "SessionStart", sessionId: "40cccc09", transcriptPath: "/tmp/40cccc09.jsonl", rawJSON: "{\"source\":\"fork\"}")
+        let event = HookEvent(
+            name: "SessionStart", sessionId: "40cccc09", transcriptPath: "/tmp/40cccc09.jsonl",
+            sessionSource: "clear", rawJSON: "{\"source\":\"clear\"}"
+        )
         _ = await f.hooks.handle(event, identity: identity)
 
         let adopted = try XCTUnwrap(f.sessions.get("40cccc09"))
@@ -52,6 +55,26 @@ final class ForkAdoptionTests: XCTestCase {
         XCTAssertEqual(prior.estCostUSD, 1.25, accuracy: 0.0001)
     }
 
+    /// SPEC §7: a background process the orchestrator ran inherited its hook token, and its child
+    /// sessions took the running orchestrator's pin and grant.
+    func testAnUnknownSessionStartThatIsNotAClearLeavesThePinAndGrantWithTheRunningSession() async throws {
+        try f.session("b3cdfce8", role: .orchestrator, state: .running)
+        try f.projects.setOrchestratorSession(f.project.id, sessionId: "b3cdfce8")
+        let identity = try await identity(scope: .orchestrator, boundTo: "b3cdfce8")
+
+        for (id, source) in [("ff7c606e", "startup"), ("be9c05ef", "fork")] {
+            _ = await f.hooks.handle(
+                HookEvent(name: "SessionStart", sessionId: id, sessionSource: source, rawJSON: "{\"source\":\"\(source)\"}"),
+                identity: identity
+            )
+        }
+
+        XCTAssertEqual(try f.projects.get(f.project.id)?.orchSessionId, "b3cdfce8")
+        XCTAssertEqual(try grants.resolve(token: identity.token)?.sessionId, "b3cdfce8")
+        XCTAssertNil(try f.sessions.get("ff7c606e"))
+        XCTAssertNil(try f.sessions.get("be9c05ef"))
+    }
+
     func testWorkerForkKeepsTheTaskBindingAndLeavesTheProjectPinAlone() async throws {
         let task = try f.task("Add the sidebar", column: .running)
         try f.session("w1", taskId: task.id)
@@ -60,8 +83,11 @@ final class ForkAdoptionTests: XCTestCase {
         try f.projects.setOrchestratorSession(f.project.id, sessionId: "orch-1")
         let identity = try await identity(scope: .worker, boundTo: "w1", taskId: task.id)
 
-        let event = HookEvent(name: "PostToolUse", sessionId: "w2", toolName: "Bash", rawJSON: "{}")
-        _ = await f.hooks.handle(event, identity: identity)
+        _ = await f.hooks.handle(
+            HookEvent(name: "SessionStart", sessionId: "w2", sessionSource: "clear", rawJSON: "{\"source\":\"clear\"}"),
+            identity: identity
+        )
+        _ = await f.hooks.handle(HookEvent(name: "PostToolUse", sessionId: "w2", toolName: "Bash", rawJSON: "{}"), identity: identity)
 
         let adopted = try XCTUnwrap(f.sessions.get("w2"))
         XCTAssertEqual(adopted.state, .running)
@@ -79,7 +105,10 @@ final class ForkAdoptionTests: XCTestCase {
         try f.session("w1", taskId: task.id)
         let identity = try await identity(scope: .worker, boundTo: "w1", taskId: task.id)
 
-        _ = await f.hooks.handle(HookEvent(name: "SessionStart", sessionId: "w2", rawJSON: "{\"source\":\"fork\"}"), identity: identity)
+        _ = await f.hooks.handle(
+            HookEvent(name: "SessionStart", sessionId: "w2", sessionSource: "clear", rawJSON: "{\"source\":\"clear\"}"),
+            identity: identity
+        )
 
         XCTAssertEqual(try f.sessions.get("w2")?.state, .stopped)
     }
@@ -87,7 +116,7 @@ final class ForkAdoptionTests: XCTestCase {
     func testUnknownSessionWithNoLiveGrantIsStillIgnored() async throws {
         let identity = try await identity(scope: .worker, boundTo: String?.none)
 
-        _ = await f.hooks.handle(HookEvent(name: "SessionStart", sessionId: "ghost", rawJSON: "{}"), identity: identity)
+        _ = await f.hooks.handle(HookEvent(name: "SessionStart", sessionId: "ghost", sessionSource: "clear", rawJSON: "{}"), identity: identity)
 
         XCTAssertNil(try f.sessions.get("ghost"))
     }
@@ -97,7 +126,7 @@ final class ForkAdoptionTests: XCTestCase {
         try f.sessions.insert(AgentSession(sessionId: "other-orch", projectId: other.id, role: .orchestrator, cwd: "/tmp/other", state: .stopped))
         let identity = try await identity(scope: .orchestrator, boundTo: "other-orch")
 
-        _ = await f.hooks.handle(HookEvent(name: "SessionStart", sessionId: "fork-1", rawJSON: "{}"), identity: identity)
+        _ = await f.hooks.handle(HookEvent(name: "SessionStart", sessionId: "fork-1", sessionSource: "clear", rawJSON: "{}"), identity: identity)
 
         XCTAssertNil(try f.sessions.get("fork-1"))
         XCTAssertNil(try f.projects.get(f.project.id)?.orchSessionId)
@@ -107,7 +136,7 @@ final class ForkAdoptionTests: XCTestCase {
         try f.session("orch-1", role: .orchestrator, state: .stopped)
         let identity = try await identity(scope: .worker, boundTo: "orch-1")
 
-        _ = await f.hooks.handle(HookEvent(name: "SessionStart", sessionId: "fork-1", rawJSON: "{}"), identity: identity)
+        _ = await f.hooks.handle(HookEvent(name: "SessionStart", sessionId: "fork-1", sessionSource: "clear", rawJSON: "{}"), identity: identity)
 
         XCTAssertNil(try f.sessions.get("fork-1"))
     }
@@ -118,7 +147,7 @@ final class ForkAdoptionTests: XCTestCase {
         try f.projects.setOrchestratorSession(f.project.id, sessionId: "orch-1")
         let identity = try await identity(scope: .orchestrator, boundTo: "orch-1")
 
-        _ = await f.hooks.handle(HookEvent(name: "SessionStart", sessionId: "orch-2", rawJSON: "{}"), identity: identity)
+        _ = await f.hooks.handle(HookEvent(name: "SessionStart", sessionId: "orch-2", sessionSource: "clear", rawJSON: "{}"), identity: identity)
 
         XCTAssertEqual(try grants.resolve(token: identity.token)?.sessionId, "orch-1")
         XCTAssertEqual(try f.projects.get(f.project.id)?.orchSessionId, "orch-1")

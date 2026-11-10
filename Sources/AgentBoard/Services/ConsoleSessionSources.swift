@@ -2,6 +2,25 @@ import AgentBoardCore
 import AgentBoardRuntime
 import Foundation
 
+/// SPEC §9: a pin can name a session whose transcript holds no conversation, and `--resume` refuses
+/// it, so every relaunch would exit at once.
+private struct ConsoleTranscripts {
+    let cwd: String
+    let projectsRoot: URL
+
+    /// A missing transcript is fine: the launch passes `--session-id` and starts the conversation.
+    func cannotResume(_ sessionId: String) -> Bool {
+        let url = ClaudeProjectPaths.transcriptURL(forCwd: cwd, sessionId: sessionId, projectsRoot: projectsRoot)
+        return FileManager.default.fileExists(atPath: url.path) && !TranscriptMeter.holdsConversation(transcriptAt: url)
+    }
+
+    func holdConversation(_ sessionId: String) -> Bool {
+        TranscriptMeter.holdsConversation(
+            transcriptAt: ClaudeProjectPaths.transcriptURL(forCwd: cwd, sessionId: sessionId, projectsRoot: projectsRoot)
+        )
+    }
+}
+
 /// A project's orchestrator (SPEC §9): runs in the repository under the session pinned on the project.
 @MainActor
 final class ProjectOrchestratorSource: ConsoleSessionSource {
@@ -33,7 +52,16 @@ final class ProjectOrchestratorSource: ConsoleSessionSource {
     func resolveSession(port: Int?) throws -> String {
         let project = try project()
         guard port != nil else { throw SupervisorError.serverNotRunning }
-        if let pinned = project.orchSessionId, !pinned.isEmpty { return pinned }
+        if let pinned = project.orchSessionId, !pinned.isEmpty {
+            let transcripts = ConsoleTranscripts(cwd: project.repoPath, projectsRoot: projectsRoot)
+            guard transcripts.cannotResume(pinned) else { return pinned }
+            if let latest = try sessions.all(projectId: project.id).first(where: {
+                $0.role == .orchestrator && transcripts.holdConversation($0.sessionId)
+            }) {
+                try projects.setOrchestratorSession(project.id, sessionId: latest.sessionId)
+                return latest.sessionId
+            }
+        }
         let sessionId = UUID().uuidString.lowercased()
         try projects.setOrchestratorSession(project.id, sessionId: sessionId)
         return sessionId
@@ -119,7 +147,14 @@ final class CoordinatorSource: ConsoleSessionSource {
     func resolveSession(port: Int?) throws -> String {
         try CoordinatorHome.prepare(folder)
         guard port != nil else { throw SupervisorError.serverNotRunning }
-        if let active = try coordinator.activeSessionId() { return active }
+        if let active = try coordinator.activeSessionId() {
+            let transcripts = ConsoleTranscripts(cwd: folder.path, projectsRoot: projectsRoot)
+            guard transcripts.cannotResume(active) else { return active }
+            if let latest = try coordinator.history().first(where: { transcripts.holdConversation($0.sessionId) }) {
+                try coordinator.setActiveSession(latest.sessionId)
+                return latest.sessionId
+            }
+        }
         let sessionId = UUID().uuidString.lowercased()
         try sessions.insert(AgentSession(
             sessionId: sessionId, projectId: "", role: .coordinator, cwd: folder.path, state: .starting

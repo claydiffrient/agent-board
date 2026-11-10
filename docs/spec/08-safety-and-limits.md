@@ -283,7 +283,8 @@ the project's), under these rules:
   one pins it and restarts the console with `--resume`. Both switches revoke every
   live `coordinator` grant first, so the session switched away from can no longer
   call Coordinator tools; the next launch is issued its own. A `/clear` fork moves the
-  pin to the fork (§7).
+  pin to the fork (§7); no other new session id does. A pin whose transcript
+  holds no conversation is replaced on launch as an orchestrator's is (§9).
 - **Model.** `coordinator.model`, NULL for Claude Code's default; set in the
   Coordinator settings sheet (§10), and read by the next launch.
 - **Hooks and spend.** Its `agent_session` row has role `coordinator` and

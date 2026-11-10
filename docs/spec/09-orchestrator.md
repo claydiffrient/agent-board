@@ -16,6 +16,15 @@
   task it creates so agent review routes by it (§4), and the project's
   `modelGuidance` text so it can set `model` on the tasks it creates. The orchestrator itself runs on
   `settings.defaultModel` when set.
+- **Pinned session.** `project.orch_session_id` names the session every launch
+  resumes; an empty pin mints a new id, which the launch passes as
+  `--session-id`. Only a `/clear` fork moves the pin on its own (§7). Before a
+  launch, a pin whose transcript exists but holds no `user` or `assistant`
+  entry is replaced, because `claude --resume` refuses it with "No conversation
+  found with session ID" and every Restart would exit at once: the newest
+  orchestrator session for the project whose transcript does hold one takes
+  the pin, or a new id if none does. A pin with no transcript yet is kept and
+  started with `--session-id`.
 - **Restart** signals the child with SIGTERM and relaunches on its exit. It
   does not call SwiftTerm's `terminate()`, which cancels the exit monitor, so
   the relaunch would never fire.
