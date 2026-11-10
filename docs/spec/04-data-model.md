@@ -110,6 +110,7 @@ CREATE TABLE agent_session (
   review_head    TEXT,               -- §5.1: HEAD (and uncommitted-change fingerprint) a rostered reviewer was spawned on
   review_base    TEXT,               -- §3.1 step 1, §5.1: what a rostered reviewer diffs against; `ReviewPrompt.recorded` rebuilds from it
   agent_stopped_at INTEGER,         -- §8.6: a `claude stop` succeeded after the row's last sign of life; a trigger clears it
+  agent_started_at INTEGER,         -- §8: setup row promoted (or resumed); the cap and stall clocks start here, not at started_at
   CHECK ((role = 'coordinator') = (project_id IS NULL))
 );
 

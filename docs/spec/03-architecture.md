@@ -251,7 +251,8 @@ session, so when a stopped attempt's setup ends a `decision` report says so;
 that report is the refusal's cue to spawn again. A retry after a reap or
 teardown has claimed the path waits for that removal instead (§5). A session in `setup`
 holds a concurrency slot but does no work, is exempt from the idle cap (the
-clock is measuring setup, not the agent), and is skipped by `reconcile`, whose
+clock is measuring setup, not the agent), starts the elapsed and idle clocks
+only at step 8's promotion (§8), and is skipped by `reconcile`, whose
 join against `claude agents --json` cannot see a placeholder id. A failure in
 steps 3-8 has nowhere to be thrown: it terminates the session, puts the task
 back in `ready` flagged failed, and queues a `failed` report, which is also what
