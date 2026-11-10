@@ -508,6 +508,37 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
     private func resolved(_ url: URL) -> String { url.resolvingSymlinksInPath().path }
 
+    /// SPEC §13.1 fixing: a fixer whose `post-checkout` hook fails is a fixer session that failed.
+    func testAFixerWhoseWorktreeSetupFailsIsReportedRetriedAndParksTheWatchNamingTheError() async throws {
+        try enable()
+        let hook = fixture.repo.appendingPathComponent(".git/hooks/post-checkout")
+        try FileManager.default.createDirectory(at: hook.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try """
+        #!/bin/sh
+        case "$(git symbolic-ref -q --short HEAD)" in
+          agentboard/pr-*) echo 'MODULE.bazel expected but not found' >&2; exit 1 ;;
+        esac
+
+        """.write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+
+        let fixer = try await runningFixer()
+        for attempt in 1...PRWatchStore.failedSessionsBeforePark {
+            let fixers = try fixture.sessions.forTask(fixer.id)
+            XCTAssertEqual(fixers.count, attempt)
+            XCTAssertFalse(fixers.contains { $0.state.isActive })
+            XCTAssertEqual(try onlyWatch().state, .fixing)
+            await poll()
+        }
+
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .parked)
+        XCTAssertTrue(watch.parkedReason?.contains("MODULE.bazel expected but not found") == true, "\(watch.parkedReason ?? "")")
+        let failed = try ReportStore(fixture.db).unconsumed(projectId: fixture.project.id)
+            .filter { $0.taskId == fixer.id && $0.kind == .failed }
+        XCTAssertEqual(failed.count, PRWatchStore.failedSessionsBeforePark)
+    }
+
     func testACompletedFixerIsCheckedOnTheRoundBranchAndPassesToPublishingWithNoMerge() async throws {
         try enableChecking()
         let fixer = try await runningFixer()
