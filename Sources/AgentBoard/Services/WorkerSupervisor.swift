@@ -4181,30 +4181,31 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let placed = Set(placing.map(Self.resolved))
         let claim = claimTeardown(of: candidates.map(\.path).filter { !placed.contains(Self.resolved($0)) })
         defer { releaseTeardown(claim) }
-        let branches = candidates.filter { claim.paths.contains($0.path) }.map(\.branch)
+        let branches = candidates.filter { claim.paths.contains($0.path) }.map(\.listed)
         return await offMainResult { Self.deleteMergedBranches(manager, branches, bases: bases) }
     }
 
     /// A branch whose worktree is on disk is kept by the holder check, so only the rest need a claim.
-    private nonisolated static func worktreelessTaskBranches(_ manager: WorktreeManager) -> [(branch: String, path: String)] {
-        guard let branches = try? manager.localBranches(withPrefix: taskBranchPrefix) else { return [] }
+    nonisolated static func worktreelessTaskBranches(_ manager: WorktreeManager) -> [(listed: BranchTip, path: String)] {
+        guard let branches = try? manager.branchTips(withPrefix: taskBranchPrefix) else { return [] }
         return branches
-            .filter { !$0.hasPrefix(EpicStore.branchPrefix) && !$0.hasPrefix(SharedCheckoutGroup.branchPrefix) }
-            .map { ($0, manager.worktreeRoot.appendingPathComponent(String($0.dropFirst(taskBranchPrefix.count))).path) }
+            .filter { !$0.branch.hasPrefix(EpicStore.branchPrefix) && !$0.branch.hasPrefix(SharedCheckoutGroup.branchPrefix) }
+            .map { ($0, manager.worktreeRoot.appendingPathComponent(String($0.branch.dropFirst(taskBranchPrefix.count))).path) }
             .filter { !FileManager.default.fileExists(atPath: $0.path) }
     }
 
-    private nonisolated static func deleteMergedBranches(
-        _ manager: WorktreeManager, _ branches: [String], bases: [String]
+    nonisolated static func deleteMergedBranches(
+        _ manager: WorktreeManager, _ branches: [BranchTip], bases: [String]
     ) -> [String] {
         var failures: [String] = []
         var blocked: [String: (record: UnreadableWorktreeRecord, branches: Int)] = [:]
-        for branch in branches {
-            do {
-                if case .keptUnreadable(_, let record) = try manager.deleteBranchIfMerged(branch, into: bases) {
-                    blocked[record.directory, default: (record, 0)].branches += 1
-                }
-            } catch {
+        for (branch, outcome) in manager.deleteBranchesIfMerged(branches, into: bases) {
+            switch outcome {
+            case .success(.keptUnreadable(_, let record)):
+                blocked[record.directory, default: (record, 0)].branches += 1
+            case .success:
+                break
+            case .failure(let error):
                 failures.append("could not delete branch \(branch): \(error)")
             }
         }

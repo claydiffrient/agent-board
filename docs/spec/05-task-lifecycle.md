@@ -472,7 +472,12 @@ listed but not searched, so its entries cannot be told apart from stray files:
 only a positive "no such file" makes a registration dead or drops an entry. A linked entry with no `HEAD`
 names no branch, as git reads it. One unreadable record blocks every branch's
 check, so the sweep names that directory once in the status bar, with how many
-branches it kept. The delete itself is guarded by the tip that was checked. The teardown
+branches it kept. The sweep reads every `agentboard/*` tip with one `git
+for-each-ref` per repository, and the common dir and each base once per pass,
+so only the ancestry check (`merge-base --is-ancestor`) runs per branch, and
+through the git gate (§8.8). The delete itself is guarded by the tip that was checked:
+a branch gone since the listing counts as already deleted, and one that moved
+is kept. The teardown
 hook runs before each removal (§3.1); a failure goes on the progress of the
 task whose session held the worktree, in a `decision` report of its own, since
 no other report marks the removal. A kept orphan stays a status-bar notice:

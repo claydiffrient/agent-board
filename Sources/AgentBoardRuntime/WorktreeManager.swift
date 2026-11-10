@@ -41,6 +41,16 @@ public struct DiffSummary: Sendable, Equatable {
     public var isEmpty: Bool { filesChanged == 0 }
 }
 
+public struct BranchTip: Sendable, Equatable {
+    public var branch: String
+    public var tip: String
+
+    public init(branch: String, tip: String) {
+        self.branch = branch
+        self.tip = tip
+    }
+}
+
 public enum BranchDeletion: Sendable, Equatable {
     case deleted(String)
     case kept(branch: String, reason: String)
@@ -608,9 +618,36 @@ public struct WorktreeManager: Sendable {
     /// that was checked, so a commit landing in between keeps the branch.
     public func deleteBranchIfMerged(_ branch: String, into bases: [String]) throws -> BranchDeletion {
         guard try branchExists(branch) else { return .noSuchBranch(branch) }
+        return try deleteIfMerged(
+            branch, tip: { try resolve("refs/heads/\(branch)") }, bases: bases,
+            reads: SweepReads(common: Result { try commonDir() }, known: Result { try bases.filter { try commitExists($0) } })
+        )
+    }
+
+    /// `deleteBranchIfMerged` for each branch `branchTips` listed, deciding exactly as it does, but
+    /// reading the common dir and each base once per call rather than once per branch (SPEC §5).
+    public func deleteBranchesIfMerged(
+        _ branches: [BranchTip], into bases: [String]
+    ) -> [(branch: String, outcome: Result<BranchDeletion, Error>)] {
+        let reads = SweepReads(common: Result { try commonDir() }, known: Result { try bases.filter { try commitExists($0) } })
+        return branches.map { listed in
+            (listed.branch, Result {
+                try deleteIfMerged(listed.branch, tip: { listed.tip }, bases: bases, reads: reads, tipMayBeStale: true)
+            })
+        }
+    }
+
+    private struct SweepReads {
+        var common: Result<URL, Error>
+        var known: Result<[String], Error>
+    }
+
+    private func deleteIfMerged(
+        _ branch: String, tip readTip: () throws -> String, bases: [String], reads: SweepReads, tipMayBeStale: Bool = false
+    ) throws -> BranchDeletion {
         let holder: String?
         do {
-            holder = try worktreeHolding(branch)
+            holder = try worktreeHolding(branch, common: reads.common.get())
         } catch let record as UnreadableWorktreeRecord {
             return .keptUnreadable(branch: branch, record: record)
         } catch {
@@ -619,17 +656,27 @@ public struct WorktreeManager: Sendable {
         if let holder {
             return .kept(branch: branch, reason: "it is still checked out at \(holder)")
         }
-        let known = try bases.filter { try commitExists($0) }
+        let known = try reads.known.get()
         guard !known.isEmpty else {
             return .kept(branch: branch, reason: "none of \(bases.joined(separator: ", ")) exist in this repository")
         }
-        let tip = try resolve("refs/heads/\(branch)")
+        let tip = try readTip()
         guard try known.contains(where: { try isAncestor(tip, of: $0) }) else {
             return .kept(branch: branch, reason: "it is not merged into \(known.joined(separator: " or "))")
         }
-        recordReapedTip(branch)
-        try git(["update-ref", "-d", "refs/heads/\(branch)", tip])
-        return .deleted(branch)
+        recordReapedTip(branch, tip: tip)
+        let ref = "refs/heads/\(branch)"
+        let deletion = try gitRaw(["update-ref", "-d", ref, tip], cwd: repoPath)
+        guard deletion.status != 0 else { return .deleted(branch) }
+        if tipMayBeStale {
+            switch try refCommit(ref) {
+            case nil: return .noSuchBranch(branch)
+            case let moved? where moved != tip:
+                return .kept(branch: branch, reason: "it moved to \(moved) after its tip was read")
+            default: break
+            }
+        }
+        throw AgentRuntimeError(Self.failure(["update-ref", "-d", ref, tip], deletion))
     }
 
     /// The worktree whose HEAD, in-progress rebase or bisect names `branch` — the states git's own
@@ -637,8 +684,8 @@ public struct WorktreeManager: Sendable {
     /// list`: that exits 0 when it cannot read a worktree's `gitdir` or `HEAD`, and leaves the
     /// worktree or its branch out. Throws `UnreadableWorktreeRecord` when any record is unreadable.
     /// A linked entry with no HEAD names nothing, as git reads it.
-    private func worktreeHolding(_ branch: String) throws -> String? {
-        let admins = try worktreeAdminDirectories()
+    private func worktreeHolding(_ branch: String, common: URL? = nil) throws -> String? {
+        let admins = try worktreeAdminDirectories(common: common)
         let ref = "refs/heads/\(branch)"
         for admin in [admins.common] + admins.linked {
             let head = try Self.adminFile("HEAD", in: admin, required: admin == admins.common) ?? ""
@@ -662,8 +709,8 @@ public struct WorktreeManager: Sendable {
     }
 
     /// Leaves out, and prunes, every dead linked entry (`isDead`).
-    private func worktreeAdminDirectories() throws -> (common: URL, linked: [URL]) {
-        let (common, linked) = try linkedAdminEntries()
+    private func worktreeAdminDirectories(common: URL? = nil) throws -> (common: URL, linked: [URL]) {
+        let (common, linked) = try linkedAdminEntries(common: common)
         return (common, try linked.filter { admin in
             guard try Self.isDead(admin) else { return true }
             try? FileManager.default.removeItem(at: admin)
@@ -690,10 +737,14 @@ public struct WorktreeManager: Sendable {
             .appendingPathComponent(url.lastPathComponent).path
     }
 
-    private func linkedAdminEntries() throws -> (common: URL, linked: [URL]) {
-        let common = URL(fileURLWithPath: try gitChecked(
+    private func commonDir() throws -> URL {
+        URL(fileURLWithPath: try gitChecked(
             ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd: repoPath
         ).stdout.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func linkedAdminEntries(common: URL? = nil) throws -> (common: URL, linked: [URL]) {
+        let common = try common ?? commonDir()
         let linkedRoot = common.appendingPathComponent("worktrees")
         guard try Self.exists(linkedRoot, admin: linkedRoot) else { return (common, []) }
         let linked: [URL]
@@ -766,11 +817,22 @@ public struct WorktreeManager: Sendable {
 
     /// Written before the ref is dropped, so a task whose work merged stays distinguishable from
     /// one that never committed. Without it both look the same: no branch.
-    private func recordReapedTip(_ branch: String) {
-        guard let taskId = TaskBranchLedger.taskId(ofBranch: branch),
-              let tip = try? refCommit("refs/heads/\(branch)")
-        else { return }
+    private func recordReapedTip(_ branch: String, tip: String) {
+        guard let taskId = TaskBranchLedger.taskId(ofBranch: branch) else { return }
         _ = try? setRef(TaskBranchLedger.tipRef(taskId: taskId), to: tip)
+    }
+
+    /// Every local branch under `refs/heads/<prefix>`, from one `for-each-ref` rather than a
+    /// `rev-parse` per branch (SPEC §5).
+    public func branchTips(withPrefix prefix: String) throws -> [BranchTip] {
+        try git(["for-each-ref", "--format=%(objectname) %(refname)", "refs/heads/\(prefix)"]).stdout
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line in
+                let fields = line.split(separator: " ", maxSplits: 1)
+                guard fields.count == 2, fields[1].hasPrefix("refs/heads/") else { return nil }
+                let branch = String(fields[1].dropFirst("refs/heads/".count))
+                return branch.hasPrefix(prefix) ? BranchTip(branch: branch, tip: String(fields[0])) : nil
+            }
     }
 
     public func localBranches(withPrefix prefix: String) throws -> [String] {

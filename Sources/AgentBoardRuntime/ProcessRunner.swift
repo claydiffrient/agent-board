@@ -31,6 +31,14 @@ enum ProcessRunner {
         stdin: Data? = nil,
         environment: [String: String]? = nil
     ) throws -> CommandResult {
+        try GitLaunchGate.admitting(executable.path) {
+            try untimed(executable: executable, arguments: arguments, cwd: cwd, stdin: stdin, environment: environment)
+        }
+    }
+
+    private static func untimed(
+        executable: URL, arguments: [String], cwd: URL?, stdin: Data?, environment: [String: String]?
+    ) throws -> CommandResult {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -174,6 +182,14 @@ enum ProcessRunner {
         environment: [String: String]? = nil,
         timeout: TimeInterval
     ) throws -> CommandResult {
+        try GitLaunchGate.admitting(executable.path) {
+            try timed(executable: executable, arguments: arguments, cwd: cwd, environment: environment, timeout: timeout)
+        }
+    }
+
+    private static func timed(
+        executable: URL, arguments: [String], cwd: URL?, environment: [String: String]?, timeout: TimeInterval
+    ) throws -> CommandResult {
         let deadline = DispatchTime.now() + timeout
         let process = Process()
         process.executableURL = executable
@@ -243,6 +259,20 @@ enum ProcessRunner {
             )
         }
         return result
+    }
+}
+
+/// Caps the git children running at once across the app, so a sweep's burst cannot use up the descriptors
+/// an accept's merge needs (SPEC §8.8). A waiter blocks its thread; a holder never waits on another slot.
+enum GitLaunchGate {
+    static let limit = 8
+    private static let slots = DispatchSemaphore(value: limit)
+
+    static func admitting<T>(_ executable: String, _ body: () throws -> T) rethrows -> T {
+        guard executable == WorktreeManager.gitPath else { return try body() }
+        slots.wait()
+        defer { slots.signal() }
+        return try body()
     }
 }
 
