@@ -850,7 +850,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             return ToolResult(text: """
             Worker dispatched for \(task.id); the task is now running. \(site) on branch \
             \(spawn.branch), but setup is still running, so the worker cannot do anything yet and \
-            has no session id.
+            has no session id. \(spawn.models.summary)
 
             Nothing to do but wait. The session shows as `setup` in list_agents and turns to \
             `running` once the agent starts; if setup fails instead, the task goes back to ready \
@@ -899,7 +899,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             return ToolResult(text: """
             \(agent.name) was assigned \(task.id); the task is now running. \(site) on branch \
             \(spawn.branch), but setup is still running, so the agent cannot do anything yet and \
-            has no session id.
+            has no session id. \(spawn.models.summary)
 
             Nothing to do but wait, exactly as after spawn_worker. Do not call assign_to_agent for \
             this task again.

@@ -21,12 +21,15 @@ final class EffortSpawnTests: XCTestCase {
         fixture = nil
     }
 
-    private func spawnArguments(effort: Effort?) async throws -> (args: [String], session: AgentSession?) {
+    private func spawnArguments(
+        effort: Effort?, type: TaskType? = nil
+    ) async throws -> (args: [String], session: AgentSession?) {
         var task = try fixture.tasks.create(
             projectId: fixture.project.id, title: "Effort \(effort?.rawValue ?? "none")", body: "Do it.",
             acceptance: nil, priority: nil, column: .ready, origin: .human, epicId: nil
         )
         task.effort = effort
+        task.type = type
         try fixture.tasks.update(task)
         try await fixture.supervisor.assign(taskId: task.id)
         await fixture.supervisor.waitForSetup()
@@ -53,5 +56,11 @@ final class EffortSpawnTests: XCTestCase {
 
         let projectDefault = try await spawnArguments(effort: nil)
         XCTAssertEqual(effortFlag(projectDefault.args), "low")
+    }
+
+    func testATypedTaskWithNoModelOrEffortSpawnsOnItsRecommendedRow() async throws {
+        let docs = try await spawnArguments(effort: nil, type: .docs)
+        XCTAssertEqual(docs.args.firstIndex(of: "--model").map { docs.args[$0 + 1] }, "claude-sonnet-5-5")
+        XCTAssertEqual(effortFlag(docs.args), "medium")
     }
 }

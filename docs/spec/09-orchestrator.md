@@ -15,8 +15,11 @@
   call `list_reports` when told to, the instruction to set `type` on every
   task it creates so agent review routes by it (§4), and the project's
   `modelGuidance` text so it can set `model` and `effort` on the tasks it creates. A *Default model*
-  section names the project's `defaultModel` and `defaultEffort` (or Claude Code's defaults) and the
-  five effort levels. The orchestrator itself runs on `settings.defaultModel` and
+  section names the project's `defaultModel` and `defaultEffort` (or Claude Code's defaults), the
+  five effort levels, and each row of the type table (`settings.workerModels`, §4), so the
+  orchestrator knows what a task that sets neither runs on. `spawn_worker` and `assign_to_agent`
+  answer with the model and effort the spawn chose and the level each came from: the task, the
+  agent or role, the type table, the project default, or Claude Code's default. The orchestrator itself runs on `settings.defaultModel` and
   `settings.defaultEffort` when set. Through `create_task`, `update_task` and `create_epic` it sets a
   task's `effort`; `get_task` and `list_tasks` return it (§4, §6).
 - **Pinned session.** `project.orch_session_id` names the session every launch

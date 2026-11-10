@@ -116,8 +116,8 @@ public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, Data
     public var isPullRequestReader: Bool { self == .triage || self == .followupCheck }
 }
 
-/// What kind of work a task is. Under `agent` review it picks the task's row in the project's
-/// review routing table (SPEC §4); nil is Default. Nothing else reads it.
+/// What kind of work a task is. It picks the task's row in the project's review routing table under
+/// `agent` review, and in its worker model table (SPEC §4); nil is Default.
 public enum TaskType: String, Codable, CodingKeyRepresentable, Sendable, CaseIterable, Equatable,
     DatabaseValueConvertible {
     case code

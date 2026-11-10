@@ -231,7 +231,7 @@ Everything in worker scope over any task in the project, plus:
 | `get_epic(id)` | One epic in full: goal, branch, newest pull request, its tasks grouped by column, whether it is ready for integration, `next_step` — `open_pull_request(epic_id)` for an `integrated` epic, waiting on the merge for a `pull_request_open` one, null otherwise (§5.2 step 4) — and `base_drift` — commits behind and ahead of the base branch, `against` naming the ref counted from (the last-fetched `origin/<base>` when it is at or ahead of local, never fetched by this call), or why they cannot be counted (§5.2). Drift raises no attention and no notification |
 | `attach_note(note_id, task_id|epic_id)` | Passes context down at spawn time |
 | `pin_note(note_id, pinned)` | Every future agent sees it in its note index and can fetch it |
-| `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting |
+| `spawn_worker(task_id)` | Subject to §8 caps, the shutdown order, and the autonomy setting. The answer names the model and effort chosen and where each came from (§4) |
 | `list_roster_agents()` | The archetypes this project can use, in its own preference order: board-local and disk ones alike, each with `source` (`board-local`, `project`, `user`), `definition_path` for a disk one, `description`, `system_prompt`, `model` and `tools` (null inherits every tool) |
 | `assign_to_agent(task_id, roster_agent_id)` | `spawn_worker` instantiating an archetype: the same caps, shutdown and autonomy gates, worker scope, and the agent's own deny list layered on. An agent outside the project's usable set is refused |
 | `stop_worker(session_id)` | `claude stop`, then the session's process tree is reaped (§8.5) |

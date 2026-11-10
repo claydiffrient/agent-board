@@ -157,14 +157,14 @@ final class BriefingResourceTests: XCTestCase {
     func testTheBriefingIsComposedAtFetchTimeFromCurrentProjectSettings() async throws {
         try setSettings { $0.defaultModel = "claude-sonnet-5" }
         let before = try await read(BriefingResourceURI.orchestrator, as: f.orchestratorIdentity)
-        XCTAssertTrue(before.contains("Workers run on `claude-sonnet-5`"), before)
+        XCTAssertTrue(before.contains("project default: `claude-sonnet-5`"), before)
 
         try setSettings { $0.defaultModel = "claude-opus-5" }
         let after = try await read(BriefingResourceURI.orchestrator, as: f.orchestratorIdentity)
 
         XCTAssertNotEqual(before, after, "the briefing did not change when the project's settings did")
-        XCTAssertTrue(after.contains("Workers run on `claude-opus-5`"), after)
-        XCTAssertFalse(after.contains("claude-sonnet-5"), "the briefing still carries the old default model")
+        XCTAssertTrue(after.contains("project default: `claude-opus-5`"), after)
+        XCTAssertFalse(after.contains("`claude-sonnet-5`"), "the briefing still carries the old default model")
     }
 
     func testTheBriefingNamesTheProjectsWorktreeStrategyAndWhereASharedPlacementChecksOut() async throws {

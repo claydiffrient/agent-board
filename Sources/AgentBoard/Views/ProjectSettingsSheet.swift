@@ -224,6 +224,17 @@ struct ProjectSettingsSheet: View {
         case .models:
             ModelPicker(label: "Default model", inheritLabel: "Claude Code default", model: $settings.defaultModel)
             EffortPicker(label: "Default effort", inheritLabel: "Claude Code default", effort: $settings.defaultEffort)
+            ForEach(TaskType.allCases, id: \.self) { type in
+                workerModelRow(type)
+            }
+            HStack {
+                Text("A task's own model and effort win over its type's row, and a row left on Project default falls through to the defaults above. Untyped tasks use the defaults.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Use recommended") { settings.workerModels = .recommended }
+                    .disabled(settings.workerModels == .recommended)
+            }
             VStack(alignment: .leading, spacing: 6) {
                 Text("Model guidance")
                 TextEditor(text: Binding(
@@ -524,6 +535,30 @@ struct ProjectSettingsSheet: View {
     }
 
     /// One row of the review routing table; `nil` is the Default row.
+    /// SPEC §10: one task type's row of the worker model table.
+    private func workerModelRow(_ type: TaskType) -> some View {
+        LabeledContent(type.label) {
+            HStack(alignment: .top) {
+                ModelPicker(label: "\(type.label) model", inheritLabel: "Project default", model: workerModelBinding(type, \.model))
+                EffortPicker(label: "\(type.label) effort", inheritLabel: "Project default", effort: workerModelBinding(type, \.effort))
+            }
+            .labelsHidden()
+        }
+    }
+
+    private func workerModelBinding<Value>(
+        _ type: TaskType, _ field: WritableKeyPath<WorkerModelRow, Value?>
+    ) -> Binding<Value?> {
+        Binding(
+            get: { settings.workerModels.rows[type]?[keyPath: field] },
+            set: { value in
+                var row = settings.workerModels.rows[type] ?? WorkerModelRow()
+                row[keyPath: field] = value
+                settings.workerModels.rows[type] = row.isEmpty ? nil : row
+            }
+        )
+    }
+
     private func routingRow(_ type: TaskType?) -> some View {
         let current = Self.routingAssignee(settings.reviewRouting, type: type)
         return Picker(type?.label ?? "Default", selection: Binding(

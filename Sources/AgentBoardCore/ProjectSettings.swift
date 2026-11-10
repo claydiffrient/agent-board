@@ -228,6 +228,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var defaultModel: String? = nil
     /// Passed as `--effort` to every session without its own; nil leaves Claude Code's default (SPEC §4).
     public var defaultEffort: Effort? = nil
+    /// Per task type, ahead of `defaultModel` and `defaultEffort` (SPEC §4).
+    public var workerModels: WorkerModelTable = .recommended
     /// Free text the orchestrator reads when choosing a model per task.
     public var modelGuidance: String? = nil
     /// How much human acceptance a finished task needs. An epic may override it for its own tasks.
@@ -277,6 +279,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         extraMcpServers: [String] = [],
         defaultModel: String? = nil,
         defaultEffort: Effort? = nil,
+        workerModels: WorkerModelTable? = nil,
         modelGuidance: String? = nil,
         reviewLevel: ReviewLevel = .task,
         reviewRouting: ReviewRoutingTable = ReviewRoutingTable(),
@@ -301,6 +304,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.extraMcpServers = extraMcpServers
         self.defaultModel = defaultModel
         self.defaultEffort = defaultEffort
+        self.workerModels = workerModels ?? Self.initialWorkerModels(defaultModel: defaultModel)
         self.modelGuidance = modelGuidance
         self.reviewLevel = reviewLevel
         self.reviewRouting = reviewRouting
@@ -328,6 +332,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         extraMcpServers = try c.decodeIfPresent([String].self, forKey: .extraMcpServers) ?? []
         defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
         defaultEffort = try? c.decodeIfPresent(Effort.self, forKey: .defaultEffort)
+        workerModels = try c.decodeIfPresent(WorkerModelTable.self, forKey: .workerModels)
+            ?? Self.initialWorkerModels(defaultModel: defaultModel)
         modelGuidance = try c.decodeIfPresent(String.self, forKey: .modelGuidance)
         reviewLevel = try c.decodeIfPresent(ReviewLevel.self, forKey: .reviewLevel) ?? .task
         if let table = try c.decodeIfPresent(ReviewRoutingTable.self, forKey: .reviewRouting) {
@@ -357,6 +363,12 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         standaloneIntegration = try c.decodeIfPresent(StandaloneIntegration.self, forKey: .standaloneIntegration)
         prFollowThrough = try c.decodeIfPresent(PRFollowThroughSettings.self, forKey: .prFollowThrough)
             ?? PRFollowThroughSettings()
+    }
+
+    /// A project that already chose a default model starts with an empty table, so the type rows
+    /// never silently override that choice (SPEC §4).
+    static func initialWorkerModels(defaultModel: String?) -> WorkerModelTable {
+        defaultModel == nil ? .recommended : WorkerModelTable()
     }
 
     /// Settings written before the routing table named a single reviewer here; it decodes into the

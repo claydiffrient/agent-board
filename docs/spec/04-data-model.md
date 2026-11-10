@@ -19,7 +19,7 @@ CREATE TABLE project (
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, defaultEffort,
-                                   -- modelGuidance,
+                                   -- workerModels, modelGuidance,
                                    -- reviewLevel, reviewRouting, buildCommand, testCommand,
                                    -- verificationTimeoutSeconds (null = 30 min; else clamped
                                    --   to 60..86400, i.e. 1 min to 24 h, on decode and on set),
@@ -465,11 +465,34 @@ bind it itself. `est_cost_usd` is a list-price estimate from transcript usage,
 never a billed amount.
 
 **Effort** (`Effort`: `low`, `medium`, `high`, `xhigh`, `max`) is passed to a
-spawn as `claude --effort`. A worker gets `task.effort ?? settings.defaultEffort`;
-a session started for a role rather than a task's own work (triager, follow-up
-checker, rostered reviewer) gets `settings.defaultEffort`, and the orchestrator's
-own session gets it too. Neither the roster nor a PR follow-through role carries
-an effort. Nil at every level passes no flag, which is Claude Code's default.
+spawn as `claude --effort`, and the model as `--model`. Every spawn path resolves
+the two independently through `WorkerModelChoice.resolve`, taking the first level
+that sets a value:
+
+1. the task's own `model` or `effort`;
+2. the rostered agent's `model`, or a PR follow-through role's, where the spawn
+   uses one (neither carries an effort);
+3. the row for the task's `type` in `settings.workerModels`; a rostered or round
+   reviewer reads the `review` row, whatever the reviewed task's type;
+4. `settings.defaultModel` / `settings.defaultEffort`;
+5. nothing, which passes no flag: Claude Code's default.
+
+The orchestrator's own session takes level 4 only. `workerModels`
+(`WorkerModelTable`) holds an optional model and effort per task type; an untyped
+task, or a type with no row, skips level 3. The recommended table follows "Which
+Claude model should you build with?" (claude.dev, read 2026-11-10):
+
+| Type | Model | Effort |
+|---|---|---|
+| `code` | `claude-opus-5-5` | `medium` |
+| `tests`, `docs`, `review` | `claude-sonnet-5-5` | `medium` |
+| `plan` | `claude-opus-5-5` | `high` |
+
+A new project starts with it. Settings that carry no `workerModels` key decode to
+it as well, unless they set `defaultModel`: then the table decodes empty, so a
+model the human already chose keeps applying to every task. This is a
+decode-time conversion, and once saved the table is always written, empty or not.
+A row whose type this build doesn't know is dropped on decode.
 `agent_session.effort` records the level the spawn passed, beside the `model`
 the transcript reports, so spend can be read by both. A resumed worker keeps its
 effort: `--effort` is in the job's saved `respawnFlags` (§2). A `defaultEffort`
