@@ -1225,11 +1225,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// SPEC §4's resolution order. A reviewer takes the `review` row whatever the reviewed task's type.
+    /// `usesTaskValues` is false where the task's model was stamped for someone else, as a fix round's is for its fixer.
     static func modelChoice(
-        for task: BoardTask, project: Project, roleModel: String? = nil, scope: AgentBoardCore.TokenScope = .worker
+        for task: BoardTask, project: Project, roleModel: String? = nil, scope: AgentBoardCore.TokenScope = .worker,
+        usesTaskValues: Bool = true
     ) -> WorkerModelChoice {
         WorkerModelChoice.resolve(
-            taskModel: task.model, taskEffort: task.effort, roleModel: roleModel,
+            taskModel: usesTaskValues ? task.model : nil, taskEffort: usesTaskValues ? task.effort : nil,
+            roleModel: roleModel,
             type: scope == .reviewer ? .review : task.type, settings: project.settings
         )
     }
@@ -1624,7 +1627,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             )
             let role = project.settings.prFollowThrough.roles.reviewer
             let models = Self.modelChoice(
-                for: task, project: project, roleModel: role?.model ?? agent.model, scope: .reviewer
+                for: task, project: project, roleModel: role?.model ?? agent.model, scope: .reviewer,
+                usesTaskValues: false
             )
             beginSetup(
                 LaunchPlan(

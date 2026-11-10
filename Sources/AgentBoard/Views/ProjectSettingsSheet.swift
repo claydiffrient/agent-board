@@ -534,7 +534,6 @@ struct ProjectSettingsSheet: View {
         }
     }
 
-    /// One row of the review routing table; `nil` is the Default row.
     /// SPEC §10: one task type's row of the worker model table.
     private func workerModelRow(_ type: TaskType) -> some View {
         LabeledContent(type.label) {
@@ -559,6 +558,7 @@ struct ProjectSettingsSheet: View {
         )
     }
 
+    /// One row of the review routing table; `nil` is the Default row.
     private func routingRow(_ type: TaskType?) -> some View {
         let current = Self.routingAssignee(settings.reviewRouting, type: type)
         return Picker(type?.label ?? "Default", selection: Binding(

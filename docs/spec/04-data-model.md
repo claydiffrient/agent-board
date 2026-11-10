@@ -469,7 +469,9 @@ spawn as `claude --effort`, and the model as `--model`. Every spawn path resolve
 the two independently through `WorkerModelChoice.resolve`, taking the first level
 that sets a value:
 
-1. the task's own `model` or `effort`;
+1. the task's own `model` or `effort`, except for a PR round's reviewer: a fix
+   round's task carries the fixer role's model (§13.1), so its reviewer skips
+   this level;
 2. the rostered agent's `model`, or a PR follow-through role's, where the spawn
    uses one (neither carries an effort);
 3. the row for the task's `type` in `settings.workerModels`; a rostered or round
