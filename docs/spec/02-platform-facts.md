@@ -26,14 +26,26 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   silently skips `http` hooks** (foreground and background); a `command` hook
   that pipes stdin to `curl` fires and is the workaround.
 - **`/clear` forks the session under a new id.** The old id gets `SessionEnd`
-  with `"reason": "clear"`, and ~18s later a new id gets `SessionStart` with `"source": "fork"`. The fork
+  with `"reason": "clear"`, and within about 2s a new id gets `SessionStart` with
+  `"source": "clear"` (every `/clear` in the live `hook_event` table through
+  2026-11-10). The fork
   payload does not name its parent — no parent session id anywhere in it — so
-  the hook token grant is the only link back. `StoreHookSink` treats an unknown
-  payload `session_id` on a live grant bound to a known session as the fork
-  signal: it inserts a row for the new id, rebinds the grant, and re-pins
-  `project.orch_session_id` for an orchestrator grant. The old row keeps its
+  the hook token grant is the only link back. `StoreHookSink` treats a
+  `SessionStart` with `source: "clear"` under an unknown payload `session_id`
+  on a live grant bound to a known session as the fork signal: it inserts a row
+  for the new id, rebinds the grant, and re-pins `project.orch_session_id` for
+  an orchestrator grant. The old row keeps its
   terminal state and its spend — the fork writes its own transcript, and
   metering reads transcripts.
+- **A process a session runs inherits its hook token.** Observed 2026-11-10:
+  an orchestrator ran a background process, and child sessions it started sent
+  hooks on the orchestrator's grant — a `SessionStart` with
+  `"source": "startup"` for a new id that never wrote a transcript, then one
+  with `"source": "fork"` for another new id whose transcript held only
+  `ai-title` and `agent-name` lines. The parent's transcript gained a
+  `continued-in` line naming the fork, yet the parent kept running and sending
+  hooks, and its own `SessionEnd` reason stays `other`, never `clear`. These
+  are not `/clear` and are not adopted (§7).
 - *M0:* The MCP client sends a non-standard `server/discover` request before
   `initialize`; answering it with JSON-RPC `-32601` is fine. `tools/list` is
   fetched at startup and the tool is callable in the first turn.

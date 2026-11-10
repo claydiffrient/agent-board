@@ -18,6 +18,13 @@ public struct BranchSalvage: Sendable, Equatable {
 
     public var hasCommittedWork: Bool { commitsAheadOfBase > 0 }
 
+    /// What accepting the task must say first (SPEC §5, `done`): nil unless the branch holds no commits and the worktree is dirty.
+    public var acceptWarning: String? {
+        guard !hasCommittedWork, uncommittedChanges else { return nil }
+        return "Branch \(branch) contains no committed work, and the task's worktree has uncommitted changes. "
+            + "Accepting moves the task to Done without that work: nothing lands, and the worktree is kept with the changes in it."
+    }
+
     /// What a failure report says about the branch. It never claims the work is finished or that it
     /// builds: no worker reported on it and Agent Board compiles nothing.
     public var sentence: String {

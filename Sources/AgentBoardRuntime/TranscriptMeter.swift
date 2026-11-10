@@ -96,6 +96,16 @@ public enum TranscriptMeter {
         }
         return accumulator.summary
     }
+
+    /// `claude --resume` refuses a transcript with no `user` or `assistant` entry: "No conversation
+    /// found with session ID" (SPEC §9). A missing or unreadable file holds none.
+    public static func holdsConversation(transcriptAt url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return false }
+        return data.split(separator: UInt8(ascii: "\n")).contains { line in
+            let type = (try? JSONSerialization.jsonObject(with: line) as? [String: Any])?["type"] as? String
+            return type == "user" || type == "assistant"
+        }
+    }
 }
 
 /// Remembers the byte offset between polls and folds only new lines into the running summary.

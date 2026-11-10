@@ -5,13 +5,27 @@ Generated into each managed session's `--settings`. All post to
 
 | Event | Agent Board's reaction |
 |---|---|
-| `SessionStart` | Mark `agent_session.state = running`, unless its task is in `done`, or in `ready` with no other session on it; a worker the board ended (its grant revoked, or its row `failed` or `completed`) is not revived, and the supervisor stops its process again (§8.5); record transcript path |
+| `SessionStart` | Mark `agent_session.state = running`, unless its task is in `done`, or in `ready` with no other session on it; a worker the board ended (its grant revoked, or its row `failed` or `completed`) is not revived, and the supervisor stops its process again (§8.5); record transcript path. With `source: "clear"` under an unknown id, adopt the `/clear` fork first (below) |
 | `PreToolUse` (matcher `Bash`) | Deny `git push`, `gh pr create`, `gh pr merge`; append an `error` progress row (§8) |
 | `PostToolUse` | Bump `last_activity`; clear `blocked`; append a `tool` progress row; reply with a worker's post-compaction brief or queued human comments as `additionalContext` |
 | `Notification` | Set `blocked` + reason on the task and session; the task appears in the orchestrator's **Blocked** section (§10) and raises the project's attention signal, which posts the banner |
 | `Stop` | Mark session idle. **On the orchestrator, this is the trigger for the report notice** (§9). On a reviewer whose task is still in `review`, the first one in the session replies with `additionalContext` asking for the verdict, which continues the turn; a later one raises "Reviewer stopped without a verdict" (§5.1) |
 | `SessionEnd` | Mark stopped/completed; reconcile final spend from the transcript |
 | `WorktreeRemove` | Chain to the user's existing hook, then clear the worktree row |
+
+**Only a `/clear` moves a session's grant or pin.** A `SessionStart` with
+`source: "clear"` under an unknown session id, on a live grant bound to a
+known session of the same project and role, is a `/clear` fork (§2): the new id
+gets a row copied from the old one (adopted `stopped` on a settled task), the
+grant is rebound to it, and an orchestrator's `project.orch_session_id` or the
+Coordinator's `active_session_id` moves to it. An unknown id with any other
+source (`startup`, `fork`), or on any other event, is a child of a process the
+bound session ran, which inherited its hook token while the bound session keeps
+running (§2). It gets no row, no grant binding and
+no pin, so the running session keeps its token, and its hooks change nothing.
+`compact` keeps the session id (§2), and a `resume` comes from a launch that
+bound the grant to the id it resumes before `claude` started, so neither
+reaches adoption.
 
 A hook on a revoked token is still accepted, where an MCP call on one gets a
 401. It does two things only: `PreToolUse` keeps the push guard, and

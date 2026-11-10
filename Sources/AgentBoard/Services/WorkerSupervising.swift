@@ -20,6 +20,8 @@ protocol WorkerSupervising: AnyObject {
     /// Task → done, every attempt's worktree removed (chaining the user's WorktreeRemove hook),
     /// and the task branch deleted once it is merged into the base or epic branch.
     func accept(taskId: String) async throws
+    /// What the Accept confirmation must say first, or nil when nothing needs confirming (SPEC §5, `done`).
+    func acceptWarning(taskId: String) async -> String?
     func reopen(taskId: String) async throws
     /// Stops the task's reviewer session and starts a fresh one from the same roster agent; the task
     /// stays in `review` (SPEC §10, Pending reviews).
@@ -112,4 +114,5 @@ extension WorkerSupervising {
     func focusChanged(projectId: String?) {}
     func reportQueued(projectId: String) async {}
     func previewLeakedAgentSweep() async -> AgentSweepReport? { nil }
+    func acceptWarning(taskId: String) async -> String? { nil }
 }

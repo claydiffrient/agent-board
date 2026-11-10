@@ -19,6 +19,7 @@ struct TaskBoardView: View {
     @State private var busyMessage: String?
     @State private var errorMessage: String?
     @State private var taskPendingDelete: BoardTask?
+    @State private var acceptancePendingConfirmation: PendingAcceptance?
     @State private var closurePlan: EpicClosurePlan?
     @State private var worktreeRemoval: EpicWorktreeRemoval?
     @State private var drafts = TaskDraftCache()
@@ -290,6 +291,7 @@ struct TaskBoardView: View {
             }
         }
         .background(deleteConfirmation)
+        .background(acceptConfirmation)
         .background(archiveConfirmation)
         .background(closeEpicConfirmation)
         .background(worktreeRemovalConfirmation)
@@ -609,6 +611,26 @@ struct TaskBoardView: View {
             }
     }
 
+    private var acceptConfirmation: some View {
+        EmptyView()
+            .confirmationDialog(
+                "Accept with no committed work?",
+                isPresented: Binding(
+                    get: { acceptancePendingConfirmation != nil },
+                    set: { if !$0 { acceptancePendingConfirmation = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: acceptancePendingConfirmation
+            ) { pending in
+                Button("Accept anyway", role: .destructive) {
+                    runSupervised("Accepting…") { try await env.supervisor.accept(taskId: pending.taskId) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { pending in
+                Text(pending.warning)
+            }
+    }
+
     private var archiveConfirmation: some View {
         EmptyView()
             .confirmationDialog(
@@ -708,7 +730,13 @@ struct TaskBoardView: View {
     }
 
     private func accept(_ taskId: String) {
-        runSupervised("Accepting…") { try await env.supervisor.accept(taskId: taskId) }
+        _Concurrency.Task {
+            if let warning = await env.supervisor.acceptWarning(taskId: taskId) {
+                acceptancePendingConfirmation = PendingAcceptance(taskId: taskId, warning: warning)
+            } else {
+                runSupervised("Accepting…") { try await env.supervisor.accept(taskId: taskId) }
+            }
+        }
     }
 
     private func reopen(_ taskId: String) {
@@ -733,4 +761,9 @@ struct TaskBoardView: View {
     TaskBoardView(project: preview.project)
         .environment(preview.environment)
         .frame(width: 1400, height: 700)
+}
+
+private struct PendingAcceptance {
+    var taskId: String
+    var warning: String
 }

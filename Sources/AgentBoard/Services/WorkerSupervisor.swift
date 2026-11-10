@@ -55,6 +55,7 @@ enum SupervisorError: LocalizedError {
     case pullRequestNotFetched(String)
     case fixRoundNotFound(title: String)
     case fixRoundNotAcceptable(title: String)
+    case uncommittedWorkNeedsAPerson(String)
 
     var errorDescription: String? {
         switch self {
@@ -67,6 +68,8 @@ enum SupervisorError: LocalizedError {
                 + "starts a fresh one"
         case .pullRequestNotFetched(let reason): return "the pull request could not be fetched: \(reason)"
         case .fixRoundNotFound(let title): return "\"\(title)\" is not a pull request round's fix task"
+        case .uncommittedWorkNeedsAPerson(let warning):
+            return "\(warning) Only a person accepts a task like that, so it stays in Review."
         case .fixRoundNotAcceptable(let title):
             return "\"\(title)\" is a pull request fix round; its check accepts it, and Agent Board pushes it to the "
                 + "pull request rather than merging it"
@@ -2123,6 +2126,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
             // SPEC §13.1: a round's branch is pushed onto its pull request, never merged as a task branch.
             if task.origin == .fixRound { throw SupervisorError.fixRoundNotAcceptable(title: task.title) }
+            // SPEC §5: a person sees this warning before accepting; an agent's accept has nobody to show it to.
+            if acceptedBy != .human, let warning = await acceptWarning(taskId: taskId) {
+                throw SupervisorError.uncommittedWorkNeedsAPerson(warning)
+            }
             let sparing = acceptedBy.acceptingSessionId
             if !landsAfterReturning {
                 try await stopLiveSessions(onTask: taskId, sparing: sparing, by: acceptedBy.actor)
@@ -2151,6 +2158,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 await supervisor.landAndTearDown(task: task, project: project, claim: claim, report: acceptanceReport)
             }
         }
+    }
+
+    func acceptWarning(taskId: String) async -> String? {
+        await branchSalvage(taskId: taskId)?.acceptWarning
     }
 
     private func landAndTearDown(task: BoardTask, project: Project, claim: TeardownClaim, report: Int64?) async {
