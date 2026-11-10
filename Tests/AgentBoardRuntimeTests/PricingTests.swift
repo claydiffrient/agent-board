@@ -45,6 +45,22 @@ final class PricingTests: XCTestCase {
         XCTAssertEqual(table.rates(forModel: "claude-opus-5-20260101"), opus5)
     }
 
+    func testNewestModelsHaveTheirOwnPublishedRates() {
+        let table = PricingTable.default
+        XCTAssertEqual(
+            table.rates(forModel: "claude-haiku-5-5"),
+            ModelRates(inputPerMTok: 0.1, outputPerMTok: 0.5, cacheRead: 0.01, cacheWrite5m: 0.125, cacheWrite1h: 0.2)
+        )
+        XCTAssertEqual(
+            table.rates(forModel: "claude-fable-5-2"),
+            ModelRates(inputPerMTok: 8, outputPerMTok: 40, cacheRead: 0.2, cacheWrite5m: 10, cacheWrite1h: 16)
+        )
+        XCTAssertEqual(
+            table.rates(forModel: "claude-sonnet-5-5"),
+            ModelRates(inputPerMTok: 2, outputPerMTok: 10, cacheRead: 0.1, cacheWrite5m: 2.5, cacheWrite1h: 4)
+        )
+    }
+
     func testUnknownAndNilFallBackToOpus() {
         let table = PricingTable.default
         XCTAssertEqual(table.rates(forModel: nil), PricingTable.opus)

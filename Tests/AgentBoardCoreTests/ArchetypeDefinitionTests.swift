@@ -20,7 +20,7 @@ final class AgentDefinitionParserTests: XCTestCase {
         """)
         XCTAssertEqual(full.description, "Testing (Vitest/Jest, Go): behavior, not implementation")
         XCTAssertEqual(full.tools, ["Glob", "Read", "Bash"])
-        XCTAssertEqual(full.model, "claude-sonnet-5", "a quoted short alias maps through ModelCatalog")
+        XCTAssertEqual(full.model, "claude-sonnet-5-5", "a quoted short alias maps through ModelCatalog")
         XCTAssertEqual(full.systemPrompt, "You write unit tests.")
         XCTAssertEqual(full.warnings, [])
 

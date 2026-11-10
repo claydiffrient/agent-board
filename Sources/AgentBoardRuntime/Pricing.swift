@@ -34,16 +34,21 @@ public struct PricingTable: Sendable {
         self.fallback = fallback
     }
 
+    public static let fable52 = ModelRates(inputPerMTok: 8, outputPerMTok: 40, cacheRead: 0.2, cacheWrite5m: 10, cacheWrite1h: 16)
     public static let fable = ModelRates(inputPerMTok: 10, outputPerMTok: 50, cacheRead: 0.25, cacheWrite5m: 12.5, cacheWrite1h: 20)
     public static let opus = ModelRates(inputPerMTok: 5, outputPerMTok: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10)
     /// Cache reads are 0.05x input here, not the usual 0.1x.
     public static let opus55 = ModelRates(inputPerMTok: 4, outputPerMTok: 20, cacheRead: 0.2, cacheWrite5m: 5, cacheWrite1h: 8)
+    public static let sonnet55 = ModelRates(inputPerMTok: 2, outputPerMTok: 10, cacheRead: 0.1, cacheWrite5m: 2.5, cacheWrite1h: 4)
     public static let sonnet5 = ModelRates(inputPerMTok: 2, outputPerMTok: 10, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 4)
     public static let sonnet46 = ModelRates(inputPerMTok: 3, outputPerMTok: 15, cacheRead: 0.3, cacheWrite5m: 3.75, cacheWrite1h: 6)
+    /// Rates for prompts up to 100K tokens; longer prompts bill 5x every field, which a per-model table can't express.
+    public static let haiku55 = ModelRates(inputPerMTok: 0.1, outputPerMTok: 0.5, cacheRead: 0.01, cacheWrite5m: 0.125, cacheWrite1h: 0.2)
     public static let haiku45 = ModelRates(inputPerMTok: 1, outputPerMTok: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2)
 
     public static let `default` = PricingTable(
         ratesByPrefix: [
+            "claude-fable-5-2": fable52,
             "claude-fable-5-1": fable,
             "claude-fable-5": fable,
             "claude-opus-5-5": opus55,
@@ -51,8 +56,10 @@ public struct PricingTable: Sendable {
             "claude-opus-4-8": opus,
             "claude-opus-4-7": opus,
             "claude-opus-4-6": opus,
+            "claude-sonnet-5-5": sonnet55,
             "claude-sonnet-5": sonnet5,
             "claude-sonnet-4-6": sonnet46,
+            "claude-haiku-5-5": haiku55,
             "claude-haiku-4-5": haiku45,
         ],
         fallback: opus

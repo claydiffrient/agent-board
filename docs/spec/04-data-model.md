@@ -487,7 +487,7 @@ those files use — one `key: value` scalar per line, split on the first colon s
 description containing one survives, surrounding quotes stripped — and refuses
 anything else (an indented continuation, a block list) rather than half-reading
 it. `name` is required. `model` is a short alias mapped through
-`ModelCatalog.resolve` (`sonnet` → `claude-sonnet-5`, newest in the family
+`ModelCatalog.resolve` (`sonnet` → `claude-sonnet-5-5`, newest in the family
 first); an alias it cannot map, or `inherit`, is no model, so the task's or the
 project's default applies. `color` is Claude Code's and is ignored. An omitted
 `tools` key inherits every tool; `tools:` with nothing after it grants none.

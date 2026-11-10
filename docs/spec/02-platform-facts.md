@@ -98,14 +98,17 @@ proven by the runtime spike in `spike/` on 2026-09-11.
 
   | Model | `effectiveWindow` |
   |---|---|
+  | `claude-fable-5-2` | 980000 (measured 2026-11-10 on 2.1.322, `claude -p --debug`) |
   | `claude-fable-5-1` | 980000 |
   | `claude-opus-5` | 980000 |
   | `claude-opus-5-5` | 980000 (measured 2026-09-22 on 2.1.280, `claude -p --debug`) |
+  | `claude-sonnet-5-5` | 980000 (measured 2026-11-10 on 2.1.322, `claude -p --debug`) |
   | `claude-sonnet-5` | 980000 |
+  | `claude-haiku-5-5` | 980000 (measured 2026-11-10 on 2.1.322, `claude -p --debug`) |
   | `claude-haiku-4-5` | not measured — the run died on `Error: Refresh token is invalid or has already been claimed by another client` before any turn completed |
 
-  `ModelCatalog.effectiveContextWindow(for:)` carries the four measured values
-  and reads anything else, Haiku included, as the same 980,000 rather than
+  `ModelCatalog.effectiveContextWindow(for:)` carries the measured values
+  and reads anything else, Haiku 4.5 included, as the same 980,000 rather than
   guessing a smaller one.
 - **A slash command injected into a PTY needs its Enter as a separate write.**
   Measured 2026-09-15, three runs in the same harness. Writing
