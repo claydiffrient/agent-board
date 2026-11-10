@@ -427,9 +427,16 @@ project: a reconcile waits for a tick reap in progress, and the tick skips a
 project whose reconcile is running. The tick starts each project's reap and
 does not wait for it, so metering, cap and stall checks are never held up by
 git removals. A spawn's new worktree is clean and at its base until its
-worker commits. The spawn marks the worktree's path before it touches git and
-clears the mark when its setup ends (§3.1), and a reap keeps every marked path
-as well as every path an active row names, the `setup` row included. Because a
+worker commits. So is a PR follow-through checkout of a head that a base
+already holds: an epic's pull request has its head on the epic branch, so its
+fixer's, triager's and follow-up check's worktrees read as merged. The spawn
+marks the worktree's path before it touches git and clears the mark when its
+setup ends (§3.1), and a reap keeps every marked path as well as every path an
+active row names, the `setup` row included. The fixer, triager and follow-up
+check spawns mark theirs the same way: a fixer checkout created before its row
+existed was taken by the three-minute reap while its `post-checkout` hook ran,
+and its worker launched into the removed tree, the teardown hooks having
+already deleted its build output base. Because a
 reap's list of active sessions predates its git scan, it rereads the active
 rows and the marks after the scan and claims its orphans in the same step, with
 no suspension point between, so a spawn or resume either marked its path first

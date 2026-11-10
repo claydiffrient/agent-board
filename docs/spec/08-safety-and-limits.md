@@ -45,6 +45,17 @@ Per project, overridable:
   counted every sleeping minute against it. Archive retention
   (`ArchivePolicy.afterDays`) stays on the wall clock: it bounds calendar time,
   not work. So does the token cap, which is a count, not a duration.
+- **The elapsed and idle caps and the stall threshold start when the agent
+  launches, not at spawn.** `started_at` is written when the setup row is
+  (§3.1), before `git worktree add` and the `post-checkout` hook run; the
+  promotion to Claude's real session id stamps `agent_started_at`, and every
+  time cap and the stall check read `agentStartedAt ?? startedAt`. Measuring
+  from spawn charged setup to the agent: with a 10-minute idle cap, workers
+  whose hooks ran 18 and 21 minutes under cold build servers were idle-capped
+  on the first poll after promotion, one with 0 tokens and no tool call. A
+  resume restamps both columns. `started_at` itself stays the spawn time,
+  because §8.5's orphan rule and §8.7's worktree claims need a floor that
+  precedes the `claude` host and anything the hook left running.
 - **A tool call that has started and not returned is not silence.** `PreToolUse`
   fires before a tool runs and `PostToolUse` only when it returns, so a single
   long command writes no hook for its whole duration. A cold `swift build` on
@@ -104,7 +115,7 @@ Per project, overridable:
   before any full wake. While a session is in that record, the metering tick
   drops its idle cap, however much awake time passes; the token and elapsed
   caps still apply. The wake continuation is a `claude --bg --resume`, which
-  writes the session's `last_activity` and `started_at` as it resumes, so its
+  writes the session's `last_activity`, `started_at` and `agent_started_at` as it resumes, so its
   idle and elapsed clocks start from the resume, not from the cut. An app
   relaunch drops the record, and with it the exemption.
 - **A cap breach makes the next attempt escalate (§5).** A worker stopped at

@@ -342,6 +342,9 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     public var reviewBase: String?
     /// Why this attempt runs above the model or effort its task resolves to (SPEC §5 retries); nil when it does not.
     public var escalation: String?
+    /// SPEC §8: when the agent itself launched, which is where the cap and stall clocks start.
+    /// `started_at` is the spawn, before a setup row's worktree and `post-checkout` hook ran.
+    public var agentStartedAt: Int64?
 
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -374,6 +377,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case reviewHead = "review_head"
         case reviewBase = "review_base"
         case escalation
+        case agentStartedAt = "agent_started_at"
     }
 
     public init(
@@ -384,7 +388,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil, effort: Effort? = nil,
         lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil,
         rosterAgentId: String? = nil, toolStartedAt: Int64? = nil, toolsInFlight: Int = 0,
-        reviewHead: String? = nil, reviewBase: String? = nil, escalation: String? = nil
+        reviewHead: String? = nil, reviewBase: String? = nil, escalation: String? = nil, agentStartedAt: Int64? = nil
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -416,6 +420,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.reviewHead = reviewHead
         self.reviewBase = reviewBase
         self.escalation = escalation
+        self.agentStartedAt = agentStartedAt
     }
 
     public var id: String { sessionId }
@@ -426,6 +431,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     /// Rostered sessions are exempt from the idle and wall-clock caps; see `WorkerSupervisor.capLimits`.
     public var isRostered: Bool { rosterAgentId != nil }
     public var startedDate: Date { startedAt.asDate }
+    public var clockStartedDate: Date { (agentStartedAt ?? startedAt).asDate }
     public var endedDate: Date? { endedAt?.asDate }
     public var lastActivityDate: Date? { lastActivity?.asDate }
     public var toolStartedDate: Date? { toolStartedAt?.asDate }

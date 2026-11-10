@@ -157,8 +157,8 @@ public struct SessionStore: Sendable {
     public func markResumed(_ sessionId: String, at: Int64 = .nowMillis) throws {
         try db.writer.write { db in
             try db.execute(
-                sql: "UPDATE agent_session SET state = 'running', started_at = ?, last_activity = ?, ended_at = NULL, stop_reason = NULL WHERE session_id = ?",
-                arguments: [at, at, sessionId]
+                sql: "UPDATE agent_session SET state = 'running', started_at = ?, agent_started_at = ?, last_activity = ?, ended_at = NULL, stop_reason = NULL WHERE session_id = ?",
+                arguments: [at, at, at, sessionId]
             )
         }
     }
@@ -263,6 +263,7 @@ public struct SessionStore: Sendable {
     /// reference the placeholder yet: it is never handed to an agent, and the worker's grant binds
     /// after this returns. The prompt was composed before setup, so those comments move with the row.
     /// Throws if the row is gone or has left `setup` — a cap kill or a human stop got there first.
+    /// SPEC §8: the cap and stall clocks start here, so setup time is never charged to the agent.
     public func promoteSetupSession(
         _ placeholderId: String, to sessionId: String, shortId: String?, state: SessionState = .starting,
         model: String? = nil, effort: Effort? = nil
@@ -284,6 +285,7 @@ public struct SessionStore: Sendable {
             promoted.state = state
             promoted.model = model ?? placeholder.model
             promoted.effort = effort
+            promoted.agentStartedAt = .nowMillis
             try promoted.insert(db)
             for commentId in queued {
                 try db.execute(
