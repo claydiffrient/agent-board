@@ -664,9 +664,8 @@ public struct WorktreeManager: Sendable {
         guard try known.contains(where: { try isAncestor(tip, of: $0) }) else {
             return .kept(branch: branch, reason: "it is not merged into \(known.joined(separator: " or "))")
         }
-        recordReapedTip(branch, tip: tip)
         let ref = "refs/heads/\(branch)"
-        let deletion = try gitRaw(["update-ref", "-d", ref, tip], cwd: repoPath)
+        let deletion = try dropRecordingReapedTip(ref, branch: branch, tip: tip)
         guard deletion.status != 0 else { return .deleted(branch) }
         if tipMayBeStale {
             switch try refCommit(ref) {
@@ -676,7 +675,7 @@ public struct WorktreeManager: Sendable {
             default: break
             }
         }
-        throw AgentRuntimeError(Self.failure(["update-ref", "-d", ref, tip], deletion))
+        throw AgentRuntimeError(Self.failure(["update-ref", "--stdin", "(delete \(ref) \(tip))"], deletion))
     }
 
     /// The worktree whose HEAD, in-progress rebase or bisect names `branch` — the states git's own
@@ -815,11 +814,16 @@ public struct WorktreeManager: Sendable {
         _ = try? setRef(ref, to: commit)
     }
 
-    /// Written before the ref is dropped, so a task whose work merged stays distinguishable from
-    /// one that never committed. Without it both look the same: no branch.
-    private func recordReapedTip(_ branch: String, tip: String) {
-        guard let taskId = TaskBranchLedger.taskId(ofBranch: branch) else { return }
-        _ = try? setRef(TaskBranchLedger.tipRef(taskId: taskId), to: tip)
+    /// The reaped-tip entry keeps a task whose work merged distinguishable from one that never
+    /// committed. It and the tip-guarded delete are one ref transaction, so the entry is written
+    /// only when that tip is the one dropped, and git commits updates before deletes, so a crash
+    /// mid-transaction never leaves a dropped branch with no entry (SPEC §5).
+    private func dropRecordingReapedTip(_ ref: String, branch: String, tip: String) throws -> CommandResult {
+        var commands = "delete \(ref) \(tip)\n"
+        if let taskId = TaskBranchLedger.taskId(ofBranch: branch) {
+            commands = "update \(TaskBranchLedger.tipRef(taskId: taskId)) \(tip)\n" + commands
+        }
+        return try gitRaw(["update-ref", "--stdin"], cwd: repoPath, stdin: Data(commands.utf8))
     }
 
     /// Every local branch under `refs/heads/<prefix>`, from one `for-each-ref` rather than a
@@ -1109,13 +1113,14 @@ public struct WorktreeManager: Sendable {
         )
     }
 
-    func gitRaw(_ args: [String], cwd: URL) throws -> CommandResult {
+    func gitRaw(_ args: [String], cwd: URL, stdin: Data? = nil) throws -> CommandResult {
         var env = environment()
         env["GIT_TERMINAL_PROMPT"] = "0"
         return try ProcessRunner.run(
             executable: URL(fileURLWithPath: Self.gitPath),
             arguments: args,
             cwd: cwd,
+            stdin: stdin,
             environment: env
         )
     }
