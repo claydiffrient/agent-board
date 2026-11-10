@@ -228,7 +228,10 @@ is the worst of it: a hook that builds a fresh toolchain output base has run
 for over ten minutes under load, while Claude Code abandons a tool call whose
 answer has not started after 60 seconds (§6). The epic integrator's worktree
 on `agentboard/epic-<id>` is created the same way, under the same mark (§5.2
-step 3). A rostered reviewer is the exception: it judges the checkout before
+step 3), and so is a PR follow-through fixer's, whose fetches of the PR run in
+setup too (§13.1): a fixer spawn that fetched and ran the hook before writing
+its row held an orchestrator's `spawn_worker` past the limit, and its
+checkout sat on disk with no row naming it. A rostered reviewer is the exception: it judges the checkout before
 its session exists, so its spawn creates or reuses the worktree before
 answering. Its only tool-call route is `report_complete`, from the worker
 still running in that worktree, so it reuses one and runs no hook.
@@ -263,7 +266,10 @@ throwing — first stops the agent it launched (the full §8.5 stop once the row
 promoted), then revokes its grant, and reads "Worker started, then stopped".
 Stopping first is what keeps an agent from running on in the worktree with a
 revoked token, invisible to the board, while the orchestrator retries into the
-same worktree. Keeping such an agent tracked instead is not offered: the failed
+same worktree. A stop that lands while `claude --bg` is starting the agent
+cancels the setup before it ends the row, so the launch checks for that
+cancellation before promoting and stops an agent that came up in between
+rather than promoting it into a session the stop never ends. Keeping such an agent tracked instead is not offered: the failed
 step is the one that would have tracked it. A `claude stop` that fails or times
 out — the load that delays the listing delays it too — is escalated as §8.5
 escalates one: a fresh `claude agents --json` read finds the host by short id,

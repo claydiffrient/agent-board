@@ -18,11 +18,16 @@ actor FakeRuntime: AgentRuntime {
     private var resumeFailure: Error?
     private var gate: CheckedContinuation<Void, Never>?
     private var holdNextSpawn = false
+    private var cancelGate: AsyncStream<Void>.Continuation?
+    private var holdUntilCancelled = false
     private var entered: [CheckedContinuation<Void, Never>] = []
     private var listed: [AgentInfo] = []
 
     /// The next spawn blocks inside `spawn` until `releaseSpawn()` — a setup that outlives the call.
     func holdSpawn() { holdNextSpawn = true }
+
+    /// The next spawn blocks until its setup is cancelled, then answers: an agent that came up just as a stop landed.
+    func holdSpawnUntilCancelled() { holdUntilCancelled = true }
 
     func failNextSpawn(_ error: Error) { failure = error }
 
@@ -38,6 +43,7 @@ actor FakeRuntime: AgentRuntime {
         holdNextSpawn = false
         gate?.resume()
         gate = nil
+        cancelGate?.finish()
     }
 
     func spawn(_ request: SpawnRequest) async throws -> SpawnedAgent {
@@ -46,6 +52,13 @@ actor FakeRuntime: AgentRuntime {
         entered = []
         if holdNextSpawn {
             await withCheckedContinuation { gate = $0 }
+        }
+        if holdUntilCancelled {
+            holdUntilCancelled = false
+            let (stream, continuation) = AsyncStream<Void>.makeStream()
+            cancelGate = continuation
+            for await _ in stream {}
+            cancelGate = nil
         }
         isSettingUp = false
         if let failure {
