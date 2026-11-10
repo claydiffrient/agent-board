@@ -23,13 +23,13 @@ final class PricingTests: XCTestCase {
         let table = PricingTable.default
         XCTAssertEqual(table.rates(forModel: "claude-sonnet-4-6-20260115"), PricingTable.sonnet46)
         XCTAssertEqual(table.rates(forModel: "claude-sonnet-5-20260801"), PricingTable.sonnet5)
-        XCTAssertEqual(table.rates(forModel: "claude-fable-5-1"), PricingTable.fable)
+        XCTAssertEqual(table.rates(forModel: "claude-fable-5-1"), PricingTable.fable51)
 
         let custom = PricingTable(
-            ratesByPrefix: ["claude-x": PricingTable.haiku45, "claude-x-2": PricingTable.fable],
+            ratesByPrefix: ["claude-x": PricingTable.haiku45, "claude-x-2": PricingTable.fable51],
             fallback: PricingTable.opus
         )
-        XCTAssertEqual(custom.rates(forModel: "claude-x-2-2026"), PricingTable.fable)
+        XCTAssertEqual(custom.rates(forModel: "claude-x-2-2026"), PricingTable.fable51)
         XCTAssertEqual(custom.rates(forModel: "claude-x-1"), PricingTable.haiku45)
     }
 
@@ -54,6 +54,10 @@ final class PricingTests: XCTestCase {
         XCTAssertEqual(
             table.rates(forModel: "claude-fable-5-2"),
             ModelRates(inputPerMTok: 8, outputPerMTok: 40, cacheRead: 0.2, cacheWrite5m: 10, cacheWrite1h: 16)
+        )
+        XCTAssertEqual(
+            table.rates(forModel: "claude-fable-5"),
+            ModelRates(inputPerMTok: 10, outputPerMTok: 50, cacheRead: 1, cacheWrite5m: 12.5, cacheWrite1h: 20)
         )
         XCTAssertEqual(
             table.rates(forModel: "claude-sonnet-5-5"),

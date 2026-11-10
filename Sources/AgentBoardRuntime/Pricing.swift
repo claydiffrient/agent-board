@@ -35,7 +35,8 @@ public struct PricingTable: Sendable {
     }
 
     public static let fable52 = ModelRates(inputPerMTok: 8, outputPerMTok: 40, cacheRead: 0.2, cacheWrite5m: 10, cacheWrite1h: 16)
-    public static let fable = ModelRates(inputPerMTok: 10, outputPerMTok: 50, cacheRead: 0.25, cacheWrite5m: 12.5, cacheWrite1h: 20)
+    public static let fable51 = ModelRates(inputPerMTok: 10, outputPerMTok: 50, cacheRead: 0.25, cacheWrite5m: 12.5, cacheWrite1h: 20)
+    public static let fable5 = ModelRates(inputPerMTok: 10, outputPerMTok: 50, cacheRead: 1, cacheWrite5m: 12.5, cacheWrite1h: 20)
     public static let opus = ModelRates(inputPerMTok: 5, outputPerMTok: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10)
     /// Cache reads are 0.05x input here, not the usual 0.1x.
     public static let opus55 = ModelRates(inputPerMTok: 4, outputPerMTok: 20, cacheRead: 0.2, cacheWrite5m: 5, cacheWrite1h: 8)
@@ -49,8 +50,8 @@ public struct PricingTable: Sendable {
     public static let `default` = PricingTable(
         ratesByPrefix: [
             "claude-fable-5-2": fable52,
-            "claude-fable-5-1": fable,
-            "claude-fable-5": fable,
+            "claude-fable-5-1": fable51,
+            "claude-fable-5": fable5,
             "claude-opus-5-5": opus55,
             "claude-opus-5": opus,
             "claude-opus-4-8": opus,
