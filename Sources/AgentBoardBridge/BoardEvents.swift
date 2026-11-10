@@ -93,8 +93,9 @@ public protocol WorkerControl: Sendable {
     func stopWorker(sessionId: String) async throws
     /// The single acceptance path, whoever triggered it: the board accept, the newly-ready
     /// announcement, the grant revocation and the worktree removal. A no-review completion and a
-    /// rostered reviewer's approval both come through here rather than repeating any of it.
-    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws
+    /// rostered reviewer's approval both come through here rather than repeating any of it. Returns the
+    /// warning the acceptance recorded in its decision report, for the caller's answer (SPEC §5, `done`).
+    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws -> String?
     /// Why a rostered reviewer's verdict must be refused: its checkout changed since it was spawned,
     /// or nothing recorded where it started. Nil when the checkout is as the reviewer found it.
     func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String?

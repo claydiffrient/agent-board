@@ -529,8 +529,9 @@ public final class WorkerToolHandler: ToolHandler {
         }
         // Not a second accept path: this is the call the Accept button makes, so the newly-ready
         // announcement, the grant revocation and the worktree removal all run exactly once, here.
+        let warning: String?
         do {
-            try await control.accept(taskId: task.id, acceptedBy: .policy(outcome.level))
+            warning = try await control.accept(taskId: task.id, acceptedBy: .policy(outcome.level))
         } catch {
             return ToolResult(
                 text: "\(recorded) \(noReview), but the task could not be accepted "
@@ -539,7 +540,8 @@ public final class WorkerToolHandler: ToolHandler {
         }
         return ToolResult(
             text: "\(recorded) \(noReview), so the task went straight to Done. Agent Board lands its branch and "
-                + "removes its worktree after this answer. \(Self.awaitingPullRequestLine(outcome))Stop here; do not start further work."
+                + "removes its worktree after this answer. \(warning.map { $0 + " " } ?? "")"
+                + "\(Self.awaitingPullRequestLine(outcome))Stop here; do not start further work."
         )
     }
 

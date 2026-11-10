@@ -123,13 +123,14 @@ public final class ReviewerToolHandler: ToolHandler {
             try board.recordReviewVerdict(
                 taskId: task.id, sessionId: identity.sessionId, reviewerName: name, verdict: verdict
             )
-            try await control.accept(
+            let warning = try await control.accept(
                 taskId: task.id,
                 acceptedBy: .reviewer(name: name, verdict: verdict, sessionId: identity.sessionId)
             )
             await events.reportQueued(projectId: identity.projectId)
             return stoppingAfterwards(ToolResult(
-                text: "Accepted into Done. Your verdict is on the task. Stop here; do not start further work."
+                text: "Accepted into Done. Your verdict is on the task. \(warning.map { $0 + " " } ?? "")"
+                    + "Stop here; do not start further work."
             ), identity: identity)
         case "reopen_task":
             let findings = try ToolArguments.requiredString("findings", in: arguments)
