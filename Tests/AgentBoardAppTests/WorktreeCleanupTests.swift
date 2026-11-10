@@ -350,6 +350,29 @@ final class WorktreeCleanupTests: XCTestCase {
         XCTAssertNil(fixture.supervisor.lastError)
     }
 
+    func testTheBranchSweepReadsEveryTipWithOneForEachRefRatherThanARevParsePerBranch() throws {
+        let branches = (0..<3).map { "agentboard/merged-\($0)" }
+        for branch in branches { try fixture.manager.ensureBranch(branch, from: "main") }
+        let trace = fixture.manager.worktreeRoot.deletingLastPathComponent().appendingPathComponent("git-trace-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: trace) }
+        let traced = WorktreeManager(
+            repoPath: fixture.manager.repoPath, worktreeRoot: fixture.manager.worktreeRoot, attribution: .unattributable,
+            environment: { ChildEnvironment.sanitized().merging(["GIT_TRACE": trace.path]) { $1 } }
+        )
+
+        let listed = WorkerSupervisor.worktreelessTaskBranches(traced).map(\.listed)
+        XCTAssertEqual(WorkerSupervisor.deleteMergedBranches(traced, listed, bases: ["main"]), [])
+
+        for branch in branches { XCTAssertFalse(try fixture.manager.branchExists(branch), branch) }
+        let commands = try String(contentsOf: trace, encoding: .utf8)
+            .split(whereSeparator: \.isNewline).filter { $0.contains("trace: built-in: git ") }
+        XCTAssertEqual(commands.filter { $0.contains("for-each-ref") }.count, 1, commands.joined(separator: "\n"))
+        XCTAssertEqual(
+            commands.filter { $0.contains("rev-parse") && $0.contains("refs/heads/agentboard/") }, [],
+            "the sweep asked git about each branch one at a time"
+        )
+    }
+
     func testReconcileNamesTheUnreadableWorktreeRecordThatStopsTheBranchSweep() async throws {
         try fixture.manager.ensureBranch("agentboard/stale-task", from: "main")
         _ = try fixture.manager.create(name: "unreadable", branch: "agentboard/unreadable", base: "main")
