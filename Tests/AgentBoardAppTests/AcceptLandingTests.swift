@@ -52,6 +52,24 @@ final class AcceptLandingTests: XCTestCase {
         XCTAssertTrue(report.contains("checked out at"), report)
     }
 
+    /// SPEC §5: a worker reaped between staging and committing leaves nothing on its branch to land.
+    func testAcceptWarnsWhenTheBranchHasNoCommitsAndTheWorktreeIsDirty() async throws {
+        let task = try makeTask(epicId: nil)
+        let worktree = try XCTUnwrap(try fixture.worktreeWorker(task: task).worktreePath)
+        try "staged\n".write(toFile: worktree + "/staged.txt", atomically: true, encoding: .utf8)
+        _ = try fixture.git(["add", "staged.txt"], cwd: URL(fileURLWithPath: worktree))
+
+        let uncommitted = await fixture.supervisor.acceptWarning(taskId: task.id)
+        let warning = try XCTUnwrap(uncommitted, "accepting a branch with none of the work said nothing")
+        XCTAssertTrue(warning.contains("no committed work"), warning)
+        XCTAssertTrue(warning.contains("uncommitted changes"), warning)
+
+        try fixture.commitInto(worktree)
+        try "draft\n".write(toFile: worktree + "/draft.txt", atomically: true, encoding: .utf8)
+        let committed = await fixture.supervisor.acceptWarning(taskId: task.id)
+        XCTAssertNil(committed, "a branch carrying commits must not warn")
+    }
+
     /// Same task, same accept, with nothing holding the base branch: the work lands and the board
     /// says nothing, because there is nothing to say.
     func testAcceptingAStandaloneTaskLandsItWhenNothingHoldsTheBaseBranch() async throws {

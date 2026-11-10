@@ -380,6 +380,7 @@ private struct ReviewRow: View {
     @State private var summary: String?
     @State private var progress = Observed<[ProgressEntry]>([])
     @State private var interrupting: Decision?
+    @State private var acceptWarning: String?
 
     private enum Decision {
         case accept, reopen
@@ -456,15 +457,24 @@ private struct ReviewRow: View {
     }
 
     private var interruption: String? {
-        interrupting.flatMap { hold.interruption(accepting: $0 == .accept) }
+        interrupting.flatMap(interruption(for:))
+    }
+
+    private func interruption(for decision: Decision) -> String? {
+        let accepting = decision == .accept
+        let lines = [hold.interruption(accepting: accepting), accepting ? acceptWarning : nil].compactMap { $0 }
+        return lines.isEmpty ? nil : lines.joined(separator: " ")
     }
 
     private func decide(_ decision: Decision) {
-        guard hold.interruption(accepting: decision == .accept) != nil else {
-            if decision == .accept { accept() } else { reopen() }
-            return
+        _Concurrency.Task {
+            acceptWarning = decision == .accept ? await env.supervisor.acceptWarning(taskId: task.id) : nil
+            guard interruption(for: decision) != nil else {
+                if decision == .accept { accept() } else { reopen() }
+                return
+            }
+            interrupting = decision
         }
-        interrupting = decision
     }
 
     private func changeSize(_ changes: DiffSummary) -> some View {
