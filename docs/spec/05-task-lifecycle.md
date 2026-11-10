@@ -517,6 +517,12 @@ attempt ran, because the failure before it is still the newest that counts.
 3. With no step left, the retry runs at what the last attempt reached, and the
    reason says it is the top of the ladder.
 
+A default the human raised after the failure wins over escalation: when the
+fresh §4 resolution's model comes from the type table or project default and
+ranks above the failed attempt's on the ladder (Haiku < Sonnet < Opus < Fable),
+or its effort does likewise (`nil` read as `medium`), the retry runs on the
+fresh resolution with no escalation and no `escalation` reason.
+
 Only a value whose §4 level is the type table, the project default or Claude
 Code's default escalates, each on its own: an explicit task `effort` holds while
 its type-table model still climbs, and a task with both set retries unchanged.

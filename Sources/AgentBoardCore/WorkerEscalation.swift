@@ -34,17 +34,7 @@ public enum WorkerEscalation {
                 db, sql: "SELECT * FROM agent_session WHERE task_id = ? ORDER BY started_at DESC, attempt DESC",
                 arguments: [taskId]
             )
-            let verdict = try ProgressEntry.fetchOne(
-                db,
-                sql: """
-                SELECT * FROM progress WHERE task_id = ? AND kind = ? AND (text GLOB ? OR text GLOB ? OR text GLOB ?)
-                ORDER BY at DESC, id DESC LIMIT 1
-                """,
-                arguments: [
-                    taskId, ProgressKind.note, Board.reviewFailedLead + "*", Board.reviewPassedLead + "*",
-                    Board.reviewFindingsClosedLead + "*",
-                ]
-            )
+            let verdict = try ProgressStore.latestReviewVerdict(db, taskId: taskId)
             return (sessions, verdict)
         }
         let reopenedAt = verdict.flatMap { $0.text.hasPrefix(Board.reviewFailedLead) ? $0.at : nil }
@@ -84,6 +74,7 @@ public enum WorkerEscalation {
     public static func escalate(
         _ choice: WorkerModelChoice, after prior: Prior, attempt: Int, allowsFable: Bool
     ) -> WorkerModelChoice {
+        guard !humanRaisedDefault(choice, above: prior) else { return choice }
         let modelFree = choice.modelSource.isDefault
         let effortFree = choice.effortSource.isDefault
         guard modelFree || effortFree else { return choice }
@@ -114,6 +105,25 @@ public enum WorkerEscalation {
         }
         next.escalation = "attempt \(attempt): \(step) after \(cause)"
         return next
+    }
+
+    /// A type-table or project default the human raised past what the last attempt ran at.
+    static func humanRaisedDefault(_ choice: WorkerModelChoice, above prior: Prior) -> Bool {
+        func human(_ source: WorkerModelSource) -> Bool { source == .typeTable || source == .projectDefault }
+        if human(choice.modelSource), let fresh = choice.model.flatMap(modelRank),
+           let last = prior.model.flatMap(modelRank), fresh > last {
+            return true
+        }
+        if human(choice.effortSource), let fresh = choice.effort,
+           let last = Effort.allCases.firstIndex(of: prior.effort ?? .medium),
+           let now = Effort.allCases.firstIndex(of: fresh), now > last {
+            return true
+        }
+        return false
+    }
+
+    private static func modelRank(_ model: String) -> Int? {
+        ["claude-haiku-", "claude-sonnet-", "claude-opus-", "claude-fable-"].firstIndex { model.hasPrefix($0) }
     }
 
     /// Up to `xhigh`; Claude Code's own default effort is read as `medium`.
