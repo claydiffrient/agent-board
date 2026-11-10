@@ -185,6 +185,7 @@ For a task `T` in project `P`:
 7. `claude "<prompt>" --bg -n <task-slug> --permission-mode auto
    --strict-mcp-config --mcp-config <file> --settings <file>
    [--model <task.model ?? settings.defaultModel>]
+   [--effort <task.effort ?? settings.defaultEffort>]
    --disallowedTools "Bash(git push*)" "Bash(gh pr create*)" "Bash(gh pr merge*)"`
    with cwd set to the worktree. The prompt goes first because
    `--disallowedTools` is variadic and would swallow a trailing positional.

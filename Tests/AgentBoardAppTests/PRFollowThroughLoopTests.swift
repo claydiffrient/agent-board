@@ -437,7 +437,8 @@ final class PRFollowThroughLoopTests: XCTestCase {
         try store.enable(agentId: rita.id, forProject: fixture.project.id)
         try store.enable(agentId: gail.id, forProject: fixture.project.id)
         try enable(label: label, replies: replies, reRequest: reRequest, roles: PRFollowThroughRoles(
-            fixer: PRFollowThroughRole(model: "fixer-model"), reviewer: PRFollowThroughRole(rosterAgentId: rita.id),
+            fixer: PRFollowThroughRole(model: "fixer-model"),
+            reviewer: PRFollowThroughRole(rosterAgentId: rita.id, model: "reviewer-model"),
             followupCheck: PRFollowThroughRole(rosterAgentId: gail.id)
         ))
     }
@@ -585,6 +586,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         let checker = try XCTUnwrap(spawns.last)
         let tip = try fixture.git(["rev-parse", "HEAD"], cwd: worktree).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(resolved(reviewer.cwd), resolved(worktree), "the reviewer reads the fixer's own worktree")
+        XCTAssertEqual(reviewer.model, "reviewer-model", "the fix task carries the fixer's model, not the reviewer's")
         XCTAssertTrue(reviewer.prompt.contains("on branch `agentboard/pr-12-r1`"), reviewer.prompt)
         XCTAssertTrue(reviewer.prompt.contains("`git diff \(head)...HEAD`"), reviewer.prompt)
         XCTAssertEqual(checker.pluginDirs, [gradingPlugin])

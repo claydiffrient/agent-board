@@ -482,7 +482,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let placeholder = try await spawnIntegrator(epicId: epicId, retrying: task)
             return WorkerSpawn(
                 setupSessionId: placeholder.sessionId, worktreePath: placeholder.cwd,
-                branch: placeholder.branch ?? ""
+                branch: placeholder.branch ?? "",
+                models: try projects.get(task.projectId).map { Self.modelChoice(for: task, project: $0) }
+                    ?? .claudeCodeDefault
             )
         }
         guard let project = try projects.get(task.projectId) else {
@@ -605,10 +607,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let reviewHead = scope == .reviewer
                 ? try await offMain { try ReviewCheckout.baseline(in: site.cwd) }
                 : nil
+            let models = try escalatedModelChoice(
+                for: task, project: project, roleModel: agent?.model, scope: scope, attempt: attempt
+            )
             let row = { (site: CheckoutSite) in
                 Self.setupRow(
                     projectId: project.id, taskId: taskId, site: site, attempt: attempt,
-                    rosterAgentId: agent?.id, reviewHead: reviewHead, reviewBase: scope == .reviewer ? reviewBase : nil
+                    rosterAgentId: agent?.id, reviewHead: reviewHead, reviewBase: scope == .reviewer ? reviewBase : nil,
+                    escalation: models.escalation
                 )
             }
             // SPEC §5: a discard that began during this spawn's awaits saw no session to stop, and
@@ -630,6 +636,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
             if let epic, epic.state == .planning {
                 try epics.setState(epic.id, .active)
+            }
+            if let escalation = models.escalation {
+                _ = try? ProgressStore(db).append(
+                    taskId: taskId, sessionId: nil, kind: .status, text: "Escalation: \(escalation)."
+                )
             }
             beginSetup(
                 LaunchPlan(
@@ -660,9 +671,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             reviewFindings: try ProgressStore(db).openReviewFindings(taskId: taskId),
                             comments: try CommentStore(db).list(taskId: taskId)
                         ),
-                    // Most specific override wins: this task, then the agent's standing preference,
-                    // then the project default.
-                    model: task.model ?? agent?.model ?? project.settings.defaultModel,
+                    models: models,
                     attempt: placeholder.attempt,
                     rosterAgent: agent,
                     scope: scope
@@ -675,7 +684,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             setupHoldsMark = true
             return WorkerSpawn(
                 setupSessionId: placeholder.sessionId, worktreePath: site.cwd.path, branch: branch,
-                sharesCheckout: site.placement.sharedBranch != nil, warnings: site.warnings
+                sharesCheckout: site.placement.sharedBranch != nil, warnings: site.warnings, models: models
             )
         } catch SupervisorError.taskBeingDiscarded(let id) {
             throw SupervisorError.taskBeingDiscarded(taskId: id)
@@ -1070,7 +1079,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private static func setupRow(
         projectId: String, taskId: String, site: CheckoutSite, attempt: Int,
-        rosterAgentId: String? = nil, reviewHead: String? = nil, reviewBase: String? = nil
+        rosterAgentId: String? = nil, reviewHead: String? = nil, reviewBase: String? = nil, escalation: String? = nil
     ) -> AgentSession {
         AgentSession(
             sessionId: "setup-\(UUID().uuidString)",
@@ -1084,7 +1093,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             attempt: attempt,
             rosterAgentId: rosterAgentId,
             reviewHead: reviewHead,
-            reviewBase: reviewBase
+            reviewBase: reviewBase,
+            escalation: escalation
         )
     }
 
@@ -1223,6 +1233,37 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    /// SPEC §4's resolution order. A reviewer takes the `review` row whatever the reviewed task's type.
+    /// `usesTaskValues` is false for every reviewer, which judges the task rather than doing it.
+    static func modelChoice(
+        for task: BoardTask, project: Project, roleModel: String? = nil, scope: AgentBoardCore.TokenScope = .worker,
+        usesTaskValues: Bool = true
+    ) -> WorkerModelChoice {
+        WorkerModelChoice.resolve(
+            taskModel: usesTaskValues ? task.model : nil, taskEffort: usesTaskValues ? task.effort : nil,
+            roleModel: roleModel,
+            type: scope == .reviewer ? .review : task.type, settings: project.settings
+        )
+    }
+
+    /// SPEC §5 retries: a worker whose task's last attempt fell short climbs from what that attempt ran at.
+    /// A reviewer resolves without the reviewed task's own values and is never escalated (SPEC §4).
+    private func escalatedModelChoice(
+        for task: BoardTask, project: Project, roleModel: String?, scope: AgentBoardCore.TokenScope, attempt: Int
+    ) throws -> WorkerModelChoice {
+        let resolved = Self.modelChoice(
+            for: task, project: project, roleModel: roleModel, scope: scope, usesTaskValues: scope != .reviewer
+        )
+        guard scope == .worker,
+              let prior = try WorkerEscalation.prior(
+                  in: db, taskId: task.id, cutBySleep: { latestTurnWasCutBySleep($0.sessionId) }
+              )
+        else { return resolved }
+        return WorkerEscalation.escalate(
+            resolved, after: prior, attempt: attempt, allowsFable: project.settings.allowsFableEscalation
+        )
+    }
+
     private struct LaunchPlan {
         var project: Project
         var taskId: String
@@ -1233,7 +1274,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var configId: String
         var name: String
         var prompt: String
-        var model: String?
+        var models: WorkerModelChoice
         var attempt: Int
         /// A rostered assignment. Nothing here widens authority: the session still gets
         /// `--permission-mode auto`, the worker deny list, and at most a worker's token scope.
@@ -1279,7 +1320,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 disallowedTools: Self.disallowedTools(scope: plan.scope, supportDir: appSupportDir, home: home)
                     + plan.extraDisallowedTools + (plan.rosterAgent?.disallowedTools ?? []),
                 tools: plan.rosterAgent?.tools,
-                model: plan.model,
+                model: plan.models.model,
+                effort: plan.models.effort,
                 pluginDirs: (plan.rosterAgent?.pluginDirs ?? []).map(expandingHome)
             )
             let spawned: SpawnedAgent
@@ -1292,7 +1334,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             do {
                 try _Concurrency.Task.checkCancellation()
                 recorded = try sessions.promoteSetupSession(
-                    placeholder.sessionId, to: spawned.sessionId, shortId: spawned.shortId
+                    placeholder.sessionId, to: spawned.sessionId, shortId: spawned.shortId,
+                    model: plan.models.model, effort: plan.models.effort
                 )
             } catch {
                 // A stop cancelled this setup, or something ended its row, while the agent was starting;
@@ -1460,7 +1503,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     prompt: TriagePrompt.compose(
                         watch: watch, triage: triage, workingDirectory: worktree.path, agent: agent?.identity
                     ),
-                    model: role?.model ?? agent?.model ?? project.settings.defaultModel,
+                    models: Self.modelChoice(for: task, project: project, roleModel: role?.model ?? agent?.model),
                     attempt: placeholder.attempt,
                     rosterAgent: agent,
                     scope: .triager
@@ -1544,6 +1587,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     attempt: try sessions.forTask(task.id).count + 1, rosterAgentId: agent?.id
                 )
             )
+            let models = Self.modelChoice(for: task, project: project, roleModel: agent?.model)
             beginSetup(
                 LaunchPlan(
                     project: project,
@@ -1563,7 +1607,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         reviewFindings: try ProgressStore(db).openReviewFindings(taskId: task.id),
                         comments: try CommentStore(db).list(taskId: task.id)
                     ),
-                    model: task.model ?? agent?.model ?? project.settings.defaultModel,
+                    models: models,
                     attempt: placeholder.attempt,
                     rosterAgent: agent,
                     extraDisallowedTools: SpawnRequest.fixerDisallowedTools
@@ -1576,7 +1620,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             setupHoldsMark = true
             return WorkerSpawn(
                 setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch,
-                sharesCheckout: false, warnings: warnings
+                sharesCheckout: false, warnings: warnings, models: models
             )
         } catch {
             throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
@@ -1628,6 +1672,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 )
             )
             let role = project.settings.prFollowThrough.roles.reviewer
+            let models = Self.modelChoice(
+                for: task, project: project, roleModel: role?.model ?? agent.model, scope: .reviewer,
+                usesTaskValues: false
+            )
             beginSetup(
                 LaunchPlan(
                     project: project,
@@ -1642,7 +1690,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         workingDirectory: worktree.path, agent: agent.identity,
                         comments: try CommentStore(db).list(taskId: task.id)
                     ),
-                    model: role?.model ?? agent.model ?? project.settings.defaultModel,
+                    models: models,
                     attempt: placeholder.attempt,
                     rosterAgent: agent,
                     scope: .reviewer
@@ -1652,7 +1700,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             )
             return WorkerSpawn(
                 setupSessionId: placeholder.sessionId, worktreePath: worktree.path, branch: branch,
-                sharesCheckout: false, warnings: []
+                sharesCheckout: false, warnings: [], models: models
             )
         } catch {
             throw SupervisorError.spawnFailed(worktree: worktree.path, underlying: describe(error))
@@ -1712,7 +1760,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         watch: watch, round: round, headOid: headOid, workingDirectory: worktree.path,
                         agent: agent?.identity
                     ),
-                    model: role?.model ?? agent?.model ?? project.settings.defaultModel,
+                    models: Self.modelChoice(for: task, project: project, roleModel: role?.model ?? agent?.model),
                     attempt: placeholder.attempt,
                     rosterAgent: agent,
                     scope: .triager
@@ -1824,7 +1872,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         branches: branches,
                         verification: project.settings.verification
                     ),
-                    model: project.settings.defaultModel,
+                    models: Self.modelChoice(for: task, project: project),
                     attempt: placeholder.attempt
                 ),
                 placeholder: placeholder,

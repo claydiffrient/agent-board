@@ -255,6 +255,19 @@ Review — as a small pill beside its priority and model; a Default task shows n
 The inspector's **Type** picker (Default plus the five types) saves through the
 same task update as its body and model. Changing it doesn't touch a review
 already under way; the task's next completion routes by the new type.
+An **Effort** picker (`EffortPicker`: Project default plus Low, Medium, High,
+Extra high, Max) sits under the Model picker in the inspector, the New Task sheet
+and each New Epic task row, and saves with the model. A task with its own effort
+shows it as a pill after its model pill, on the card and in the inspector header.
+Project settings' Models section puts a **Default effort** picker (Claude Code
+default plus the five levels) under Default model (§4). Below it, the **type
+table** gives each task type a row with a model picker and an effort picker, each
+offering Project default plus the same choices, and a **Use recommended** button
+that restores the recommended table (§4); it is disabled while the table already
+matches. An **Allow escalation to Fable** switch under the table, off by default,
+lets a retried task climb from Opus to Fable 5.2 (§5, "Retries escalate effort,
+then model"). A session that escalated shows its reason under its cost line in
+the task inspector's Sessions list.
 
 A task proposed through a `verifier` grant (origin `verify_session`, §6) says
 where it came from: its card in `proposed` shows "From Walk me through it ·

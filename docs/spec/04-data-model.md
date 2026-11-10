@@ -18,7 +18,8 @@ CREATE TABLE project (
   worktree_root   TEXT NOT NULL,
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
-  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
+  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, defaultEffort,
+                                   -- workerModels, allowsFableEscalation, modelGuidance,
                                    -- reviewLevel, reviewRouting, buildCommand, testCommand,
                                    -- verificationTimeoutSeconds (null = 30 min; else clamped
                                    --   to 60..86400, i.e. 1 min to 24 h, on decode and on set),
@@ -60,6 +61,7 @@ CREATE TABLE task (
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
+  effort         TEXT,             -- low|medium|high|xhigh|max; overrides settings.defaultEffort. NULL = inherit
   reviewer_agent_id TEXT REFERENCES roster_agent(id),  -- the rostered reviewer holding it in `review`
   roster_agent_id TEXT REFERENCES roster_agent(id),    -- the archetype that last worked it
   archived_at    INTEGER,          -- non-null = archived: hidden from the board, never deleted
@@ -101,6 +103,7 @@ CREATE TABLE agent_session (
   est_cost_usd   REAL NOT NULL DEFAULT 0,
   attempt        INTEGER NOT NULL DEFAULT 1,
   model          TEXT,
+  effort         TEXT,               -- the --effort it was spawned with; NULL = none passed (Claude Code's default)
   last_tool      TEXT,
   stop_reason    TEXT,
   tool_started_at INTEGER,           -- oldest tool call not yet seen to return
@@ -109,6 +112,7 @@ CREATE TABLE agent_session (
   roster_agent_id TEXT REFERENCES roster_agent(id),  -- §10: the archetype this session was spawned from
   review_head    TEXT,               -- §5.1: HEAD (and uncommitted-change fingerprint) a rostered reviewer was spawned on
   review_base    TEXT,               -- §3.1 step 1, §5.1: what a rostered reviewer diffs against; `ReviewPrompt.recorded` rebuilds from it
+  escalation     TEXT,               -- §5 retries: why this attempt runs above what its task resolves to; NULL = it does not
   agent_stopped_at INTEGER,         -- §8.6: a `claude stop` succeeded after the row's last sign of life; a trigger clears it
   agent_started_at INTEGER,         -- §8: setup row promoted (or resumed); the cap and stall clocks start here, not at started_at
   CHECK ((role = 'coordinator') = (project_id IS NULL))
@@ -462,6 +466,46 @@ and bound to the session afterwards; the SessionStart hook may arrive first and
 bind it itself. `est_cost_usd` is a list-price estimate from transcript usage,
 never a billed amount.
 
+**Effort** (`Effort`: `low`, `medium`, `high`, `xhigh`, `max`) is passed to a
+spawn as `claude --effort`, and the model as `--model`. Every spawn path resolves
+the two independently through `WorkerModelChoice.resolve`, taking the first level
+that sets a value:
+
+1. the task's own `model` or `effort`, except for a reviewer, rostered or PR
+   round: it judges the task rather than doing it, so a task's own values (and
+   a fix round's, which carry the fixer role's model, §13.1) are skipped;
+2. the rostered agent's `model`, or a PR follow-through role's, where the spawn
+   uses one (neither carries an effort);
+3. the row for the task's `type` in `settings.workerModels`; a rostered or round
+   reviewer reads the `review` row, whatever the reviewed task's type;
+4. `settings.defaultModel` / `settings.defaultEffort`;
+5. nothing, which passes no flag: Claude Code's default.
+
+A worker retried after a failed attempt then escalates whichever of the two came
+from levels 3 to 5 (§5, "Retries escalate effort, then model").
+
+The orchestrator's own session takes level 4 only. `workerModels`
+(`WorkerModelTable`) holds an optional model and effort per task type; an untyped
+task, or a type with no row, skips level 3. The recommended table follows "Which
+Claude model should you build with?" (claude.dev, read 2026-11-10):
+
+| Type | Model | Effort |
+|---|---|---|
+| `code` | `claude-opus-5-5` | `medium` |
+| `tests`, `docs`, `review` | `claude-sonnet-5-5` | `medium` |
+| `plan` | `claude-opus-5-5` | `high` |
+
+A new project starts with it. Settings that carry no `workerModels` key decode to
+it as well, unless they set `defaultModel`: then the table decodes empty, so a
+model the human already chose keeps applying to every task. This is a
+decode-time conversion, and once saved the table is always written, empty or not.
+A row whose type this build doesn't know is dropped on decode.
+`agent_session.effort` records the level the spawn passed, and `model` the
+`--model` it passed until the transcript reports the one that answered, so
+spend can be read by both and a retry escalates from them (§5). A resumed worker keeps its
+effort: `--effort` is in the job's saved `respawnFlags` (§2). A `defaultEffort`
+this build does not know decodes as nil rather than resetting every other setting.
+
 Notes are sectioned rather than a single body specifically so three concurrent
 workers appending to one note do not silently lose each other's writes. Whole-
 document replace is not offered.
@@ -488,7 +532,7 @@ those files use — one `key: value` scalar per line, split on the first colon s
 description containing one survives, surrounding quotes stripped — and refuses
 anything else (an indented continuation, a block list) rather than half-reading
 it. `name` is required. `model` is a short alias mapped through
-`ModelCatalog.resolve` (`sonnet` → `claude-sonnet-5`, newest in the family
+`ModelCatalog.resolve` (`sonnet` → `claude-sonnet-5-5`, newest in the family
 first); an alias it cannot map, or `inherit`, is no model, so the task's or the
 project's default applies. `color` is Claude Code's and is ignored. An omitted
 `tools` key inherits every tool; `tools:` with nothing after it grants none.

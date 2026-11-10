@@ -194,7 +194,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
     /// right-aligned (seen in a capture; `NSTextView.alignment` still reported `.natural`).
     func testAgentsGuidanceEditorSpansTheRow() throws {
         let mounted = try mount(
-            tab: .agents, rosterAgents: 1, until: { $0.collect(NSSwitch.self).count == 2 }
+            tab: .agents, rosterAgents: 1, until: { $0.collect(NSSwitch.self).count == 3 }
         ) {
             $0.modelGuidance = Self.guidance
             $0.autonomyEnabled = true
@@ -206,7 +206,10 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let editor = try XCTUnwrap(editors.first)
         XCTAssertGreaterThanOrEqual(mounted.frame(of: editor).width, 600)
         XCTAssertGreaterThanOrEqual(mounted.frame(of: editor).height, 100)
-        XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off], "autonomy, then the one rostered agent")
+        XCTAssertEqual(
+            mounted.collect(NSSwitch.self).map(\.state), [.off, .on, .off],
+            "Fable escalation, autonomy, then the one rostered agent"
+        )
 
         let sheet = try seededSheet(tab: .agents) {
             $0.modelGuidance = Self.guidance
@@ -242,10 +245,12 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
                     )
                 }
             },
-            until: { $0.collect(NSSwitch.self).count == 3 }
+            until: { $0.collect(NSSwitch.self).count == 4 }
         )
 
-        XCTAssertEqual(mounted.collect(NSSwitch.self).count, 3, "autonomy, then the two board-local agents")
+        XCTAssertEqual(
+            mounted.collect(NSSwitch.self).count, 4, "Fable escalation, autonomy, then the two board-local agents"
+        )
     }
 
     /// Rex left the roster after being named; the Default row still shows him rather than a blank.
@@ -378,7 +383,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
 
         let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .agents, onDeleted: {})
             .environment(renderEnvironment(db: db))
-        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 900))
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 1100))
         defer { mount.close() }
         var lines: [OCRLine] = []
         var lastImage: CGImage?

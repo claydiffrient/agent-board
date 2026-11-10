@@ -28,6 +28,7 @@ struct TaskCardView: View {
                 }
                 if let type = task.type { TaskTypeChip(type: type) }
                 if let model = task.model { ModelChip(model: model) }
+                if let effort = task.effort { EffortChip(effort: effort) }
                 if commentCount > 0 {
                     Label("\(commentCount)", systemImage: "text.bubble")
                         .font(.caption)

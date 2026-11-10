@@ -143,7 +143,9 @@ final class RosteredSpawnTests: XCTestCase {
     /// worker's branch — which is exactly what a reviewer needs and costs nothing to arrange.
     func testAReviewerRunsInTheWorkersWorktreeAndHoldsAReviewerGrant() async throws {
         let rae = try rostered("Rae", role: "reviewer")
-        let task = try makeTask()
+        var task = try makeTask()
+        task.effort = .high
+        try fixture.tasks.update(task)
         try await fixture.supervisor.assign(taskId: task.id)
         await fixture.supervisor.waitForSetup()
         let worker = try XCTUnwrap(fixture.sessions.forTask(task.id).last)
@@ -167,6 +169,8 @@ final class RosteredSpawnTests: XCTestCase {
         XCTAssertEqual(reviewer.rosterAgentId, rae.id)
         let scopes = try fixture.grants.forSession(reviewer.sessionId).map(\.scope)
         XCTAssertEqual(scopes, [.reviewer], "the reviewer session must hold a reviewer grant and nothing wider")
+        let reviewerRequest = try await lastRequest()
+        XCTAssertEqual(reviewerRequest.effort, .medium, "the review row's effort, not the reviewed task's")
     }
 
 }

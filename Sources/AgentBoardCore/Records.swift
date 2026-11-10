@@ -150,6 +150,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var updatedAt: Int64
     /// Overrides the project's default model for the worker on this task.
     public var model: String?
+    /// Overrides the project's `defaultEffort` for the worker on this task (SPEC §4).
+    public var effort: Effort?
     /// Under agent review, the rostered reviewer this task was handed to when it entered `review`.
     public var reviewerAgentId: String?
     /// The rostered agent that last worked this task, if one did rather than an anonymous worker.
@@ -193,6 +195,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case model
+        case effort
         case reviewerAgentId = "reviewer_agent_id"
         case rosterAgentId = "roster_agent_id"
         case archivedAt = "archived_at"
@@ -210,7 +213,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         id: String, projectId: String, epicId: String?, title: String, body: String?, acceptance: String?,
         priority: String?, column: TaskColumn, blocked: Bool = false, blockedReason: String? = nil,
         failed: Bool = false, failureReason: String? = nil, ordering: Double, origin: TaskOrigin,
-        createdAt: Int64, updatedAt: Int64, model: String? = nil, reviewerAgentId: String? = nil,
+        createdAt: Int64, updatedAt: Int64, model: String? = nil, effort: Effort? = nil, reviewerAgentId: String? = nil,
         rosterAgentId: String? = nil, archivedAt: Int64? = nil, doneAt: Int64? = nil,
         unarchivedAt: Int64? = nil, landing: TaskLanding? = nil, landingDetail: String? = nil,
         type: TaskType? = nil, closedAt: Int64? = nil, closedReason: String? = nil, closedBy: String? = nil
@@ -222,6 +225,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         self.landing = landing
         self.landingDetail = landingDetail
         self.model = model
+        self.effort = effort
         self.reviewerAgentId = reviewerAgentId
         self.rosterAgentId = rosterAgentId
         self.archivedAt = archivedAt
@@ -313,6 +317,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     public var estCostUSD: Double
     public var attempt: Int
     public var model: String?
+    /// The `--effort` this session was spawned with; nil means none was passed.
+    public var effort: Effort?
     public var lastTool: String?
     public var stopReason: String?
     /// Set when a shared-checkout write gave up waiting for another session's lock. `report_blocked`
@@ -334,6 +340,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     /// What a rostered reviewer was told to diff against, which for a standalone task can be the
     /// recorded cut point rather than the base branch (SPEC §3.1 step 1).
     public var reviewBase: String?
+    /// Why this attempt runs above the model or effort its task resolves to (SPEC §5 retries); nil when it does not.
+    public var escalation: String?
     /// SPEC §8: when the agent itself launched, which is where the cap and stall clocks start.
     /// `started_at` is the spawn, before a setup row's worktree and `post-checkout` hook ran.
     public var agentStartedAt: Int64?
@@ -359,6 +367,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case estCostUSD = "est_cost_usd"
         case attempt
         case model
+        case effort
         case lastTool = "last_tool"
         case stopReason = "stop_reason"
         case blockedOnPath = "blocked_on_path"
@@ -367,6 +376,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case toolsInFlight = "tools_in_flight"
         case reviewHead = "review_head"
         case reviewBase = "review_base"
+        case escalation
         case agentStartedAt = "agent_started_at"
     }
 
@@ -375,10 +385,10 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         worktreePath: String? = nil, branch: String? = nil, cwd: String, state: SessionState = .starting,
         startedAt: Int64 = .nowMillis, endedAt: Int64? = nil, lastActivity: Int64? = nil,
         transcriptPath: String? = nil, tokensIn: Int = 0, tokensOut: Int = 0, cacheRead: Int = 0,
-        cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil,
+        cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil, effort: Effort? = nil,
         lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil,
         rosterAgentId: String? = nil, toolStartedAt: Int64? = nil, toolsInFlight: Int = 0,
-        reviewHead: String? = nil, reviewBase: String? = nil, agentStartedAt: Int64? = nil
+        reviewHead: String? = nil, reviewBase: String? = nil, escalation: String? = nil, agentStartedAt: Int64? = nil
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -400,6 +410,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.estCostUSD = estCostUSD
         self.attempt = attempt
         self.model = model
+        self.effort = effort
         self.lastTool = lastTool
         self.stopReason = stopReason
         self.blockedOnPath = blockedOnPath
@@ -408,6 +419,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.toolsInFlight = toolsInFlight
         self.reviewHead = reviewHead
         self.reviewBase = reviewBase
+        self.escalation = escalation
         self.agentStartedAt = agentStartedAt
     }
 

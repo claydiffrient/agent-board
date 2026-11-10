@@ -11,14 +11,17 @@ public struct ModelOption: Sendable, Equatable, Identifiable {
 /// Ids accepted by `claude --model`; the picker offers these plus free text.
 public enum ModelCatalog {
     public static let known: [ModelOption] = [
+        ModelOption(id: "claude-fable-5-2", name: "Fable 5.2", effectiveContextWindow: 980_000),
         ModelOption(id: "claude-fable-5-1", name: "Fable 5.1", effectiveContextWindow: 980_000),
         ModelOption(id: "claude-opus-5-5", name: "Opus 5.5", effectiveContextWindow: 980_000),
         ModelOption(id: "claude-opus-5", name: "Opus 5", effectiveContextWindow: 980_000),
+        ModelOption(id: "claude-sonnet-5-5", name: "Sonnet 5.5", effectiveContextWindow: 980_000),
         ModelOption(id: "claude-sonnet-5", name: "Sonnet 5", effectiveContextWindow: 980_000),
+        ModelOption(id: "claude-haiku-5-5", name: "Haiku 5.5", effectiveContextWindow: 980_000),
         ModelOption(id: "claude-haiku-4-5", name: "Haiku 4.5", effectiveContextWindow: fallbackContextWindow),
     ]
 
-    /// Every model measured (2.1.272; Opus 5.5 on 2.1.280) reported the same window, so an id we have not measured —
+    /// Every model measured (2.1.272; Opus 5.5 on 2.1.280; Fable 5.2, Sonnet 5.5, Haiku 5.5 on 2.1.322) reported the same window, so an id we have not measured —
     /// including Haiku 4.5 and anything typed as free text — is read as that rather than guessed at.
     public static let fallbackContextWindow = 980_000
 

@@ -266,6 +266,13 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("session_agent_started_at") { db in
             try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN agent_started_at INTEGER")
         }
+        migrator.registerMigration("effort") { db in
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN effort TEXT")
+            try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN effort TEXT")
+        }
+        migrator.registerMigration("session_escalation") { db in
+            try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN escalation TEXT")
+        }
         return migrator
     }
 }

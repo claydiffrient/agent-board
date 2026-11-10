@@ -49,7 +49,15 @@ public struct ProgressStore: Sendable {
     }
 
     static func openReviewFindings(_ db: Database, taskId: String) throws -> String? {
-        let latest = try ProgressEntry.fetchOne(
+        guard let latest = try latestReviewVerdict(db, taskId: taskId),
+              latest.text.hasPrefix(Board.reviewFailedLead)
+        else { return nil }
+        return latest.text
+    }
+
+    /// The newest note that opens or closes an agent review's findings.
+    static func latestReviewVerdict(_ db: Database, taskId: String) throws -> ProgressEntry? {
+        try ProgressEntry.fetchOne(
             db,
             sql: """
             SELECT * FROM progress
@@ -61,8 +69,6 @@ public struct ProgressStore: Sendable {
                 Board.reviewFindingsClosedLead + "*",
             ]
         )
-        guard let latest, latest.text.hasPrefix(Board.reviewFailedLead) else { return nil }
-        return latest.text
     }
 
     public func observe(taskId: String, limit: Int = 100) -> ValueObservation<ValueReducers.Fetch<[ProgressEntry]>> {

@@ -141,12 +141,12 @@ final class RosterScreenRenderTests: XCTestCase {
         return mounted.collect(NSSwitch.self).map(\.state)
     }
 
-    /// The sheet carries its own toggles (autonomy, one per notification category), so a count is
+    /// The sheet carries its own toggles (Fable escalation, autonomy), so a count is
     /// only meaningful as a difference: two rostered agents must add exactly two switches, and the
     /// one the project opted into must be the one that is on.
     func testTheProjectSettingsSheetGrowsOneTogglePerRosteredAgentSetFromTheProjectsOptIn() throws {
         let (db, project) = try board()
-        let bare = sheetSwitches(db, project, expecting: 1)
+        let bare = sheetSwitches(db, project, expecting: 2)
 
         let roster = RosterStore(db)
         let ada = try roster.create(name: "Ada", role: "frontend", systemPrompt: "p")
@@ -181,12 +181,12 @@ final class RosterScreenRenderTests: XCTestCase {
         try roster.enable(agentId: ada.id, forProject: project.id)
 
         // Ada already exists in the roster, so her row still renders here — off, since "other" never
-        // enabled her — alongside autonomy: 2 switches, not 1.
-        let bareOther = sheetSwitches(db, other, expecting: 2)
+        // enabled her — alongside Fable escalation and autonomy: 3 switches, not 2.
+        let bareOther = sheetSwitches(db, other, expecting: 3)
         XCTAssertEqual(try roster.agents(forProject: other.id).count, 0)
         XCTAssertEqual(
             bareOther.filter { $0 == .on }.count,
-            sheetSwitches(db, project, expecting: 2).filter { $0 == .on }.count - 1,
+            sheetSwitches(db, project, expecting: 3).filter { $0 == .on }.count - 1,
             "the other project should be short exactly the one agent this project opted into"
         )
     }

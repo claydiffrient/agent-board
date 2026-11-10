@@ -75,9 +75,9 @@ public final class OrchestratorToolHandler: ToolHandler {
             name: "create_task",
             description: "Create a task on the board. It lands in `backlog` by default and moves to `ready` automatically "
                 + "once every dependency is done (immediately if it has none). Write the acceptance criteria as the "
-                + "check a reviewer will run. Set `model` from the project's model guidance when the task warrants "
-                + "something other than the default. Set `type` on every task, so agent review routes by it. You "
-                + "cannot create a task directly in `running` or `done`.",
+                + "check a reviewer will run. Set `model` and `effort` from the project's model guidance when the "
+                + "task warrants something other than the default. Set `type` on every task, so agent review routes "
+                + "by it. You cannot create a task directly in `running` or `done`.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "title": ToolSchema.string("Short imperative title."),
@@ -86,6 +86,7 @@ public final class OrchestratorToolHandler: ToolHandler {
                     "priority": ToolSchema.string("Free text, e.g. high, normal, low."),
                     "column": ToolSchema.enumeration(["proposed", "backlog", "ready"], "Defaults to backlog."),
                     "model": ToolSchema.string("Claude model id for the worker on this task; omit for the project default."),
+                    "effort": OrchestratorToolHandler.effortSchema,
                     "type": OrchestratorToolHandler.typeSchema,
                     "depends_on": ToolSchema.stringArray("Task ids that must be done before this one is ready."),
                     "epic_id": ToolSchema.string(
@@ -108,6 +109,10 @@ public final class OrchestratorToolHandler: ToolHandler {
                     "acceptance": ToolSchema.string(),
                     "priority": ToolSchema.string(),
                     "model": ToolSchema.string(),
+                    "effort": ToolSchema.enumeration(
+                        [""] + OrchestratorToolHandler.effortNames,
+                        "The worker's `claude --effort`; \"\" clears it back to the project default."
+                    ),
                     "type": ToolSchema.enumeration(
                         [""] + OrchestratorToolHandler.typeNames,
                         "What kind of work this is; \"\" clears it back to Default."
@@ -297,6 +302,7 @@ public final class OrchestratorToolHandler: ToolHandler {
                             "acceptance": ToolSchema.string("How the reviewer will know it is done."),
                             "priority": ToolSchema.string("Free text, e.g. high, normal, low."),
                             "model": ToolSchema.string("Claude model id for the worker on this task; omit for the project default."),
+                            "effort": OrchestratorToolHandler.effortSchema,
                             "type": OrchestratorToolHandler.typeSchema,
                             "depends_on": ToolSchema.integerArray(
                                 "Zero-based indices of earlier tasks in this same array that must be done first."
@@ -618,6 +624,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "priority": .optional(task.priority),
             "column": .string(task.column.rawValue),
             "model": .optional(task.model),
+            "effort": .optional(task.effort?.rawValue),
             "type": .optional(task.type?.rawValue),
             "epic_id": .optional(task.epicId),
             "roster_agent": try renderRosterAgent(task.rosterAgentId),
@@ -654,6 +661,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         }
         let epic = try destinationEpic(arguments, identity: identity)
         let type = try Self.parseType(in: arguments, label: "type")
+        let effort = try Self.parseEffort(in: arguments, label: "effort")
         let task = try tasks.create(
             projectId: identity.projectId,
             title: title,
@@ -664,6 +672,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             origin: .orchestrator,
             epicId: epic?.id,
             model: ToolArguments.optionalString("model", in: arguments),
+            effort: effort,
             type: type
         )
         if !dependsOn.isEmpty {
@@ -685,6 +694,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         if let acceptance = ToolArguments.optionalString("acceptance", in: arguments) { task.acceptance = acceptance }
         if let priority = ToolArguments.optionalString("priority", in: arguments) { task.priority = priority }
         if let model = ToolArguments.optionalString("model", in: arguments) { task.model = model.isEmpty ? nil : model }
+        if arguments["effort"] != nil { task.effort = try Self.parseEffort(in: arguments, label: "effort") }
         if arguments["type"] != nil { task.type = try Self.parseType(in: arguments, label: "type") }
         try tasks.update(task)
         return ToolResult(text: "Updated task \(task.id).")
@@ -840,7 +850,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             return ToolResult(text: """
             Worker dispatched for \(task.id); the task is now running. \(site) on branch \
             \(spawn.branch), but setup is still running, so the worker cannot do anything yet and \
-            has no session id.
+            has no session id. \(spawn.models.summary)
 
             Nothing to do but wait. The session shows as `setup` in list_agents and turns to \
             `running` once the agent starts; if setup fails instead, the task goes back to ready \
@@ -889,7 +899,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             return ToolResult(text: """
             \(agent.name) was assigned \(task.id); the task is now running. \(site) on branch \
             \(spawn.branch), but setup is still running, so the agent cannot do anything yet and \
-            has no session id.
+            has no session id. \(spawn.models.summary)
 
             Nothing to do but wait, exactly as after spawn_worker. Do not call assign_to_agent for \
             this task again.
@@ -1140,6 +1150,7 @@ public final class OrchestratorToolHandler: ToolHandler {
                 acceptance: ToolArguments.optionalString("acceptance", in: raw),
                 priority: ToolArguments.optionalString("priority", in: raw),
                 model: ToolArguments.optionalString("model", in: raw),
+                effort: try Self.parseEffort(in: raw, label: "tasks[\(index)].effort"),
                 type: try Self.parseType(in: raw, label: "tasks[\(index)].type"),
                 origin: .orchestrator,
                 dependsOn: dependsOn
@@ -1468,6 +1479,28 @@ public final class OrchestratorToolHandler: ToolHandler {
         return type
     }
 
+    static let effortNames = Effort.allCases.map(\.rawValue)
+
+    static let effortSchema = ToolSchema.enumeration(
+        effortNames, "The worker's `claude --effort`; omit for the project default."
+    )
+
+    /// Absent, `null` and `""` all mean the project default (SPEC §6, §9).
+    static func parseEffort(in arguments: JSONValue, label: String) throws -> Effort? {
+        guard let value = arguments["effort"], value != .null else { return nil }
+        guard let raw = value.stringValue else {
+            throw ToolError("\(label) must be a string: one of \(effortNames.joined(separator: ", ")).")
+        }
+        if raw.isEmpty { return nil }
+        guard let effort = Effort(rawValue: raw) else {
+            throw ToolError(
+                "Unknown \(label) '\(raw)'. Use one of: \(effortNames.joined(separator: ", ")); omit it for the "
+                    + "project default."
+            )
+        }
+        return effort
+    }
+
     private func refuseTerminalColumns(_ column: TaskColumn, verb: String) throws {
         switch column {
         case .running:
@@ -1497,6 +1530,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "column": .string(task.column.rawValue),
             "priority": .optional(task.priority),
             "model": .optional(task.model),
+            "effort": .optional(task.effort?.rawValue),
             "type": .optional(task.type?.rawValue),
             "blocked": .bool(task.blocked),
             "failed": .bool(task.failed),

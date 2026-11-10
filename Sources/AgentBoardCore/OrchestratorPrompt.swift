@@ -56,14 +56,30 @@ public enum OrchestratorPrompt {
         - `shared`: tasks share one branch (`agentboard/shared`, or `agentboard/shared-epic-<id>` inside an epic) checked out in the project's primary checkout at \(project.repoPath), with up to \(project.settings.sharedCheckoutMaxAgents) workers at once. That replaces whatever branch the checkout had. A task that cannot join, or a checkout that cannot switch, gets its own worktree instead.
         - `auto`: its own worktree, unless a shared group with room is already running on the branch the task wants; then it joins that group. `auto` never starts a group.
         """)
-        if let defaultModel = project.settings.defaultModel {
-            sections.append("## Default model\nWorkers run on `\(defaultModel)` unless a task sets its own `model`.")
-        } else {
-            sections.append("## Default model\nWorkers run on Claude Code's default model unless a task sets its own `model`.")
-        }
+        sections.append(Self.defaultModelSection(project.settings))
         if let guidance = project.settings.modelGuidance?.trimmingCharacters(in: .whitespacesAndNewlines), !guidance.isEmpty {
             sections.append("## Model guidance from the human\nApply this when setting `model` on tasks (ids: \(ModelCatalog.known.map { "`\($0.id)` (\($0.name))" }.joined(separator: ", "))):\n\n\(guidance)")
         }
         return sections.joined(separator: "\n\n")
+    }
+
+    /// SPEC §9: what a task that sets neither `model` nor `effort` runs on.
+    static func defaultModelSection(_ settings: ProjectSettings) -> String {
+        let model = settings.defaultModel.map { "`\($0)`" } ?? "Claude Code's default model"
+        let effort = settings.defaultEffort.map { "`\($0.rawValue)` effort" } ?? "Claude Code's default effort"
+        let efforts = Effort.allCases.map { "`\($0.rawValue)`" }.joined(separator: ", ")
+        let rows = TaskType.allCases.compactMap { type -> String? in
+            guard let row = settings.workerModels.rows[type] else { return nil }
+            let parts = [row.model.map { "`\($0)`" }, row.effort.map { "`\($0.rawValue)` effort" }].compactMap { $0 }
+            return "- `\(type.rawValue)`: \(parts.joined(separator: " at "))"
+        }
+        let lines = [
+            "## Default model",
+            "A task's own `model` and `effort` (\(efforts)) always win. A task that leaves either unset takes it "
+                + "from its type's row, then from the project default: \(model) at \(effort).",
+            rows.isEmpty ? "No task type has a row." : rows.joined(separator: "\n"),
+            "An untyped task skips the rows.",
+        ]
+        return lines.joined(separator: "\n")
     }
 }

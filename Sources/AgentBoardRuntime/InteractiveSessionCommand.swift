@@ -1,3 +1,4 @@
+import AgentBoardCore
 import Foundation
 
 /// The foreground orchestrator process the app runs inside its own PTY (SPEC §9).
@@ -8,6 +9,7 @@ public struct InteractiveSessionCommand: Sendable, Equatable {
     public var configFiles: SessionConfigFiles
     public var appendSystemPrompt: String
     public var model: String?
+    public var effort: Effort?
     public var strictMcpConfig: Bool
     public var addDirs: [String]
     public var disallowedTools: [String]
@@ -15,7 +17,7 @@ public struct InteractiveSessionCommand: Sendable, Equatable {
     public var invocation: ClaudeInvocation
 
     public init(sessionId: String, cwd: URL, configFiles: SessionConfigFiles, appendSystemPrompt: String,
-                model: String? = nil, strictMcpConfig: Bool = false, addDirs: [String] = [],
+                model: String? = nil, effort: Effort? = nil, strictMcpConfig: Bool = false, addDirs: [String] = [],
                 disallowedTools: [String] = [], projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
                 invocation: ClaudeInvocation = .installed()) {
         self.sessionId = sessionId
@@ -23,6 +25,7 @@ public struct InteractiveSessionCommand: Sendable, Equatable {
         self.configFiles = configFiles
         self.appendSystemPrompt = appendSystemPrompt
         self.model = model
+        self.effort = effort
         self.strictMcpConfig = strictMcpConfig
         self.addDirs = addDirs
         self.disallowedTools = disallowedTools
@@ -45,6 +48,7 @@ public struct InteractiveSessionCommand: Sendable, Equatable {
         if strictMcpConfig { args.append("--strict-mcp-config") }
         args += ["--append-system-prompt", appendSystemPrompt]
         if let model { args += ["--model", model] }
+        if let effort { args += ["--effort", effort.rawValue] }
         if !addDirs.isEmpty { args += ["--add-dir"] + addDirs }
         if !disallowedTools.isEmpty { args += ["--disallowedTools"] + disallowedTools }
         return args
