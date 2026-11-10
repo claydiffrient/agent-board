@@ -223,6 +223,7 @@ struct ProjectSettingsSheet: View {
             TextField("Project session ceiling", value: $settings.caps.sessionCeiling, format: .number, prompt: Text("Unlimited"))
         case .models:
             ModelPicker(label: "Default model", inheritLabel: "Claude Code default", model: $settings.defaultModel)
+            EffortPicker(label: "Default effort", inheritLabel: "Claude Code default", effort: $settings.defaultEffort)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Model guidance")
                 TextEditor(text: Binding(

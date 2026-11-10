@@ -102,6 +102,7 @@ final class ProjectOrchestratorSource: ConsoleSessionSource {
             configFiles: configFiles,
             appendSystemPrompt: OrchestratorPrompt.systemPrompt(project: project),
             model: project.settings.defaultModel,
+            effort: project.settings.defaultEffort,
             strictMcpConfig: false,
             projectsRoot: projectsRoot,
             invocation: claude

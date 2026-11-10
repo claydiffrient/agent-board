@@ -1,3 +1,4 @@
+import AgentBoardCore
 import Foundation
 
 public struct SpawnRequest: Sendable {
@@ -12,6 +13,7 @@ public struct SpawnRequest: Sendable {
     public var tools: [String]?
     public var appendSystemPrompt: String?
     public var model: String?
+    public var effort: Effort?
     public var pluginDirs: [String]
 
     public static let defaultDisallowedTools = ["Bash(git push*)", "Bash(gh pr create*)", "Bash(gh pr merge*)"]
@@ -78,6 +80,7 @@ public struct SpawnRequest: Sendable {
         tools: [String]? = nil,
         appendSystemPrompt: String? = nil,
         model: String? = nil,
+        effort: Effort? = nil,
         pluginDirs: [String] = []
     ) {
         self.cwd = cwd
@@ -89,6 +92,7 @@ public struct SpawnRequest: Sendable {
         self.tools = tools
         self.appendSystemPrompt = appendSystemPrompt
         self.model = model
+        self.effort = effort
         self.pluginDirs = pluginDirs
     }
 }
@@ -177,6 +181,9 @@ public struct BackgroundSessionRuntime: AgentRuntime {
         }
         if let model = request.model {
             args += ["--model", model]
+        }
+        if let effort = request.effort {
+            args += ["--effort", effort.rawValue]
         }
         if let tools = request.tools {
             args += ["--tools", tools.joined(separator: ",")]
@@ -272,6 +279,6 @@ public struct BackgroundSessionRuntime: AgentRuntime {
     }
 
     private func offMain<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
-        try await Task.detached(priority: .userInitiated) { try body() }.value
+        try await _Concurrency.Task.detached(priority: .userInitiated) { try body() }.value
     }
 }

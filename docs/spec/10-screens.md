@@ -255,6 +255,12 @@ Review — as a small pill beside its priority and model; a Default task shows n
 The inspector's **Type** picker (Default plus the five types) saves through the
 same task update as its body and model. Changing it doesn't touch a review
 already under way; the task's next completion routes by the new type.
+An **Effort** picker (`EffortPicker`: Project default plus Low, Medium, High,
+Extra high, Max) sits under the Model picker in the inspector, the New Task sheet
+and each New Epic task row, and saves with the model. A task with its own effort
+shows it as a pill after its model pill, on the card and in the inspector header.
+Project settings' Models section puts a **Default effort** picker (Claude Code
+default plus the five levels) under Default model (§4).
 
 A task proposed through a `verifier` grant (origin `verify_session`, §6) says
 where it came from: its card in `proposed` shows "From Walk me through it ·

@@ -226,6 +226,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var extraMcpServers: [String] = []
     /// Passed as `--model` to every session without its own; nil leaves Claude Code's default.
     public var defaultModel: String? = nil
+    /// Passed as `--effort` to every session without its own; nil leaves Claude Code's default (SPEC §4).
+    public var defaultEffort: Effort? = nil
     /// Free text the orchestrator reads when choosing a model per task.
     public var modelGuidance: String? = nil
     /// How much human acceptance a finished task needs. An epic may override it for its own tasks.
@@ -274,6 +276,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         autoModeJSON: String? = nil,
         extraMcpServers: [String] = [],
         defaultModel: String? = nil,
+        defaultEffort: Effort? = nil,
         modelGuidance: String? = nil,
         reviewLevel: ReviewLevel = .task,
         reviewRouting: ReviewRoutingTable = ReviewRoutingTable(),
@@ -297,6 +300,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.autoModeJSON = autoModeJSON
         self.extraMcpServers = extraMcpServers
         self.defaultModel = defaultModel
+        self.defaultEffort = defaultEffort
         self.modelGuidance = modelGuidance
         self.reviewLevel = reviewLevel
         self.reviewRouting = reviewRouting
@@ -323,6 +327,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         autoModeJSON = try c.decodeIfPresent(String.self, forKey: .autoModeJSON)
         extraMcpServers = try c.decodeIfPresent([String].self, forKey: .extraMcpServers) ?? []
         defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
+        defaultEffort = try? c.decodeIfPresent(Effort.self, forKey: .defaultEffort)
         modelGuidance = try c.decodeIfPresent(String.self, forKey: .modelGuidance)
         reviewLevel = try c.decodeIfPresent(ReviewLevel.self, forKey: .reviewLevel) ?? .task
         if let table = try c.decodeIfPresent(ReviewRoutingTable.self, forKey: .reviewRouting) {

@@ -14,8 +14,11 @@
   assignable, the completion and integration protocols, the instruction to
   call `list_reports` when told to, the instruction to set `type` on every
   task it creates so agent review routes by it (§4), and the project's
-  `modelGuidance` text so it can set `model` on the tasks it creates. The orchestrator itself runs on
-  `settings.defaultModel` when set.
+  `modelGuidance` text so it can set `model` and `effort` on the tasks it creates. A *Default model*
+  section names the project's `defaultModel` and `defaultEffort` (or Claude Code's defaults) and the
+  five effort levels. The orchestrator itself runs on `settings.defaultModel` and
+  `settings.defaultEffort` when set. Through `create_task`, `update_task` and `create_epic` it sets a
+  task's `effort`; `get_task` and `list_tasks` return it (§4, §6).
 - **Pinned session.** `project.orch_session_id` names the session every launch
   resumes; an empty pin mints a new id, which the launch passes as
   `--session-id`. Only a `/clear` fork moves the pin on its own (§7). Before a

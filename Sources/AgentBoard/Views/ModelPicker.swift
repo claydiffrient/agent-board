@@ -64,3 +64,33 @@ struct ModelChip: View {
             .help("Model override: \(model)")
     }
 }
+
+/// The five `claude --effort` levels; nil means "inherit", as with `ModelPicker` (SPEC §10).
+struct EffortPicker: View {
+    let label: String
+    let inheritLabel: String
+    @Binding var effort: Effort?
+
+    var body: some View {
+        Picker(label, selection: $effort) {
+            Text(inheritLabel).tag(Effort?.none)
+            ForEach(Effort.allCases, id: \.self) { level in
+                Text(level.label).tag(Effort?.some(level))
+            }
+        }
+    }
+}
+
+struct EffortChip: View {
+    let effort: Effort
+
+    var body: some View {
+        Text(effort.label)
+            .font(.caption2.weight(.medium))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color.teal.opacity(0.18)))
+            .foregroundStyle(.teal)
+            .help("Effort override: \(effort.rawValue)")
+    }
+}

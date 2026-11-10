@@ -5,6 +5,7 @@ struct TaskDraft: Equatable {
     var body: String
     var acceptance: String
     var model: String?
+    var effort: Effort? = nil
     var type: TaskType?
 }
 

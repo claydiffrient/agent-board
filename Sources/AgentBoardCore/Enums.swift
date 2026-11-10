@@ -234,3 +234,22 @@ public enum ReviewLevel: String, Codable, Sendable, CaseIterable, Equatable, Dat
         }
     }
 }
+
+/// The levels `claude --effort` accepts (SPEC §4). Nil wherever one is optional means Claude Code's default.
+public enum Effort: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case low
+    case medium
+    case high
+    case xhigh
+    case max
+
+    public var label: String {
+        switch self {
+        case .low: return "Low"
+        case .medium: return "Medium"
+        case .high: return "High"
+        case .xhigh: return "Extra high"
+        case .max: return "Max"
+        }
+    }
+}

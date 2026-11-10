@@ -12,6 +12,7 @@ struct NewTaskSheet: View {
     @State private var priority = ""
     @State private var column: TaskColumn = .backlog
     @State private var model: String?
+    @State private var effort: Effort?
     @State private var errorMessage: String?
 
     private static let priorities = ["", "high", "medium", "low"]
@@ -35,6 +36,7 @@ struct NewTaskSheet: View {
                         ForEach(TaskColumn.allCases.filter { $0 != .closed }, id: \.self) { Text($0.title).tag($0) }
                     }
                     ModelPicker(label: "Model", inheritLabel: "Project default", model: $model)
+                    EffortPicker(label: "Effort", inheritLabel: "Project default", effort: $effort)
                 }
                 Section {
                     editor("Body", text: $body_, minHeight: 100)
@@ -87,7 +89,8 @@ struct NewTaskSheet: View {
                 column: column,
                 origin: .human,
                 epicId: nil,
-                model: model
+                model: model,
+                effort: effort
             )
             dismiss()
         } catch {
