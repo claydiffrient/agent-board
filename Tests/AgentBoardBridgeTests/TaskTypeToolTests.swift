@@ -42,6 +42,22 @@ final class TaskTypeToolTests: XCTestCase {
         XCTAssertTrue(refused.text.contains("code, docs, tests, plan, review"), refused.text)
     }
 
+    func testEffortIsSetReadAndAnUnknownLevelIsRefused() async throws {
+        let created = try await callJSON("create_task", ["title": "Port the parser", "effort": "high"])
+        let id = try XCTUnwrap(created["id"] as? String)
+        let detail = try await callJSON("get_task", ["id": id])
+        XCTAssertEqual(detail["effort"] as? String, "high")
+
+        _ = try await call("update_task", ["id": id, "effort": "medium"])
+        let list = try await callJSONArray("list_tasks", [:])
+        XCTAssertEqual(list.first { $0["id"] as? String == id }?["effort"] as? String, "medium")
+
+        let refused = try await call("create_task", ["title": "Think hard", "effort": "extreme"])
+        XCTAssertTrue(refused.isError)
+        XCTAssertTrue(refused.text.contains("low, medium, high, xhigh, max"), refused.text)
+        XCTAssertFalse(try f.tasks.list(projectId: f.project.id).contains { $0.title == "Think hard" })
+    }
+
     func testCreateEpicSetsEachTasksType() async throws {
         let created = try await callJSON("create_epic", [
             "title": "Docs pass", "tasks": [["title": "Write the guide", "type": "docs"]],

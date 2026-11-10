@@ -14,6 +14,7 @@ struct TaskInspectorView: View {
     @State private var draftBody = ""
     @State private var draftAcceptance = ""
     @State private var draftModel: String?
+    @State private var draftEffort: Effort?
     @State private var draftType: TaskType?
     @State private var deps = Observed<[String]>([])
     @State private var progress = Observed<[ProgressEntry]>([])
@@ -25,11 +26,16 @@ struct TaskInspectorView: View {
     }
 
     private var savedDraft: TaskDraft {
-        TaskDraft(body: task.body ?? "", acceptance: task.acceptance ?? "", model: task.model, type: task.type)
+        TaskDraft(
+            body: task.body ?? "", acceptance: task.acceptance ?? "", model: task.model, effort: task.effort,
+            type: task.type
+        )
     }
 
     private var currentDraft: TaskDraft {
-        TaskDraft(body: draftBody, acceptance: draftAcceptance, model: draftModel, type: draftType)
+        TaskDraft(
+            body: draftBody, acceptance: draftAcceptance, model: draftModel, effort: draftEffort, type: draftType
+        )
     }
 
     private var hasEdits: Bool {
@@ -43,6 +49,7 @@ struct TaskInspectorView: View {
                 editor("Body", text: $draftBody, minHeight: 120)
                 editor("Acceptance", text: $draftAcceptance, minHeight: 80)
                 ModelPicker(label: "Model", inheritLabel: "Project default", model: $draftModel)
+                EffortPicker(label: "Effort", inheritLabel: "Project default", effort: $draftEffort)
                 Picker("Type", selection: $draftType) {
                     Text("Default").tag(TaskType?.none)
                     ForEach(TaskType.allCases, id: \.self) { type in
@@ -133,6 +140,7 @@ struct TaskInspectorView: View {
                 }
                 if let type = task.type { TaskTypeChip(type: type) }
                 if let model = task.model { ModelChip(model: model) }
+                if let effort = task.effort { EffortChip(effort: effort) }
                 Text(task.origin.rawValue)
                 if task.blocked { FlagBadge(text: "blocked") }
                 if task.failed { FlagBadge(text: "failed") }
@@ -318,6 +326,7 @@ struct TaskInspectorView: View {
         draftBody = draft.body
         draftAcceptance = draft.acceptance
         draftModel = draft.model
+        draftEffort = draft.effort
         draftType = draft.type
     }
 
@@ -325,7 +334,10 @@ struct TaskInspectorView: View {
         let saved = taskId == task.id
             ? savedDraft
             : allTasks.first { $0.id == taskId }.map {
-                TaskDraft(body: $0.body ?? "", acceptance: $0.acceptance ?? "", model: $0.model, type: $0.type)
+                TaskDraft(
+                    body: $0.body ?? "", acceptance: $0.acceptance ?? "", model: $0.model, effort: $0.effort,
+                    type: $0.type
+                )
             }
         guard let saved else { return }
         drafts.retain(currentDraft, for: taskId, ifDifferentFrom: saved)
@@ -336,6 +348,7 @@ struct TaskInspectorView: View {
         updated.body = draftBody.isEmpty ? nil : draftBody
         updated.acceptance = draftAcceptance.isEmpty ? nil : draftAcceptance
         updated.model = draftModel
+        updated.effort = draftEffort
         updated.type = draftType
         do {
             try TaskStore(env.db).update(updated)

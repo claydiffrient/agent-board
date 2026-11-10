@@ -18,7 +18,8 @@ CREATE TABLE project (
   worktree_root   TEXT NOT NULL,
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
-  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, modelGuidance,
+  settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, defaultEffort,
+                                   -- modelGuidance,
                                    -- reviewLevel, reviewRouting, buildCommand, testCommand,
                                    -- verificationTimeoutSeconds (null = 30 min; else clamped
                                    --   to 60..86400, i.e. 1 min to 24 h, on decode and on set),
@@ -60,6 +61,7 @@ CREATE TABLE task (
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   model          TEXT,             -- overrides project settings.defaultModel for this task's worker
+  effort         TEXT,             -- low|medium|high|xhigh|max; overrides settings.defaultEffort. NULL = inherit
   reviewer_agent_id TEXT REFERENCES roster_agent(id),  -- the rostered reviewer holding it in `review`
   roster_agent_id TEXT REFERENCES roster_agent(id),    -- the archetype that last worked it
   archived_at    INTEGER,          -- non-null = archived: hidden from the board, never deleted
@@ -101,6 +103,7 @@ CREATE TABLE agent_session (
   est_cost_usd   REAL NOT NULL DEFAULT 0,
   attempt        INTEGER NOT NULL DEFAULT 1,
   model          TEXT,
+  effort         TEXT,               -- the --effort it was spawned with; NULL = none passed (Claude Code's default)
   last_tool      TEXT,
   stop_reason    TEXT,
   tool_started_at INTEGER,           -- oldest tool call not yet seen to return
@@ -460,6 +463,17 @@ The token is issued before spawn (it has to be in the generated config files)
 and bound to the session afterwards; the SessionStart hook may arrive first and
 bind it itself. `est_cost_usd` is a list-price estimate from transcript usage,
 never a billed amount.
+
+**Effort** (`Effort`: `low`, `medium`, `high`, `xhigh`, `max`) is passed to a
+spawn as `claude --effort`. A worker gets `task.effort ?? settings.defaultEffort`;
+a session started for a role rather than a task's own work (triager, follow-up
+checker, rostered reviewer) gets `settings.defaultEffort`, and the orchestrator's
+own session gets it too. Neither the roster nor a PR follow-through role carries
+an effort. Nil at every level passes no flag, which is Claude Code's default.
+`agent_session.effort` records the level the spawn passed, beside the `model`
+the transcript reports, so spend can be read by both. A resumed worker keeps its
+effort: `--effort` is in the job's saved `respawnFlags` (§2). A `defaultEffort`
+this build does not know decodes as nil rather than resetting every other setting.
 
 Notes are sectioned rather than a single body specifically so three concurrent
 workers appending to one note do not silently lose each other's writes. Whole-

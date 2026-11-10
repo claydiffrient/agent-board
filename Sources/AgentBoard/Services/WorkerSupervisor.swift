@@ -666,6 +666,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     // Most specific override wins: this task, then the agent's standing preference,
                     // then the project default.
                     model: task.model ?? agent?.model ?? project.settings.defaultModel,
+                    effort: task.effort ?? project.settings.defaultEffort,
                     attempt: placeholder.attempt,
                     rosterAgent: agent,
                     scope: scope
@@ -1234,6 +1235,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var name: String
         var prompt: String
         var model: String?
+        var effort: Effort?
         var attempt: Int
         /// A rostered assignment. Nothing here widens authority: the session still gets
         /// `--permission-mode auto`, the worker deny list, and at most a worker's token scope.
@@ -1280,6 +1282,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     + plan.extraDisallowedTools + (plan.rosterAgent?.disallowedTools ?? []),
                 tools: plan.rosterAgent?.tools,
                 model: plan.model,
+                effort: plan.effort,
                 pluginDirs: (plan.rosterAgent?.pluginDirs ?? []).map(expandingHome)
             )
             let spawned: SpawnedAgent
@@ -1291,7 +1294,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let recorded: AgentSession
             do {
                 recorded = try sessions.promoteSetupSession(
-                    placeholder.sessionId, to: spawned.sessionId, shortId: spawned.shortId
+                    placeholder.sessionId, to: spawned.sessionId, shortId: spawned.shortId, effort: plan.effort
                 )
             } catch {
                 // Something ended the setup row while the agent was starting, so nothing owns the
@@ -1454,6 +1457,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         watch: watch, triage: triage, workingDirectory: worktree.path, agent: agent?.identity
                     ),
                     model: role?.model ?? agent?.model ?? project.settings.defaultModel,
+                    effort: project.settings.defaultEffort,
                     attempt: placeholder.attempt,
                     rosterAgent: agent,
                     scope: .triager
@@ -1548,6 +1552,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         comments: try CommentStore(db).list(taskId: task.id)
                     ),
                     model: task.model ?? agent?.model ?? project.settings.defaultModel,
+                    effort: task.effort ?? project.settings.defaultEffort,
                     attempt: placeholder.attempt,
                     rosterAgent: agent,
                     extraDisallowedTools: SpawnRequest.fixerDisallowedTools
@@ -1625,6 +1630,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         comments: try CommentStore(db).list(taskId: task.id)
                     ),
                     model: role?.model ?? agent.model ?? project.settings.defaultModel,
+                    effort: project.settings.defaultEffort,
                     attempt: placeholder.attempt,
                     rosterAgent: agent,
                     scope: .reviewer
@@ -1690,6 +1696,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         agent: agent?.identity
                     ),
                     model: role?.model ?? agent?.model ?? project.settings.defaultModel,
+                    effort: project.settings.defaultEffort,
                     attempt: placeholder.attempt,
                     rosterAgent: agent,
                     scope: .triager
@@ -1802,6 +1809,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         verification: project.settings.verification
                     ),
                     model: project.settings.defaultModel,
+                    effort: task.effort ?? project.settings.defaultEffort,
                     attempt: placeholder.attempt
                 ),
                 placeholder: placeholder,

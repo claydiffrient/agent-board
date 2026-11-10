@@ -150,6 +150,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var updatedAt: Int64
     /// Overrides the project's default model for the worker on this task.
     public var model: String?
+    /// Overrides the project's `defaultEffort` for the worker on this task (SPEC §4).
+    public var effort: Effort?
     /// Under agent review, the rostered reviewer this task was handed to when it entered `review`.
     public var reviewerAgentId: String?
     /// The rostered agent that last worked this task, if one did rather than an anonymous worker.
@@ -193,6 +195,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case model
+        case effort
         case reviewerAgentId = "reviewer_agent_id"
         case rosterAgentId = "roster_agent_id"
         case archivedAt = "archived_at"
@@ -210,7 +213,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         id: String, projectId: String, epicId: String?, title: String, body: String?, acceptance: String?,
         priority: String?, column: TaskColumn, blocked: Bool = false, blockedReason: String? = nil,
         failed: Bool = false, failureReason: String? = nil, ordering: Double, origin: TaskOrigin,
-        createdAt: Int64, updatedAt: Int64, model: String? = nil, reviewerAgentId: String? = nil,
+        createdAt: Int64, updatedAt: Int64, model: String? = nil, effort: Effort? = nil, reviewerAgentId: String? = nil,
         rosterAgentId: String? = nil, archivedAt: Int64? = nil, doneAt: Int64? = nil,
         unarchivedAt: Int64? = nil, landing: TaskLanding? = nil, landingDetail: String? = nil,
         type: TaskType? = nil, closedAt: Int64? = nil, closedReason: String? = nil, closedBy: String? = nil
@@ -222,6 +225,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         self.landing = landing
         self.landingDetail = landingDetail
         self.model = model
+        self.effort = effort
         self.reviewerAgentId = reviewerAgentId
         self.rosterAgentId = rosterAgentId
         self.archivedAt = archivedAt
@@ -313,6 +317,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     public var estCostUSD: Double
     public var attempt: Int
     public var model: String?
+    /// The `--effort` this session was spawned with; nil means none was passed.
+    public var effort: Effort?
     public var lastTool: String?
     public var stopReason: String?
     /// Set when a shared-checkout write gave up waiting for another session's lock. `report_blocked`
@@ -356,6 +362,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case estCostUSD = "est_cost_usd"
         case attempt
         case model
+        case effort
         case lastTool = "last_tool"
         case stopReason = "stop_reason"
         case blockedOnPath = "blocked_on_path"
@@ -371,7 +378,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         worktreePath: String? = nil, branch: String? = nil, cwd: String, state: SessionState = .starting,
         startedAt: Int64 = .nowMillis, endedAt: Int64? = nil, lastActivity: Int64? = nil,
         transcriptPath: String? = nil, tokensIn: Int = 0, tokensOut: Int = 0, cacheRead: Int = 0,
-        cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil,
+        cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil, effort: Effort? = nil,
         lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil,
         rosterAgentId: String? = nil, toolStartedAt: Int64? = nil, toolsInFlight: Int = 0,
         reviewHead: String? = nil, reviewBase: String? = nil
@@ -396,6 +403,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.estCostUSD = estCostUSD
         self.attempt = attempt
         self.model = model
+        self.effort = effort
         self.lastTool = lastTool
         self.stopReason = stopReason
         self.blockedOnPath = blockedOnPath

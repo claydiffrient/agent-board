@@ -56,11 +56,12 @@ public enum OrchestratorPrompt {
         - `shared`: tasks share one branch (`agentboard/shared`, or `agentboard/shared-epic-<id>` inside an epic) checked out in the project's primary checkout at \(project.repoPath), with up to \(project.settings.sharedCheckoutMaxAgents) workers at once. That replaces whatever branch the checkout had. A task that cannot join, or a checkout that cannot switch, gets its own worktree instead.
         - `auto`: its own worktree, unless a shared group with room is already running on the branch the task wants; then it joins that group. `auto` never starts a group.
         """)
-        if let defaultModel = project.settings.defaultModel {
-            sections.append("## Default model\nWorkers run on `\(defaultModel)` unless a task sets its own `model`.")
-        } else {
-            sections.append("## Default model\nWorkers run on Claude Code's default model unless a task sets its own `model`.")
-        }
+        let model = project.settings.defaultModel.map { "`\($0)`" } ?? "Claude Code's default model"
+        let effort = project.settings.defaultEffort.map { "`\($0.rawValue)` effort" } ?? "Claude Code's default effort"
+        sections.append(
+            "## Default model\nWorkers run on \(model) unless a task sets its own `model`, at \(effort) unless it "
+                + "sets its own `effort` (\(Effort.allCases.map { "`\($0.rawValue)`" }.joined(separator: ", ")))."
+        )
         if let guidance = project.settings.modelGuidance?.trimmingCharacters(in: .whitespacesAndNewlines), !guidance.isEmpty {
             sections.append("## Model guidance from the human\nApply this when setting `model` on tasks (ids: \(ModelCatalog.known.map { "`\($0.id)` (\($0.name))" }.joined(separator: ", "))):\n\n\(guidance)")
         }

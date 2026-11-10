@@ -17,7 +17,8 @@ proven by the runtime spike in `spike/` on 2026-09-11.
   id`). The id is therefore recorded after spawn, not assigned before it.
   `claude --bg --resume <uuid>` wakes a stopped session under the same id and
   **reuses its saved options** (`-n`, `--permission-mode`, `--strict-mcp-config`,
-  `--mcp-config`, `--settings`, `--disallowedTools`, `--model`) by path. The
+  `--mcp-config`, `--settings`, `--disallowedTools`, `--model`, and `--effort`
+  as of 2.1.322) by path. The
   per-session config files must stay at their original paths and be rewritten
   with the current server port before a resume, or the woken worker talks to a
   dead port.

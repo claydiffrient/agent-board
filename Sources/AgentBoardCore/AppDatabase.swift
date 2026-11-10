@@ -263,6 +263,10 @@ public final class AppDatabase: Sendable {
                 arguments: [Int64.nowMillis]
             )
         }
+        migrator.registerMigration("effort") { db in
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN effort TEXT")
+            try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN effort TEXT")
+        }
         return migrator
     }
 }

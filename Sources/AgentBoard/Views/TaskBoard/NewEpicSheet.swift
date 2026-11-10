@@ -90,6 +90,7 @@ struct NewEpicSheet: View {
                 }
             }
             ModelPicker(label: "Model", inheritLabel: "Project default", model: draft.model)
+            EffortPicker(label: "Effort", inheritLabel: "Project default", effort: draft.effort)
             editor("Body", text: draft.body, minHeight: 60)
             editor("Acceptance", text: draft.acceptance, minHeight: 50)
         }
@@ -142,6 +143,7 @@ struct EpicTaskDraft: Identifiable, Equatable {
     var acceptance = ""
     var priority = ""
     var model: String?
+    var effort: Effort?
 
     /// Drops rows the user added and left blank so a stray Add Task does not create an untitled task.
     static func specs(from drafts: [EpicTaskDraft]) -> [NewEpicTask] {
@@ -154,6 +156,7 @@ struct EpicTaskDraft: Identifiable, Equatable {
                 acceptance: draft.acceptance.isEmpty ? nil : draft.acceptance,
                 priority: draft.priority.isEmpty ? nil : draft.priority,
                 model: draft.model,
+                effort: draft.effort,
                 origin: .human
             )
         }
