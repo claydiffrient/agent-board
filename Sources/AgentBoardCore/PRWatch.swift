@@ -227,6 +227,17 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
 
     public var isOpenDecision: Bool { state == .open && verdict == .decision }
 
+    /// SPEC §13.1: an open fix or decision outlives an outdated or viewer-latest thread; an untriaged item
+    /// outlives only an outdated one, since the viewer's own reply retires it.
+    func staysOpen(under incoming: PRSnapshotItem) -> Bool {
+        guard state == .open else { return false }
+        switch verdict {
+        case .fix?, .decision?: return true
+        case nil: return !incoming.viewerLatest
+        default: return false
+        }
+    }
+
     /// A `CHANGES_REQUESTED` review with no text of its own (SPEC §13.1).
     public var isEmptyChangeRequest: Bool {
         guard kind == .review, let author else { return false }
@@ -439,10 +450,14 @@ public struct PRSnapshotItem: Sendable, Equatable {
     public var isResolved: Bool
     /// False for feedback too old to start triage: it updates a stored item but creates none (SPEC §13.1).
     public var opensItem: Bool
+    /// An outdated thread, or one whose latest comment is the viewer's, only keeps an owed item open (SPEC §13.1).
+    public var isOutdated: Bool
+    public var viewerLatest: Bool
 
     public init(
         githubNodeId: String, kind: PRItemKind, author: String? = nil, body: String, path: String? = nil,
-        line: Int? = nil, url: String? = nil, isResolved: Bool = false, opensItem: Bool = true
+        line: Int? = nil, url: String? = nil, isResolved: Bool = false, opensItem: Bool = true,
+        isOutdated: Bool = false, viewerLatest: Bool = false
     ) {
         self.githubNodeId = githubNodeId
         self.kind = kind
@@ -453,7 +468,11 @@ public struct PRSnapshotItem: Sendable, Equatable {
         self.url = url
         self.isResolved = isResolved
         self.opensItem = opensItem
+        self.isOutdated = isOutdated
+        self.viewerLatest = viewerLatest
     }
+
+    var onlyKeepsOwedItems: Bool { isOutdated || viewerLatest }
 
     /// SPEC §13.1: the body of a CHANGES_REQUESTED review that has no visible text of its own.
     public static func emptyChangeRequestBody(author: String) -> String {

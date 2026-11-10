@@ -600,7 +600,10 @@ overrides (§5, §5.1) still apply over it, and there are no per-epic rows.
 `watching`. Items are matched by `github_node_id`, so the same snapshot twice
 changes nothing but `last_polled_at`. An open item that the snapshot reports
 resolved, or leaves out, becomes `handled`; a resolved item never seen before is
-not stored. An unresolved item whose body changed — a new reply — loses
+not stored. A thread the snapshot marks `isOutdated` or `viewerLatest` stores
+nothing new and leaves an open item with verdict `fix` or `decision` exactly as
+it was, and an untriaged one too unless the thread is `viewerLatest`; for any
+other item it counts as left out (§13.1). An unresolved item whose body changed — a new reply — loses
 everything triage gave it: `verdict`, `approach`, the `decision_*` fields,
 `reply_body`, `reply_url`, `reply_error`, `reply_abandoned_at` and
 `followup_grade`, so the next round triages it afresh and replies anew. A
