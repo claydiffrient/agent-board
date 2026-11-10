@@ -336,10 +336,10 @@ public final class StoreHookSink: HookSink {
     }
 
     /// `/clear` ends the session and starts a new one under a new id, and the fork payload does not
-    /// name its parent. The grant is the only link back, so an unknown session id arriving on a live
-    /// grant bound to a known session is the fork signal. The old row keeps its state and its spend —
-    /// the fork writes its own transcript, and metering reads transcripts — but its queued comments move.
-    /// A fork on a settled task is adopted stopped (SPEC §7).
+    /// name its parent. The grant is the only link back, so a `SessionStart` with `source: "clear"`
+    /// under an unknown id on a live grant bound to a known session is the fork signal. The old row
+    /// keeps its state and its spend — the fork writes its own transcript, and metering reads
+    /// transcripts — but its queued comments move. A fork on a settled task is adopted stopped (SPEC §7).
     private func adoptFork(newSessionId: String, identity: TokenIdentity) {
         guard let priorId = identity.sessionId, priorId != newSessionId,
               (try? sessions.get(newSessionId)) == nil,
@@ -461,7 +461,11 @@ public final class StoreHookSink: HookSink {
         if identity.sessionId == nil {
             try? grants.bind(token: identity.token, sessionId: sessionId)
         }
-        adoptFork(newSessionId: sessionId, identity: identity)
+        // SPEC §2, §7: any other unknown id on the grant is a child process of the bound session that
+        // inherited its hook token, and adopting it would take the running session's grant and pin.
+        if event.name == "SessionStart", event.sessionSource == "clear" {
+            adoptFork(newSessionId: sessionId, identity: identity)
+        }
         guard let session = projectSession(sessionId, identity: identity) else { return .none }
         let taskId = session.taskId ?? identity.taskId
 
