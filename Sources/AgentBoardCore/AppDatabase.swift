@@ -263,6 +263,9 @@ public final class AppDatabase: Sendable {
                 arguments: [Int64.nowMillis]
             )
         }
+        migrator.registerMigration("session_agent_started_at") { db in
+            try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN agent_started_at INTEGER")
+        }
         return migrator
     }
 }

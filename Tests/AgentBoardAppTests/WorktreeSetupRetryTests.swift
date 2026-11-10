@@ -94,6 +94,22 @@ final class WorktreeSetupRetryTests: XCTestCase {
         _ = try await fixture.supervisor.spawnWorker(taskId: task.id)
     }
 
+    /// SPEC §3.1: a stop cancels setup before it ends the row, so an agent that comes up between the
+    /// two must be stopped, not promoted into a session in a worktree a teardown may take.
+    func testAnAgentThatStartsAsItsSetupIsStoppedIsStoppedToo() async throws {
+        let task = try makeTask()
+        await fixture.runtime.holdSpawnUntilCancelled()
+        let spawn = try await fixture.supervisor.spawnWorker(taskId: task.id)
+        await fixture.runtime.waitUntilSettingUp()
+
+        try? await fixture.supervisor.stop(sessionId: spawn.setupSessionId)
+        await fixture.supervisor.waitForSetup()
+
+        XCTAssertEqual(try SessionStore(fixture.db).forTask(task.id).filter(\.state.isActive).map(\.sessionId), [])
+        let stopped = await fixture.runtime.stopped
+        XCTAssertEqual(stopped, ["short-1"], "the agent that came up as its setup was stopped was left running")
+    }
+
     // MARK: - Helpers
 
     private func makeTask() throws -> BoardTask {

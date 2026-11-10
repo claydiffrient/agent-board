@@ -300,6 +300,32 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(byNode["T_choice"]?.isOpenDecision, true)
     }
 
+    /// SPEC §5: an epic's PR head is on its epic branch, so a fixer's checkout of it is a clean orphan to a
+    /// reap; a reap while its `git worktree add` runs must leave the worktree to the fixer.
+    func testAReapWhileAFixersCheckoutIsBeingCreatedLeavesTheFixerItsWorktree() async throws {
+        try enable()
+        _ = try fixture.git(["merge", "-q", "--ff-only", "add-widgets"])
+        let gate = try fixture.installGatedHook(
+            "post-checkout", when: "[ \"$(git symbolic-ref --short -q HEAD)\" = agentboard/pr-12-r1 ]"
+        )
+        let hookStarted = fixture.supportDir.appendingPathComponent("post-checkout-used").path
+        let reap = _Concurrency.Task {
+            let deadline = Date().addingTimeInterval(30)
+            while !FileManager.default.fileExists(atPath: hookStarted), Date() < deadline {
+                try? await _Concurrency.Task.sleep(for: .milliseconds(20))
+            }
+            await fixture.supervisor.reconcile(projectId: fixture.project.id)
+            FileManager.default.createFile(atPath: gate.path, contents: nil)
+        }
+
+        let fixer = try await runningFixer()
+        await reap.value
+        await fixture.supervisor.waitForSetup()
+
+        let worktree = try XCTUnwrap(try activeSession(on: fixer.id).worktreePath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree), "the reap removed the fixer's worktree under its session")
+    }
+
     /// The third failure in a row parks the watch and raises the project's attention, naming it.
     func testATriagerThatEndsWithoutVerdictsLeavesNothingBehindAndIsRetriedUntilTheWatchParks() async throws {
         try enable()

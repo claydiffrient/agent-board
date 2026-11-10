@@ -78,7 +78,7 @@ public enum AttentionSelection {
             guard let session = active[task.id], session.state == .running else { continue }
             guard isStalled(
                 lastActivity: session.lastActivityDate,
-                startedAt: session.startedDate,
+                startedAt: session.clockStartedDate,
                 toolStartedAt: session.toolStartedDate,
                 awake: awake,
                 threshold: stallThreshold
@@ -89,7 +89,7 @@ public enum AttentionSelection {
                     session: session,
                     kind: .stalled,
                     reason: nil,
-                    since: session.lastActivityDate ?? session.startedDate
+                    since: session.lastActivityDate ?? session.clockStartedDate
                 )
             )
         }
