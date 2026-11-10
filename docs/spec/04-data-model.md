@@ -19,7 +19,7 @@ CREATE TABLE project (
   memory_dir      TEXT,            -- canonical ~/.claude/projects/<slug>/memory
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, defaultEffort,
-                                   -- workerModels, modelGuidance,
+                                   -- workerModels, allowsFableEscalation, modelGuidance,
                                    -- reviewLevel, reviewRouting, buildCommand, testCommand,
                                    -- verificationTimeoutSeconds (null = 30 min; else clamped
                                    --   to 60..86400, i.e. 1 min to 24 h, on decode and on set),
@@ -112,6 +112,7 @@ CREATE TABLE agent_session (
   roster_agent_id TEXT REFERENCES roster_agent(id),  -- §10: the archetype this session was spawned from
   review_head    TEXT,               -- §5.1: HEAD (and uncommitted-change fingerprint) a rostered reviewer was spawned on
   review_base    TEXT,               -- §3.1 step 1, §5.1: what a rostered reviewer diffs against; `ReviewPrompt.recorded` rebuilds from it
+  escalation     TEXT,               -- §5 retries: why this attempt runs above what its task resolves to; NULL = it does not
   agent_stopped_at INTEGER,         -- §8.6: a `claude stop` succeeded after the row's last sign of life; a trigger clears it
   CHECK ((role = 'coordinator') = (project_id IS NULL))
 );
@@ -469,15 +470,18 @@ spawn as `claude --effort`, and the model as `--model`. Every spawn path resolve
 the two independently through `WorkerModelChoice.resolve`, taking the first level
 that sets a value:
 
-1. the task's own `model` or `effort`, except for a PR round's reviewer: a fix
-   round's task carries the fixer role's model (§13.1), so its reviewer skips
-   this level;
+1. the task's own `model` or `effort`, except for a reviewer, rostered or PR
+   round: it judges the task rather than doing it, so a task's own values (and
+   a fix round's, which carry the fixer role's model, §13.1) are skipped;
 2. the rostered agent's `model`, or a PR follow-through role's, where the spawn
    uses one (neither carries an effort);
 3. the row for the task's `type` in `settings.workerModels`; a rostered or round
    reviewer reads the `review` row, whatever the reviewed task's type;
 4. `settings.defaultModel` / `settings.defaultEffort`;
 5. nothing, which passes no flag: Claude Code's default.
+
+A worker retried after a failed attempt then escalates whichever of the two came
+from levels 3 to 5 (§5, "Retries escalate effort, then model").
 
 The orchestrator's own session takes level 4 only. `workerModels`
 (`WorkerModelTable`) holds an optional model and effort per task type; an untyped
@@ -495,8 +499,9 @@ it as well, unless they set `defaultModel`: then the table decodes empty, so a
 model the human already chose keeps applying to every task. This is a
 decode-time conversion, and once saved the table is always written, empty or not.
 A row whose type this build doesn't know is dropped on decode.
-`agent_session.effort` records the level the spawn passed, beside the `model`
-the transcript reports, so spend can be read by both. A resumed worker keeps its
+`agent_session.effort` records the level the spawn passed, and `model` the
+`--model` it passed until the transcript reports the one that answered, so
+spend can be read by both and a retry escalates from them (§5). A resumed worker keeps its
 effort: `--effort` is in the job's saved `respawnFlags` (§2). A `defaultEffort`
 this build does not know decodes as nil rather than resetting every other setting.
 

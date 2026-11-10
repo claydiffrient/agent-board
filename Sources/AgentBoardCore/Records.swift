@@ -340,6 +340,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     /// What a rostered reviewer was told to diff against, which for a standalone task can be the
     /// recorded cut point rather than the base branch (SPEC §3.1 step 1).
     public var reviewBase: String?
+    /// Why this attempt runs above the model or effort its task resolves to (SPEC §5 retries); nil when it does not.
+    public var escalation: String?
 
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -371,6 +373,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case toolsInFlight = "tools_in_flight"
         case reviewHead = "review_head"
         case reviewBase = "review_base"
+        case escalation
     }
 
     public init(
@@ -381,7 +384,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil, effort: Effort? = nil,
         lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil,
         rosterAgentId: String? = nil, toolStartedAt: Int64? = nil, toolsInFlight: Int = 0,
-        reviewHead: String? = nil, reviewBase: String? = nil
+        reviewHead: String? = nil, reviewBase: String? = nil, escalation: String? = nil
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -412,6 +415,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.toolsInFlight = toolsInFlight
         self.reviewHead = reviewHead
         self.reviewBase = reviewBase
+        self.escalation = escalation
     }
 
     public var id: String { sessionId }

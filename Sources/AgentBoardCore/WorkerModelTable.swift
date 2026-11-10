@@ -57,6 +57,16 @@ public enum WorkerModelSource: String, Sendable, Equatable {
     case typeTable
     case projectDefault
     case claudeCode
+    /// Raised from what the last attempt ran at, after it fell short (SPEC §5 retries).
+    case escalation
+
+    /// The levels a retry may escalate: none of them was chosen for this task in particular.
+    public var isDefault: Bool {
+        switch self {
+        case .typeTable, .projectDefault, .claudeCode, .escalation: return true
+        case .task, .role: return false
+        }
+    }
 
     public var label: String {
         switch self {
@@ -65,6 +75,7 @@ public enum WorkerModelSource: String, Sendable, Equatable {
         case .typeTable: return "the type table"
         case .projectDefault: return "the project default"
         case .claudeCode: return "Claude Code's default"
+        case .escalation: return "escalation after a failed attempt"
         }
     }
 }
@@ -76,14 +87,19 @@ public struct WorkerModelChoice: Sendable, Equatable {
     public var modelSource: WorkerModelSource
     public var effort: Effort?
     public var effortSource: WorkerModelSource
+    /// Set when `WorkerEscalation` moved this attempt above what it resolved to, e.g.
+    /// "attempt 2: effort medium → high after review reopened attempt 1".
+    public var escalation: String?
 
     public init(
-        model: String?, modelSource: WorkerModelSource, effort: Effort?, effortSource: WorkerModelSource
+        model: String?, modelSource: WorkerModelSource, effort: Effort?, effortSource: WorkerModelSource,
+        escalation: String? = nil
     ) {
         self.model = model
         self.modelSource = modelSource
         self.effort = effort
         self.effortSource = effortSource
+        self.escalation = escalation
     }
 
     public static let claudeCodeDefault = WorkerModelChoice(
@@ -119,6 +135,7 @@ public struct WorkerModelChoice: Sendable, Equatable {
     public var summary: String {
         let model = self.model.map { "`\($0)`" } ?? "Claude Code's default model"
         let effort = self.effort.map { "`\($0.rawValue)` effort" } ?? "Claude Code's default effort"
-        return "It runs on \(model) (from \(modelSource.label)) at \(effort) (from \(effortSource.label))."
+        let base = "It runs on \(model) (from \(modelSource.label)) at \(effort) (from \(effortSource.label))."
+        return escalation.map { "\(base) Escalation: \($0)." } ?? base
     }
 }

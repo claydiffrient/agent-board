@@ -610,10 +610,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let reviewHead = scope == .reviewer
                 ? try await offMain { try ReviewCheckout.baseline(in: site.cwd) }
                 : nil
+            let models = try escalatedModelChoice(
+                for: task, project: project, roleModel: agent?.model, scope: scope, attempt: attempt
+            )
             let row = { (site: CheckoutSite) in
                 Self.setupRow(
                     projectId: project.id, taskId: taskId, site: site, attempt: attempt,
-                    rosterAgentId: agent?.id, reviewHead: reviewHead, reviewBase: scope == .reviewer ? reviewBase : nil
+                    rosterAgentId: agent?.id, reviewHead: reviewHead, reviewBase: scope == .reviewer ? reviewBase : nil,
+                    escalation: models.escalation
                 )
             }
             // SPEC §5: a discard that began during this spawn's awaits saw no session to stop, and
@@ -636,7 +640,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if let epic, epic.state == .planning {
                 try epics.setState(epic.id, .active)
             }
-            let models = Self.modelChoice(for: task, project: project, roleModel: agent?.model, scope: scope)
+            if let escalation = models.escalation {
+                _ = try? ProgressStore(db).append(
+                    taskId: taskId, sessionId: nil, kind: .status, text: "Escalation: \(escalation)."
+                )
+            }
             beginSetup(
                 LaunchPlan(
                     project: project,
@@ -1071,7 +1079,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     private static func setupRow(
         projectId: String, taskId: String, site: CheckoutSite, attempt: Int,
-        rosterAgentId: String? = nil, reviewHead: String? = nil, reviewBase: String? = nil
+        rosterAgentId: String? = nil, reviewHead: String? = nil, reviewBase: String? = nil, escalation: String? = nil
     ) -> AgentSession {
         AgentSession(
             sessionId: "setup-\(UUID().uuidString)",
@@ -1085,7 +1093,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             attempt: attempt,
             rosterAgentId: rosterAgentId,
             reviewHead: reviewHead,
-            reviewBase: reviewBase
+            reviewBase: reviewBase,
+            escalation: escalation
         )
     }
 
@@ -1225,7 +1234,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// SPEC §4's resolution order. A reviewer takes the `review` row whatever the reviewed task's type.
-    /// `usesTaskValues` is false where the task's model was stamped for someone else, as a fix round's is for its fixer.
+    /// `usesTaskValues` is false for every reviewer, which judges the task rather than doing it.
     static func modelChoice(
         for task: BoardTask, project: Project, roleModel: String? = nil, scope: AgentBoardCore.TokenScope = .worker,
         usesTaskValues: Bool = true
@@ -1234,6 +1243,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             taskModel: usesTaskValues ? task.model : nil, taskEffort: usesTaskValues ? task.effort : nil,
             roleModel: roleModel,
             type: scope == .reviewer ? .review : task.type, settings: project.settings
+        )
+    }
+
+    /// SPEC §5 retries: a worker whose task's last attempt fell short climbs from what that attempt ran at.
+    /// A reviewer resolves without the reviewed task's own values and is never escalated (SPEC §4).
+    private func escalatedModelChoice(
+        for task: BoardTask, project: Project, roleModel: String?, scope: AgentBoardCore.TokenScope, attempt: Int
+    ) throws -> WorkerModelChoice {
+        let resolved = Self.modelChoice(
+            for: task, project: project, roleModel: roleModel, scope: scope, usesTaskValues: scope != .reviewer
+        )
+        guard scope == .worker,
+              let prior = try WorkerEscalation.prior(
+                  in: db, taskId: task.id, cutBySleep: { latestTurnWasCutBySleep($0.sessionId) }
+              )
+        else { return resolved }
+        return WorkerEscalation.escalate(
+            resolved, after: prior, attempt: attempt, allowsFable: project.settings.allowsFableEscalation
         )
     }
 
@@ -1306,7 +1333,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let recorded: AgentSession
             do {
                 recorded = try sessions.promoteSetupSession(
-                    placeholder.sessionId, to: spawned.sessionId, shortId: spawned.shortId, effort: plan.models.effort
+                    placeholder.sessionId, to: spawned.sessionId, shortId: spawned.shortId,
+                    model: plan.models.model, effort: plan.models.effort
                 )
             } catch {
                 // Something ended the setup row while the agent was starting, so nothing owns the

@@ -235,6 +235,8 @@ struct ProjectSettingsSheet: View {
                 Button("Use recommended") { settings.workerModels = .recommended }
                     .disabled(settings.workerModels == .recommended)
             }
+            Toggle("Allow escalation to Fable", isOn: $settings.allowsFableEscalation)
+                .help("A retried task that already failed on Opus at extra high effort moves up to Fable 5.2, which costs twice as much per token.")
             VStack(alignment: .leading, spacing: 6) {
                 Text("Model guidance")
                 TextEditor(text: Binding(

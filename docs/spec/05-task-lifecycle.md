@@ -487,6 +487,46 @@ either way, and it is deleted only by acceptance finding it fully accepted and
 idle, above — never by reconcile's orphan sweep, which has no notion of "every
 member" to check.
 
+**Retries escalate effort, then model.** A worker spawned on a task whose last
+attempt fell short starts one step above what that attempt ran at, following
+the published order ("Which Claude model should you build with?", claude.dev,
+read 2026-11-10): raise effort one level, then move up one model, starting the
+bigger model at a lower effort than the smaller one reached.
+`WorkerEscalation.prior` walks the task's worker sessions newest first, skipping
+reviewers (they carry a `review_head`). An attempt fell short if it ended
+`failed` — a cap (§8) or the worker's own `report_failed` — or it completed and
+a rostered reviewer's `reopen_task` ("Agent review failed.") has been the
+task's latest review verdict since it started. An attempt that says nothing
+about the model is skipped and the walk goes on: a setup failure, whether or not
+`claude` started; any `stopped` session (a human stop, a vanished process, a
+wind-down acknowledgment); a hand-off; and a cap breach whose last turn was the
+sleep-cut `StopFailure` (§8). A completed attempt nothing reopened ends the
+walk with no escalation. Skipping rather than stopping is what keeps a level: a
+human stop on an escalated attempt leaves the next one where the stopped
+attempt ran, because the failure before it is still the newest that counts.
+
+`WorkerEscalation.escalate` then takes one step from the recorded
+`agent_session.model` and `effort` of that attempt:
+
+1. Effort below `xhigh` rises one level (`low` → `medium` → `high` → `xhigh`).
+   Claude Code's own default, when no effort was passed, is read as `medium`.
+2. At `xhigh` or `max`, the model moves up one at `medium`: Haiku to
+   `claude-sonnet-5-5`, Sonnet to `claude-opus-5-5`, and Opus to
+   `claude-fable-5-2` only when the project's `allowsFableEscalation` is on (off
+   by default; Fable costs twice as much per token).
+3. With no step left, the retry runs at what the last attempt reached, and the
+   reason says it is the top of the ladder.
+
+Only a value whose §4 level is the type table, the project default or Claude
+Code's default escalates, each on its own: an explicit task `effort` holds while
+its type-table model still climbs, and a task with both set retries unchanged.
+A reviewer never escalates. The step's reason, e.g. "attempt 2: effort medium →
+high after attempt 1 failed", is the escalated `WorkerModelChoice`'s
+`escalation`: `spawn_worker` appends it to its summary, the setup row stores it in
+`agent_session.escalation` (shown under the session in the task inspector), and
+a `status` progress row records it on the task. Integrator, triage, fixer and
+follow-up check spawns do not escalate.
+
 ### 5.1 Completion protocol
 
 A worker's closing instructions, injected at spawn, worded per placement

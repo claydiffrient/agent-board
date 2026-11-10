@@ -264,7 +264,10 @@ default plus the five levels) under Default model (§4). Below it, the **type
 table** gives each task type a row with a model picker and an effort picker, each
 offering Project default plus the same choices, and a **Use recommended** button
 that restores the recommended table (§4); it is disabled while the table already
-matches.
+matches. An **Allow escalation to Fable** switch under the table, off by default,
+lets a retried task climb from Opus to Fable 5.2 (§5, "Retries escalate effort,
+then model"). A session that escalated shows its reason under its cost line in
+the task inspector's Sessions list.
 
 A task proposed through a `verifier` grant (origin `verify_session`, §6) says
 where it came from: its card in `proposed` shows "From Walk me through it ·

@@ -265,7 +265,7 @@ public struct SessionStore: Sendable {
     /// Throws if the row is gone or has left `setup` — a cap kill or a human stop got there first.
     public func promoteSetupSession(
         _ placeholderId: String, to sessionId: String, shortId: String?, state: SessionState = .starting,
-        effort: Effort? = nil
+        model: String? = nil, effort: Effort? = nil
     ) throws -> AgentSession {
         try db.writer.write { db in
             guard let placeholder = try AgentSession.fetchOne(db, key: placeholderId) else {
@@ -282,6 +282,7 @@ public struct SessionStore: Sendable {
             promoted.sessionId = sessionId
             promoted.shortId = shortId
             promoted.state = state
+            promoted.model = model ?? placeholder.model
             promoted.effort = effort
             try promoted.insert(db)
             for commentId in queued {

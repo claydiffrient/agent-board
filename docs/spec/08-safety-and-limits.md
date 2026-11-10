@@ -107,6 +107,12 @@ Per project, overridable:
   writes the session's `last_activity` and `started_at` as it resumes, so its
   idle and elapsed clocks start from the resume, not from the cut. An app
   relaunch drops the record, and with it the exemption.
+- **A cap breach makes the next attempt escalate (§5).** A worker stopped at
+  the token, elapsed or idle cap ends `failed`, and the task's next worker runs
+  one effort level higher, or one model up, than it did. A cap breach whose
+  last turn was the sleep-cut `StopFailure` above does not count: sleep says
+  nothing about the model. Neither does a human Stop, which ends the session
+  `stopped`.
 - **Autonomy is off on first run.** Every `spawn_worker` creates a pending
   approval until you turn it on. This is a setting, not a rebuild.
 - **PR follow-through spawns skip approval (§13).** In a project with the

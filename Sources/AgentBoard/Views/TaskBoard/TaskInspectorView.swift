@@ -270,6 +270,10 @@ struct TaskInspectorView: View {
                         }
                         Text("\(Format.cost(session.estCostUSD)) · \(Format.tokens(session.totalTokens)) tok")
                             .foregroundStyle(.secondary)
+                        if let escalation = session.escalation {
+                            Text("Escalated: \(escalation)")
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .font(.caption)
                     Spacer()

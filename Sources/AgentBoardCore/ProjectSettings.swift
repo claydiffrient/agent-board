@@ -230,6 +230,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var defaultEffort: Effort? = nil
     /// Per task type, ahead of `defaultModel` and `defaultEffort` (SPEC §4).
     public var workerModels: WorkerModelTable = .recommended
+    /// Whether a retried task on Opus may move up to Fable 5.2, which costs twice as much per token (SPEC §5 retries).
+    public var allowsFableEscalation: Bool = false
     /// Free text the orchestrator reads when choosing a model per task.
     public var modelGuidance: String? = nil
     /// How much human acceptance a finished task needs. An epic may override it for its own tasks.
@@ -280,6 +282,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         defaultModel: String? = nil,
         defaultEffort: Effort? = nil,
         workerModels: WorkerModelTable? = nil,
+        allowsFableEscalation: Bool = false,
         modelGuidance: String? = nil,
         reviewLevel: ReviewLevel = .task,
         reviewRouting: ReviewRoutingTable = ReviewRoutingTable(),
@@ -305,6 +308,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.defaultModel = defaultModel
         self.defaultEffort = defaultEffort
         self.workerModels = workerModels ?? Self.initialWorkerModels(defaultModel: defaultModel)
+        self.allowsFableEscalation = allowsFableEscalation
         self.modelGuidance = modelGuidance
         self.reviewLevel = reviewLevel
         self.reviewRouting = reviewRouting
@@ -334,6 +338,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         defaultEffort = try? c.decodeIfPresent(Effort.self, forKey: .defaultEffort)
         workerModels = try c.decodeIfPresent(WorkerModelTable.self, forKey: .workerModels)
             ?? Self.initialWorkerModels(defaultModel: defaultModel)
+        allowsFableEscalation = try c.decodeIfPresent(Bool.self, forKey: .allowsFableEscalation) ?? false
         modelGuidance = try c.decodeIfPresent(String.self, forKey: .modelGuidance)
         reviewLevel = try c.decodeIfPresent(ReviewLevel.self, forKey: .reviewLevel) ?? .task
         if let table = try c.decodeIfPresent(ReviewRoutingTable.self, forKey: .reviewRouting) {
