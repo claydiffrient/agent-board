@@ -143,6 +143,16 @@ nobody reviewed.
   shared member has no worktree of its own on that branch, so the removal of
   any earlier attempt's worktree starts first.
 
+  An accept of a task whose `agentboard/<task-id>` carries no commits past its
+  recorded base (the count a failure report's salvage line gives) while its
+  worktree has uncommitted changes, staged or not, lands nothing and keeps that
+  worktree — the state a worker reaped between staging and committing leaves.
+  So a person's Accept, from the board or from Pending reviews, first asks for
+  confirmation with a warning naming both facts, and the person may still
+  accept. An accept a tool call makes has nobody to warn, so it is refused and
+  the task stays in `review` for a person. No new commits and a clean worktree —
+  a no-op — is accepted without a warning.
+
   A worktree with uncommitted changes is kept — the teardown hook does not run
   in it — and so is one git refuses to remove. Whenever that happens, for any
   reason, or a teardown hook fails or times out, the acceptance's `decision`
