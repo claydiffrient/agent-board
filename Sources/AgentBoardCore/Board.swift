@@ -716,13 +716,15 @@ public struct Board: Sendable {
     /// only signal that the dependency graph moved. Every review level lands here — `acceptedBy` only
     /// changes who the report names, never what happens.
     @discardableResult
-    public func accept(taskId: String, acceptedBy: TaskAcceptance = .human) throws -> [String] {
+    public func accept(taskId: String, acceptedBy: TaskAcceptance = .human, warning: String? = nil) throws -> [String] {
         try db.writer.write { db in
-            try Self.accept(db, taskId: taskId, acceptedBy: acceptedBy)
+            try Self.accept(db, taskId: taskId, acceptedBy: acceptedBy, warning: warning)
         }
     }
 
-    static func accept(_ db: Database, taskId: String, acceptedBy: TaskAcceptance) throws -> [String] {
+    static func accept(
+        _ db: Database, taskId: String, acceptedBy: TaskAcceptance, warning: String?
+    ) throws -> [String] {
         let task = try requireTask(db, taskId)
         try TaskStore.setBlocked(db, taskId, false, reason: nil)
         try TaskStore.setFailed(db, taskId, false, reason: nil)
@@ -739,6 +741,7 @@ public struct Board: Sendable {
         if case .reviewer(_, let verdict, _) = acceptedBy, !verdict.isEmpty {
             body += "\n\n" + verdict
         }
+        if let warning { body += "\n\n" + warning }
         body += "\n\n" + (try describeNewlyReady(db, ready))
         _ = try ReportStore.insert(
             db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision, body: body

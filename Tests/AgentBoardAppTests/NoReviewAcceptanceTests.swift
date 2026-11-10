@@ -100,6 +100,29 @@ final class NoReviewAcceptanceTests: XCTestCase {
         XCTAssertFalse(try fixture.manager.branchExists("agentboard/\(blocker.id)"))
     }
 
+    /// SPEC §5: an agent's accept of a branch with no commits and a dirty worktree is not refused;
+    /// the warning a person would have seen goes to the agent and the orchestrator instead.
+    func testNoReviewAcceptOfUncommittedWorkLandsInDoneAndCarriesTheWarning() async throws {
+        try setReviewLevel(.none)
+        let staged = try task("stage but never commit")
+        let session = try fixture.worktreeWorker(task: staged, state: .running)
+        let worktree = try XCTUnwrap(session.worktreePath)
+        try "staged\n".write(toFile: worktree + "/staged.txt", atomically: true, encoding: .utf8)
+        _ = try fixture.git(["add", "staged.txt"], cwd: URL(fileURLWithPath: worktree))
+        let grant = try fixture.grants.issue(projectId: fixture.project.id, scope: .worker, taskId: staged.id)
+        try fixture.grants.bind(token: grant.token, sessionId: session.sessionId)
+
+        let text = try await reportComplete(task: staged, session: session, token: grant.token)
+
+        XCTAssertEqual(try fixture.tasks.get(staged.id)?.column, .done)
+        XCTAssertTrue(text.contains("contains no committed work"), text)
+        let decision = try XCTUnwrap(
+            ReportStore(fixture.db).unconsumed(projectId: fixture.project.id).last { $0.kind == .decision }
+        )
+        XCTAssertTrue(decision.body.contains("contains no committed work"), decision.body)
+        await fixture.supervisor.waitForTeardowns()
+    }
+
     /// SPEC §6: landing can run repository hooks, so the answer cannot wait for it.
     func testReportCompleteAnswersWhileTheLandingIsStillInARefHook() async throws {
         try setReviewLevel(.none)

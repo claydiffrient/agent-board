@@ -85,9 +85,10 @@ actor FakeWorkerControl: WorkerControl {
         stopped.append(sessionId)
     }
 
-    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws {
+    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws -> String? {
         accepted.append((taskId, acceptedBy))
         try board?.accept(taskId: taskId, acceptedBy: acceptedBy)
+        return nil
     }
 
     func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String? {

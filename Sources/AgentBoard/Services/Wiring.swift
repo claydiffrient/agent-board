@@ -131,9 +131,9 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         try await target.stopWorker(sessionId: sessionId)
     }
 
-    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws {
+    func accept(taskId: String, acceptedBy: TaskAcceptance) async throws -> String? {
         guard let target else { throw SupervisorError.serverNotRunning }
-        try await target.accept(taskId: taskId, acceptedBy: acceptedBy)
+        return try await target.accept(taskId: taskId, acceptedBy: acceptedBy)
     }
 
     func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String? {
