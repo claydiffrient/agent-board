@@ -481,7 +481,17 @@ listed but not searched, so its entries cannot be told apart from stray files:
 only a positive "no such file" makes a registration dead or drops an entry. A linked entry with no `HEAD`
 names no branch, as git reads it. One unreadable record blocks every branch's
 check, so the sweep names that directory once in the status bar, with how many
-branches it kept. The delete itself is guarded by the tip that was checked. The teardown
+branches it kept. The sweep reads every `agentboard/*` tip with one `git
+for-each-ref` per repository, and the common dir and each base once per pass,
+so only the ancestry check (`merge-base --is-ancestor`) runs per branch, and
+through the git gate (§8.8). The delete itself is guarded by the tip that was checked:
+a branch gone since the listing counts as already deleted, and one that moved
+is kept. Its `refs/agentboard/reaped/<task-id>` entry is written in the same
+`git update-ref --stdin` transaction as that delete, so the entry names the tip
+that was dropped or is not written at all, and git applies the entry before the
+delete, so an interrupted transaction never leaves a dropped branch without one.
+A branch that moved or vanished leaves the entry at whatever an earlier delete
+recorded. The teardown
 hook runs before each removal (§3.1); a failure goes on the progress of the
 task whose session held the worktree, in a `decision` report of its own, since
 no other report marks the removal. A kept orphan stays a status-bar notice:
@@ -781,7 +791,7 @@ than one that is finished; they merge nothing and are not part of this sequence.
    requested; integration is no longer the first time task branches meet.
    A task branch that is gone is not reported as missing. Agent Board writes two
    refs outside `refs/heads` — `refs/agentboard/base/<task-id>` when the branch
-   is cut and `refs/agentboard/reaped/<task-id>` before the ref is dropped — so
+   is cut and `refs/agentboard/reaped/<task-id>` with the ref's deletion — so
    the plan can tell a branch deleted *because* its work merged from one that
    never carried a commit. `IntegrationPlan.classify` reads them into three
    claims: work on the epic branch and the branch gone ("nothing to do"),

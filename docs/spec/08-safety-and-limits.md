@@ -696,3 +696,17 @@ project-owned process with no task (a shell, an orchestrator console's child),
 a `decision` report on the project; for the Coordinator's, a `decision` report
 on its queue. Agent Board's own helpers belong to no project and are logged to
 the unified log (`AgentBoard`, category `process-stop`).
+
+### 8.8 Git launches are capped
+
+Every `/usr/bin/git` child the board starts through `ProcessRunner` — sweeps,
+landing checks, merges on accept, branch publishing, review checkouts — waits
+for one of eight app-wide slots (`GitLaunchGate`) before it opens its pipes,
+and gives the slot back once the child has exited and its pipes are closed. A
+running git child holds up to six of the app's descriptors, so the cap bounds
+git's share of the table at a few dozen, and a sweep that asks git about
+hundreds of branches holds one slot at a time while an accept's merge takes
+another, rather than exhausting the table and failing every launch in the
+app with `NSPOSIXErrorDomain 9`. The scratch
+checkout a refresh verification adds (`BoundedCommand`) and the one-off
+`origin/HEAD` read when a project is added run outside the gate.

@@ -20,6 +20,32 @@ final class ProcessRunnerTests: XCTestCase {
         }
     }
 
+    /// Each child lists the children still running beside it, so the largest count is the most that ran at once.
+    func testNoMoreGitChildrenRunAtOnceThanTheGateAdmits() throws {
+        let live = FileManager.default.temporaryDirectory.appendingPathComponent("git-gate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: live, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: live) }
+        let probe = ["-c", "alias.probe=!touch \(live.path)/$$; sleep 0.3; ls \(live.path) | wc -l; rm \(live.path)/$$", "probe"]
+        let git = URL(fileURLWithPath: WorktreeManager.gitPath)
+        let lock = NSLock()
+        var counts: [Int] = []
+        let group = DispatchGroup()
+        for index in 0..<(GitLaunchGate.limit * 3) {
+            group.enter()
+            Thread.detachNewThread {
+                defer { group.leave() }
+                let result = index.isMultiple(of: 2)
+                    ? try? ProcessRunner.run(executable: git, arguments: probe, cwd: live)
+                    : try? ProcessRunner.run(executable: git, arguments: probe, cwd: live, timeout: 60)
+                let count = Int(result?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? -1
+                lock.withLock { counts.append(count) }
+            }
+        }
+        XCTAssertEqual(group.wait(timeout: .now() + 120), .success)
+        XCTAssertFalse(counts.contains(-1), "a probe failed: \(counts)")
+        XCTAssertLessThanOrEqual(try XCTUnwrap(counts.max()), GitLaunchGate.limit, "\(counts)")
+    }
+
     func testATimedRunReturnsAtTheChildsExitWhileAGrandchildHoldsItsPipes() throws {
         let result = try ProcessRunner.run(executable: Self.shell, arguments: ["-c", "sleep 60 & echo $!"], timeout: 10)
         let grandchild = try XCTUnwrap(pid_t(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)))

@@ -206,6 +206,28 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertNil(try manager.refCommit(TaskBranchLedger.tipRef(taskId: "keep-me")))
     }
 
+    func testASweptBranchThatMovesAfterListingKeepsItsEarlierLedgerTip() throws {
+        @discardableResult func run(_ args: [String]) throws -> String {
+            try git(args, cwd: repo).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let branch = "agentboard/task-moved", epic = "agentboard/epic-moved"
+        let ledger = TaskBranchLedger.tipRef(taskId: "task-moved")
+        let earlier = try run(["rev-parse", "main"])
+        try run(["update-ref", ledger, earlier])
+        let listedTip = try run(["commit-tree", "main^{tree}", "-p", "main", "-m", "listed"])
+        try run(["branch", branch, listedTip])
+        try run(["branch", epic, listedTip])
+        let listed = try manager.branchTips(withPrefix: branch)
+        let moved = try run(["commit-tree", "main^{tree}", "-p", listedTip, "-m", "moved"])
+        try run(["update-ref", "refs/heads/\(branch)", moved])
+
+        let outcome = try XCTUnwrap(manager.deleteBranchesIfMerged(listed, into: [epic]).first).outcome.get()
+
+        guard case .kept = outcome else { return XCTFail("expected .kept, got \(outcome)") }
+        XCTAssertEqual(try manager.refCommit("refs/heads/\(branch)"), moved)
+        XCTAssertEqual(try manager.refCommit(ledger), earlier)
+    }
+
     func testEnsureBranchIsIdempotent() throws {
         XCTAssertFalse(try manager.branchExists("agentboard/epic-1"))
         try manager.ensureBranch("agentboard/epic-1", from: "main")
