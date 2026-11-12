@@ -75,6 +75,44 @@ final class TakeoverDiscoveryTests: XCTestCase {
         XCTAssertEqual(try store.get(recorded.id)?.state, .released)
     }
 
+    func testAPartialReadActsOnTheNodesItGotAndLeavesUnreadableItemsAlone() throws {
+        let (store, projectId) = try fixture()
+        var rows: [String: Takeover] = [:]
+        for (number, id) in [(1, "I_gone"), (2, "I_lost"), (3, "I_partial")] {
+            let row = try XCTUnwrap(store.record(projectId: projectId, TakeoverCandidate(
+                githubNodeId: id, kind: .issue, number: number,
+                url: "https://github.com/example-org/app/issues/\(number)", title: id, author: "example-author"
+            )))
+            try store.acknowledge(row.id)
+            rows[id] = row
+        }
+        var partial = Self.node("I_partial", typename: "Issue")
+        partial["labels"] = NSNull()
+        let response = Self.json([
+            "data": ["viewer": ["login": "example-user"], "nodes": [
+                NSNull(), Self.node("I_lost", typename: "Issue", labels: ["taken-example"]), NSNull(), partial,
+            ]],
+            "errors": [
+                ["message": "Could not resolve to a node with the global id of 'I_gone'", "path": ["nodes", 0]],
+                ["message": "Could not resolve to a node with the global id of 'I_new'", "path": ["nodes", 2]],
+                ["message": "Resource not accessible", "path": ["nodes", 3, "labels"]],
+            ],
+        ])
+        let gh = RecordingGh(
+            search: Self.search([("I_new", 8, false, "https://github.com/example-org/app/issues/8")]),
+            nodes: response, nodesStatus: 1
+        )
+
+        let result = try TakeoverDiscovery(gh: gh).poll(
+            projectId: projectId, settings: settings, repository: "example-org/app", store: store, cwd: cwd
+        )
+
+        XCTAssertEqual(result.released.map(\.id), [rows["I_lost"]?.id])
+        XCTAssertEqual(result.recorded, [], "an unread hit waits for a poll that reads it")
+        XCTAssertEqual(try store.get(XCTUnwrap(rows["I_gone"]).id)?.state, .acknowledged)
+        XCTAssertEqual(try store.get(XCTUnwrap(rows["I_partial"]).id)?.state, .acknowledged)
+    }
+
     private func fixture() throws -> (TakeoverStore, String) {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
@@ -124,10 +162,12 @@ private final class RecordingGh: GhRunning, @unchecked Sendable {
     private var recorded: [[String]] = []
     private let search: String
     private let nodes: String?
+    private let nodesStatus: Int32
 
-    init(search: String, nodes: String? = nil) {
+    init(search: String, nodes: String? = nil, nodesStatus: Int32 = 0) {
         self.search = search
         self.nodes = nodes
+        self.nodesStatus = nodesStatus
     }
 
     var calls: [[String]] { lock.withLock { recorded } }
@@ -136,7 +176,7 @@ private final class RecordingGh: GhRunning, @unchecked Sendable {
         lock.withLock { recorded.append(arguments) }
         switch arguments.first {
         case "search": return CommandResult(status: 0, stdout: search, stderr: "")
-        case "api" where nodes != nil: return CommandResult(status: 0, stdout: nodes!, stderr: "")
+        case "api" where nodes != nil: return CommandResult(status: nodesStatus, stdout: nodes!, stderr: "")
         default: return CommandResult(status: 1, stdout: "", stderr: "no canned answer for \(arguments)")
         }
     }

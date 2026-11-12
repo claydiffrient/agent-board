@@ -1,5 +1,6 @@
 import AgentBoardCore
 import Foundation
+import os
 
 /// One row of the discovery search.
 public struct TakeoverSearchHit: Sendable, Equatable {
@@ -48,6 +49,7 @@ public struct TakeoverDiscovery: Sendable {
     static let searchFields = "id,number,url,title,isPullRequest,author"
     /// GitHub's cap on `nodes(ids:)`.
     static let nodesPerQuery = 100
+    private static let logger = Logger(subsystem: "AgentBoard", category: "takeover")
 
     /// One search for open issues and pull requests in `repository` assigned to `assignee`, carrying
     /// every trigger label and not the acknowledgment label. Labels go in as query keywords after `--`,
@@ -108,9 +110,16 @@ public struct TakeoverDiscovery: Sendable {
         var viewer: String?
         for start in stride(from: 0, to: ids.count, by: Self.nodesPerQuery) {
             let chunk = Array(ids[start..<min(start + Self.nodesPerQuery, ids.count)])
-            let out = try reader.run(Self.nodesArguments(ids: chunk), cwd: cwd, what: "gh api graphql")
-            guard let parsed = Self.parseNodes(out) else {
-                throw PullRequestWatchFailure("`gh api graphql` printed no nodes: \(out)", ghUnavailable: false)
+            let out = try reader.launch(Self.nodesArguments(ids: chunk), cwd: cwd)
+            guard let parsed = Self.parseNodes(out.stdout) else {
+                guard out.status == 0 else { throw PullRequestWatchReader.failure(out, what: "gh api graphql") }
+                throw PullRequestWatchFailure("`gh api graphql` printed no nodes: \(out.stdout)", ghUnavailable: false)
+            }
+            let unread = Set(chunk).subtracting(parsed.nodes.map(\.nodeId))
+            if !unread.isEmpty {
+                Self.logger.notice(
+                    "takeover nodes read left out \(unread.sorted().joined(separator: ","), privacy: .public): \(out.stderr, privacy: .public)"
+                )
             }
             viewer = viewer ?? parsed.viewer
             for node in parsed.nodes { nodes[node.nodeId] = node }
@@ -118,7 +127,8 @@ public struct TakeoverDiscovery: Sendable {
 
         var result = TakeoverPollResult(recorded: [], released: [])
         let owning = Set(live.flatMap { [$0.githubNodeId, $0.issueNodeId].compactMap { $0 } })
-        for candidate in Self.candidates(fresh: fresh, nodes: nodes, owning: owning) {
+        let read = fresh.filter { nodes[$0.nodeId] != nil }
+        for candidate in Self.candidates(fresh: read, nodes: nodes, owning: owning) {
             if let row = try store.record(projectId: projectId, candidate, now: now) { result.recorded.append(row) }
         }
         for row in Self.releasable(live, nodes: nodes, settings: settings, viewer: viewer) {
@@ -209,6 +219,18 @@ public struct TakeoverDiscovery: Sendable {
             let closedByPullRequestsReferences: Ids?
             let closingIssuesReferences: Ids?
         }
+        enum PathStep: Decodable {
+            case field(String), index(Int)
+            init(from decoder: Decoder) throws {
+                let value = try decoder.singleValueContainer()
+                if let index = try? value.decode(Int.self) {
+                    self = .index(index)
+                } else {
+                    self = .field(try value.decode(String.self))
+                }
+            }
+        }
+        struct Problem: Decodable { let path: [PathStep]? }
         struct Response: Decodable {
             struct Data: Decodable {
                 struct Viewer: Decodable { let login: String }
@@ -216,12 +238,18 @@ public struct TakeoverDiscovery: Sendable {
                 let nodes: [Node?]?
             }
             let data: Data?
+            let errors: [Problem]?
         }
         guard let response = try? JSONDecoder().decode(Response.self, from: Data(json.utf8)),
               let nodes = response.data?.nodes
         else { return nil }
-        let parsed = nodes.compactMap { $0 }.compactMap { node -> TakeoverNode? in
-            guard let id = node.id else { return nil }
+        let errored = Set((response.errors ?? []).compactMap { problem -> Int? in
+            guard let path = problem.path, path.count >= 2, case .field("nodes") = path[0],
+                  case .index(let index) = path[1] else { return nil }
+            return index
+        })
+        let parsed = nodes.enumerated().compactMap { offset, node -> TakeoverNode? in
+            guard !errored.contains(offset), let node, let id = node.id else { return nil }
             let linked = (node.closingIssuesReferences ?? node.closedByPullRequestsReferences)?.nodes.compactMap { $0?.id }
             return TakeoverNode(
                 nodeId: id, isOpen: node.state == "OPEN",

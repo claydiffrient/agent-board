@@ -92,23 +92,28 @@ public struct PullRequestWatchReader: Sendable {
     }
 
     func run(_ arguments: [String], cwd: URL, what: String) throws -> String {
-        let result: CommandResult
+        let result = try launch(arguments, cwd: cwd)
+        guard result.status == 0 else { throw Self.failure(result, what: what) }
+        return result.stdout
+    }
+
+    /// Runs `gh` and returns its result whatever the exit status; throws only when `gh` cannot launch.
+    func launch(_ arguments: [String], cwd: URL) throws -> CommandResult {
         do {
-            result = try gh.run(arguments, cwd: cwd)
+            return try gh.run(arguments, cwd: cwd)
         } catch {
             throw PullRequestWatchFailure("\(error)", ghUnavailable: true)
         }
-        guard result.status == 0 else {
-            let said = [result.stderr, result.stdout]
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .first { !$0.isEmpty } ?? "exit \(result.status)"
-            let unauthenticated = result.status == Self.authRequiredStatus || said.contains("gh auth login")
-            if unauthenticated {
-                throw PullRequestWatchFailure("`gh` is not logged in; run `gh auth login`.", ghUnavailable: true)
-            }
-            throw PullRequestWatchFailure("`\(what)` failed: \(said)", ghUnavailable: false)
+    }
+
+    static func failure(_ result: CommandResult, what: String) -> PullRequestWatchFailure {
+        let said = [result.stderr, result.stdout]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? "exit \(result.status)"
+        if result.status == authRequiredStatus || said.contains("gh auth login") {
+            return PullRequestWatchFailure("`gh` is not logged in; run `gh auth login`.", ghUnavailable: true)
         }
-        return result.stdout
+        return PullRequestWatchFailure("`\(what)` failed: \(said)", ghUnavailable: false)
     }
 
     static func query(numbers: [Int]) -> String {

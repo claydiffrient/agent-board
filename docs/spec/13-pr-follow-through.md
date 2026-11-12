@@ -1221,4 +1221,8 @@ search cannot see these items: acknowledged ones carry the acknowledgment label
 it excludes, and released ones have lost what it searches for. That is one
 call per poll however many rows are live, against one per row. A closed item,
 or one GitHub no longer returns, is left as it is. Release changes only the
-row's state here.
+row's state here. `gh api graphql` exits non-zero when GraphQL reports any
+error, such as a deleted node, so the read keeps `data.nodes` from such a
+response: a null node, or one an `errors[].path` names, counts as not returned
+this poll (a new hit is not recorded until a poll reads it), the omission is
+logged, and only a response with no `data.nodes` counts as a failed poll.
