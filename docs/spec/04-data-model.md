@@ -441,8 +441,9 @@ CREATE TABLE takeover (
   kind                TEXT NOT NULL,     -- issue | pr
   number              INTEGER NOT NULL,
   url                 TEXT NOT NULL,
-  issue_node_id       TEXT,              -- a pr row only: the issue found with it that it closes
+  issue_node_id       TEXT,              -- a pr row only: the issue found that it closes
   issue_url           TEXT,
+  via_issue           INTEGER NOT NULL DEFAULT 0,  -- a pr row taken over through issue_node_id alone
   title               TEXT NOT NULL,
   author              TEXT,
   is_cross_repository INTEGER NOT NULL DEFAULT 0,
