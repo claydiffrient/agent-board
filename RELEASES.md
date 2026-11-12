@@ -9,6 +9,82 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.10.0 — 2026-11-11
+
+- **Reliability.** The 0.9.0 app could run out of file descriptors for a few
+  seconds every few minutes, and any `git` or `gh` command it launched in
+  that window failed with "Bad file descriptor" or came back empty. Two
+  causes are fixed: finished commands now release their pipes, and the
+  sweep that deletes merged task branches reads them with one command and
+  no longer launches thousands of `git` commands at once. The empty reads
+  also made an epic in a GitHub-backed project look like it had no remote,
+  and it was marked to ship by local merge instead of a pull request; the
+  integrator now refuses to spawn when it can't read the remote.
+- **Pull requests.** A pull request you chose **Stop watching** on is no
+  longer gone for good. It sits in a collapsed **Stopped** group at the end
+  of the Pull Requests page, and **Watch again** returns it to follow-
+  through; an orchestrator can ask for the same. A decision you answer with
+  a reply now posts that reply to GitHub right away, even with Post factual
+  replies off, instead of waiting for a round that might never start. A
+  decision answered with a fix, or still waiting on you, is no longer
+  dropped when a push marks its review thread outdated or your own comment
+  becomes the thread's latest. A fixer whose worktree setup fails is now
+  reported and counted toward parking the pull request, and a fixer spawn
+  no longer times out the orchestrator's call or has its worktree removed
+  while setup is still running.
+- **Take over work assigned to you.** Project Settings → PR Follow-Through
+  → Takeover, off by default, lets a project pick up open issues and pull
+  requests in its origin that are assigned to you and carry every trigger
+  label you list. You enter the trigger labels, an acknowledgment label
+  that must already exist in the repository, and an optional comment; the
+  switch stays off until the labels are set. Found items appear in a
+  **Taken over** group on the Pull Requests page. An issue becomes a ready
+  task for a worker, and the pull request it opens closes the issue when
+  merged. Someone else's pull request is adopted into follow-through, which
+  may fast-forward push to it under the same conditions as your own. A fork
+  can't be adopted and ends as failed with a reason. Removing a label or
+  unassigning you releases the item without posting anything.
+- **Reviews.** A **Reviews** row appears in the sidebar below Pull Requests
+  whenever the CDR review watcher is installed. The page has a switch to
+  start and stop the watcher, one line on its state, a **Waiting on you**
+  section for its open escalations, what it is running or has queued, and
+  the last 7 days of finished reviews; each row opens that review. A new
+  **CDR** tab in Settings sets the path to its command, auto-detected when
+  left blank.
+- **Models and effort.** Fable 5.2, Sonnet 5.5 and Haiku 5.5 join Opus 5.5
+  in the model pickers, each with its own pricing; `sonnet`, `haiku` and
+  `fable` now mean those models. Project Settings → Agents → Models gains a
+  **Default effort**, a model and effort row per task type, **Use
+  recommended**, and **Allow escalation to Fable** (off). Tasks and the
+  orchestrator can set an effort of low through max. A project that had
+  already chosen a default model keeps it; one with none now runs typed
+  tasks on the recommended table, Opus 5.5 at medium for code and Sonnet
+  5.5 for tests, docs and review. A retried task starts one step higher
+  than its failed attempt.
+- **Epics.** Resuming a stopped worker in an epic now merges the epic
+  branch into its worktree first, and a conflict is handed to the worker to
+  resolve. Project Settings → Workflow → Verification gains **Integration
+  verification**: Build and test (default), Build only, or None: CI
+  verifies, which governs what the epic integrator and an epic refresh run
+  on this Mac. An epic's integration task that was stranded after its epic
+  ended is now closed when the epic's pull request merges or the epic is
+  closed.
+- **Sessions.** A worker's idle and wall-clock caps now start when its
+  setup finishes, so a long setup no longer gets it stopped before its
+  first turn. If a setup step fails after the worker has launched, it is
+  stopped before its grant is revoked and reported as "Worker started, then
+  stopped", so it no longer looks never-started and gets retried alongside
+  the first. The orchestrator is no longer re-pinned to a background child
+  session, and Restart recovers when its pinned session has no
+  conversation.
+- **Tasks.** Accepting a task whose branch has no commits but whose
+  worktree has uncommitted changes asks "Accept with no committed work?"
+  first; an agent's accept in that state goes through with a warning.
+- **Terminal.** Terminals draw with the Metal renderer. Settings →
+  Terminal → Rendering has **Use GPU rendering (Metal)**, on by default;
+  if Metal can't start, terminals fall back to CoreGraphics and a line
+  under the toggle says why. Cmd+K clears the focused terminal.
+
 ## 0.9.0 — 2026-10-28
 
 - **Pull requests.** Project Settings → PR Follow-Through → Verification's
