@@ -113,6 +113,7 @@ public struct TakeoverStore: Sendable {
             guard var row = try Takeover.fetchOne(db, key: id), row.state.canMove(to: .working) else { return nil }
             row.state = .working
             row.taskId = taskId
+            row.failure = nil
             row.updatedAt = now
             try row.update(db)
             if try Task.fetchOne(db, key: taskId)?.column == .backlog {
@@ -129,16 +130,20 @@ public struct TakeoverStore: Sendable {
         }
     }
 
-    /// A pull request body for `taskId`'s branch. A taken-over issue's task gains `Closes #<n>` unless
+    /// A pull request body for `taskId`'s branch. A taken-over issue's task gains a closing line unless
     /// the body already closes that issue (SPEC §13.8); any other task's body is returned unchanged.
-    public func closingBody(_ body: String, taskId: String?) throws -> String {
+    /// `pullRequestRepository` is the `owner/name` the pull request opens on, nil when unknown.
+    public func closingBody(_ body: String, taskId: String?, pullRequestRepository: String? = nil) throws -> String {
         guard let taskId, let issue = try issue(taskId: taskId),
-              let repository = IssueClosingReference.repository(of: issue.url),
-              !IssueClosingReference.closes(
-                  body: body, number: issue.number, issueRepository: repository, pullRequestRepository: repository
-              )
+              let repository = IssueClosingReference.repository(of: issue.url)
         else { return body }
-        let line = IssueClosingReference.line(number: issue.number)
+        let target = pullRequestRepository ?? repository
+        guard !IssueClosingReference.closes(
+            body: body, number: issue.number, issueRepository: repository, pullRequestRepository: target
+        ) else { return body }
+        let line = IssueClosingReference.line(
+            number: issue.number, issueRepository: repository, pullRequestRepository: target
+        )
         return body.isEmpty ? line : body + "\n\n" + line
     }
 
@@ -167,6 +172,7 @@ public struct TakeoverStore: Sendable {
                 var watched = row
                 watched.state = .watched
                 watched.watchId = watchId
+                watched.failure = nil
                 watched.updatedAt = now
                 try watched.update(db)
                 return watched
@@ -177,7 +183,9 @@ public struct TakeoverStore: Sendable {
     /// The rows watching `watchId` are done once it merges (SPEC §13.8).
     static func finishWatching(_ db: Database, watchId: String, now: Int64) throws {
         try db.execute(
-            sql: "UPDATE takeover SET state = 'done', updated_at = ? WHERE watch_id = ? AND state = 'watched'",
+            sql: """
+            UPDATE takeover SET state = 'done', failure = NULL, updated_at = ? WHERE watch_id = ? AND state = 'watched'
+            """,
             arguments: [now, watchId]
         )
     }
@@ -194,14 +202,26 @@ public struct TakeoverStore: Sendable {
 
     /// Releases the row. An issue's task that has not started is closed with a reason in the same
     /// write, the way `close_task` closes one, and the orchestrator is told; a started one is left
-    /// to finish (SPEC §13.8).
+    /// to finish. A pull request's watch stops being adopted in the same write, so a round in flight
+    /// cannot push; the human's own authored pull request also drops the takeover and keeps its
+    /// follow-through (SPEC §13.8).
     @discardableResult
     public func release(_ id: String, now: Int64 = .nowMillis) throws -> Takeover? {
         try db.writer.write { db in
             guard var row = try Takeover.fetchOne(db, key: id), row.state.canMove(to: .released) else { return nil }
             row.state = .released
+            row.failure = nil
             row.updatedAt = now
             try row.update(db)
+            try db.execute(
+                sql: """
+                UPDATE pr_watch SET adopted = 0, updated_at = ?,
+                  takeover_id = CASE WHEN authored = 1 OR state IN ('stopped', 'merged', 'closed')
+                    THEN NULL ELSE takeover_id END
+                WHERE takeover_id = ?
+                """,
+                arguments: [now, row.id]
+            )
             guard row.kind == .issue, let task = try row.taskId.flatMap({ try Task.fetchOne(db, key: $0) }),
                   [.proposed, .backlog, .ready].contains(task.column)
             else { return row }
@@ -247,6 +267,7 @@ public struct TakeoverStore: Sendable {
         try db.writer.write { db in
             guard var row = try Takeover.fetchOne(db, key: id), row.state.canMove(to: next) else { return nil }
             row.state = next
+            if next != .failed { row.failure = nil }
             change(&row)
             row.updatedAt = now
             try row.update(db)

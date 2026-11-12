@@ -24,17 +24,21 @@ public struct TakeoverSearchHit: Sendable, Equatable {
 /// What GitHub says now about one searched or recorded item.
 public struct TakeoverNode: Sendable, Equatable {
     public var nodeId: String
-    public var isOpen: Bool
+    /// `OPEN`, `CLOSED`, or `MERGED` for a pull request.
+    public var state: String
     public var labels: [String]
     public var assignees: [String]
     public var isCrossRepository: Bool
     /// A pull request's closing issues, or the open pull requests that close an issue.
     public var linkedNodeIds: [String]
+
+    public var isOpen: Bool { state == "OPEN" }
 }
 
 public struct TakeoverPollResult: Sendable, Equatable {
     public var recorded: [Takeover]
     public var released: [Takeover]
+    public var finished: [Takeover] = []
 }
 
 /// Finds the issues and pull requests a project takes over, records new ones and releases the ones
@@ -134,7 +138,30 @@ public struct TakeoverDiscovery: Sendable {
         for row in Self.releasable(live, nodes: nodes, settings: settings, viewer: viewer) {
             if let released = try store.release(row.id, now: now) { result.released.append(released) }
         }
+        for (row, next) in Self.ended(live, nodes: nodes) {
+            if next == .done, let done = try store.finish(row.id, now: now) {
+                result.finished.append(done)
+            } else if next == .released, let released = try store.release(row.id, now: now) {
+                result.released.append(released)
+            }
+        }
         return result
+    }
+
+    /// Live rows whose item GitHub reports closed, with where each goes. An issue being worked or watched
+    /// is done, never released. A watched pull request is done once merged and released once closed
+    /// unmerged, as its watch ends `merged` or `closed`.
+    static func ended(_ live: [Takeover], nodes: [String: TakeoverNode]) -> [(Takeover, TakeoverState)] {
+        live.compactMap { row in
+            guard let node = nodes[row.githubNodeId], !node.isOpen else { return nil }
+            switch row.kind {
+            case .issue:
+                return [.working, .watched].contains(row.state) && node.state == "CLOSED" ? (row, .done) : nil
+            case .pr:
+                guard row.state == .watched else { return nil }
+                return (row, node.state == "MERGED" ? .done : .released)
+            }
+        }
     }
 
     /// The new hits to record. An issue whose open pull request is found with it is folded into that
@@ -252,7 +279,7 @@ public struct TakeoverDiscovery: Sendable {
             guard !errored.contains(offset), let node, let id = node.id else { return nil }
             let linked = (node.closingIssuesReferences ?? node.closedByPullRequestsReferences)?.nodes.compactMap { $0?.id }
             return TakeoverNode(
-                nodeId: id, isOpen: node.state == "OPEN",
+                nodeId: id, state: node.state ?? "",
                 labels: node.labels?.nodes.compactMap { $0?.name } ?? [],
                 assignees: node.assignees?.nodes.compactMap { $0?.login } ?? [],
                 isCrossRepository: node.isCrossRepository ?? false, linkedNodeIds: linked ?? []

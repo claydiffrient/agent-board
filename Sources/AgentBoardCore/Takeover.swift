@@ -109,7 +109,7 @@ public enum TakeoverState: String, Codable, Sendable, CaseIterable, Equatable, D
         case .acknowledged: return self == .found
         case .working: return self == .acknowledged
         case .watched: return self == .acknowledged || self == .working
-        case .done: return self == .watched
+        case .done: return self == .watched || self == .working
         case .found: return false
         }
     }
@@ -277,6 +277,13 @@ public struct TakeoverIssue: Sendable, Equatable {
 /// owner/name#12` or names the issue's URL after a keyword closes that issue when it merges.
 public enum IssueClosingReference {
     public static func line(number: Int) -> String { "Closes #\(number)" }
+
+    /// The closing line a pull request on `pullRequestRepository` carries; qualified when the issue lives elsewhere.
+    public static func line(number: Int, issueRepository: String, pullRequestRepository: String) -> String {
+        issueRepository.caseInsensitiveCompare(pullRequestRepository) == .orderedSame
+            ? line(number: number)
+            : "Closes \(issueRepository)#\(number)"
+    }
 
     /// `owner/name` from an issue or pull request URL on github.com.
     public static func repository(of url: String) -> String? {

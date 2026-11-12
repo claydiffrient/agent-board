@@ -128,15 +128,14 @@ final class PRWatchPollTests: XCTestCase {
     }
 
     private func thread(
-        _ id: String, by author: String, body: String = "Rename this.", resolved: Bool = false, outdated: Bool = false
+        _ id: String, by author: String, body: String = "Rename this.", resolved: Bool = false, outdated: Bool = false,
+        at created: String? = nil
     ) -> [String: Any] {
-        [
-            "id": id, "isResolved": resolved, "isOutdated": outdated,
-            "comments": ["nodes": [[
-                "author": ["login": author], "body": body, "url": "\(url)#\(id)",
-                "path": "Sources/App.swift", "line": 3,
-            ]]],
+        var comment: [String: Any] = [
+            "author": ["login": author], "body": body, "url": "\(url)#\(id)", "path": "Sources/App.swift", "line": 3,
         ]
+        if let created { comment["createdAt"] = created }
+        return ["id": id, "isResolved": resolved, "isOutdated": outdated, "comments": ["nodes": [comment]]]
     }
 
     private func answer(_ pr: [String: Any]) {
@@ -773,10 +772,10 @@ final class PRWatchPollTests: XCTestCase {
 
     // MARK: - Takeover adoption (SPEC §13.8)
 
-    private func adoptedWatch(author: String = "colleague") throws -> PRWatch {
+    private func adoptedWatch(author: String = "colleague", recordedAt: Int64 = .nowMillis) throws -> PRWatch {
         let takeover = try XCTUnwrap(TakeoverStore(fixture.db).record(projectId: fixture.project.id, TakeoverCandidate(
             githubNodeId: "PR_12", kind: .pr, number: 12, url: url, title: "Add widgets", author: author
-        )))
+        ), now: recordedAt))
         return try XCTUnwrap(watches.adopt(takeover))
     }
 
@@ -796,14 +795,20 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertTrue(watch.adopted)
     }
 
-    /// The viewer's own open feedback is the takeover round's work; once that round has started, a new
-    /// comment of the viewer's is ignored as on any watch.
+    /// The viewer's own open feedback from before the takeover is the takeover round's work, and feedback
+    /// written after it or with no date is not; once that round has started, a new comment of the viewer's
+    /// is ignored as on any watch.
     func testRoundOneOfAnAdoptedWatchTakesTheViewersOpenThreadAndALaterRoundIgnoresANewOne() async throws {
         try enable()
-        let adopted = try adoptedWatch()
+        let takenOver = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-20T10:00:00Z"))
+        let adopted = try adoptedWatch(recordedAt: Int64(takenOver.timeIntervalSince1970 * 1000))
+        let mine = thread("T_mine", by: "me", at: "2026-10-20T09:00:00.250Z")
         fixture.gh.answerSearch([])
         fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: [
-            pullRequest(threads: [thread("T_mine", by: "me")]),
+            pullRequest(
+                threads: [mine, thread("T_undated", by: "me", body: "Undated.")],
+                comments: [comment("C_ack", by: "me", body: "Taking this over.", at: "2026-10-20T11:00:00Z")]
+            ),
         ])
         await fixture.supervisor.pollPRWatches()
         XCTAssertEqual(try watches.items(watchId: adopted.id).map(\.githubNodeId), ["T_mine"])
@@ -812,7 +817,7 @@ final class PRWatchPollTests: XCTestCase {
             try $0.execute(sql: "UPDATE pr_watch SET round = 1, state = 'watching' WHERE id = ?", arguments: [adopted.id])
         }
         fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: [
-            pullRequest(threads: [thread("T_mine", by: "me"), thread("T_new", by: "me", body: "Also rename that.")]),
+            pullRequest(threads: [mine, thread("T_new", by: "me", body: "Also rename that.")]),
         ])
         await fixture.supervisor.pollPRWatches()
 
@@ -845,5 +850,63 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertTrue(row.failure?.contains("fork") == true, row.failure ?? "")
         XCTAssertEqual(try watches.live(projectId: fixture.project.id), [])
         XCTAssertEqual(fixture.gh.calls.map { Array($0.prefix(2)) }, [["search", "issues"], ["api", "graphql"]])
+    }
+
+    func testATakenOverPRWhoseWatchWasStoppedWaitsAndReleasingTheHumansOwnKeepsItsFollowThrough() async throws {
+        try enable()
+        answer(pullRequest())
+        await fixture.supervisor.pollPRWatches()
+        let own = try onlyWatch()
+        XCTAssertTrue(own.authored)
+        try await fixture.db.writer.write {
+            try $0.execute(sql: "UPDATE pr_watch SET state = 'stopped' WHERE id = ?", arguments: [own.id])
+        }
+        let takeover = TakeoverSettings(
+            enabled: true, triggerLabels: ["handoff-example"], ackLabel: "taken-example", ackComment: "Taking this over."
+        )
+        var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
+        settings.takeover = takeover
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+        fixture.gh.answer(
+            arguments: TakeoverDiscovery.searchArguments(takeover, repository: repository),
+            stdout: #"[{"id":"PR_12","number":12,"url":"\#(url)","title":"Add widgets","isPullRequest":true,"author":{"login":"me"}}]"#
+        )
+        func answerNode(labels: String) {
+            fixture.gh.answer(
+                arguments: TakeoverDiscovery.nodesArguments(ids: ["PR_12"]),
+                stdout: #"{"data":{"viewer":{"login":"me"},"nodes":[{"__typename":"PullRequest","id":"PR_12","state":"OPEN","isCrossRepository":false,"labels":{"nodes":[\#(labels)]},"assignees":{"nodes":[{"login":"me"}]},"closingIssuesReferences":{"nodes":[]}}]}}"#
+            )
+        }
+        answerNode(labels: #"{"name":"handoff-example"}"#)
+        fixture.gh.answer(prefix: ["label", "list"], stdout: #"[{"name":"taken-example"}]"#)
+        fixture.gh.answer(prefix: ["pr", "edit"], stdout: "")
+        fixture.gh.answer(prefix: ["pr", "comment"], stdout: "")
+        let takeovers = TakeoverStore(fixture.db)
+
+        await fixture.supervisor.pollTakeovers()
+
+        var row = try XCTUnwrap(takeovers.page(projectId: fixture.project.id).first)
+        XCTAssertEqual(row.state, .found)
+        XCTAssertTrue(row.failure?.contains("stopped") == true, row.failure ?? "")
+        XCTAssertEqual(try onlyWatch().state, .stopped)
+        XCTAssertFalse(try onlyWatch().adopted)
+        XCTAssertFalse(fixture.gh.calls.contains { $0.starts(with: ["pr", "edit"]) }, "nothing is acknowledged")
+
+        _ = try watches.resume(watchId: own.id)
+        await fixture.supervisor.pollTakeovers()
+        row = try XCTUnwrap(takeovers.get(row.id))
+        XCTAssertEqual(row.state, .watched)
+        XCTAssertNil(row.failure)
+        XCTAssertTrue(try onlyWatch().adopted)
+
+        answerNode(labels: "")
+        await fixture.supervisor.pollTakeovers()
+        await fixture.supervisor.pollPRWatches()
+
+        XCTAssertEqual(try takeovers.get(row.id)?.state, .released)
+        let after = try onlyWatch()
+        XCTAssertNotEqual(after.state, .stopped, "the human's own pull request keeps its follow-through")
+        XCTAssertFalse(after.adopted)
+        XCTAssertNil(after.takeoverId)
     }
 }

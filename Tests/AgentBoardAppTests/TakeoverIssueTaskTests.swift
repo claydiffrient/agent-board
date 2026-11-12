@@ -49,6 +49,9 @@ final class TakeoverIssueTaskTests: XCTestCase {
         XCTAssertTrue(spawns.isEmpty)
         XCTAssertTrue(try fixture.reports.unconsumed(projectId: fixture.project.id).contains { $0.body.contains(task.id) })
         XCTAssertTrue(try TakeoverStore(fixture.db).closingBody("Fixes the crash.", taskId: task.id).hasSuffix("Closes #12"))
+        XCTAssertTrue(try TakeoverStore(fixture.db).closingBody(
+            "Fixes the crash.", taskId: task.id, pullRequestRepository: "example-org/app-fork"
+        ).hasSuffix("Closes example-org/app#12"))
 
         await fixture.cleanUp()
     }

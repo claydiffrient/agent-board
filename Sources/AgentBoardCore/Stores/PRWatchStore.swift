@@ -66,7 +66,8 @@ public struct PRWatchStore: Sendable {
             )
             let viewerCutoff = try Self.viewerFeedbackCutoff(db, watch: watch)
             for var incoming in snapshot.items {
-                if incoming.viewerLatest, let viewerCutoff, (incoming.createdAt ?? .min) < viewerCutoff {
+                if incoming.viewerLatest, let viewerCutoff, let createdAt = incoming.createdAt,
+                   createdAt < viewerCutoff {
                     incoming.viewerLatest = false
                 }
                 guard var item = stored.removeValue(forKey: incoming.githubNodeId) else {
@@ -167,7 +168,8 @@ public struct PRWatchStore: Sendable {
 
     /// SPEC §13.8: watches a taken-over pull request although the human did not author it. Its head and
     /// feedback arrive with the next poll, and its next round is the takeover round. A watch the project
-    /// already has for the PR is adopted in place. Nil when `takeover.url` names no pull request.
+    /// already has for the PR is adopted in place, unless the human stopped it: that one is returned
+    /// unchanged. Nil when `takeover.url` names no pull request.
     @discardableResult
     public func adopt(_ takeover: Takeover, now: Int64 = .nowMillis) throws -> PRWatch? {
         guard let (owner, name) = Self.repository(ofPullRequestURL: takeover.url) else { return nil }
@@ -180,7 +182,7 @@ public struct PRWatchStore: Sendable {
                 """,
                 arguments: [takeover.projectId, owner, name, takeover.number]
             ) {
-                guard existing.takeoverId != takeover.id else { return existing }
+                guard existing.takeoverId != takeover.id, existing.state != .stopped else { return existing }
                 existing.adopted = true
                 existing.takeoverId = takeover.id
                 existing.takeoverRound = existing.round + 1
@@ -212,9 +214,9 @@ public struct PRWatchStore: Sendable {
         return (parts[0], parts[1])
     }
 
-    /// SPEC §13.8 release: each adopted watch whose takeover was released stops as Stop watching stops a
-    /// watch, and is no longer adopted. A watch mid-round is left to finish the round and is stopped by a
-    /// later call, before it can start another. Returns the stopped watches' ids.
+    /// SPEC §13.8 release: each watch still holding a released takeover stops as Stop watching stops a
+    /// watch. Release already cleared `adopted`, so a round in flight parks at publish; it is stopped by a
+    /// later call. Returns the stopped watches' ids.
     @discardableResult
     public func stopReleasedAdoptions(projectId: String, now: Int64 = .nowMillis) throws -> [String] {
         try db.writer.write { db in
@@ -222,7 +224,7 @@ public struct PRWatchStore: Sendable {
                 db,
                 sql: """
                 SELECT w.* FROM pr_watch w JOIN takeover t ON t.id = w.takeover_id
-                WHERE w.project_id = ? AND w.adopted = 1 AND t.state = 'released'
+                WHERE w.project_id = ? AND t.state = 'released'
                 AND w.state IN ('watching', 'settling', 'ready_to_verify', 'verified', 'parked', 'stale', 'awaiting_ci')
                 """,
                 arguments: [projectId]
@@ -234,6 +236,7 @@ public struct PRWatchStore: Sendable {
                 )
                 watch.state = .stopped
                 watch.adopted = false
+                watch.takeoverId = nil
                 watch.updatedAt = now
                 try watch.update(db)
             }

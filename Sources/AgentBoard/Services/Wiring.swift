@@ -41,7 +41,13 @@ enum Wiring {
     }
 
     static func tools(db: AppDatabase, sink: LateBoundSink, scopedCommits: (any ScopedCommitting)?) -> ScopedToolHandler {
-        let orchestrator = OrchestratorToolHandler(db: db, control: sink, events: sink)
+        let orchestrator = OrchestratorToolHandler(
+            db: db, control: sink, events: sink,
+            pullRequestRepository: { project in
+                let remote = try? BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath)).requireRemote()
+                return remote.flatMap(PullRequestLaunch.githubSlug(remoteURL:))
+            }
+        )
         let commitsInFlight = CommitsInFlight()
         return ScopedToolHandler(
             worker: WorkerToolHandler(

@@ -183,6 +183,18 @@ public struct PullRequestWatchReader: Sendable {
         }
     }
 
+    private static let plainTimestamp = ISO8601DateFormatter()
+    private static let fractionalTimestamp: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    /// A GitHub timestamp, with or without fractional seconds.
+    static func timestamp(_ stamp: String) -> Date? {
+        plainTimestamp.date(from: stamp) ?? fractionalTimestamp.date(from: stamp)
+    }
+
     public static func parseSnapshots(
         _ json: String, owner: String, name: String, ignoring: Set<String> = []
     ) -> [PRSnapshot]? {
@@ -203,9 +215,8 @@ public struct PullRequestWatchReader: Sendable {
             guard let viewer, let login = author?.login else { return false }
             return login.caseInsensitiveCompare(viewer) == .orderedSame
         }
-        let iso = ISO8601DateFormatter()
         func millis(_ stamp: String?) -> Int64? {
-            stamp.flatMap { iso.date(from: $0) }.map { Int64($0.timeIntervalSince1970 * 1000) }
+            stamp.flatMap(timestamp).map { Int64($0.timeIntervalSince1970 * 1000) }
         }
         var items: [PRSnapshotItem] = []
         for thread in pr.reviewThreads?.nodes ?? [] where !thread.isResolved {
@@ -237,11 +248,11 @@ public struct PullRequestWatchReader: Sendable {
                 viewerLatest: byViewer(review.author), createdAt: millis(review.submittedAt)
             ))
         }
-        let headCommittedAt = pr.commits?.nodes.last?.commit.committedDate.flatMap { iso.date(from: $0) }
+        let headCommittedAt = pr.commits?.nodes.last?.commit.committedDate.flatMap(timestamp)
         for comment in pr.comments?.nodes ?? [] {
             let body = PRSnapshotItem.visibleText(comment.body)
             guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            let createdAt = comment.createdAt.flatMap { iso.date(from: $0) }
+            let createdAt = comment.createdAt.flatMap(timestamp)
             let afterHead = createdAt.flatMap { created in headCommittedAt.map { created > $0 } } ?? false
             items.append(PRSnapshotItem(
                 githubNodeId: comment.id, kind: .comment, author: comment.author?.login, body: body, url: comment.url,
@@ -368,7 +379,6 @@ extension PullRequestWatchReader {
     fileprivate static func standings(
         of pr: GraphQLResponse.PullRequest, byViewer: (GraphQLResponse.Author?) -> Bool
     ) -> (approvedBy: [String], changesRequestedBy: [String]) {
-        let iso = ISO8601DateFormatter()
         var latest: [String: (login: String, review: GraphQLResponse.Review)] = [:]
         for review in pr.reviews?.nodes ?? [] {
             guard let login = review.author?.login, !byViewer(review.author) else { continue }
@@ -382,7 +392,7 @@ extension PullRequestWatchReader {
         var removedAt: [String: Date] = [:]
         for event in pr.timelineItems?.nodes ?? [] {
             guard let login = event.requestedReviewer?.login?.lowercased(),
-                  let at = event.createdAt.flatMap({ iso.date(from: $0) })
+                  let at = event.createdAt.flatMap(timestamp)
             else { continue }
             switch event.__typename {
             case "ReviewRequestedEvent": requestedAt[login] = max(at, requestedAt[login] ?? at)
@@ -397,7 +407,7 @@ extension PullRequestWatchReader {
                 approvedBy.append(entry.login)
                 continue
             }
-            let submitted = entry.review.submittedAt.flatMap { iso.date(from: $0) }
+            let submitted = entry.review.submittedAt.flatMap(timestamp)
             if let submitted, let requested = requestedAt[key], requested > submitted,
                removedAt[key].map({ $0 < requested }) ?? true { continue }
             changesRequestedBy.append(entry.login)

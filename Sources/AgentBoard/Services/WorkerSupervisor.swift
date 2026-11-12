@@ -2909,10 +2909,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
                 takeoverFailures[project.id] = nil
                 takeoverProblems[project.id] = nil
-                if !result.recorded.isEmpty || !result.released.isEmpty {
+                if !result.recorded.isEmpty || !result.released.isEmpty || !result.finished.isEmpty {
                     NSLog(
-                        "Takeover poll for %@ recorded %d and released %d", project.name,
-                        result.recorded.count, result.released.count
+                        "Takeover poll for %@ recorded %d, released %d and finished %d", project.name,
+                        result.recorded.count, result.released.count, result.finished.count
                     )
                 }
                 if !result.released.isEmpty { try? prWatches.stopReleasedAdoptions(projectId: project.id) }
@@ -2957,13 +2957,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 }
             }
             guard let taskId else { continue }
+            var commentFailure: String?
             if row.state == .found {
                 switch await acknowledge(takeover: row) {
-                case .acknowledged?, .commentFailed?: break
+                case .acknowledged?: break
+                case .commentFailed(_, let detail)?: commentFailure = detail
                 default: continue
                 }
             }
             guard (try? takeovers.startWorking(row.id, taskId: taskId)) != nil else { continue }
+            if let commentFailure { _ = try? takeovers.noteProblem(row.id, detail: commentFailure) }
             let outcome: String
             do {
                 switch try board.requestSpawn(taskId: taskId, requestedBy: "takeover") {
@@ -2993,8 +2996,14 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     static let adoptionNeedsFollowThrough =
         "Adopting this pull request needs PR follow-through. Turn it on in the project's PR Follow-Through settings."
 
+    static func adoptionStopped(_ row: Takeover) -> String {
+        "Follow-through is stopped for #\(row.number). Choose Watch again on the Pull Requests page to adopt it, "
+            + "or remove a trigger label to release it."
+    }
+
     /// SPEC §13.8: each found pull request becomes an adopted watch, is acknowledged, and is marked watched. A
-    /// fork fails with nothing posted, and without follow-through the row waits in `found` with a problem.
+    /// fork fails with nothing posted; without follow-through, or while the human has its watch stopped, the
+    /// row waits in `found` with a problem.
     private func adoptTakenOverPullRequests(_ project: Project) async {
         for row in (try? takeovers.live(projectId: project.id)) ?? [] where row.kind == .pr {
             switch row.state {
@@ -3013,11 +3022,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     }
                     continue
                 }
-                if row.failure == Self.adoptionNeedsFollowThrough { try? takeovers.noteProblem(row.id, detail: nil) }
                 guard let watch = try? prWatches.adopt(row) else { continue }
+                if watch.state == .stopped {
+                    let problem = Self.adoptionStopped(row)
+                    if row.failure != problem { try? takeovers.noteProblem(row.id, detail: problem) }
+                    continue
+                }
+                if row.failure != nil { try? takeovers.noteProblem(row.id, detail: nil) }
                 switch await acknowledge(takeover: row) {
-                case .acknowledged?, .commentFailed?: try? takeovers.watch(row.id, watchId: watch.id)
-                default: break
+                case .acknowledged?:
+                    try? takeovers.watch(row.id, watchId: watch.id)
+                case .commentFailed(_, let detail)?:
+                    if (try? takeovers.watch(row.id, watchId: watch.id)) != nil {
+                        try? takeovers.noteProblem(row.id, detail: detail)
+                    }
+                default:
+                    break
                 }
             case .acknowledged:
                 if let watch = try? prWatches.adopted(takeoverId: row.id) { try? takeovers.watch(row.id, watchId: watch.id) }

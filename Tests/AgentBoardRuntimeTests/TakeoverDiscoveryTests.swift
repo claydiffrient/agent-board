@@ -113,6 +113,47 @@ final class TakeoverDiscoveryTests: XCTestCase {
         XCTAssertEqual(try store.get(XCTUnwrap(rows["I_partial"]).id)?.state, .acknowledged)
     }
 
+    func testAClosedItemEndsItsTakeoverDoneOrReleasedAsItsWatchWould() throws {
+        let db = try AppDatabase.inMemory()
+        let projectId = try ProjectStore(db).register(
+            name: "Example", repoPath: "/example", baseBranch: "main", worktreeRoot: "/w", memoryDir: nil
+        ).id
+        let store = TakeoverStore(db)
+        let issue = try XCTUnwrap(store.record(projectId: projectId, TakeoverCandidate(
+            githubNodeId: "I_closed", kind: .issue, number: 3, url: "https://github.com/example-org/app/issues/3",
+            title: "Closed", author: "example-author"
+        )))
+        let task = try XCTUnwrap(store.createTask(issue.id, issue: TakeoverIssue(
+            number: 3, title: "Closed", url: issue.url, author: "example-author", body: ""
+        )))
+        try store.acknowledge(issue.id)
+        try store.startWorking(issue.id, taskId: task.id)
+        var pullRequests: [String: Takeover] = [:]
+        for (number, id) in [(4, "PR_merged"), (5, "PR_closed")] {
+            let row = try XCTUnwrap(store.record(projectId: projectId, TakeoverCandidate(
+                githubNodeId: id, kind: .pr, number: number, url: "https://github.com/example-org/app/pull/\(number)",
+                title: id, author: "example-author"
+            )))
+            let watch = try XCTUnwrap(PRWatchStore(db).adopt(row))
+            try store.acknowledge(row.id)
+            try store.watch(row.id, watchId: watch.id)
+            pullRequests[id] = row
+        }
+        let gh = RecordingGh(search: "[]", nodes: Self.nodes([
+            Self.node("I_closed", typename: "Issue", state: "CLOSED"),
+            Self.node("PR_merged", typename: "PullRequest", state: "MERGED"),
+            Self.node("PR_closed", typename: "PullRequest", state: "CLOSED"),
+        ]))
+
+        _ = try TakeoverDiscovery(gh: gh).poll(
+            projectId: projectId, settings: settings, repository: "example-org/app", store: store, cwd: cwd
+        )
+
+        XCTAssertEqual(try store.get(issue.id)?.state, .done, "a closed issue is done, never released")
+        XCTAssertEqual(try store.get(XCTUnwrap(pullRequests["PR_merged"]).id)?.state, .done)
+        XCTAssertEqual(try store.get(XCTUnwrap(pullRequests["PR_closed"]).id)?.state, .released)
+    }
+
     private func fixture() throws -> (TakeoverStore, String) {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
@@ -130,11 +171,11 @@ final class TakeoverDiscoveryTests: XCTestCase {
 
     private static func node(
         _ id: String, typename: String, labels: [String] = ["handoff-example", "ready example"],
-        linked: [String] = []
+        linked: [String] = [], state: String = "OPEN"
     ) -> [String: Any] {
         let links = ["nodes": linked.map { ["id": $0] }]
         var node: [String: Any] = [
-            "__typename": typename, "id": id, "state": "OPEN",
+            "__typename": typename, "id": id, "state": state,
             "labels": ["nodes": labels.map { ["name": $0] }],
             "assignees": ["nodes": [["login": "example-user"]]],
         ]
