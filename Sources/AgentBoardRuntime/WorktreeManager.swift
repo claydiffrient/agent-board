@@ -399,17 +399,33 @@ public struct WorktreeManager: Sendable {
     /// against the last-fetched `origin/<base>` when it is at or ahead of local, never fetching.
     public func drift(of branch: String, from base: String) throws -> BaseDrift {
         let against = startPoint(base)
-        let result = try gitRaw(
-            ["rev-list", "--left-right", "--count", "\(qualified(against, base: base))...refs/heads/\(branch)"],
-            cwd: repoPath
-        )
-        if result.status == 0 {
-            let counts = result.stdout.split(whereSeparator: { $0.isWhitespace }).compactMap { Int($0) }
-            if counts.count == 2 { return .measured(behind: counts[0], ahead: counts[1], against: against.name) }
-        }
+        let args = ["rev-list", "--left-right", "--count", "\(qualified(against, base: base))...refs/heads/\(branch)"]
+        let result = try gitRaw(args, cwd: repoPath)
+        if let counted = Self.counted(result, against: against.name) { return counted }
         if try !branchExists(branch) { return .noEpicBranch(branch) }
         if try !branchExists(base) { return .noBaseBranch(base) }
-        throw AgentRuntimeError(Self.failure(["rev-list", "--left-right", "--count", "\(base)...\(branch)"], result))
+        throw AgentRuntimeError(Self.failure(args, result))
+    }
+
+    /// SPEC §5.2: an epic built on a pull request drifts from `<remote>/<headRef>` as the last
+    /// `fetchRemoteTip` left it, never fetching.
+    public func drift(of branch: String, fromRemoteHead headRef: String, remote: String = "origin") throws -> BaseDrift {
+        let name = "\(remote)/\(headRef)"
+        guard try refCommit("refs/remotes/\(name)") != nil else {
+            if try !branchExists(branch) { return .noEpicBranch(branch) }
+            return .unavailable("\(name) has not been fetched into this repository; refresh_epic fetches it.")
+        }
+        let args = ["rev-list", "--left-right", "--count", "refs/remotes/\(name)...refs/heads/\(branch)"]
+        let result = try gitRaw(args, cwd: repoPath)
+        if let counted = Self.counted(result, against: name) { return counted }
+        if try !branchExists(branch) { return .noEpicBranch(branch) }
+        throw AgentRuntimeError(Self.failure(args, result))
+    }
+
+    private static func counted(_ result: CommandResult, against: String) -> BaseDrift? {
+        guard result.status == 0 else { return nil }
+        let counts = result.stdout.split(whereSeparator: { $0.isWhitespace }).compactMap { Int($0) }
+        return counts.count == 2 ? .measured(behind: counts[0], ahead: counts[1], against: against) : nil
     }
 
     /// Where merging `start` into `branch` would leave it, without moving anything: a settled

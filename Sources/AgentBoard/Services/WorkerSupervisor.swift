@@ -786,7 +786,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let manager = worktreeManager(for: project)
         let branch = epic.branch
         let base = project.baseBranch
-        return try await offMain { try manager.drift(of: branch, from: base) }
+        let upstream = epic.upstream
+        return try await offMain {
+            if let upstream { return try manager.drift(of: branch, fromRemoteHead: upstream.headRef) }
+            return try manager.drift(of: branch, from: base)
+        }
     }
 
     func pullRequestUpstream(projectId: String, number: Int) async throws -> EpicUpstream {
@@ -874,6 +878,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             throw SupervisorError.upstreamHeadUnavailable(upstream, underlying: "\(error)")
         }
+    }
+
+    /// SPEC §5: an accept recreates a missing epic branch where spawn would have cut it, an
+    /// upstream epic's from its pull request's freshly fetched head and never from the base branch.
+    nonisolated private static func ensureEpicBranch(
+        _ epicBranch: String, upstream: EpicUpstream?, projectBase: String, manager: WorktreeManager
+    ) throws {
+        guard let upstream else { return try manager.ensureBranch(epicBranch, from: projectBase) }
+        guard try !manager.branchExists(epicBranch) else { return }
+        try manager.ensureBranch(epicBranch, from: try fetchUpstreamHead(upstream, manager: manager))
     }
 
     private func verifyRefresh(
@@ -2440,6 +2454,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let targetTitle = epic?.title ?? project.baseBranch
         let projectBase = project.baseBranch
         let epicBranch = epic?.branch
+        let upstream = epic?.upstream
         var byPullRequest = false
         if epic == nil {
             do {
@@ -2462,7 +2477,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 // Only an epic branch is ever cut here. A missing base branch comes back as
                 // `.noTargetBranch` instead, because creating one would land the work on a ref
                 // nobody pulls and call it done.
-                if let epicBranch { try manager.ensureBranch(epicBranch, from: projectBase) }
+                if let epicBranch {
+                    try Self.ensureEpicBranch(epicBranch, upstream: upstream, projectBase: projectBase, manager: manager)
+                }
                 return try manager.merge(
                     taskBranch: taskBranch, into: target,
                     taskTitle: taskTitle, targetTitle: targetTitle
@@ -3693,12 +3710,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let epicBranch = epic.branch
         let epicTitle = epic.title
         let projectBase = project.baseBranch
+        let upstream = epic.upstream
         let memberIds = members.map(\.taskId)
         let mergeTitle = sharedMergeTitle(memberIds)
         let outcome: BranchMerge
         do {
             outcome = try await offMain {
-                try manager.ensureBranch(epicBranch, from: projectBase)
+                try Self.ensureEpicBranch(epicBranch, upstream: upstream, projectBase: projectBase, manager: manager)
                 // Nothing to attribute, and the ledger's tip refs are all that is left to check.
                 guard try manager.branchExists(branch) else { return .nothingToMerge }
                 let base = try manager.mergeBase(branch, epicBranch) ?? projectBase

@@ -225,6 +225,12 @@ nobody reviewed.
   identifiers into that repository's history permanently (§6.1 renames the
   branch, not commits already made). Nothing here pushes: it is a local
   branch-to-branch merge.
+  An epic branch missing at accept is recreated before the merge, here and
+  for a shared branch's merge below: from local `<base>` for an ordinary
+  epic, and for an epic built on a pull request (§4) from its head, fetched
+  with `WorktreeManager.fetchRemoteTip` as §3.1 step 1 cuts it. A failed fetch
+  leaves the task unlanded with `SupervisorError.upstreamHeadUnavailable` in its
+  decision report; the base branch is never the fallback.
 
   **A task accepted off a shared branch (D6 amended, §1) does not merge or
   remove anything by itself.** Its branch carries every co-resident sibling's
@@ -993,8 +999,12 @@ the rule §3.1 step 1 cuts epic branches by, so an epic cut from `origin/main`
 is not read as current against a lagging local `main`. `get_epic` never
 fetches, since orchestrators call it constantly and a fetch can take 10
 seconds, so `against` names the ref counted from (`origin/main` or `main`) and
-a count can be read as only as fresh as the last fetch. An epic branch not cut
-yet, or a missing base branch, reports `behind` and `ahead` as null with
+a count can be read as only as fresh as the last fetch. An epic built on a pull
+request (§4) is counted against `refs/remotes/origin/<head ref>` instead, the
+ref `refresh_epic` merges for it, as the last `fetchRemoteTip` left it, and
+`base` and `against` both name `origin/<head ref>`; local `<base>` plays no
+part. An epic branch not cut yet, a missing base branch, or a head ref never
+fetched into the repository reports `behind` and `ahead` as null with
 `unavailable` saying which. Drift is reporting only: it raises no attention
 badge and no notification.
 

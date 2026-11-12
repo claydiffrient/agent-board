@@ -343,7 +343,8 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "pull request or on that pull request to merge (null otherwise), and `base_drift`: how many commits "
                 + "the epic branch is behind and ahead of the project's base branch, `against` naming the ref "
                 + "counted from (`origin/<base>` as last fetched, when it is at or ahead of local; this call never "
-                + "fetches), or why that cannot be counted "
+                + "fetches; for an epic with an `upstream`, `base` and `against` are `origin/<head ref>` as last fetched, "
+                + "the ref refresh_epic merges for it), or why that cannot be counted "
                 + "(`behind` and `ahead` are null and `unavailable` says why). Drift is information for the human, "
                 + "not an alarm: raise it when it bears on a decision, and never refresh on your own because of it. "
                 + "A done or abandoned epic also lists `held_worktrees`: the worktrees of it and its integration task "
@@ -1280,7 +1281,7 @@ public final class OrchestratorToolHandler: ToolHandler {
     }
 
     private func renderDrift(_ epic: Epic) async throws -> JSONValue {
-        let base = try projects.get(epic.projectId)?.baseBranch
+        let base = try epic.upstream.map { "origin/\($0.headRef)" } ?? projects.get(epic.projectId)?.baseBranch
         let drift: BaseDrift
         do {
             drift = try await control.baseDrift(epicId: epic.id)
@@ -1294,7 +1295,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             fields["ahead"] = .number(Double(ahead))
             fields["against"] = .string(against)
         case .noEpicBranch(let branch):
-            fields["unavailable"] = .string("\(branch) does not exist yet; it is cut from the base branch on first use.")
+            let source = epic.upstream.map { "origin/\($0.headRef)" } ?? "the base branch"
+            fields["unavailable"] = .string("\(branch) does not exist yet; it is cut from \(source) on first use.")
         case .noBaseBranch(let branch):
             fields["unavailable"] = .string("the project's base branch \(branch) does not exist in the repository.")
         case .unavailable(let reason):

@@ -83,6 +83,55 @@ final class UpstreamEpicTests: XCTestCase {
         XCTAssertTrue(refused.contains("pull request #42") && refused.contains("closed"), refused)
     }
 
+    func testDriftIsCountedAgainstTheFetchedPullRequestHeadAndNamesIt() async throws {
+        _ = try pushToHead(file: "pr.txt")
+        let epic = try adopt(number: 42, headRef: headRef)
+        _ = try await spawn(in: epic)
+        _ = try pushToHead(file: "newer.txt")
+        _ = try fixture.manager.fetchRemoteTip(headRef)
+        try fixture.git(["commit", "-q", "--allow-empty", "-m", "main one"])
+        try fixture.git(["commit", "-q", "--allow-empty", "-m", "main two"])
+
+        let result = try await fixture.callOrchestratorTool("get_epic", arguments: .object(["id": .string(epic.id)]))
+        let object = try JSONSerialization.jsonObject(with: Data(result.text.utf8)) as? [String: Any]
+        let drift = try XCTUnwrap(object?["base_drift"] as? [String: Any], result.text)
+
+        XCTAssertEqual(drift["against"] as? String, "origin/\(headRef)", "\(drift)")
+        XCTAssertEqual(drift["base"] as? String, "origin/\(headRef)", "\(drift)")
+        XCTAssertEqual(drift["behind"] as? Int, 1, "\(drift)")
+    }
+
+    func testAnAcceptRecreatesAMissingEpicBranchFromTheHeadOrRefuses() async throws {
+        _ = try pushToHead(file: "pr.txt")
+        let epic = try adopt(number: 42, headRef: headRef)
+        let first = try await committedTask(in: epic, file: "first.txt")
+        let second = try await committedTask(in: epic, file: "second.txt")
+        let newer = try pushToHead(file: "newer.txt")
+
+        try fixture.git(["branch", "-D", epic.branch])
+        try await fixture.supervisor.accept(taskId: first)
+        XCTAssertNoThrow(
+            try fixture.git(["merge-base", "--is-ancestor", newer, epic.branch]),
+            "the epic branch was not recreated from the fetched origin/\(headRef)"
+        )
+
+        try fixture.git(["branch", "-D", epic.branch])
+        try SupervisorFixture.git(
+            ["--git-dir", remote.path, "update-ref", "-d", "refs/heads/\(headRef)"], cwd: fixture.supportDir
+        )
+        try await fixture.supervisor.accept(taskId: second)
+        XCTAssertFalse(try fixture.manager.branchExists(epic.branch), "the epic branch fell back to the base")
+        let refused = try XCTUnwrap(try decisions().last)
+        XCTAssertTrue(refused.contains("#42") && refused.contains(headRef), refused)
+    }
+
+    private func committedTask(in epic: Epic, file: String) async throws -> String {
+        let taskId = try await spawn(in: epic)
+        let worker = try XCTUnwrap(fixture.sessions.forTask(taskId).first)
+        try fixture.commitInto(try XCTUnwrap(worker.worktreePath), file: file)
+        return taskId
+    }
+
     private func adopt(number: Int, headRef: String) throws -> Epic {
         try fixture.epics.create(
             projectId: fixture.project.id, title: "Widgets \(number)", goal: nil,
