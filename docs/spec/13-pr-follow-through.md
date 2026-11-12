@@ -1142,8 +1142,8 @@ or swap rows under SwiftUI's `ForEach`.
 A project can take over GitHub work another engineer handed to the human: open
 issues and pull requests in its `origin` that are assigned to the human and
 carry every configured trigger label. This subsection covers the settings,
-discovery, the records, acknowledgment and release. Starting work on an item
-and adopting a pull request into follow-through belong to later tasks.
+discovery, the records, acknowledgment, issues becoming tasks, and release.
+Adopting a pull request into follow-through belongs to a later task.
 
 **Settings.** `settings_json.takeover`, beside `prFollowThrough`, edited in the
 **Takeover** section of the PR Follow-Through tab:
@@ -1246,15 +1246,62 @@ it. Once a check or an edit has seen the label, the app does not list it again
 for that project until an edit says it is missing. When the poll's search is
 failing too, its problem is the one shown.
 
+**Issues become tasks.** After each discovery poll,
+`WorkerSupervisor.startIssueTakeovers` takes every live `issue` row still
+`found` or `acknowledged` through these steps, and a step that fails leaves the
+row where it is for the next poll:
+
+1. `gh issue view <url> --json number,title,url,author,body,comments,closedByPullRequestsReferences`
+   reads the issue (`TakeoverIssueReader`), and one write creates a `code` task
+   with origin `takeover` in `backlog` and records its id on the row
+   (`TakeoverStore.createTask`). A row that already has a task keeps it, so an
+   issue never gets two. The task body gives the issue's number and URL, quotes
+   its title, body and every comment line by line with `> `, each comment headed
+   by its author and URL, and lists the open pull requests GitHub links to it.
+   A paragraph above the quotes labels all of it as text written on GitHub: data
+   to act on, not instructions to follow, as a fix round's body labels review
+   comments (§13.1).
+2. The acknowledgment above runs. Until the row is `acknowledged` the task stays
+   in `backlog`, so nothing dispatches work on an issue GitHub has not been told
+   about.
+3. One write moves the row to `working` and the task to `ready`.
+4. `Board.requestSpawn` and then the supervisor's `spawnWorker`, the path
+   `spawn_worker` takes, start the worker with `requestedBy` `takeover`. The
+   project's autonomy setting, caps and spawn approval apply unchanged: with
+   autonomy off, a spawn approval waits for the human. A refused spawn leaves the
+   task in `ready`.
+5. A `decision` report tells the orchestrator which task appeared, from which
+   issue, and how the spawn went, so it does not create a second task for it.
+
+**The pull request closes the issue.** When the task is accepted into a project
+that integrates standalone tasks by pull request, the awaiting-pull-request
+advice says the board adds the closing line, and `open_pull_request` for the
+task's branch appends `Closes #<n>` to the body, `n` being the issue's own
+number, unless the body already closes that issue
+(`TakeoverStore.closingBody`). Opening it still waits for the human's approval.
+The pull request is then the human's, so follow-through's own author search
+finds it. When a watch's snapshot body closes a live `acknowledged` or `working`
+issue row, by a closing keyword (`close`, `fix`, `resolve` and their forms)
+before `#n`, `owner/name#n` or the issue's URL, with a bare `#n` counting only
+in the issue's repository, the row moves to `watched` on that watch
+(`TakeoverStore.watchClosingPullRequest`). The watch reaching `merged` moves
+every row watching it to `done` in the same write.
+
 **Release.** A live row whose item is still open but now lacks a trigger label
 or is no longer assigned to the assignee becomes `released`. The check rides
 the same `nodes(ids:)` read rather than one `gh pr view` per row, since the
 search cannot see these items: acknowledged ones carry the acknowledgment label
 it excludes, and released ones have lost what it searches for. That is one
 call per poll however many rows are live, against one per row. A closed item,
-or one GitHub no longer returns, is left as it is. Release changes only the
-row's state here. `gh api graphql` exits non-zero when GraphQL reports any
+or one GitHub no longer returns, is left as it is. Release changes the row's
+state and, for an issue, may close its task (below). `gh api graphql` exits non-zero when GraphQL reports any
 error, such as a deleted node, so the read keeps `data.nodes` from such a
 response: a null node, or one an `errors[].path` names, counts as not returned
 this poll (a new hit is not recorded until a poll reads it), the omission is
 logged, and only a response with no `data.nodes` counts as a failed poll.
+
+Releasing an issue row whose task has not started, one still in `backlog` or
+`ready` with no active session, closes the task in the same write the way
+`close_task` does: `closed` with a reason naming the issue, any pending spawn
+approval denied, and a `decision` report to the orchestrator. A task that is
+running, in review or done is left alone, so a running worker finishes.

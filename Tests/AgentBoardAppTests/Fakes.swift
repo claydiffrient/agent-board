@@ -133,8 +133,14 @@ final class FakeGh: GhRunning, @unchecked Sendable {
     private var answers: [String: CommandResult] = [:]
     private var recorded: [[String]] = []
     private var searchGate: DispatchSemaphore?
+    private var prefixAnswers: [(prefix: [String], result: CommandResult)] = []
 
     var calls: [[String]] { lock.withLock { recorded } }
+
+    /// Answers every call whose arguments start with `prefix`, ahead of the keyed answers below.
+    func answer(prefix: [String], stdout: String, status: Int32 = 0) {
+        lock.withLock { prefixAnswers.append((prefix, CommandResult(status: status, stdout: stdout, stderr: ""))) }
+    }
 
     /// Blocks every `gh search prs` until `releaseSearch()`, standing in for a slow `gh`.
     func holdSearch() {
@@ -253,6 +259,7 @@ final class FakeGh: GhRunning, @unchecked Sendable {
         }
         gate?.wait()
         return try lock.withLock {
+            if let match = prefixAnswers.last(where: { arguments.starts(with: $0.prefix) }) { return match.result }
             guard let answer = answers[key] else { throw PullRequestCheckFailure("FakeGh has no answer for \(key)") }
             return answer
         }

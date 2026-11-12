@@ -1356,8 +1356,10 @@ public final class OrchestratorToolHandler: ToolHandler {
             throw ToolError("A pull request cannot merge \(branch) into itself. Give a different `base`.")
         }
         let title = try ToolArguments.requiredString("title", in: arguments)
-        let body = ToolArguments.optionalString("body", in: arguments) ?? ""
         let target = try publishTarget(branch: branch, identity: identity)
+        let body = try TakeoverStore(db).closingBody(
+            ToolArguments.optionalString("body", in: arguments) ?? "", taskId: target.taskId
+        )
 
         let published = try publishedName(for: branch, project: project)
         let head = published ?? branch

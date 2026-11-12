@@ -213,6 +213,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Consecutive failed takeover polls, by project id.
     @ObservationIgnored private var takeoverFailures: [String: Int] = [:]
     @ObservationIgnored private let takeoverAcknowledger: TakeoverAcknowledger
+    @ObservationIgnored private let takeoverIssues: TakeoverIssueReader
     /// "<project id> <label>" for each acknowledgment label seen on GitHub; a missing one is checked again.
     @ObservationIgnored private var confirmedAckLabels: Set<String> = []
     /// Projects whose acknowledgment label is missing (SPEC §13.8), merged into `pr_poll_problem`.
@@ -367,6 +368,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         takeovers = TakeoverStore(db)
         takeoverDiscovery = TakeoverDiscovery(gh: gh)
         takeoverAcknowledger = TakeoverAcknowledger(gh: gh)
+        takeoverIssues = TakeoverIssueReader(gh: gh)
     }
 
     private var sessionConfigDir: URL { SessionConfigWriter.configDir(supportDir: appSupportDir) }
@@ -2515,7 +2517,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         recordLanding(
             task: task, epic: nil, landing: .awaitingPullRequest,
             detail: PullRequestLanding.awaitingDetail(branch: branch, base: base),
-            advice: PullRequestLanding.awaitingAdvice(branch: branch)
+            advice: PullRequestLanding.awaitingAdvice(
+                branch: branch, closesIssue: (try? takeovers.issue(taskId: task.id))?.number
+            )
         )
     }
 
@@ -2902,6 +2906,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         result.recorded.count, result.released.count
                     )
                 }
+                await startIssueTakeovers(project: project)
+                if !result.released.isEmpty { announceReports(projectId: project.id) }
             } catch PublishFailure.noRemote {
                 takeoverFailures[project.id] = nil
                 takeoverProblems[project.id] = nil
@@ -2919,9 +2925,67 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         writePollProblems()
     }
 
+    /// SPEC §13.8: each live issue row not yet working gets its task, is acknowledged on GitHub, moves to
+    /// `working`, and asks for a worker through `spawn_worker`'s gate, so autonomy, caps and approval apply
+    /// unchanged. A step that fails leaves the row where it is for the next poll.
+    private func startIssueTakeovers(project: Project) async {
+        let pending = ((try? takeovers.live(projectId: project.id)) ?? [])
+            .filter { $0.kind == .issue && ($0.state == .found || $0.state == .acknowledged) }
+        let reader = takeoverIssues
+        let cwd = URL(fileURLWithPath: project.repoPath)
+        for row in pending {
+            var taskId = row.taskId
+            if taskId == nil {
+                let url = row.url
+                do {
+                    let issue = try await offMain { try reader.read(url: url, cwd: cwd) }
+                    taskId = try takeovers.createTask(row.id, issue: issue)?.id
+                } catch {
+                    NSLog("Reading takeover issue #%d in %@ failed: %@", row.number, project.name, describe(error))
+                    _ = try? takeovers.noteProblem(row.id, detail: "Could not read the issue: \(describe(error))")
+                }
+            }
+            guard let taskId else { continue }
+            if row.state == .found {
+                switch await acknowledge(takeover: row) {
+                case .acknowledged?, .commentFailed?: break
+                default: continue
+                }
+            }
+            guard (try? takeovers.startWorking(row.id, taskId: taskId)) != nil else { continue }
+            let outcome: String
+            do {
+                switch try board.requestSpawn(taskId: taskId, requestedBy: "takeover") {
+                case .proceed:
+                    let spawn = try await spawnWorker(taskId: taskId)
+                    outcome = "A worker was dispatched on branch \(spawn.branch)."
+                case .approvalPending(let approval):
+                    outcome = "Spawn approval \(approval.id) is pending; the human decides."
+                case .refused(let reason):
+                    outcome = "No worker was started: \(reason) The task waits in ready; spawn_worker it when you can."
+                }
+            } catch {
+                outcome = "No worker was started: \(describe(error)) The task waits in ready; spawn_worker it when you can."
+            }
+            _ = try? ReportStore(db).insert(
+                projectId: project.id, taskId: taskId, sessionId: nil, kind: .decision,
+                body: """
+                Takeover created task \(taskId) from issue #\(row.number) — \(row.url)
+                The issue was assigned to the human with the project's trigger labels, so Agent Board took it over \
+                and acknowledged it on GitHub. \(outcome) Do not create another task for this issue.
+                """
+            )
+            announceReports(projectId: project.id)
+        }
+    }
+
     private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) async {
         do {
             var watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
+            _ = try takeovers.watchClosingPullRequest(
+                projectId: project.id, watchId: watch.id, repository: "\(snapshot.repoOwner)/\(snapshot.repoName)",
+                body: snapshot.body
+            )
             prReplyReadFailures[watch.id] = nil
             let failed = try await newFailedChecks(snapshot, watch: watch, project: project)
             if let settled = try prWatches.settleAwaitingCI(watchId: watch.id, failedChecks: failed) {

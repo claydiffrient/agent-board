@@ -167,7 +167,9 @@ public struct PRWatchStore: Sendable {
             try watch.update(db)
             guard before != state else { return }
             switch state {
-            case .merged: try Self.report(db, watch: watch, .merged)
+            case .merged:
+                try Self.report(db, watch: watch, .merged)
+                try TakeoverStore.finishWatching(db, watchId: watchId, now: now)
             case .closed: try Self.report(db, watch: watch, .closed)
             default: break
             }

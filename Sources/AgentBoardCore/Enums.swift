@@ -111,6 +111,8 @@ public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, Data
     case followupCheck = "followup_check"
     /// A proposal filed through a `verifier` grant from Walk me through it (SPEC §6).
     case verifySession = "verify_session"
+    /// The task a taken-over GitHub issue became (SPEC §13.8).
+    case takeover
 
     /// A read-only session over a pull request under a triager grant: never assigned, resumed or landed.
     public var isPullRequestReader: Bool { self == .triage || self == .followupCheck }
