@@ -215,6 +215,11 @@ final class FakeGh: GhRunning, @unchecked Sendable {
         lock.withLock { answers[Self.failedLogKey(jobId)] = CommandResult(status: 0, stdout: log, stderr: "") }
     }
 
+    /// What `gh` prints for `arguments`, keyed the way `run` looks it up.
+    func answer(arguments: [String], stdout: String) {
+        lock.withLock { answers[Self.key(for: arguments)] = CommandResult(status: 0, stdout: stdout, stderr: "") }
+    }
+
     private static let searchKey = "search prs"
     private static let replyKey = "reply"
     private static let commentKey = "comment"

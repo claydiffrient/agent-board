@@ -14,9 +14,13 @@ public struct PRWatchStore: Sendable {
     /// An outdated or viewer-latest thread leaves an owed item untouched and counts as gone for any other (SPEC §13.1).
     /// An item whose body changed (a new reply) is open and untriaged again, owing a fresh reply; one that
     /// reopens also drops its task. A fork parks from any state the poll moves (SPEC §13.1), and a stopped
-    /// watch records nothing.
+    /// watch records nothing. `authored` says whether the author search returned it. Before an adopted watch's
+    /// takeover round starts, the viewer's feedback from before the takeover counts like anyone's; an item made
+    /// from it stays as it is while that comment stays the latest (SPEC §13.1).
     @discardableResult
-    public func upsert(projectId: String, snapshot: PRSnapshot, now: Int64 = .nowMillis) throws -> PRWatch {
+    public func upsert(
+        projectId: String, snapshot: PRSnapshot, authored: Bool = true, now: Int64 = .nowMillis
+    ) throws -> PRWatch {
         try db.writer.write { db in
             let existing = try PRWatch.fetchOne(
                 db,
@@ -31,7 +35,8 @@ public struct PRWatchStore: Sendable {
                 baseRef: snapshot.baseRef, state: .watching, round: 0, reviewDecision: snapshot.reviewDecision,
                 checksState: snapshot.checksState, mergeable: snapshot.mergeable,
                 labelsJSON: PRWatch.encodeLabels(snapshot.labels), paused: false, lastPolledAt: now,
-                lastFeedbackAt: nil, verifiedAt: nil, estCostUSD: 0, createdAt: now, updatedAt: now
+                lastFeedbackAt: nil, verifiedAt: nil, estCostUSD: 0, createdAt: now, updatedAt: now,
+                authored: authored
             )
             if let existing {
                 watch.url = snapshot.url
@@ -39,7 +44,8 @@ public struct PRWatchStore: Sendable {
                 watch.body = snapshot.body
                 watch.isDraft = snapshot.isDraft
                 watch.headRef = snapshot.headRef
-                if watch.headOid != snapshot.headOid { watch.headChangedAt = now }
+                watch.authored = authored
+                if !watch.headOid.isEmpty, watch.headOid != snapshot.headOid { watch.headChangedAt = now }
                 watch.headOid = snapshot.headOid
                 watch.baseRef = snapshot.baseRef
                 watch.reviewDecision = snapshot.reviewDecision
@@ -58,7 +64,11 @@ public struct PRWatchStore: Sendable {
                 uniqueKeysWithValues: try PRItem.filter(Column("watch_id") == watch.id).fetchAll(db)
                     .map { ($0.githubNodeId, $0) }
             )
-            for incoming in snapshot.items {
+            let viewerCutoff = try Self.viewerFeedbackCutoff(db, watch: watch)
+            for var incoming in snapshot.items {
+                if incoming.viewerLatest, let viewerCutoff, (incoming.createdAt ?? .min) < viewerCutoff {
+                    incoming.viewerLatest = false
+                }
                 guard var item = stored.removeValue(forKey: incoming.githubNodeId) else {
                     if incoming.isResolved || !incoming.opensItem || incoming.onlyKeepsOwedItems { continue }
                     var item = PRItem(
@@ -68,6 +78,10 @@ public struct PRWatchStore: Sendable {
                     )
                     try item.insert(db)
                     feedbackArrived = true
+                    continue
+                }
+                if !incoming.isResolved, incoming.viewerLatest, item.body == incoming.body,
+                   item.author?.caseInsensitiveCompare(incoming.author ?? "") == .orderedSame {
                     continue
                 }
                 if !incoming.isResolved, incoming.onlyKeepsOwedItems {
@@ -140,6 +154,90 @@ public struct PRWatchStore: Sendable {
                 try Self.report(db, watch: watch, .parked(reason: watch.parkedReason))
             }
             return watch
+        }
+    }
+
+    /// The takeover's `created_at` while an adopted watch's takeover round has not started; nil otherwise.
+    /// Feedback the viewer wrote after it, the acknowledgment comment included, never counts.
+    static func viewerFeedbackCutoff(_ db: Database, watch: PRWatch) throws -> Int64? {
+        guard watch.adopted, let takeoverId = watch.takeoverId, let round = watch.takeoverRound, watch.round < round
+        else { return nil }
+        return try Int64.fetchOne(db, sql: "SELECT created_at FROM takeover WHERE id = ?", arguments: [takeoverId])
+    }
+
+    /// SPEC §13.8: watches a taken-over pull request although the human did not author it. Its head and
+    /// feedback arrive with the next poll, and its next round is the takeover round. A watch the project
+    /// already has for the PR is adopted in place. Nil when `takeover.url` names no pull request.
+    @discardableResult
+    public func adopt(_ takeover: Takeover, now: Int64 = .nowMillis) throws -> PRWatch? {
+        guard let (owner, name) = Self.repository(ofPullRequestURL: takeover.url) else { return nil }
+        return try db.writer.write { db in
+            if var existing = try PRWatch.fetchOne(
+                db,
+                sql: """
+                SELECT * FROM pr_watch WHERE project_id = ? AND lower(repo_owner) = lower(?)
+                AND lower(repo_name) = lower(?) AND number = ?
+                """,
+                arguments: [takeover.projectId, owner, name, takeover.number]
+            ) {
+                guard existing.takeoverId != takeover.id else { return existing }
+                existing.adopted = true
+                existing.takeoverId = takeover.id
+                existing.takeoverRound = existing.round + 1
+                existing.updatedAt = now
+                try existing.update(db)
+                return existing
+            }
+            let watch = PRWatch(
+                id: PRWatch.newId(), projectId: takeover.projectId, repoOwner: owner, repoName: name,
+                number: takeover.number, url: takeover.url, title: takeover.title, isDraft: false, headRef: "",
+                headOid: "", baseRef: "", state: .watching, round: 0, reviewDecision: nil, checksState: nil,
+                mergeable: nil, labelsJSON: "[]", paused: false, lastPolledAt: nil, lastFeedbackAt: nil,
+                verifiedAt: nil, estCostUSD: 0, createdAt: now, updatedAt: now, authored: false, adopted: true,
+                takeoverId: takeover.id, takeoverRound: 1
+            )
+            try watch.insert(db)
+            return watch
+        }
+    }
+
+    public func adopted(takeoverId: String) throws -> PRWatch? {
+        try db.reader.read { try PRWatch.filter(Column("takeover_id") == takeoverId).fetchOne($0) }
+    }
+
+    /// `owner` and `name` of `https://github.com/<owner>/<name>/pull/<n>`.
+    static func repository(ofPullRequestURL url: String) -> (owner: String, name: String)? {
+        let parts = URL(string: url)?.pathComponents.filter { $0 != "/" } ?? []
+        guard parts.count >= 4, parts[2] == "pull" else { return nil }
+        return (parts[0], parts[1])
+    }
+
+    /// SPEC §13.8 release: each adopted watch whose takeover was released stops as Stop watching stops a
+    /// watch, and is no longer adopted. A watch mid-round is left to finish the round and is stopped by a
+    /// later call, before it can start another. Returns the stopped watches' ids.
+    @discardableResult
+    public func stopReleasedAdoptions(projectId: String, now: Int64 = .nowMillis) throws -> [String] {
+        try db.writer.write { db in
+            let released = try PRWatch.fetchAll(
+                db,
+                sql: """
+                SELECT w.* FROM pr_watch w JOIN takeover t ON t.id = w.takeover_id
+                WHERE w.project_id = ? AND w.adopted = 1 AND t.state = 'released'
+                AND w.state IN ('watching', 'settling', 'ready_to_verify', 'verified', 'parked', 'stale', 'awaiting_ci')
+                """,
+                arguments: [projectId]
+            )
+            for var watch in released {
+                try db.execute(
+                    sql: "UPDATE pr_item SET state = 'dismissed', updated_at = ? WHERE watch_id = ? AND state = 'open'",
+                    arguments: [now, watch.id]
+                )
+                watch.state = .stopped
+                watch.adopted = false
+                watch.updatedAt = now
+                try watch.update(db)
+            }
+            return released.map(\.id)
         }
     }
 

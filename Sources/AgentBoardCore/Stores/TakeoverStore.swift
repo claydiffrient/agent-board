@@ -72,9 +72,10 @@ public struct TakeoverStore: Sendable {
         try move(id, to: .acknowledged, now: now)
     }
 
-    /// Sets `failure` on a live row without moving it, for a step that failed after its state was recorded.
+    /// Sets `failure` on a live row without moving it, for a step that failed after its state was recorded or
+    /// cannot run yet; nil clears it.
     @discardableResult
-    public func noteProblem(_ id: String, detail: String, now: Int64 = .nowMillis) throws -> Takeover? {
+    public func noteProblem(_ id: String, detail: String?, now: Int64 = .nowMillis) throws -> Takeover? {
         try db.writer.write { db in
             guard var row = try Takeover.fetchOne(db, key: id), !row.state.isTerminal else { return nil }
             row.failure = detail

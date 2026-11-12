@@ -101,6 +101,13 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
     public var resumedAt: Int64? = nil
     public var createdAt: Int64
     public var updatedAt: Int64
+    /// The last poll's author search returned it: the human authored it.
+    public var authored: Bool = true
+    /// Watched because a takeover adopted it (SPEC §13.8), whoever authored it; cleared when the takeover is released.
+    public var adopted: Bool = false
+    public var takeoverId: String? = nil
+    /// The round that works the human's own open review feedback on an adopted PR (SPEC §13.1); later rounds ignore it.
+    public var takeoverRound: Int? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -132,9 +139,16 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
         case resumedAt = "resumed_at"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case authored
+        case adopted
+        case takeoverId = "takeover_id"
+        case takeoverRound = "takeover_round"
     }
 
     public static func newId() -> String { BoardId.new() }
+
+    /// SPEC D8 as amended (§13.5): publishing may fast-forward only a pull request the human authored or a takeover adopted.
+    public var acceptsFastForward: Bool { authored || adopted }
 
     public var labels: [String] {
         get { (try? JSONDecoder().decode([String].self, from: Data(labelsJSON.utf8))) ?? [] }
@@ -359,6 +373,8 @@ public struct PRSnapshot: Sendable, Equatable {
     public var title: String
     /// The description with its `<!-- … -->` comments removed, as GitHub renders it.
     public var body: String
+    /// False once merged or closed. Only an adopted watch's read can return one, since the author search lists open PRs.
+    public var isOpen: Bool
     public var isDraft: Bool
     public var headRef: String
     public var headOid: String
@@ -380,7 +396,7 @@ public struct PRSnapshot: Sendable, Equatable {
 
     public init(
         repoOwner: String, repoName: String, number: Int, url: String, title: String, body: String = "",
-        isDraft: Bool = false, headRef: String, headOid: String, baseRef: String, reviewDecision: String? = nil,
+        isOpen: Bool = true, isDraft: Bool = false, headRef: String, headOid: String, baseRef: String, reviewDecision: String? = nil,
         approvedBy: [String] = [], changesRequestedBy: [String] = [],
         checksState: String? = nil, mergeable: String? = nil, labels: [String] = [], items: [PRSnapshotItem] = [],
         isCrossRepository: Bool = false, headRepository: String? = nil, failedChecks: [PRFailedCheck] = []
@@ -391,6 +407,7 @@ public struct PRSnapshot: Sendable, Equatable {
         self.url = url
         self.title = title
         self.body = body
+        self.isOpen = isOpen
         self.isDraft = isDraft
         self.headRef = headRef
         self.headOid = headOid
@@ -452,12 +469,15 @@ public struct PRSnapshotItem: Sendable, Equatable {
     public var opensItem: Bool
     /// An outdated thread, or one whose latest comment is the viewer's, only keeps an owed item open (SPEC §13.1).
     public var isOutdated: Bool
+    /// The viewer wrote the thread's latest comment, the review or the comment.
     public var viewerLatest: Bool
+    /// When that comment or review was written, in millis.
+    public var createdAt: Int64?
 
     public init(
         githubNodeId: String, kind: PRItemKind, author: String? = nil, body: String, path: String? = nil,
         line: Int? = nil, url: String? = nil, isResolved: Bool = false, opensItem: Bool = true,
-        isOutdated: Bool = false, viewerLatest: Bool = false
+        isOutdated: Bool = false, viewerLatest: Bool = false, createdAt: Int64? = nil
     ) {
         self.githubNodeId = githubNodeId
         self.kind = kind
@@ -470,6 +490,7 @@ public struct PRSnapshotItem: Sendable, Equatable {
         self.opensItem = opensItem
         self.isOutdated = isOutdated
         self.viewerLatest = viewerLatest
+        self.createdAt = createdAt
     }
 
     var onlyKeepsOwedItems: Bool { isOutdated || viewerLatest }

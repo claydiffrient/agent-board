@@ -276,6 +276,12 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("takeover") { db in
             try db.execute(sql: Schema.takeover)
         }
+        migrator.registerMigration("pr_watch_adoption") { db in
+            try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN authored INTEGER NOT NULL DEFAULT 1")
+            try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0")
+            try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN takeover_id TEXT")
+            try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN takeover_round INTEGER")
+        }
         return migrator
     }
 }

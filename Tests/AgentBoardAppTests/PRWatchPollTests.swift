@@ -770,4 +770,80 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertEqual(untouched.round, 0, "advancePRWatches must not start a round for a watch outside the Refresh's scope")
         XCTAssertEqual(untouched.state, .settling)
     }
+
+    // MARK: - Takeover adoption (SPEC §13.8)
+
+    private func adoptedWatch(author: String = "colleague") throws -> PRWatch {
+        let takeover = try XCTUnwrap(TakeoverStore(fixture.db).record(projectId: fixture.project.id, TakeoverCandidate(
+            githubNodeId: "PR_12", kind: .pr, number: 12, url: url, title: "Add widgets", author: author
+        )))
+        return try XCTUnwrap(watches.adopt(takeover))
+    }
+
+    func testAnAdoptedWatchIsPolledAndAdvancesThoughTheAuthorSearchDoesNotReturnIt() async throws {
+        try enable()
+        let adopted = try adoptedWatch()
+        fixture.gh.answerSearch([])
+        fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: [pullRequest()])
+
+        await fixture.supervisor.pollPRWatches()
+
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.id, adopted.id)
+        XCTAssertEqual(watch.headOid, "c0ffee")
+        XCTAssertEqual(watch.state, .readyToVerify)
+        XCTAssertFalse(watch.authored)
+        XCTAssertTrue(watch.adopted)
+    }
+
+    /// The viewer's own open feedback is the takeover round's work; once that round has started, a new
+    /// comment of the viewer's is ignored as on any watch.
+    func testRoundOneOfAnAdoptedWatchTakesTheViewersOpenThreadAndALaterRoundIgnoresANewOne() async throws {
+        try enable()
+        let adopted = try adoptedWatch()
+        fixture.gh.answerSearch([])
+        fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: [
+            pullRequest(threads: [thread("T_mine", by: "me")]),
+        ])
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try watches.items(watchId: adopted.id).map(\.githubNodeId), ["T_mine"])
+
+        try await fixture.db.writer.write {
+            try $0.execute(sql: "UPDATE pr_watch SET round = 1, state = 'watching' WHERE id = ?", arguments: [adopted.id])
+        }
+        fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: [
+            pullRequest(threads: [thread("T_mine", by: "me"), thread("T_new", by: "me", body: "Also rename that.")]),
+        ])
+        await fixture.supervisor.pollPRWatches()
+
+        let items = try watches.items(watchId: adopted.id)
+        XCTAssertEqual(items.map(\.githubNodeId), ["T_mine"])
+        XCTAssertEqual(items.first?.state, .open, "the takeover round's item stays while the viewer's comment is still the latest")
+    }
+
+    func testATakenOverForkIsMarkedFailedAndNothingIsPosted() async throws {
+        try enable()
+        let takeover = TakeoverSettings(
+            enabled: true, triggerLabels: ["handoff-example"], ackLabel: "taken-example", ackComment: "Taking this over."
+        )
+        var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
+        settings.takeover = takeover
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+        fixture.gh.answer(
+            arguments: TakeoverDiscovery.searchArguments(takeover, repository: repository),
+            stdout: #"[{"id":"PR_12","number":12,"url":"\#(url)","title":"Add widgets","isPullRequest":true,"author":{"login":"colleague"}}]"#
+        )
+        fixture.gh.answer(
+            arguments: TakeoverDiscovery.nodesArguments(ids: ["PR_12"]),
+            stdout: #"{"data":{"viewer":{"login":"me"},"nodes":[{"__typename":"PullRequest","id":"PR_12","state":"OPEN","isCrossRepository":true,"labels":{"nodes":[{"name":"handoff-example"}]},"assignees":{"nodes":[{"login":"me"}]},"closingIssuesReferences":{"nodes":[]}}]}}"#
+        )
+
+        await fixture.supervisor.pollTakeovers()
+
+        let row = try XCTUnwrap(TakeoverStore(fixture.db).page(projectId: fixture.project.id).first)
+        XCTAssertEqual(row.state, .failed)
+        XCTAssertTrue(row.failure?.contains("fork") == true, row.failure ?? "")
+        XCTAssertEqual(try watches.live(projectId: fixture.project.id), [])
+        XCTAssertEqual(fixture.gh.calls.map { Array($0.prefix(2)) }, [["search", "issues"], ["api", "graphql"]])
+    }
 }

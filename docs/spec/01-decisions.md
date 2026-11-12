@@ -74,9 +74,11 @@ enforce it are unchanged for them.
 
 **D8 amended again, for PR follow-through (§13).** The app, never a worker,
 may fast-forward push a round branch to the head ref of an open pull request
-the human authored, without a human approval. This is allowed only after the
-reviewer role has accepted the round, every item in the round is graded fixed
-or moot, and the project's tests pass (§13.1 publishing, §13.2 verdicts).
+the human authored, or one a takeover adopted (§13.8), without a human approval.
+This is allowed only after the reviewer role has accepted the round, every item
+in the round is graded fixed or moot, and the project's tests pass (§13.1
+publishing, §13.2 verdicts). An adopted pull request gets exactly these
+conditions and nothing looser, and one from a fork is never adopted.
 Everything else about pushing is unchanged: creating a branch, opening a
 pull request, any non-fast-forward push, and any push to a pull request
 already verified all stay human-gated or forbidden, exactly as before this
