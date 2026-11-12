@@ -148,17 +148,16 @@ public struct TakeoverDiscovery: Sendable {
         return result
     }
 
-    /// Live rows whose item GitHub reports closed, with where each goes. An issue being worked or watched
-    /// is done, never released. A watched pull request is done once merged and released once closed
-    /// unmerged, as its watch ends `merged` or `closed`.
+    /// Live rows whose item GitHub reports closed, with where each goes. An issue is done, never released.
+    /// A pull request is done once merged and released once closed unmerged, as its watch ends `merged` or
+    /// `closed`. A row not yet working or watched ends the same way, before anything is posted to the item.
     static func ended(_ live: [Takeover], nodes: [String: TakeoverNode]) -> [(Takeover, TakeoverState)] {
         live.compactMap { row in
             guard let node = nodes[row.githubNodeId], !node.isOpen else { return nil }
             switch row.kind {
             case .issue:
-                return [.working, .watched].contains(row.state) && node.state == "CLOSED" ? (row, .done) : nil
+                return node.state == "CLOSED" ? (row, .done) : nil
             case .pr:
-                guard row.state == .watched else { return nil }
                 return (row, node.state == "MERGED" ? .done : .released)
             }
         }

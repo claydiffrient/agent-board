@@ -1237,6 +1237,10 @@ unique per project: kind (`issue` or `pr`), number, URL, title, author,
 failure later steps fill in. States run `found` → `acknowledged` → `working`
 → `watched` → `done`, a pull request going straight from `acknowledged` to
 `watched` and an issue closed while `working` going straight to `done`;
+an item GitHub reports closed or merged while still `found` or `acknowledged`
+ends the same way before adoption, the issue task or acknowledgment runs, so
+nothing is posted to it: an issue or merged pull request goes to `done`, an
+unmerged closed pull request to `released`;
 `released` and `failed` are reachable from any state that is not terminal,
 and `done`, `released` and `failed` are terminal. `TakeoverStore` re-reads the
 row inside each write and refuses any other move. `failure` holds the row's

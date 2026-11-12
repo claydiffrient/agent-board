@@ -109,7 +109,7 @@ public enum TakeoverState: String, Codable, Sendable, CaseIterable, Equatable, D
         case .acknowledged: return self == .found
         case .working: return self == .acknowledged
         case .watched: return self == .acknowledged || self == .working
-        case .done: return self == .watched || self == .working
+        case .done: return true
         case .found: return false
         }
     }

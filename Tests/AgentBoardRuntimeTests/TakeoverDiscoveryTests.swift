@@ -154,6 +154,23 @@ final class TakeoverDiscoveryTests: XCTestCase {
         XCTAssertEqual(try store.get(XCTUnwrap(pullRequests["PR_closed"]).id)?.state, .released)
     }
 
+    func testAFoundPullRequestThatClosedIsReleasedAndNothingIsPostedToIt() throws {
+        let (store, projectId) = try fixture()
+        let row = try XCTUnwrap(store.record(projectId: projectId, TakeoverCandidate(
+            githubNodeId: "PR_found", kind: .pr, number: 6, url: "https://github.com/example-org/app/pull/6",
+            title: "Found", author: "example-author"
+        )))
+        let gh = RecordingGh(search: "[]", nodes: Self.nodes([Self.node("PR_found", typename: "PullRequest", state: "CLOSED")]))
+
+        let result = try TakeoverDiscovery(gh: gh).poll(
+            projectId: projectId, settings: settings, repository: "example-org/app", store: store, cwd: cwd
+        )
+
+        XCTAssertEqual(try store.get(row.id)?.state, .released)
+        XCTAssertEqual(result.released.map(\.id), [row.id])
+        XCTAssertFalse(gh.calls.contains { $0.contains("edit") || $0.contains("comment") })
+    }
+
     private func fixture() throws -> (TakeoverStore, String) {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
