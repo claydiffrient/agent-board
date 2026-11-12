@@ -445,7 +445,7 @@ CREATE TABLE takeover (
   state               TEXT NOT NULL,     -- found | acknowledged | working | watched | done | released | failed
   task_id             TEXT REFERENCES task(id) ON DELETE SET NULL,
   watch_id            TEXT REFERENCES pr_watch(id) ON DELETE SET NULL,
-  failure             TEXT,
+  failure             TEXT,              -- why it failed, or a step that failed after its state was recorded
   created_at          INTEGER NOT NULL,
   updated_at          INTEGER NOT NULL,
   UNIQUE (project_id, github_node_id)

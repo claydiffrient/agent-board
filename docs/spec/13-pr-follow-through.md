@@ -1142,9 +1142,8 @@ or swap rows under SwiftUI's `ForEach`.
 A project can take over GitHub work another engineer handed to the human: open
 issues and pull requests in its `origin` that are assigned to the human and
 carry every configured trigger label. This subsection covers the settings,
-discovery, the records and release. Acknowledging an item on GitHub, starting
-work on it and adopting a pull request into follow-through belong to later
-tasks; nothing here writes to GitHub.
+discovery, the records, acknowledgment and release. Starting work on an item
+and adopting a pull request into follow-through belong to later tasks.
 
 **Settings.** `settings_json.takeover`, beside `prFollowThrough`, edited in the
 **Takeover** section of the PR Follow-Through tab:
@@ -1155,7 +1154,7 @@ tasks; nothing here writes to GitHub.
 | `assignee` | `@me` — whoever `gh` is logged in as; a blank value saves as `@me` | |
 | `triggerLabels` | `[]`, no default | An item qualifies only when every label is present. Matched ignoring case |
 | `ackLabel` | `nil`, no default | Marks an item as taken over; the search excludes it |
-| `ackComment` | `nil`, no default | A comment template |
+| `ackComment` | `nil`, no default | A comment template posted after the label; nil posts none |
 | `pollMinutes` | 5 | Saved at least 1 |
 
 The trigger and acknowledgment labels are work-specific, so they have no
@@ -1212,7 +1211,40 @@ failure later steps fill in. States run `found` → `acknowledged` → `working`
 terminal, and `done`, `released` and `failed` are terminal. `TakeoverStore`
 re-reads the row inside each write and refuses any other move. The Pull
 Requests page lists every row in a **Taken over** group, with kind, number,
-title, author, state and a link to GitHub, under the page's project filter.
+title, author, state, any `failure` and a link to GitHub, under the page's project filter.
+
+**Acknowledgment.** An item is acknowledged only once its board side exists:
+an issue's task, or a pull request's adopted watch. The step that creates it
+calls `WorkerSupervisor.acknowledge(takeover:)`, which does nothing unless the
+row is still `found`, and otherwise runs in this order
+(`TakeoverAcknowledger`):
+
+1. `gh issue edit <url> --add-label <ackLabel>`, or `gh pr edit` for a pull
+   request.
+2. Record `acknowledged`.
+3. Post `ackComment` with `gh issue comment` or `gh pr comment`. The template's
+   `{assignee}`, `{kind}` (`issue` or `pull request`) and `{url}` are filled
+   in; with the assignee left at `@me`, `{assignee}` is the login `gh api user`
+   names. Everything else is posted verbatim, so any footer is the human's to
+   write.
+
+If the label edit fails, nothing is recorded and the row stays `found` for the
+caller's next poll to retry. If the comment fails after the label is on, the
+row keeps `acknowledged`, its `failure` holds the error (shown on its Taken
+over row), and nothing re-adds the label: a retry on a row that is no longer
+`found` runs no `gh` command. Nothing in this path reads a comment's text back
+from GitHub.
+
+**Agent Board never creates labels.** The acknowledgment label must already
+exist on the repository. Before a project's first acknowledgment, and again
+whenever a label edit fails with GitHub saying the label was not found,
+`gh label list --repo <owner/name> --search <ackLabel> --json name` checks for
+it by exact name, ignoring case. A missing label adds no label and posts no
+comment: it becomes the project's `pr_poll_problem` row, telling the human to
+create the label, and every takeover waits in `found` until a later check finds
+it. Once a check or an edit has seen the label, the app does not list it again
+for that project until an edit says it is missing. When the poll's search is
+failing too, its problem is the one shown.
 
 **Release.** A live row whose item is still open but now lacks a trigger label
 or is no longer assigned to the assignee becomes `released`. The check rides

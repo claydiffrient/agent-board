@@ -212,6 +212,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var takeoverPoll: _Concurrency.Task<Void, Never>?
     /// Consecutive failed takeover polls, by project id.
     @ObservationIgnored private var takeoverFailures: [String: Int] = [:]
+    @ObservationIgnored private let takeoverAcknowledger: TakeoverAcknowledger
+    /// "<project id> <label>" for each acknowledgment label seen on GitHub; a missing one is checked again.
+    @ObservationIgnored private var confirmedAckLabels: Set<String> = []
+    /// Projects whose acknowledgment label is missing (SPEC §13.8), merged into `pr_poll_problem`.
+    @ObservationIgnored private var ackLabelProblems: [String: String] = [:]
     /// Millis of the last pull request merge check; 0 means none yet, so the first tick after
     /// launch checks.
     @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
@@ -361,6 +366,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         prWatches = PRWatchStore(db)
         takeovers = TakeoverStore(db)
         takeoverDiscovery = TakeoverDiscovery(gh: gh)
+        takeoverAcknowledger = TakeoverAcknowledger(gh: gh)
     }
 
     private var sessionConfigDir: URL { SessionConfigWriter.configDir(supportDir: appSupportDir) }
@@ -2787,7 +2793,50 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// One `pr_poll_problem` row per project; a follow-through problem wins over a takeover one.
     private func writePollProblems() {
-        try? prWatches.setPollProblems(takeoverProblems.merging(followThroughProblems) { _, followThrough in followThrough })
+        let takeover = takeoverProblems.merging(ackLabelProblems) { search, _ in search }
+        try? prWatches.setPollProblems(takeover.merging(followThroughProblems) { _, followThrough in followThrough })
+    }
+
+    /// SPEC §13.8: adds the acknowledgment label, records `acknowledged`, then posts the comment. A label
+    /// edit that fails records nothing, so the caller's next poll retries it; nil means it failed.
+    @discardableResult
+    func acknowledge(takeover: Takeover) async -> TakeoverAcknowledgment? {
+        guard let project = try? projects.get(takeover.projectId), project.settings.takeover.enabled,
+              let label = project.settings.takeover.ackLabel
+        else { return nil }
+        let repo = URL(fileURLWithPath: project.repoPath)
+        let settings = project.settings.takeover
+        let key = "\(project.id) \(label)"
+        let confirmed = confirmedAckLabels.contains(key)
+        let acknowledger = takeoverAcknowledger
+        let store = takeovers
+        do {
+            let remote = try await offMain { try BranchPublisher(repoPath: repo).requireRemote() }
+            guard let slug = PullRequestLaunch.githubSlug(remoteURL: remote) else { return nil }
+            let outcome = try await offMain {
+                try acknowledger.acknowledge(
+                    takeover, settings: settings, repository: slug, labelConfirmed: confirmed, store: store, cwd: repo
+                )
+            }
+            switch outcome {
+            case .labelMissing(let problem):
+                confirmedAckLabels.remove(key)
+                ackLabelProblems[project.id] = problem
+            case .acknowledged, .commentFailed:
+                confirmedAckLabels.insert(key)
+                ackLabelProblems[project.id] = nil
+            case .skipped:
+                break
+            }
+            if case .commentFailed(_, let detail) = outcome {
+                NSLog("Takeover #%d in %@: %@", takeover.number, project.name, detail)
+            }
+            writePollProblems()
+            return outcome
+        } catch {
+            NSLog("Acknowledging takeover #%d in %@ failed: %@", takeover.number, project.name, describe(error))
+            return nil
+        }
     }
 
     /// SPEC §13.8: one discovery poll for each project with takeover on, or only `projectIds`. A call made
@@ -2806,8 +2855,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     private func pollDueTakeovers(_ all: [Project], now: Int64) {
         let enabled = all.filter { $0.settings.takeover.enabled }
         if enabled.isEmpty {
-            if !takeoverProblems.isEmpty {
+            if !takeoverProblems.isEmpty || !ackLabelProblems.isEmpty {
                 takeoverProblems = [:]
+                ackLabelProblems = [:]
                 writePollProblems()
             }
             return
@@ -2828,6 +2878,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let enabledIds = Set(enabled.map(\.id))
         takeoverProblems = takeoverProblems.filter { enabledIds.contains($0.key) }
         takeoverFailures = takeoverFailures.filter { enabledIds.contains($0.key) }
+        ackLabelProblems = ackLabelProblems.filter { enabledIds.contains($0.key) }
         let discovery = takeoverDiscovery
         let store = takeovers
         for project in enabled where projectIds?.contains(project.id) ?? true {

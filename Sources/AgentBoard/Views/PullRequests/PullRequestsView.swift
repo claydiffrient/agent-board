@@ -690,6 +690,12 @@ struct TakeoverRow: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                if let failure = takeover.failure {
+                    Text(failure)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(3)
+                }
             }
             Spacer()
             Text(takeover.state.rawValue.capitalized)
