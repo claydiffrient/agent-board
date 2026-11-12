@@ -1,3 +1,4 @@
+import AgentBoardCore
 import Foundation
 
 /// What GitHub says about a pull request, reduced to what decides a task's landing.
@@ -17,6 +18,34 @@ public struct PullRequestHead: Sendable, Equatable {
         self.isOpen = isOpen
         self.oid = oid
         self.labels = labels
+    }
+}
+
+/// What `push_branch` re-reads before publishing an epic onto the pull request it builds on (SPEC §6.1).
+public struct PullRequestUpstreamState: Sendable, Equatable {
+    public var state: String
+    public var headRefName: String
+    public var isCrossRepository: Bool
+
+    public init(state: String, headRefName: String, isCrossRepository: Bool) {
+        self.state = state
+        self.headRefName = headRefName
+        self.isCrossRepository = isCrossRepository
+    }
+
+    /// Why nothing may be pushed onto `upstream`'s head, or nil when the pull request still takes it.
+    public func refusal(for upstream: EpicUpstream) -> String? {
+        let pr = "pull request #\(upstream.pullRequest.number) (\(upstream.pullRequest.url))"
+        if state.uppercased() != "OPEN" {
+            return "\(pr) is \(state.lowercased()), so nothing was pushed to `\(upstream.headRef)`."
+        }
+        if isCrossRepository {
+            return "\(pr) comes from a fork, so nothing was pushed to `\(upstream.headRef)`."
+        }
+        if headRefName != upstream.headRef {
+            return "\(pr) now has head `\(headRefName)`, not `\(upstream.headRef)`, so nothing was pushed."
+        }
+        return nil
     }
 }
 
@@ -79,6 +108,20 @@ public struct PullRequestStateReader: Sendable {
             throw PullRequestCheckFailure("`gh pr view` printed no head: \(stdout)")
         }
         return head
+    }
+
+    public static func upstreamArguments(url: String) -> [String] {
+        ["pr", "view", url, "--json", "state,headRefName,isCrossRepository"]
+    }
+
+    public func upstream(of url: String, cwd: URL) throws -> PullRequestUpstreamState {
+        let stdout = try view(Self.upstreamArguments(url: url), cwd: cwd)
+        guard let data = stdout.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let state = object["state"] as? String, let head = object["headRefName"] as? String,
+              let crossRepository = object["isCrossRepository"] as? Bool
+        else { throw PullRequestCheckFailure("`gh pr view` printed no head ref: \(stdout)") }
+        return PullRequestUpstreamState(state: state, headRefName: head, isCrossRepository: crossRepository)
     }
 
     private func view(_ arguments: [String], cwd: URL) throws -> String {

@@ -413,11 +413,12 @@ public struct WorktreeManager: Sendable {
     }
 
     /// Where merging `start` into `branch` would leave it, without moving anything: a settled
-    /// outcome, or a commit on no ref for the caller to verify and then `applyRefresh`.
+    /// outcome, or a commit on no ref for the caller to verify and then `applyRefresh`. A `start`
+    /// that names a commit, such as a pull request's fetched head, needs no local `base`.
     public func refreshCandidate(
         branch: String, base: String, start: BaseStartPoint, message: String
     ) throws -> RefreshCandidate {
-        guard try branchExists(base) else { return .settled(.noBaseBranch) }
+        guard try start.ref != base || branchExists(base) else { return .settled(.noBaseBranch) }
         guard try branchExists(branch) else { return .settled(.noEpicBranch) }
         if let holder = try list().first(where: { $0.branch == branch }) {
             return .settled(.checkedOut(path: holder.path.path, holder: nil))
