@@ -52,4 +52,17 @@ final class EpicUpstreamTests: XCTestCase {
         XCTAssertEqual(try f.epics.get(epic.id)?.state, .done)
         XCTAssertTrue(try f.board.epicPullRequestChecks(epicId: epic.id).isEmpty)
     }
+
+    func testTheIntegratorsConflictMarkerCheckDiffsAgainstThePullRequestsHead() throws {
+        let f = try Fixture.make()
+        let epic = try f.epics.create(projectId: f.project.id, title: "Widgets", goal: nil, upstream: upstream)
+
+        let prompt = IntegrationPlan.compose(
+            epic: epic, baseBranch: "main", branches: [],
+            verification: VerificationCommands(integration: .ciVerifies)
+        )
+
+        XCTAssertTrue(prompt.contains("`git diff origin/feature/widgets...\(epic.branch) |"), prompt)
+        XCTAssertFalse(prompt.contains("main...\(epic.branch)"), prompt)
+    }
 }
