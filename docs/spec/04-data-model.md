@@ -351,6 +351,10 @@ CREATE TABLE pr_watch (
   resumed_at       INTEGER,           -- the last Resume from parked or Watch again from stopped; bounds the round cap and failure streak (§13.4)
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,  -- moves only when something other than last_polled_at changes
+  authored         INTEGER NOT NULL DEFAULT 1,  -- the last poll's author search returned it (§13.5)
+  adopted          INTEGER NOT NULL DEFAULT 0,  -- watched for a takeover (§13.8); cleared when the takeover is released
+  takeover_id      TEXT,              -- the takeover that adopted it
+  takeover_round   INTEGER,           -- the round that works the human's own open feedback (§13.1)
   UNIQUE (project_id, repo_owner, repo_name, number)
 );
 CREATE INDEX pr_watch_state ON pr_watch(state);

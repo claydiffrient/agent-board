@@ -2709,11 +2709,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
 
         let drafts = Set(authored.filter(\.isDraft).map { key($0.repository, $0.number) })
-        let open = authored.filter {
+        let authoredKeys = Set(authored.filter { !$0.isDraft }.map { key($0.repository, $0.number) })
+        // SPEC §13.8: an adopted watch is read like an authored one, though the author search does not return it.
+        let adopted = projectByRepo.values.flatMap { project in
+            ((try? prWatches.live(projectId: project.id)) ?? []).filter { $0.adopted && $0.state != .stopped }.map {
+                AuthoredPullRequest(repository: "\($0.repoOwner)/\($0.repoName)", number: $0.number, url: $0.url, title: $0.title)
+            }
+        }.filter { !authoredKeys.contains(key($0.repository, $0.number)) }
+        let open = (authored + adopted).filter {
             !$0.isDraft && projectByRepo[$0.repository.lowercased()] != nil
                 && scopedKeys?.contains(key($0.repository, $0.number)) ?? true
         }
-        let stillOpen = Set(open.map { key($0.repository, $0.number) })
+        var stillOpen = Set(open.map { key($0.repository, $0.number) }).intersection(authoredKeys)
         for (slug, prs) in Dictionary(grouping: open, by: { $0.repository.lowercased() }) {
             guard let project = projectByRepo[slug] else { continue }
             let parts = prs[0].repository.split(separator: "/").map(String.init)
@@ -2732,9 +2739,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 ))
                 continue
             }
-            for snapshot in snapshots
-            where scopedKeys?.contains(key("\(snapshot.repoOwner)/\(snapshot.repoName)", snapshot.number)) ?? true {
-                await applyPRSnapshot(snapshot, project: project)
+            for snapshot in snapshots where snapshot.isOpen
+                && scopedKeys?.contains(key("\(snapshot.repoOwner)/\(snapshot.repoName)", snapshot.number)) ?? true {
+                let snapshotKey = key("\(snapshot.repoOwner)/\(snapshot.repoName)", snapshot.number)
+                stillOpen.insert(snapshotKey)
+                await applyPRSnapshot(snapshot, project: project, authored: authoredKeys.contains(snapshotKey))
             }
         }
 
@@ -2906,6 +2915,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         result.recorded.count, result.released.count
                     )
                 }
+                if !result.released.isEmpty { try? prWatches.stopReleasedAdoptions(projectId: project.id) }
+                await adoptTakenOverPullRequests(project)
                 await startIssueTakeovers(project: project)
                 if !result.released.isEmpty { announceReports(projectId: project.id) }
             } catch PublishFailure.noRemote {
@@ -2979,9 +2990,46 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
-    private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) async {
+    static let adoptionNeedsFollowThrough =
+        "Adopting this pull request needs PR follow-through. Turn it on in the project's PR Follow-Through settings."
+
+    /// SPEC §13.8: each found pull request becomes an adopted watch, is acknowledged, and is marked watched. A
+    /// fork fails with nothing posted, and without follow-through the row waits in `found` with a problem.
+    private func adoptTakenOverPullRequests(_ project: Project) async {
+        for row in (try? takeovers.live(projectId: project.id)) ?? [] where row.kind == .pr {
+            switch row.state {
+            case .found:
+                if row.isCrossRepository {
+                    try? takeovers.fail(
+                        row.id,
+                        reason: "#\(row.number) comes from a fork. Follow-through pushes only to the project's own "
+                            + "`origin`, so a fork's pull request cannot be adopted."
+                    )
+                    continue
+                }
+                guard project.settings.prFollowThrough.enabled else {
+                    if row.failure != Self.adoptionNeedsFollowThrough {
+                        try? takeovers.noteProblem(row.id, detail: Self.adoptionNeedsFollowThrough)
+                    }
+                    continue
+                }
+                if row.failure == Self.adoptionNeedsFollowThrough { try? takeovers.noteProblem(row.id, detail: nil) }
+                guard let watch = try? prWatches.adopt(row) else { continue }
+                switch await acknowledge(takeover: row) {
+                case .acknowledged?, .commentFailed?: try? takeovers.watch(row.id, watchId: watch.id)
+                default: break
+                }
+            case .acknowledged:
+                if let watch = try? prWatches.adopted(takeoverId: row.id) { try? takeovers.watch(row.id, watchId: watch.id) }
+            default:
+                break
+            }
+        }
+    }
+
+    private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project, authored: Bool) async {
         do {
-            var watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
+            var watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot, authored: authored)
             _ = try takeovers.watchClosingPullRequest(
                 projectId: project.id, watchId: watch.id, repository: "\(snapshot.repoOwner)/\(snapshot.repoName)",
                 body: snapshot.body
@@ -3018,6 +3066,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// publishing one pushes its round. Then each open decision not yet announced banners once (§13.4).
     private func advancePRWatches(_ enabled: [Project], scope: Set<String>?) async {
         for project in enabled {
+            try? prWatches.stopReleasedAdoptions(projectId: project.id)
             for watch in (try? prWatches.live(projectId: project.id)) ?? [] where scope?.contains(watch.id) ?? true {
                 switch watch.state {
                 case .settling: await startTriageIfSettled(watch, project: project)
@@ -3299,6 +3348,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     try board.parkPublishing(
                         watchId: watch.id,
                         reason: "Round \(round.number)'s branch moved from \(checked) to \(tip) after its check, so it was not pushed."
+                    )
+                    await postFactualReplies(watchId: watch.id, project: project)
+                    return
+                }
+                guard watch.acceptsFastForward else {
+                    try board.parkPublishing(
+                        watchId: watch.id,
+                        reason: "Round \(round.number) was not pushed: #\(watch.number) is neither yours nor adopted by "
+                            + "a takeover, and Agent Board pushes only to those (SPEC D8)."
                     )
                     await postFactualReplies(watchId: watch.id, project: project)
                     return
