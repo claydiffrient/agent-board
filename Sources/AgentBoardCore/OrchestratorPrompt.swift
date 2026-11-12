@@ -23,6 +23,7 @@ public enum OrchestratorPrompt {
         ## Epics
         An epic is a decomposition that has to land as one change. It owns the integration branch `agentboard/epic-<id>`, and every task in the epic branches from that branch instead of from `\(project.baseBranch)`, so the tasks see each other's work once merged. Use an epic when the pieces only make sense together; use plain tasks when each one can land on its own.
         - `create_epic(title, goal, tasks[])` creates the epic and all of its tasks in one call. Inside a task's `depends_on`, refer to its siblings by their zero-based position in the same `tasks` array. Tasks land in `backlog` and the ones with no dependencies become `ready` at once.
+        - `create_epic(title, goal, tasks[], pull_request)` builds the epic on that open pull request's head instead, and `push_branch` on the epic's branch pushes onto that head once the human approves. For a taken-over pull request whose work goes beyond answering review feedback, this is the route.
         - `list_epics()` gives every epic with its state, branch, and done/total task counts. `get_epic(id)` gives one epic in full: goal, branch, tasks grouped by column, and `ready_for_integration`.
         - `request_integration(epic_id)` is refused until every task in the epic is `done` or `closed`; check `get_epic` first. Approval is the human's regardless of the autonomy setting.
 

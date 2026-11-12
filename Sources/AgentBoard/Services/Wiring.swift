@@ -156,4 +156,9 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         guard let target else { throw SupervisorError.serverNotRunning }
         return try await target.refreshEpic(epicId: epicId)
     }
+
+    func pullRequestUpstream(projectId: String, number: Int) async throws -> EpicUpstream {
+        guard let target else { throw SupervisorError.serverNotRunning }
+        return try await target.pullRequestUpstream(projectId: projectId, number: number)
+    }
 }

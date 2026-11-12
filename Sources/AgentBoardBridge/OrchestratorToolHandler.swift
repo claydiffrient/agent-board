@@ -296,10 +296,17 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "owns the integration branch `agentboard/epic-<id>` and every task in it branches from that branch "
                 + "rather than from the project's base branch, so group work that has to land as one change. Tasks "
                 + "land in `backlog` and those without dependencies become `ready` immediately. Inside `depends_on`, "
-                + "refer to sibling tasks by their zero-based position in this call's `tasks` array.",
+                + "refer to sibling tasks by their zero-based position in this call's `tasks` array. With "
+                + "`pull_request`, the epic builds on that open pull request instead: its branch is cut from the pull "
+                + "request's head, `push_branch` on it pushes onto that head, `open_pull_request` is refused, and the "
+                + "epic is done when that pull request merges. A pull request that is not open, or comes from a fork, "
+                + "is refused.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "title": ToolSchema.string("Short name for the epic."),
+                    "pull_request": ToolSchema.integer(
+                        "Number of an open pull request in this project's GitHub repository to build the epic on."
+                    ),
                     "goal": ToolSchema.string("What the epic has to achieve; every worker in it is shown this."),
                     "tasks": ToolSchema.objectArray(
                         properties: [
@@ -324,12 +331,14 @@ public final class OrchestratorToolHandler: ToolHandler {
         ToolDescriptor(
             name: "list_epics",
             description: "Every epic on this project with its state, integration branch, the newest pull request opened "
-                + "from that branch (null if none), and how many of its tasks are done.",
+                + "from that branch (null if none), `upstream` (the pull request it builds on: number, url and head_ref, "
+                + "or null), and how many of its tasks are done.",
             inputSchema: ToolSchema.object(properties: [:], required: [])
         ),
         ToolDescriptor(
             name: "get_epic",
-            description: "One epic in full: its goal, integration branch, newest pull request, its tasks grouped by column, "
+            description: "One epic in full: its goal, integration branch, newest pull request, `upstream` (as in "
+                + "list_epics), its tasks grouped by column, "
                 + "whether it is ready for integration, `next_step` when the epic is waiting on you to open its "
                 + "pull request or on that pull request to merge (null otherwise), and `base_drift`: how many commits "
                 + "the epic branch is behind and ahead of the project's base branch, `against` naming the ref "
@@ -417,7 +426,9 @@ public final class OrchestratorToolHandler: ToolHandler {
                 + "the pull request's head is the published name, not the local `agentboard/…` one. Once an epic's "
                 + "pull request is recorded the epic is `pull_request_open`: it still takes tasks, accepted ones merge "
                 + "into its branch, and `push_branch` on that branch updates the same pull request. It becomes `done` "
-                + "when the pull request merges, or `active` again if it is closed unmerged.",
+                + "when the pull request merges, or `active` again if it is closed unmerged. An epic built on a pull "
+                + "request (`create_epic` with `pull_request`) is refused: that pull request already exists, and "
+                + "`push_branch` updates it.",
             inputSchema: ToolSchema.object(
                 properties: [
                     "epic_id": ToolSchema.string("Epic whose integration branch to open the pull request from."),
@@ -562,7 +573,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         case "get_report": return try getReport(arguments, identity: identity)
         case "list_approvals": return try listApprovals(identity: identity)
         case "promote_proposal": return try promoteProposal(arguments, identity: identity)
-        case "create_epic": return try createEpic(arguments, identity: identity)
+        case "create_epic": return try await createEpic(arguments, identity: identity)
         case "list_epics": return try listEpics(identity: identity)
         case "get_epic": return try await getEpic(arguments, identity: identity)
         case "refresh_epic": return try await refreshEpic(arguments, identity: identity)
@@ -1129,7 +1140,7 @@ public final class OrchestratorToolHandler: ToolHandler {
 
     // MARK: Epics
 
-    private func createEpic(_ arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
+    private func createEpic(_ arguments: JSONValue, identity: TokenIdentity) async throws -> ToolResult {
         let title = try ToolArguments.requiredString("title", in: arguments)
         guard let rawTasks = arguments["tasks"]?.arrayValue, !rawTasks.isEmpty else {
             throw ToolError("An epic needs at least one task in `tasks`.")
@@ -1162,16 +1173,25 @@ public final class OrchestratorToolHandler: ToolHandler {
                 dependsOn: dependsOn
             )
         }
-        let (epic, created) = try board.createEpic(
-            projectId: identity.projectId,
-            title: title,
-            goal: ToolArguments.optionalString("goal", in: arguments),
-            tasks: specs
-        )
+        let upstream = try await requestedUpstream(arguments, identity: identity)
+        let result: (Epic, [AgentBoardCore.Task])
+        do {
+            result = try board.createEpic(
+                projectId: identity.projectId,
+                title: title,
+                goal: ToolArguments.optionalString("goal", in: arguments),
+                tasks: specs,
+                upstream: upstream
+            )
+        } catch let error as EpicUpstreamError {
+            throw ToolError(error.description)
+        }
+        let (epic, created) = result
         return .json(.object([
             "epic_id": .string(epic.id),
             "branch": .string(epic.branch),
             "state": .string(epic.state.rawValue),
+            "upstream": renderUpstream(epic),
             "task_ids": .array(created.map { .string($0.id) }),
             "tasks": .array(created.map { task in
                 .object([
@@ -1181,6 +1201,27 @@ public final class OrchestratorToolHandler: ToolHandler {
                 ])
             }),
         ]))
+    }
+
+    private func requestedUpstream(_ arguments: JSONValue, identity: TokenIdentity) async throws -> EpicUpstream? {
+        guard let raw = try ToolArguments.optionalInteger("pull_request", in: arguments) else { return nil }
+        guard raw > 0, let number = Int(exactly: raw) else {
+            throw ToolError("`pull_request` must be a pull request number, such as 42.")
+        }
+        do {
+            return try await control.pullRequestUpstream(projectId: identity.projectId, number: number)
+        } catch {
+            throw ToolError("No epic was created: \(Self.describe(error))")
+        }
+    }
+
+    private func renderUpstream(_ epic: Epic) -> JSONValue {
+        guard let upstream = epic.upstream else { return .null }
+        return .object([
+            "number": .number(Double(upstream.pullRequest.number)),
+            "url": .string(upstream.pullRequest.url),
+            "head_ref": .string(upstream.headRef),
+        ])
     }
 
     private func listEpics(identity: TokenIdentity) throws -> ToolResult {
@@ -1193,6 +1234,7 @@ public final class OrchestratorToolHandler: ToolHandler {
                 "state": .string(epic.state.rawValue),
                 "branch": .string(epic.branch),
                 "pull_request": try renderPullRequest(epic),
+                "upstream": renderUpstream(epic),
                 "done_tasks": .number(Double(counts.done)),
                 "closed_tasks": .number(Double(counts.closed)),
                 "total_tasks": .number(Double(counts.total)),
@@ -1226,6 +1268,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             "branch": .string(epic.branch),
             "created_at": .millis(epic.createdAt),
             "pull_request": try renderPullRequest(epic),
+            "upstream": renderUpstream(epic),
             "done_tasks": .number(Double(counts.done)),
             "closed_tasks": .number(Double(counts.closed)),
             "total_tasks": .number(Double(counts.total)),
@@ -1355,6 +1398,14 @@ public final class OrchestratorToolHandler: ToolHandler {
             throw ToolError("Name either epic_id or branch: open_pull_request needs to know what to open the pull request from.")
         }
         let branch = try ownedBranch(requested, project: project)
+        let branchEpic = try epic ?? epics.list(projectId: project.id).first { $0.branch == branch }
+        if let upstream = branchEpic?.upstream {
+            throw ToolError(
+                "\(branch) builds on pull request #\(upstream.pullRequest.number) (\(upstream.pullRequest.url)), which "
+                    + "already exists, so no new one is opened. Use `push_branch(branch: \"\(branch)\")` to push onto its "
+                    + "head \(upstream.headRef)."
+            )
+        }
         let base = try ownedBranch(
             ToolArguments.optionalString("base", in: arguments) ?? project.baseBranch, project: project
         )

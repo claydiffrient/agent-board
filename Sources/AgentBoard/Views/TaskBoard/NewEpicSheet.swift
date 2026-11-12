@@ -1,4 +1,5 @@
 import AgentBoardCore
+import AgentBoardRuntime
 import SwiftUI
 
 struct NewEpicSheet: View {
@@ -9,6 +10,9 @@ struct NewEpicSheet: View {
     @State private var title = ""
     @State private var goal = ""
     @State private var drafts: [EpicTaskDraft] = []
+    @State private var pullRequest = ""
+    @State private var pullRequestError: String?
+    @State private var creating = false
     @State private var errorMessage: String?
 
     init(projectId: String, initialTasks: [EpicTaskDraft] = []) {
@@ -29,6 +33,21 @@ struct NewEpicSheet: View {
                             .labelsHidden()
                     }
                     editor("Goal", text: $goal, minHeight: 60)
+                    VStack(alignment: .leading, spacing: 4) {
+                        fieldLabel("Pull request")
+                        TextField("", text: $pullRequest, prompt: Text("Optional, e.g. 42"))
+                            .textFieldStyle(.roundedBorder)
+                            .labelsHidden()
+                        Text("Build on an open pull request in this repository: tasks branch from its head, and pushing the epic updates it.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let pullRequestError {
+                            Text(pullRequestError)
+                                .font(.callout)
+                                .foregroundStyle(.red)
+                                .textSelection(.enabled)
+                        }
+                    }
                 }
                 Section {
                     if drafts.isEmpty {
@@ -56,7 +75,7 @@ struct NewEpicSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Create") { create() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(trimmedTitle.isEmpty)
+                    .disabled(trimmedTitle.isEmpty || creating)
             }
             .padding()
         }
@@ -120,16 +139,63 @@ struct NewEpicSheet: View {
     }
 
     private func create() {
+        creating = true
+        pullRequestError = nil
+        _Concurrency.Task {
+            defer { creating = false }
+            do {
+                try await EpicCreation.create(
+                    db: env.db, gh: env.gh, projectId: projectId, title: trimmedTitle,
+                    goal: goal.isEmpty ? nil : goal, tasks: EpicTaskDraft.specs(from: drafts), pullRequest: pullRequest
+                )
+                dismiss()
+            } catch let refusal as EpicCreation.PullRequestRefusal {
+                pullRequestError = refusal.description
+            } catch {
+                errorMessage = errorText(error)
+            }
+        }
+    }
+}
+
+/// The New Epic sheet's create: the same pull request lookup `create_epic(pull_request:)` makes.
+enum EpicCreation {
+    struct PullRequestRefusal: Error, CustomStringConvertible, Equatable {
+        let description: String
+    }
+
+    @discardableResult
+    static func create(
+        db: AppDatabase, gh: any GhRunning, projectId: String, title: String, goal: String?,
+        tasks: [NewEpicTask], pullRequest: String
+    ) async throws -> Epic {
+        let upstream = try await upstream(db: db, gh: gh, projectId: projectId, pullRequest: pullRequest)
         do {
-            try Board(env.db).createEpic(
-                projectId: projectId,
-                title: trimmedTitle,
-                goal: goal.isEmpty ? nil : goal,
-                tasks: EpicTaskDraft.specs(from: drafts)
-            )
-            dismiss()
+            return try Board(db).createEpic(
+                projectId: projectId, title: title, goal: goal, tasks: tasks, upstream: upstream
+            ).0
+        } catch let error as EpicUpstreamError {
+            throw PullRequestRefusal(description: error.description)
+        }
+    }
+
+    private static func upstream(
+        db: AppDatabase, gh: any GhRunning, projectId: String, pullRequest: String
+    ) async throws -> EpicUpstream? {
+        let raw = pullRequest.trimmingCharacters(in: .whitespaces)
+        guard !raw.isEmpty else { return nil }
+        guard let number = Int(raw.hasPrefix("#") ? String(raw.dropFirst()) : raw), number > 0 else {
+            throw PullRequestRefusal(description: "\"\(raw)\" is not a pull request number.")
+        }
+        guard let project = try ProjectStore(db).get(projectId) else { throw BoardError.projectNotFound(projectId) }
+        let reader = EpicUpstreamReader(gh: gh)
+        let repo = URL(fileURLWithPath: project.repoPath)
+        do {
+            return try await _Concurrency.Task.detached {
+                try reader.upstream(pullRequest: number, repoPath: repo)
+            }.value
         } catch {
-            errorMessage = errorText(error)
+            throw PullRequestRefusal(description: errorText(error))
         }
     }
 }

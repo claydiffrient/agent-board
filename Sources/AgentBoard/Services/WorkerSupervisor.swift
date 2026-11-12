@@ -185,6 +185,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let slots: WorktreeSlotStore
     @ObservationIgnored private let attention: ProjectAttentionStore
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
+    @ObservationIgnored private let epicUpstreams: EpicUpstreamReader
     @ObservationIgnored private let pullRequestWatch: PullRequestWatchReader
     @ObservationIgnored private let pullRequestReplies: PullRequestReplier
     @ObservationIgnored private let pullRequestReviewRequests: PullRequestReviewRequester
@@ -361,6 +362,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         slots = WorktreeSlotStore(db)
         attention = ProjectAttentionStore(db)
         pullRequestStates = PullRequestStateReader(gh: gh)
+        epicUpstreams = EpicUpstreamReader(gh: gh)
         pullRequestWatch = PullRequestWatchReader(gh: gh)
         pullRequestReplies = PullRequestReplier(gh: gh)
         pullRequestReviewRequests = PullRequestReviewRequester(gh: gh)
@@ -774,6 +776,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let branch = epic.branch
         let base = project.baseBranch
         return try await offMain { try manager.drift(of: branch, from: base) }
+    }
+
+    func pullRequestUpstream(projectId: String, number: Int) async throws -> EpicUpstream {
+        guard let project = try projects.get(projectId) else { throw SupervisorError.projectNotFound(projectId) }
+        let reader = epicUpstreams
+        let repo = URL(fileURLWithPath: project.repoPath)
+        return try await offMain { try reader.upstream(pullRequest: number, repoPath: repo) }
     }
 
     /// SPEC §5.2: the freshest base (§3.1 step 1) is merged, and the merge result is checked in a
