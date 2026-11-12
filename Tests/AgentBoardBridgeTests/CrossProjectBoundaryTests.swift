@@ -17,7 +17,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
     static let scopedByIdentity: Set<String> = [
         "list_tasks", "create_task", "list_agents", "list_reports", "list_approvals",
         "create_epic", "list_epics", "push_branch", "search_notes", "create_note",
-        "list_roster_agents", "list_pr_watches", "list_pr_poll_problems",
+        "list_roster_agents", "list_pr_watches", "list_pr_poll_problems", "watch_pr",
     ]
 
     /// Tools that accept an id and must throw a `ToolError` when it belongs to another project.
@@ -59,7 +59,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "attach_note", "pin_note",
         "update_status", "propose_task", "report_complete", "hand_off", "report_blocked", "acknowledge_shutdown",
         "commit_my_work", "accept_task", "reopen_task", "reply_to_request", "add_pr_item", "dismiss_pr_item",
-        "resume_pr_watch",
+        "resume_pr_watch", "watch_pr",
     ]
 
     /// Reads of a caller's own roster, task or pull requests, which mean nothing to a session with no project.
@@ -107,7 +107,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
             "a tool was added to the orchestrator surface without a cross-project test in this file"
         )
         XCTAssertEqual(classified.subtracting(surface), [], "this audit names tools that no longer exist")
-        XCTAssertEqual(surface.count, 46)
+        XCTAssertEqual(surface.count, 47)
     }
 
     func testOnlySendMessageAcceptsAnotherProjectsId() async {

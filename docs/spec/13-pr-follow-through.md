@@ -203,7 +203,8 @@ feedback on a pull request they took over is round 1's work.
 next round). Until the watch's `round` reaches it, the viewer's thread whose
 latest comment is theirs, their latest review that is not an approval, and
 their conversation comment each count as anyone's would, provided GitHub dates
-them before the takeover row's `created_at`. An item with no date counts as
+them before the takeover row's `created_at`, or for a manual adoption (§13.8)
+before the watch's `adopted_at`. An item with no date counts as
 written after it, and the reader parses GitHub's timestamps with or without
 fractional seconds, so a parsing gap can only leave feedback out. The human's
 review agent posts as the viewer, so its feedback is included the same way;
@@ -824,6 +825,18 @@ on at all.
   shows on Pending Approvals as "Watch a stopped pull request again", with the
   PR, the reason it had parked before it was stopped, and the orchestrator's
   reason.
+- **Watch pull request….** Beside the project filter, a **Watch pull
+  request…** button (disabled while no project has follow-through on) opens a
+  popover with a project picker, shown when more than one project has
+  follow-through on, and a number field that accepts `12` or `#12`. Watch runs
+  §13.8's manual adoption; a refusal (closed, merged, from a fork, already
+  watched, stopped, `gh` failing) shows inline in the popover, which stays open,
+  and success closes it and polls the new watch at once so its row fills in. A
+  manually adopted row also offers **Stop watching** beside Pause in any state
+  with no round in flight (watching, settling, awaiting CI, ready to verify,
+  verified, stale), since no label can release it; Stop and Watch again then
+  behave as for a parked row. An orchestrator's `watch_pr` shows on Pending
+  Approvals as "Watch a pull request taken over by hand".
 - **Dismiss one item.** Under a row with open items, a collapsed "N open
   items" list shows each one's author, kind, first line, and "graded partly" or
   "graded not fixed" when its last check fell short. Each has **Dismiss…**,
@@ -1304,6 +1317,30 @@ project is adopted (`WorkerSupervisor.adoptTakenOverPullRequests`):
   failed acknowledgment leaves it `found` with its watch; the next poll
   acknowledges it again, and a row left `acknowledged` by an interruption is
   moved to `watched` then.
+
+**Manual adoption.** The human sometimes takes over a pull request with no
+trigger label, by reassignment. The Pull Requests page's **Watch pull
+request…** (§13.4) and a granted `watch_pr` (§6) both adopt one by number
+(`PullRequestAdopter`), with no `takeover` row:
+
+- PR follow-through must be on for the project, and its `origin` a GitHub
+  remote.
+- `gh pr view <n> --repo <owner/name> --json number,url,title,state,isCrossRepository`
+  reads it from that `origin`. One that is closed or merged, or from a fork,
+  is refused with the reason, and nothing is written.
+- A watch the human stopped is refused, naming Watch again; one already
+  authored or adopted and not merged or closed is refused as already watched.
+- Otherwise `PRWatchStore.adoptManually` writes a `pr_watch` with `adopted`
+  set, no `takeover_id`, `authored` off, `takeover_round` 1 and `adopted_at`
+  now, or marks the project's merged-or-closed or not-yet-adopted watch for it
+  adopted in place, its `takeover_round` one past its current round and a
+  closed one, since reopened, back to watching.
+
+Nothing is acknowledged: no label or comment is posted on GitHub. With no
+takeover row, no label logic or `stopReleasedAdoptions` ever releases it; only
+the human's Stop watching does (§13.4), which keeps `adopted` so Watch again
+resumes it as adopted. Its takeover round works the human's own feedback dated
+before `adopted_at` (§13.1).
 
 From then on follow-through polls, triages, fixes, checks and publishes the
 adopted watch like the human's own (§13.1), with the human's own open feedback

@@ -108,6 +108,8 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
     public var takeoverId: String? = nil
     /// The round that works the human's own open review feedback on an adopted PR (SPEC §13.1); later rounds ignore it.
     public var takeoverRound: Int? = nil
+    /// When the human adopted it by number (SPEC §13.8 manual adoption); bounds which of their feedback counts.
+    public var adoptedAt: Int64? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -143,12 +145,23 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
         case adopted
         case takeoverId = "takeover_id"
         case takeoverRound = "takeover_round"
+        case adoptedAt = "adopted_at"
     }
 
     public static func newId() -> String { BoardId.new() }
 
     /// SPEC D8 as amended (§13.5): publishing may fast-forward only a pull request the human authored or a takeover adopted.
     public var acceptsFastForward: Bool { authored || adopted }
+
+    /// Adopted by the human's Watch pull request or a granted `watch_pr`, not by a takeover: no label releases it (SPEC §13.8).
+    public var isManualAdoption: Bool { adopted && takeoverId == nil }
+
+    /// Stop watching applies to a parked watch, and to a manual adoption with no round in flight, since no
+    /// label can release that one (SPEC §13.4).
+    public var canStop: Bool {
+        state == .parked || isManualAdoption
+            && [.watching, .settling, .readyToVerify, .verified, .stale, .awaitingCI].contains(state)
+    }
 
     public var labels: [String] {
         get { (try? JSONDecoder().decode([String].self, from: Data(labelsJSON.utf8))) ?? [] }

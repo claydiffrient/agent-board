@@ -158,11 +158,12 @@ public struct PRWatchStore: Sendable {
         }
     }
 
-    /// The takeover's `created_at` while an adopted watch's takeover round has not started; nil otherwise.
-    /// Feedback the viewer wrote after it, the acknowledgment comment included, never counts.
+    /// The takeover's `created_at`, or a manual adoption's `adopted_at`, while an adopted watch's takeover round
+    /// has not started; nil otherwise. Feedback the viewer wrote after it, the acknowledgment comment included,
+    /// never counts.
     static func viewerFeedbackCutoff(_ db: Database, watch: PRWatch) throws -> Int64? {
-        guard watch.adopted, let takeoverId = watch.takeoverId, let round = watch.takeoverRound, watch.round < round
-        else { return nil }
+        guard watch.adopted, let round = watch.takeoverRound, watch.round < round else { return nil }
+        guard let takeoverId = watch.takeoverId else { return watch.adoptedAt }
         return try Int64.fetchOne(db, sql: "SELECT created_at FROM takeover WHERE id = ?", arguments: [takeoverId])
     }
 
@@ -197,6 +198,57 @@ public struct PRWatchStore: Sendable {
                 mergeable: nil, labelsJSON: "[]", paused: false, lastPolledAt: nil, lastFeedbackAt: nil,
                 verifiedAt: nil, estCostUSD: 0, createdAt: now, updatedAt: now, authored: false, adopted: true,
                 takeoverId: takeover.id, takeoverRound: 1
+            )
+            try watch.insert(db)
+            return watch
+        }
+    }
+
+    /// SPEC §13.8 manual adoption: the human's Watch pull request, or a granted `watch_pr`, adopts an open
+    /// same-repository pull request with no takeover row, so no label releases it and nothing is acknowledged.
+    /// A watch the project already has is marked adopted in place; one the human stopped, or one already
+    /// authored or adopted and live, is refused with the reason.
+    @discardableResult
+    public func adoptManually(
+        projectId: String, owner: String, name: String, number: Int, url: String, title: String,
+        now: Int64 = .nowMillis
+    ) throws -> PRWatch {
+        try db.writer.write { db in
+            if var existing = try PRWatch.fetchOne(
+                db,
+                sql: """
+                SELECT * FROM pr_watch WHERE project_id = ? AND lower(repo_owner) = lower(?)
+                AND lower(repo_name) = lower(?) AND number = ?
+                """,
+                arguments: [projectId, owner, name, number]
+            ) {
+                if existing.state == .stopped {
+                    throw PRVerdictRejection(
+                        "Follow-through is stopped for #\(number). Choose Watch again on the Pull Requests page to resume it."
+                    )
+                }
+                if !existing.state.isTerminal, existing.adopted || existing.authored {
+                    throw PRVerdictRejection(
+                        "#\(number) is already watched (\(existing.state.rawValue)); there is nothing to adopt."
+                    )
+                }
+                existing.adopted = true
+                existing.takeoverId = nil
+                existing.takeoverRound = existing.round + 1
+                existing.adoptedAt = now
+                if existing.state.isTerminal { existing.state = .watching }
+                existing.url = url
+                existing.title = title
+                existing.updatedAt = now
+                try existing.update(db)
+                return existing
+            }
+            let watch = PRWatch(
+                id: PRWatch.newId(), projectId: projectId, repoOwner: owner, repoName: name, number: number,
+                url: url, title: title, isDraft: false, headRef: "", headOid: "", baseRef: "", state: .watching,
+                round: 0, reviewDecision: nil, checksState: nil, mergeable: nil, labelsJSON: "[]", paused: false,
+                lastPolledAt: nil, lastFeedbackAt: nil, verifiedAt: nil, estCostUSD: 0, createdAt: now,
+                updatedAt: now, authored: false, adopted: true, takeoverId: nil, takeoverRound: 1, adoptedAt: now
             )
             try watch.insert(db)
             return watch
@@ -393,7 +445,7 @@ public struct PRWatchStore: Sendable {
     /// so the next poll does not start it over.
     public func stopWatching(watchId: String, now: Int64 = .nowMillis) throws {
         try db.writer.write { db in
-            guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .parked else { return }
+            guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.canStop else { return }
             try db.execute(
                 sql: "UPDATE pr_item SET state = 'dismissed', updated_at = ? WHERE watch_id = ? AND state = 'open'",
                 arguments: [now, watchId]

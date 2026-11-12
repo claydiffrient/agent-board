@@ -285,6 +285,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("takeover_via_issue") { db in
             try db.execute(sql: "ALTER TABLE takeover ADD COLUMN via_issue INTEGER NOT NULL DEFAULT 0")
         }
+        migrator.registerMigration("pr_watch_adopted_at") { db in
+            try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN adopted_at INTEGER")
+        }
         return migrator
     }
 }

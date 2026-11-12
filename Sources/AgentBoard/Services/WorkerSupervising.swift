@@ -104,6 +104,8 @@ protocol WorkerSupervising: AnyObject {
     func dismissPRItem(itemId: Int64, reason: String) async throws
     /// The human's answer to an open decision (SPEC §13.4), posting the reply it chose.
     func answerPRDecision(itemId: Int64, choice: PRDecisionChoice) async throws
+    /// The page's Watch pull request (SPEC §13.8 manual adoption); throws the refusal to show inline.
+    func watchPullRequest(number: Int, projectId: String) async throws
 }
 
 extension WorkerSupervising {
@@ -111,6 +113,7 @@ extension WorkerSupervising {
     func pollPRWatches(watchIds: Set<String>) async throws {}
     func dismissPRItem(itemId: Int64, reason: String) async throws {}
     func answerPRDecision(itemId: Int64, choice: PRDecisionChoice) async throws {}
+    func watchPullRequest(number: Int, projectId: String) async throws {}
     func focusChanged(projectId: String?) {}
     func reportQueued(projectId: String) async {}
     func previewLeakedAgentSweep() async -> AgentSweepReport? { nil }
