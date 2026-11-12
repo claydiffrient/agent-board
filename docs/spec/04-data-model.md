@@ -26,7 +26,7 @@ CREATE TABLE project (
                                    -- integrationVerification, archivePolicy, worktreeStrategy,
                                    -- sharedCheckoutMaxAgents, worktreeSlots, rosterAgentIds,
                                    -- worktreeTeardownCommand, worktreeTeardownTimeoutSeconds,
-                                   -- prFollowThrough
+                                   -- prFollowThrough, takeover (§13.8)
   created_at      INTEGER NOT NULL,
   workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
 );
@@ -428,6 +428,29 @@ CREATE TABLE pr_poll_problem (
   detail     TEXT NOT NULL,
   since      INTEGER NOT NULL
 );
+
+-- One GitHub issue or pull request a project took over (§13.8).
+CREATE TABLE takeover (
+  id                  TEXT PRIMARY KEY,
+  project_id          TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  github_node_id      TEXT NOT NULL,
+  kind                TEXT NOT NULL,     -- issue | pr
+  number              INTEGER NOT NULL,
+  url                 TEXT NOT NULL,
+  issue_node_id       TEXT,              -- a pr row only: the issue found with it that it closes
+  issue_url           TEXT,
+  title               TEXT NOT NULL,
+  author              TEXT,
+  is_cross_repository INTEGER NOT NULL DEFAULT 0,
+  state               TEXT NOT NULL,     -- found | acknowledged | working | watched | done | released | failed
+  task_id             TEXT REFERENCES task(id) ON DELETE SET NULL,
+  watch_id            TEXT REFERENCES pr_watch(id) ON DELETE SET NULL,
+  failure             TEXT,
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL,
+  UNIQUE (project_id, github_node_id)
+);
+CREATE INDEX takeover_project_state ON takeover(project_id, state);
 
 -- One triage run (§13.2): the synthetic `triage` task its session is bound to, the watch it
 -- triages, and the diff it was spawned to read. A triager grant reaches its watch only through this.

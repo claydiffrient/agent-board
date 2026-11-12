@@ -273,6 +273,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// `origin` remote and `.localMerge` otherwise (SPEC §5).
     public var standaloneIntegration: StandaloneIntegration? = nil
     public var prFollowThrough: PRFollowThroughSettings = PRFollowThroughSettings()
+    public var takeover: TakeoverSettings = TakeoverSettings()
 
     public init(
         caps: Caps = Caps(),
@@ -299,7 +300,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         notifications: NotificationPreferences = NotificationPreferences(),
         remoteBranchTemplate: String? = nil,
         standaloneIntegration: StandaloneIntegration? = nil,
-        prFollowThrough: PRFollowThroughSettings = PRFollowThroughSettings()
+        prFollowThrough: PRFollowThroughSettings = PRFollowThroughSettings(),
+        takeover: TakeoverSettings = TakeoverSettings()
     ) {
         self.caps = caps
         self.autonomyEnabled = autonomyEnabled
@@ -326,6 +328,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.remoteBranchTemplate = remoteBranchTemplate
         self.standaloneIntegration = standaloneIntegration
         self.prFollowThrough = prFollowThrough
+        self.takeover = takeover.normalized
     }
 
     public init(from decoder: Decoder) throws {
@@ -368,6 +371,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         standaloneIntegration = try c.decodeIfPresent(StandaloneIntegration.self, forKey: .standaloneIntegration)
         prFollowThrough = try c.decodeIfPresent(PRFollowThroughSettings.self, forKey: .prFollowThrough)
             ?? PRFollowThroughSettings()
+        takeover = try c.decodeIfPresent(TakeoverSettings.self, forKey: .takeover) ?? TakeoverSettings()
     }
 
     /// A project that already chose a default model starts with an empty table, so the type rows

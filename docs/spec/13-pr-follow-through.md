@@ -1136,3 +1136,89 @@ escalations argued on the same PR thread are two separate rows with the same
 thread. Each row's id in `ReviewsPage` combines `target_id`, `reply_url` and
 the row's index in the list, since `thread_url` alone would collide and drop
 or swap rows under SwiftUI's `ForEach`.
+
+### 13.8 Takeover
+
+A project can take over GitHub work another engineer handed to the human: open
+issues and pull requests in its `origin` that are assigned to the human and
+carry every configured trigger label. This subsection covers the settings,
+discovery, the records and release. Acknowledging an item on GitHub, starting
+work on it and adopting a pull request into follow-through belong to later
+tasks; nothing here writes to GitHub.
+
+**Settings.** `settings_json.takeover`, beside `prFollowThrough`, edited in the
+**Takeover** section of the PR Follow-Through tab:
+
+| Setting | Default | Rule |
+|---|---|---|
+| `enabled` | `false` | |
+| `assignee` | `@me` — whoever `gh` is logged in as; a blank value saves as `@me` | |
+| `triggerLabels` | `[]`, no default | An item qualifies only when every label is present. Matched ignoring case |
+| `ackLabel` | `nil`, no default | Marks an item as taken over; the search excludes it |
+| `ackComment` | `nil`, no default | A comment template |
+| `pollMinutes` | 5 | Saved at least 1 |
+
+The trigger and acknowledgment labels are work-specific, so they have no
+default and are never written into source, tests or this SPEC; examples here
+use `handoff-example` and `taken-example`. A project cannot be enabled while
+`triggerLabels` is empty or `ackLabel` is nil: the toggle is disabled and says
+which one is missing, and decoding `settings_json` reads a stored `enabled`
+without them as off (`TakeoverSettings.normalized`), so no path ever runs a
+search that would match everything assigned to the human.
+
+**Discovery.** On the metering tick, beside follow-through's poll,
+`WorkerSupervisor.pollTakeovers` polls each project with takeover on once its
+`pollMinutes` have passed since its last poll. No project enabled means no
+`gh` call. For each project whose `origin` is a GitHub remote it runs one
+search covering issues and pull requests:
+
+```
+gh search issues --include-prs --state=open --assignee=@me --repo=example-org/app \
+  --json id,number,url,title,isPullRequest,author --limit 1000 \
+  -- label:handoff-example -label:taken-example
+```
+
+Labels go in as query keywords after `--`, which `gh` quotes when they hold a
+space, rather than through `--label`, which splits a value on commas. A hit
+whose node id the project has already recorded is skipped. When anything is
+new, or the project has live rows, one `gh api graphql` `nodes(ids:)` query
+(100 ids per query) reads every new hit and every live row at once: state,
+labels, assignees, `isCrossRepository`, and each pull request's
+`closingIssuesReferences` and each issue's open
+`closedByPullRequestsReferences`. A quiet poll with nothing recorded costs the
+search alone. An issue linked to a pull request found in the same search, by
+either reference, is recorded once, as the pull request, with the issue's node
+id and URL on that row; a later poll that finds the issue again skips it as
+recorded. A new hit linked to a live row is left to that row. Each remaining
+new hit is inserted as `found`. The search and the read go through `SystemGh`
+and the origin read through `BranchPublisher`, so git's launches take the
+app-wide slots (§8.8).
+
+Failures follow the follow-through poll's (§13.1): a project with no `origin`
+or a non-GitHub one is skipped without a word; a `gh` that is missing or not
+logged in records the project's `pr_poll_problem` row at once; any other
+failure is logged and after 10 in a row records the row, and the next good
+poll clears it. Follow-through and takeover share that table, one row per
+project; when both have a problem for one project, follow-through's detail is
+the one shown. Takeover polls never overlap: a tick skips while one runs, and a
+direct call waits for it and then polls.
+
+**Records.** One `takeover` row per item (§4), keyed by GitHub node id and
+unique per project: kind (`issue` or `pr`), number, URL, title, author,
+`is_cross_repository` for a pull request, state, and the task, watch and
+failure later steps fill in. States run `found` → `acknowledged` → `working`
+→ `watched` → `done`, a pull request going straight from `acknowledged` to
+`watched`; `released` and `failed` are reachable from any state that is not
+terminal, and `done`, `released` and `failed` are terminal. `TakeoverStore`
+re-reads the row inside each write and refuses any other move. The Pull
+Requests page lists every row in a **Taken over** group, with kind, number,
+title, author, state and a link to GitHub, under the page's project filter.
+
+**Release.** A live row whose item is still open but now lacks a trigger label
+or is no longer assigned to the assignee becomes `released`. The check rides
+the same `nodes(ids:)` read rather than one `gh pr view` per row, since the
+search cannot see these items: acknowledged ones carry the acknowledgment label
+it excludes, and released ones have lost what it searches for. That is one
+call per poll however many rows are live, against one per row. A closed item,
+or one GitHub no longer returns, is left as it is. Release changes only the
+row's state here.

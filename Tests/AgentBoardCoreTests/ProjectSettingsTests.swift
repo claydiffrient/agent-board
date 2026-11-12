@@ -57,6 +57,14 @@ final class ProjectSettingsTests: XCTestCase {
         XCTAssertEqual(TaskColumn.done.index, 5)
         XCTAssertEqual(TaskOrigin.workerProposal.rawValue, "worker_proposal")
     }
+
+    /// SPEC §13.8: without a trigger label the search would claim everything assigned to the human.
+    func testTakeoverStoredAsEnabledWithNoTriggerLabelsReadsAsOff() {
+        let json = #"{"takeover":{"enabled":true,"triggerLabels":[],"ackLabel":"taken-example"}}"#
+        let takeover = ProjectSettings.decode(json).takeover
+        XCTAssertFalse(takeover.enabled)
+        XCTAssertNotNil(takeover.cannotEnableReason)
+    }
 }
 
 final class ModelSettingsTests: XCTestCase {

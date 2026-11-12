@@ -273,6 +273,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("session_escalation") { db in
             try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN escalation TEXT")
         }
+        migrator.registerMigration("takeover") { db in
+            try db.execute(sql: Schema.takeover)
+        }
         return migrator
     }
 }

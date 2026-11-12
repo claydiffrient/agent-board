@@ -651,6 +651,31 @@ enum Schema {
     CREATE UNIQUE INDEX worktree_slot_task ON worktree_slot(task_id) WHERE task_id IS NOT NULL;
     """
 
+    /// One row per GitHub issue or pull request a project took over (SPEC §13.8), keyed by node id.
+    static let takeover = """
+    CREATE TABLE takeover (
+      id                  TEXT PRIMARY KEY,
+      project_id          TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+      github_node_id      TEXT NOT NULL,
+      kind                TEXT NOT NULL,
+      number              INTEGER NOT NULL,
+      url                 TEXT NOT NULL,
+      issue_node_id       TEXT,
+      issue_url           TEXT,
+      title               TEXT NOT NULL,
+      author              TEXT,
+      is_cross_repository INTEGER NOT NULL DEFAULT 0,
+      state               TEXT NOT NULL,
+      task_id             TEXT REFERENCES task(id) ON DELETE SET NULL,
+      watch_id            TEXT REFERENCES pr_watch(id) ON DELETE SET NULL,
+      failure             TEXT,
+      created_at          INTEGER NOT NULL,
+      updated_at          INTEGER NOT NULL,
+      UNIQUE (project_id, github_node_id)
+    );
+    CREATE INDEX takeover_project_state ON takeover(project_id, state);
+    """
+
     static let tables: [String] = [
         "project", "epic", "task", "task_dep", "agent_session", "token_grant",
         "progress", "report", "note", "note_section", "note_link", "note_fts", "hook_event",
@@ -658,6 +683,6 @@ enum Schema {
         "task_commit",
         "roster_agent", "project_roster_agent", "task_comment", "comment_delivery", "coordinator",
         "coordinator_request", "request_event", "request_epic", "pr_watch", "pr_item", "pr_round",
-        "pr_poll_problem", "pr_triage", "worktree_slot",
+        "pr_poll_problem", "pr_triage", "worktree_slot", "takeover",
     ]
 }

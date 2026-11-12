@@ -30,7 +30,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
         case .workflow: [.verification, .teardown, .isolation, .publishing]
         case .notifications: [.notifications]
         case .advanced: [.autoMode, .extraMcpServers]
-        case .prFollowThrough: [.prWatch, .prVerification, .prReplies, .publishGuard, .prRoles]
+        case .prFollowThrough: [.prWatch, .prVerification, .prReplies, .publishGuard, .prRoles, .takeover]
         }
     }
 }
@@ -38,7 +38,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
 enum ProjectSettingsSection: String, CaseIterable, Identifiable {
     case repository, workspace, caps, models, review, verification, teardown, isolation, publishing
     case archive, notifications, autonomy, autoMode, extraMcpServers, roster
-    case prWatch, prVerification, prReplies, prRoles, publishGuard
+    case prWatch, prVerification, prReplies, prRoles, publishGuard, takeover
 
     var id: Self { self }
 
@@ -64,6 +64,7 @@ enum ProjectSettingsSection: String, CaseIterable, Identifiable {
         case .prReplies: "Replies"
         case .prRoles: "Roles"
         case .publishGuard: "Publish guard"
+        case .takeover: "Takeover"
         }
     }
 }
@@ -81,6 +82,7 @@ struct ProjectSettingsSheet: View {
     @State private var autoModeJSON: String
     @State private var extraServers: String
     @State private var checksAwaitingVerification: String
+    @State private var triggerLabels: String
     @State private var archiveMode: ArchivePolicyMode
     @State private var archiveDays: Int
     @State private var workspaceId: String?
@@ -114,6 +116,7 @@ struct ProjectSettingsSheet: View {
         _checksAwaitingVerification = State(
             initialValue: settings.prFollowThrough.checksAwaitingVerification.joined(separator: ", ")
         )
+        _triggerLabels = State(initialValue: settings.takeover.triggerLabels.joined(separator: ", "))
         _archiveMode = State(initialValue: settings.archivePolicy.mode)
         _archiveDays = State(initialValue: settings.archivePolicy.days ?? ArchivePolicy.defaultDays)
         _muteChoice = State(initialValue: NotificationMuteChoice(settings.notifications.mute))
@@ -461,7 +464,44 @@ struct ProjectSettingsSheet: View {
             Text("Agent Board refuses any push or pull request whose diff, commit messages, branch name, title or body contains one of these, ignoring case. It applies whether or not follow-through is on.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        case .takeover:
+            takeoverRows
         }
+    }
+
+    /// The draft with the trigger labels typed so far, which decides whether the toggle can turn on.
+    private var draftTakeover: TakeoverSettings {
+        var draft = settings.takeover
+        draft.triggerLabels = Self.checkNames(triggerLabels)
+        return draft
+    }
+
+    @ViewBuilder private var takeoverRows: some View {
+        let refusal = draftTakeover.cannotEnableReason
+        Toggle("Take over work handed to me", isOn: Binding(
+            get: { settings.takeover.enabled && refusal == nil },
+            set: { settings.takeover.enabled = $0 }
+        ))
+        .disabled(refusal != nil)
+        if let refusal {
+            Text(refusal)
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+        TextField("Assignee", text: $settings.takeover.assignee, prompt: Text(TakeoverSettings.defaultAssignee))
+        TextField("Trigger labels", text: $triggerLabels, prompt: Text("Comma-separated; every one must be present"))
+        TextField("Acknowledgment label", text: Binding(
+            get: { settings.takeover.ackLabel ?? "" },
+            set: { settings.takeover.ackLabel = $0.isEmpty ? nil : $0 }
+        ), prompt: Text("Required"))
+        TextField("Acknowledgment comment", text: Binding(
+            get: { settings.takeover.ackComment ?? "" },
+            set: { settings.takeover.ackComment = $0.isEmpty ? nil : $0 }
+        ), prompt: Text("Optional"))
+        TextField("Poll every (minutes)", value: $settings.takeover.pollMinutes, format: .number)
+        Text("Finds open issues and pull requests in this project's origin that are assigned to the assignee and carry every trigger label, and records each one. Anything already carrying the acknowledgment label is skipped. Removing a trigger label or the assignment releases it. @me is whoever gh is logged in as.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 
     private func addPrivateTerm() {
@@ -654,6 +694,7 @@ struct ProjectSettingsSheet: View {
         updated.notifications.mute = muteChoice.mute(existing: settings.notifications.mute)
         updated.prFollowThrough = Self.savedFollowThrough(settings.prFollowThrough, pendingTerm: newPrivateTerm)
         updated.prFollowThrough.checksAwaitingVerification = Self.checkNames(checksAwaitingVerification)
+        updated.takeover = draftTakeover.normalized
         let trimmedJSON = autoModeJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.autoModeJSON = trimmedJSON.isEmpty ? nil : trimmedJSON
         updated.extraMcpServers = extraServers

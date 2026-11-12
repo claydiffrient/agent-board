@@ -202,6 +202,16 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Watches whose pull request could not be read after a reply to it came back not found (SPEC
     /// §13.2), with their project and detail. Each stays among the poll's problems until a poll reads it.
     @ObservationIgnored private var prReplyReadFailures: [String: (projectId: String, detail: String)] = [:]
+    /// The follow-through poll's and the takeover poll's problems, merged into `pr_poll_problem` by `writePollProblems`.
+    @ObservationIgnored private var followThroughProblems: [String: String] = [:]
+    @ObservationIgnored private var takeoverProblems: [String: String] = [:]
+    @ObservationIgnored private let takeovers: TakeoverStore
+    @ObservationIgnored private let takeoverDiscovery: TakeoverDiscovery
+    /// Millis of each project's last takeover poll (SPEC §13.8); absent means none yet.
+    @ObservationIgnored private var lastTakeoverPoll: [String: Int64] = [:]
+    @ObservationIgnored private var takeoverPoll: _Concurrency.Task<Void, Never>?
+    /// Consecutive failed takeover polls, by project id.
+    @ObservationIgnored private var takeoverFailures: [String: Int] = [:]
     /// Millis of the last pull request merge check; 0 means none yet, so the first tick after
     /// launch checks.
     @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
@@ -256,6 +266,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored var beforeCheckoutCreated: @MainActor () async -> Void = {}
     /// Off in a test that drives every `pollPRWatches()` itself, so the tick's poll cannot advance a watch between two of its own.
     @ObservationIgnored var pollsPRWatchesOnTick = true
+    /// Off in a test that drives every `pollTakeovers()` itself.
+    @ObservationIgnored var pollsTakeoversOnTick = true
     /// Whether a pid runs `claude`, the only process a stop signals as a session's host; a test swaps in a stand-in.
     @ObservationIgnored var isClaudeHost: (pid_t) -> Bool = SessionProcessReaper.isClaudeExecutable
     /// Tasks a discard is waiting out the setup of; that setup's end is not a cue to retry.
@@ -347,6 +359,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         pullRequestReplies = PullRequestReplier(gh: gh)
         pullRequestReviewRequests = PullRequestReviewRequester(gh: gh)
         prWatches = PRWatchStore(db)
+        takeovers = TakeoverStore(db)
+        takeoverDiscovery = TakeoverDiscovery(gh: gh)
     }
 
     private var sessionConfigDir: URL { SessionConfigWriter.configDir(supportDir: appSupportDir) }
@@ -2765,8 +2779,93 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let live = Set(enabled.flatMap { (try? prWatches.live(projectId: $0.id)) ?? [] }.map(\.id))
             prReplyReadFailures = prReplyReadFailures.filter { live.contains($0.key) }
         }
-        let all = prReplyReadFailures.values.reduce(into: problems) { $0[$1.projectId] = $0[$1.projectId] ?? $1.detail }
-        try? prWatches.setPollProblems(all)
+        followThroughProblems = prReplyReadFailures.values.reduce(into: problems) {
+            $0[$1.projectId] = $0[$1.projectId] ?? $1.detail
+        }
+        writePollProblems()
+    }
+
+    /// One `pr_poll_problem` row per project; a follow-through problem wins over a takeover one.
+    private func writePollProblems() {
+        try? prWatches.setPollProblems(takeoverProblems.merging(followThroughProblems) { _, followThrough in followThrough })
+    }
+
+    /// SPEC §13.8: one discovery poll for each project with takeover on, or only `projectIds`. A call made
+    /// while a poll runs waits for it and then polls again.
+    func pollTakeovers(projectIds: Set<String>? = nil) async {
+        while let inFlight = takeoverPoll { await inFlight.value }
+        let poll = _Concurrency.Task {
+            await runTakeoverPoll(projectIds: projectIds)
+            takeoverPoll = nil
+        }
+        takeoverPoll = poll
+        await poll.value
+    }
+
+    /// The tick's half: starts a poll for the projects whose `pollMinutes` have passed, unless one runs.
+    private func pollDueTakeovers(_ all: [Project], now: Int64) {
+        let enabled = all.filter { $0.settings.takeover.enabled }
+        if enabled.isEmpty {
+            if !takeoverProblems.isEmpty {
+                takeoverProblems = [:]
+                writePollProblems()
+            }
+            return
+        }
+        guard pollsTakeoversOnTick, takeoverPoll == nil else { return }
+        let due = enabled.filter { project in
+            let interval = Int64(project.settings.takeover.pollMinutes) * 60_000
+            return lastTakeoverPoll[project.id].map { now - $0 >= interval } ?? true
+        }
+        guard !due.isEmpty else { return }
+        for project in due { lastTakeoverPoll[project.id] = now }
+        let ids = Set(due.map(\.id))
+        _Concurrency.Task { await self.pollTakeovers(projectIds: ids) }
+    }
+
+    private func runTakeoverPoll(projectIds: Set<String>?) async {
+        let enabled = ((try? projects.list()) ?? []).filter { $0.settings.takeover.enabled }
+        let enabledIds = Set(enabled.map(\.id))
+        takeoverProblems = takeoverProblems.filter { enabledIds.contains($0.key) }
+        takeoverFailures = takeoverFailures.filter { enabledIds.contains($0.key) }
+        let discovery = takeoverDiscovery
+        let store = takeovers
+        for project in enabled where projectIds?.contains(project.id) ?? true {
+            let repo = URL(fileURLWithPath: project.repoPath)
+            let settings = project.settings.takeover
+            do {
+                let remote = try await offMain { try BranchPublisher(repoPath: repo).requireRemote() }
+                guard let slug = PullRequestLaunch.githubSlug(remoteURL: remote) else {
+                    takeoverProblems[project.id] = nil
+                    continue
+                }
+                let projectId = project.id
+                let result = try await offMain {
+                    try discovery.poll(projectId: projectId, settings: settings, repository: slug, store: store, cwd: repo)
+                }
+                takeoverFailures[project.id] = nil
+                takeoverProblems[project.id] = nil
+                if !result.recorded.isEmpty || !result.released.isEmpty {
+                    NSLog(
+                        "Takeover poll for %@ recorded %d and released %d", project.name,
+                        result.recorded.count, result.released.count
+                    )
+                }
+            } catch PublishFailure.noRemote {
+                takeoverFailures[project.id] = nil
+                takeoverProblems[project.id] = nil
+            } catch let failure as PullRequestWatchFailure where failure.ghUnavailable {
+                takeoverProblems[project.id] = "Takeover: \(failure.description)"
+            } catch {
+                let failures = (takeoverFailures[project.id] ?? 0) + 1
+                takeoverFailures[project.id] = failures
+                NSLog("Takeover poll for %@ failed (%d in a row): %@", project.name, failures, describe(error))
+                if failures >= Self.prWatchFailuresBeforeAttention {
+                    takeoverProblems[project.id] = "Takeover's search has failed \(failures) times in a row: \(describe(error))"
+                }
+            }
+        }
+        writePollProblems()
     }
 
     private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) async {
@@ -5209,6 +5308,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             // A slow `gh` must not queue a poll per tick behind the one still running.
             if prWatchPoll == nil { _Concurrency.Task { await self.pollPRWatches() } }
         }
+        pollDueTakeovers(all, now: now)
         if now - lastOrphanReap >= Self.orphanReapIntervalMillis {
             lastOrphanReap = now
             reapOrphanedWorktreesOnTick(all)

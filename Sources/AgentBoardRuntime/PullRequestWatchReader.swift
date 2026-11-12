@@ -91,7 +91,7 @@ public struct PullRequestWatchReader: Sendable {
         return lines.isEmpty ? nil : lines.suffix(Self.logTailLines).joined(separator: "\n")
     }
 
-    private func run(_ arguments: [String], cwd: URL, what: String) throws -> String {
+    func run(_ arguments: [String], cwd: URL, what: String) throws -> String {
         let result: CommandResult
         do {
             result = try gh.run(arguments, cwd: cwd)
