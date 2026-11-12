@@ -202,6 +202,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Watches whose pull request could not be read after a reply to it came back not found (SPEC
     /// §13.2), with their project and detail. Each stays among the poll's problems until a poll reads it.
     @ObservationIgnored private var prReplyReadFailures: [String: (projectId: String, detail: String)] = [:]
+    /// The follow-through poll's and the takeover poll's problems, merged into `pr_poll_problem` by `writePollProblems`.
+    @ObservationIgnored private var followThroughProblems: [String: String] = [:]
+    @ObservationIgnored private var takeoverProblems: [String: String] = [:]
+    @ObservationIgnored private let takeovers: TakeoverStore
+    @ObservationIgnored private let takeoverDiscovery: TakeoverDiscovery
+    /// Millis of each project's last takeover poll (SPEC §13.8); absent means none yet.
+    @ObservationIgnored private var lastTakeoverPoll: [String: Int64] = [:]
+    @ObservationIgnored private var takeoverPoll: _Concurrency.Task<Void, Never>?
+    /// Consecutive failed takeover polls, by project id.
+    @ObservationIgnored private var takeoverFailures: [String: Int] = [:]
+    @ObservationIgnored private let takeoverAcknowledger: TakeoverAcknowledger
+    @ObservationIgnored private let takeoverIssues: TakeoverIssueReader
+    /// "<project id> <label>" for each acknowledgment label seen on GitHub; a missing one is checked again.
+    @ObservationIgnored private var confirmedAckLabels: Set<String> = []
+    /// Projects whose acknowledgment label is missing (SPEC §13.8), merged into `pr_poll_problem`.
+    @ObservationIgnored private var ackLabelProblems: [String: String] = [:]
     /// Millis of the last pull request merge check; 0 means none yet, so the first tick after
     /// launch checks.
     @ObservationIgnored private var lastPullRequestCheck: Int64 = 0
@@ -256,6 +272,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored var beforeCheckoutCreated: @MainActor () async -> Void = {}
     /// Off in a test that drives every `pollPRWatches()` itself, so the tick's poll cannot advance a watch between two of its own.
     @ObservationIgnored var pollsPRWatchesOnTick = true
+    /// Off in a test that drives every `pollTakeovers()` itself.
+    @ObservationIgnored var pollsTakeoversOnTick = true
     /// Whether a pid runs `claude`, the only process a stop signals as a session's host; a test swaps in a stand-in.
     @ObservationIgnored var isClaudeHost: (pid_t) -> Bool = SessionProcessReaper.isClaudeExecutable
     /// Tasks a discard is waiting out the setup of; that setup's end is not a cue to retry.
@@ -347,6 +365,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         pullRequestReplies = PullRequestReplier(gh: gh)
         pullRequestReviewRequests = PullRequestReviewRequester(gh: gh)
         prWatches = PRWatchStore(db)
+        takeovers = TakeoverStore(db)
+        takeoverDiscovery = TakeoverDiscovery(gh: gh)
+        takeoverAcknowledger = TakeoverAcknowledger(gh: gh)
+        takeoverIssues = TakeoverIssueReader(gh: gh)
     }
 
     private var sessionConfigDir: URL { SessionConfigWriter.configDir(supportDir: appSupportDir) }
@@ -2495,7 +2517,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         recordLanding(
             task: task, epic: nil, landing: .awaitingPullRequest,
             detail: PullRequestLanding.awaitingDetail(branch: branch, base: base),
-            advice: PullRequestLanding.awaitingAdvice(branch: branch)
+            advice: PullRequestLanding.awaitingAdvice(
+                branch: branch, closesIssue: (try? takeovers.issue(taskId: task.id))?.number
+            )
         )
     }
 
@@ -2685,11 +2709,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
 
         let drafts = Set(authored.filter(\.isDraft).map { key($0.repository, $0.number) })
-        let open = authored.filter {
+        let authoredKeys = Set(authored.filter { !$0.isDraft }.map { key($0.repository, $0.number) })
+        // SPEC §13.8: an adopted watch is read like an authored one, though the author search does not return it.
+        let adopted = projectByRepo.values.flatMap { project in
+            ((try? prWatches.live(projectId: project.id)) ?? []).filter { $0.adopted && $0.state != .stopped }.map {
+                AuthoredPullRequest(repository: "\($0.repoOwner)/\($0.repoName)", number: $0.number, url: $0.url, title: $0.title)
+            }
+        }.filter { !authoredKeys.contains(key($0.repository, $0.number)) }
+        let open = (authored + adopted).filter {
             !$0.isDraft && projectByRepo[$0.repository.lowercased()] != nil
                 && scopedKeys?.contains(key($0.repository, $0.number)) ?? true
         }
-        let stillOpen = Set(open.map { key($0.repository, $0.number) })
+        var stillOpen = Set(open.map { key($0.repository, $0.number) }).intersection(authoredKeys)
         for (slug, prs) in Dictionary(grouping: open, by: { $0.repository.lowercased() }) {
             guard let project = projectByRepo[slug] else { continue }
             let parts = prs[0].repository.split(separator: "/").map(String.init)
@@ -2708,9 +2739,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 ))
                 continue
             }
-            for snapshot in snapshots
-            where scopedKeys?.contains(key("\(snapshot.repoOwner)/\(snapshot.repoName)", snapshot.number)) ?? true {
-                await applyPRSnapshot(snapshot, project: project)
+            for snapshot in snapshots where snapshot.isOpen
+                && scopedKeys?.contains(key("\(snapshot.repoOwner)/\(snapshot.repoName)", snapshot.number)) ?? true {
+                let snapshotKey = key("\(snapshot.repoOwner)/\(snapshot.repoName)", snapshot.number)
+                stillOpen.insert(snapshotKey)
+                await applyPRSnapshot(snapshot, project: project, authored: authoredKeys.contains(snapshotKey))
             }
         }
 
@@ -2765,13 +2798,262 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let live = Set(enabled.flatMap { (try? prWatches.live(projectId: $0.id)) ?? [] }.map(\.id))
             prReplyReadFailures = prReplyReadFailures.filter { live.contains($0.key) }
         }
-        let all = prReplyReadFailures.values.reduce(into: problems) { $0[$1.projectId] = $0[$1.projectId] ?? $1.detail }
-        try? prWatches.setPollProblems(all)
+        followThroughProblems = prReplyReadFailures.values.reduce(into: problems) {
+            $0[$1.projectId] = $0[$1.projectId] ?? $1.detail
+        }
+        writePollProblems()
     }
 
-    private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project) async {
+    /// One `pr_poll_problem` row per project; a follow-through problem wins over a takeover one.
+    private func writePollProblems() {
+        let takeover = takeoverProblems.merging(ackLabelProblems) { search, _ in search }
+        try? prWatches.setPollProblems(takeover.merging(followThroughProblems) { _, followThrough in followThrough })
+    }
+
+    /// SPEC §13.8: adds the acknowledgment label, records `acknowledged`, then posts the comment. A label
+    /// edit that fails records nothing, so the caller's next poll retries it; nil means it failed.
+    @discardableResult
+    func acknowledge(takeover: Takeover) async -> TakeoverAcknowledgment? {
+        guard let project = try? projects.get(takeover.projectId), project.settings.takeover.enabled,
+              let label = project.settings.takeover.ackLabel
+        else { return nil }
+        let repo = URL(fileURLWithPath: project.repoPath)
+        let settings = project.settings.takeover
+        let key = "\(project.id) \(label)"
+        let confirmed = confirmedAckLabels.contains(key)
+        let acknowledger = takeoverAcknowledger
+        let store = takeovers
         do {
-            var watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot)
+            let remote = try await offMain { try BranchPublisher(repoPath: repo).requireRemote() }
+            guard let slug = PullRequestLaunch.githubSlug(remoteURL: remote) else { return nil }
+            let outcome = try await offMain {
+                try acknowledger.acknowledge(
+                    takeover, settings: settings, repository: slug, labelConfirmed: confirmed, store: store, cwd: repo
+                )
+            }
+            switch outcome {
+            case .labelMissing(let problem):
+                confirmedAckLabels.remove(key)
+                ackLabelProblems[project.id] = problem
+            case .acknowledged, .commentFailed:
+                confirmedAckLabels.insert(key)
+                ackLabelProblems[project.id] = nil
+            case .skipped:
+                break
+            }
+            if case .commentFailed(_, let detail) = outcome {
+                NSLog("Takeover #%d in %@: %@", takeover.number, project.name, detail)
+            }
+            writePollProblems()
+            return outcome
+        } catch {
+            NSLog("Acknowledging takeover #%d in %@ failed: %@", takeover.number, project.name, describe(error))
+            return nil
+        }
+    }
+
+    /// SPEC §13.8: one discovery poll for each project with takeover on, or only `projectIds`. A call made
+    /// while a poll runs waits for it and then polls again.
+    func pollTakeovers(projectIds: Set<String>? = nil) async {
+        while let inFlight = takeoverPoll { await inFlight.value }
+        let poll = _Concurrency.Task {
+            await runTakeoverPoll(projectIds: projectIds)
+            takeoverPoll = nil
+        }
+        takeoverPoll = poll
+        await poll.value
+    }
+
+    /// The tick's half: starts a poll for the projects whose `pollMinutes` have passed, unless one runs.
+    private func pollDueTakeovers(_ all: [Project], now: Int64) {
+        let enabled = all.filter { $0.settings.takeover.enabled }
+        if enabled.isEmpty {
+            if !takeoverProblems.isEmpty || !ackLabelProblems.isEmpty {
+                takeoverProblems = [:]
+                ackLabelProblems = [:]
+                writePollProblems()
+            }
+            return
+        }
+        guard pollsTakeoversOnTick, takeoverPoll == nil else { return }
+        let due = enabled.filter { project in
+            let interval = Int64(project.settings.takeover.pollMinutes) * 60_000
+            return lastTakeoverPoll[project.id].map { now - $0 >= interval } ?? true
+        }
+        guard !due.isEmpty else { return }
+        for project in due { lastTakeoverPoll[project.id] = now }
+        let ids = Set(due.map(\.id))
+        _Concurrency.Task { await self.pollTakeovers(projectIds: ids) }
+    }
+
+    private func runTakeoverPoll(projectIds: Set<String>?) async {
+        let enabled = ((try? projects.list()) ?? []).filter { $0.settings.takeover.enabled }
+        let enabledIds = Set(enabled.map(\.id))
+        takeoverProblems = takeoverProblems.filter { enabledIds.contains($0.key) }
+        takeoverFailures = takeoverFailures.filter { enabledIds.contains($0.key) }
+        ackLabelProblems = ackLabelProblems.filter { enabledIds.contains($0.key) }
+        let discovery = takeoverDiscovery
+        let store = takeovers
+        for project in enabled where projectIds?.contains(project.id) ?? true {
+            let repo = URL(fileURLWithPath: project.repoPath)
+            let settings = project.settings.takeover
+            do {
+                let remote = try await offMain { try BranchPublisher(repoPath: repo).requireRemote() }
+                guard let slug = PullRequestLaunch.githubSlug(remoteURL: remote) else {
+                    takeoverProblems[project.id] = nil
+                    continue
+                }
+                let projectId = project.id
+                let result = try await offMain {
+                    try discovery.poll(projectId: projectId, settings: settings, repository: slug, store: store, cwd: repo)
+                }
+                takeoverFailures[project.id] = nil
+                takeoverProblems[project.id] = nil
+                if !result.recorded.isEmpty || !result.released.isEmpty || !result.finished.isEmpty {
+                    NSLog(
+                        "Takeover poll for %@ recorded %d, released %d and finished %d", project.name,
+                        result.recorded.count, result.released.count, result.finished.count
+                    )
+                }
+                if !result.released.isEmpty { try? prWatches.stopReleasedAdoptions(projectId: project.id) }
+                await adoptTakenOverPullRequests(project)
+                await startIssueTakeovers(project: project)
+                if !result.released.isEmpty { announceReports(projectId: project.id) }
+            } catch PublishFailure.noRemote {
+                takeoverFailures[project.id] = nil
+                takeoverProblems[project.id] = nil
+            } catch let failure as PullRequestWatchFailure where failure.ghUnavailable {
+                takeoverProblems[project.id] = "Takeover: \(failure.description)"
+            } catch {
+                let failures = (takeoverFailures[project.id] ?? 0) + 1
+                takeoverFailures[project.id] = failures
+                NSLog("Takeover poll for %@ failed (%d in a row): %@", project.name, failures, describe(error))
+                if failures >= Self.prWatchFailuresBeforeAttention {
+                    takeoverProblems[project.id] = "Takeover's search has failed \(failures) times in a row: \(describe(error))"
+                }
+            }
+        }
+        writePollProblems()
+    }
+
+    /// SPEC §13.8: each live issue row not yet working gets its task, is acknowledged on GitHub, moves to
+    /// `working`, and asks for a worker through `spawn_worker`'s gate, so autonomy, caps and approval apply
+    /// unchanged. A step that fails leaves the row where it is for the next poll.
+    private func startIssueTakeovers(project: Project) async {
+        let pending = ((try? takeovers.live(projectId: project.id)) ?? [])
+            .filter { $0.kind == .issue && ($0.state == .found || $0.state == .acknowledged) }
+        let reader = takeoverIssues
+        let cwd = URL(fileURLWithPath: project.repoPath)
+        for row in pending {
+            var taskId = row.taskId
+            if taskId == nil {
+                let url = row.url
+                do {
+                    let issue = try await offMain { try reader.read(url: url, cwd: cwd) }
+                    taskId = try takeovers.createTask(row.id, issue: issue)?.id
+                } catch {
+                    NSLog("Reading takeover issue #%d in %@ failed: %@", row.number, project.name, describe(error))
+                    _ = try? takeovers.noteProblem(row.id, detail: "Could not read the issue: \(describe(error))")
+                }
+            }
+            guard let taskId else { continue }
+            var commentFailure: String?
+            if row.state == .found {
+                switch await acknowledge(takeover: row) {
+                case .acknowledged?: break
+                case .commentFailed(_, let detail)?: commentFailure = detail
+                default: continue
+                }
+            }
+            guard (try? takeovers.startWorking(row.id, taskId: taskId)) != nil else { continue }
+            if let commentFailure { _ = try? takeovers.noteProblem(row.id, detail: commentFailure) }
+            let outcome: String
+            do {
+                switch try board.requestSpawn(taskId: taskId, requestedBy: "takeover") {
+                case .proceed:
+                    let spawn = try await spawnWorker(taskId: taskId)
+                    outcome = "A worker was dispatched on branch \(spawn.branch)."
+                case .approvalPending(let approval):
+                    outcome = "Spawn approval \(approval.id) is pending; the human decides."
+                case .refused(let reason):
+                    outcome = "No worker was started: \(reason) The task waits in ready; spawn_worker it when you can."
+                }
+            } catch {
+                outcome = "No worker was started: \(describe(error)) The task waits in ready; spawn_worker it when you can."
+            }
+            _ = try? ReportStore(db).insert(
+                projectId: project.id, taskId: taskId, sessionId: nil, kind: .decision,
+                body: """
+                Takeover created task \(taskId) from issue #\(row.number) — \(row.url)
+                The issue was assigned to the human with the project's trigger labels, so Agent Board took it over \
+                and acknowledged it on GitHub. \(outcome) Do not create another task for this issue.
+                """
+            )
+            announceReports(projectId: project.id)
+        }
+    }
+
+    static let adoptionNeedsFollowThrough =
+        "Adopting this pull request needs PR follow-through. Turn it on in the project's PR Follow-Through settings."
+
+    static func adoptionStopped(_ row: Takeover) -> String {
+        "Follow-through is stopped for #\(row.number). Choose Watch again on the Pull Requests page to adopt it, "
+            + "or remove a trigger label to release it."
+    }
+
+    /// SPEC §13.8: each found pull request becomes an adopted watch, is acknowledged, and is marked watched. A
+    /// fork fails with nothing posted; without follow-through, or while the human has its watch stopped, the
+    /// row waits in `found` with a problem.
+    private func adoptTakenOverPullRequests(_ project: Project) async {
+        for row in (try? takeovers.live(projectId: project.id)) ?? [] where row.kind == .pr {
+            switch row.state {
+            case .found:
+                if row.isCrossRepository {
+                    try? takeovers.fail(
+                        row.id,
+                        reason: "#\(row.number) comes from a fork. Follow-through pushes only to the project's own "
+                            + "`origin`, so a fork's pull request cannot be adopted."
+                    )
+                    continue
+                }
+                guard project.settings.prFollowThrough.enabled else {
+                    if row.failure != Self.adoptionNeedsFollowThrough {
+                        try? takeovers.noteProblem(row.id, detail: Self.adoptionNeedsFollowThrough)
+                    }
+                    continue
+                }
+                guard let watch = try? prWatches.adopt(row) else { continue }
+                if watch.state == .stopped {
+                    let problem = Self.adoptionStopped(row)
+                    if row.failure != problem { try? takeovers.noteProblem(row.id, detail: problem) }
+                    continue
+                }
+                if row.failure != nil { try? takeovers.noteProblem(row.id, detail: nil) }
+                switch await acknowledge(takeover: row) {
+                case .acknowledged?:
+                    try? takeovers.watch(row.id, watchId: watch.id)
+                case .commentFailed(_, let detail)?:
+                    if (try? takeovers.watch(row.id, watchId: watch.id)) != nil {
+                        try? takeovers.noteProblem(row.id, detail: detail)
+                    }
+                default:
+                    break
+                }
+            case .acknowledged:
+                if let watch = try? prWatches.adopted(takeoverId: row.id) { try? takeovers.watch(row.id, watchId: watch.id) }
+            default:
+                break
+            }
+        }
+    }
+
+    private func applyPRSnapshot(_ snapshot: PRSnapshot, project: Project, authored: Bool) async {
+        do {
+            var watch = try prWatches.upsert(projectId: project.id, snapshot: snapshot, authored: authored)
+            _ = try takeovers.watchClosingPullRequest(
+                projectId: project.id, watchId: watch.id, repository: "\(snapshot.repoOwner)/\(snapshot.repoName)",
+                body: snapshot.body
+            )
             prReplyReadFailures[watch.id] = nil
             let failed = try await newFailedChecks(snapshot, watch: watch, project: project)
             if let settled = try prWatches.settleAwaitingCI(watchId: watch.id, failedChecks: failed) {
@@ -2804,6 +3086,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// publishing one pushes its round. Then each open decision not yet announced banners once (§13.4).
     private func advancePRWatches(_ enabled: [Project], scope: Set<String>?) async {
         for project in enabled {
+            try? prWatches.stopReleasedAdoptions(projectId: project.id)
             for watch in (try? prWatches.live(projectId: project.id)) ?? [] where scope?.contains(watch.id) ?? true {
                 switch watch.state {
                 case .settling: await startTriageIfSettled(watch, project: project)
@@ -3085,6 +3368,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     try board.parkPublishing(
                         watchId: watch.id,
                         reason: "Round \(round.number)'s branch moved from \(checked) to \(tip) after its check, so it was not pushed."
+                    )
+                    await postFactualReplies(watchId: watch.id, project: project)
+                    return
+                }
+                guard watch.acceptsFastForward else {
+                    try board.parkPublishing(
+                        watchId: watch.id,
+                        reason: "Round \(round.number) was not pushed: #\(watch.number) is neither yours nor adopted by "
+                            + "a takeover, and Agent Board pushes only to those (SPEC D8)."
                     )
                     await postFactualReplies(watchId: watch.id, project: project)
                     return
@@ -5209,6 +5501,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             // A slow `gh` must not queue a poll per tick behind the one still running.
             if prWatchPoll == nil { _Concurrency.Task { await self.pollPRWatches() } }
         }
+        pollDueTakeovers(all, now: now)
         if now - lastOrphanReap >= Self.orphanReapIntervalMillis {
             lastOrphanReap = now
             reapOrphanedWorktreesOnTick(all)

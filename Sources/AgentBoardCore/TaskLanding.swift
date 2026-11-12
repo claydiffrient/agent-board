@@ -59,9 +59,14 @@ public enum PullRequestLanding {
             + "pull request, so the accept merged nothing locally."
     }
 
-    public static func awaitingAdvice(branch: String) -> String {
+    /// `closesIssue` is a taken-over issue's number: the board adds its closing line (SPEC §13.8).
+    public static func awaitingAdvice(branch: String, closesIssue: Int? = nil) -> String {
         "Open one with `open_pull_request(branch: \"\(branch)\")`; the task is marked landed once GitHub "
             + "reports it merged."
+            + (closesIssue.map {
+                " The board adds `\(IssueClosingReference.line(number: $0))` to its body, so merging it closes the "
+                    + "taken-over issue."
+            } ?? "")
     }
 
     public static func openDetail(_ pr: PullRequestReference, uncheckedBecause reason: String? = nil) -> String {

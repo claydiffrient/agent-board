@@ -13,6 +13,7 @@ struct PullRequestsView: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(\.openWindow) private var openWindow
     @State private var page = Observed<[PRWatchGroup]>([])
+    @State private var takenOver = Observed<[Takeover]>([])
     @State private var marking: Set<String> = []
     @State private var errorMessage: String?
     @State private var routedWatchId: String?
@@ -32,9 +33,15 @@ struct PullRequestsView: View {
         }
     }
 
-    /// Projects with follow-through on, plus the filtered one in case it was since turned off.
+    /// Projects with follow-through or takeover on, plus the filtered one in case it was since turned off.
     private var filterable: [Project] {
-        projects.filter { $0.settings.prFollowThrough.enabled || $0.id == projectFilter }
+        projects.filter {
+            $0.settings.prFollowThrough.enabled || $0.settings.takeover.enabled || $0.id == projectFilter
+        }
+    }
+
+    private var showsTakenOver: Bool {
+        !takenOver.value.isEmpty || filterable.contains { $0.settings.takeover.enabled }
     }
 
     private var projectsById: [String: Project] {
@@ -45,7 +52,7 @@ struct PullRequestsView: View {
 
     var body: some View {
         Group {
-            if filterable.isEmpty && page.value.isEmpty {
+            if filterable.isEmpty && page.value.isEmpty && takenOver.value.isEmpty {
                 ContentUnavailableView(
                     "No pull requests watched",
                     systemImage: "arrow.triangle.pull",
@@ -58,6 +65,9 @@ struct PullRequestsView: View {
         .navigationTitle("Pull Requests")
         .task(id: projectFilter) {
             await page.run(PRWatchStore(env.db).observePage(projectId: projectFilter), in: env.db.reader)
+        }
+        .task(id: projectFilter) {
+            await takenOver.run(TakeoverStore(env.db).observePage(projectId: projectFilter), in: env.db.reader)
         }
         .task(id: env.router.sequence) {
             guard let route = env.router.route, case .pullRequest(let watchId) = route.subject,
@@ -101,6 +111,20 @@ struct PullRequestsView: View {
                             }
                         } header: {
                             header(section)
+                        }
+                    }
+                    if showsTakenOver {
+                        Section("Taken over") {
+                            if takenOver.value.isEmpty {
+                                Text("Nothing taken over yet.")
+                                    .foregroundStyle(.secondary)
+                            }
+                            ForEach(takenOver.value) { takeover in
+                                TakeoverRow(
+                                    takeover: takeover,
+                                    projectName: projectFilter == nil ? projectsById[takeover.projectId]?.name : nil
+                                )
+                            }
                         }
                     }
                 }
@@ -642,5 +666,47 @@ extension PRWatchState {
         case .closed: "closed"
         case .stopped: "stopped"
         }
+    }
+}
+
+/// One row of the Taken over group (SPEC §13.8).
+struct TakeoverRow: View {
+    let takeover: Takeover
+    let projectName: String?
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(takeover.kind == .pr ? "PR" : "Issue")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text("#\(takeover.number)")
+                .monospacedDigit()
+            VStack(alignment: .leading, spacing: 2) {
+                Text(takeover.title)
+                    .lineLimit(2)
+                HStack(spacing: 6) {
+                    if let author = takeover.author { Text("by \(author)") }
+                    if let projectName { Text(projectName) }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                if let failure = takeover.failure {
+                    Text(failure)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(3)
+                }
+            }
+            Spacer()
+            Text(takeover.state.rawValue.capitalized)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("State: \(takeover.state.rawValue)")
+            if let url = URL(string: takeover.url) {
+                Link("Open", destination: url)
+                    .help("Open \(takeover.kind == .pr ? "pull request" : "issue") #\(takeover.number) on GitHub")
+            }
+        }
+        .padding(.vertical, 2)
     }
 }

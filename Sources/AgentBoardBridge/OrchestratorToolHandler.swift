@@ -21,8 +21,13 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let pullRequests: PRWatchTools
     private let control: any WorkerControl
     private let events: any BoardEventSink
+    /// `owner/name` of the repository a project's pull requests open on, nil when it has none on GitHub.
+    private let pullRequestRepository: @Sendable (Project) -> String?
 
-    public init(db: AppDatabase, control: any WorkerControl, events: any BoardEventSink) {
+    public init(
+        db: AppDatabase, control: any WorkerControl, events: any BoardEventSink,
+        pullRequestRepository: @escaping @Sendable (Project) -> String? = { _ in nil }
+    ) {
         self.db = db
         projects = ProjectStore(db)
         tasks = TaskStore(db)
@@ -40,6 +45,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         pullRequests = PRWatchTools(db: db)
         self.control = control
         self.events = events
+        self.pullRequestRepository = pullRequestRepository
     }
 
     static let columnNames = TaskColumn.allCases.map(\.rawValue)
@@ -1356,8 +1362,11 @@ public final class OrchestratorToolHandler: ToolHandler {
             throw ToolError("A pull request cannot merge \(branch) into itself. Give a different `base`.")
         }
         let title = try ToolArguments.requiredString("title", in: arguments)
-        let body = ToolArguments.optionalString("body", in: arguments) ?? ""
         let target = try publishTarget(branch: branch, identity: identity)
+        let body = try TakeoverStore(db).closingBody(
+            ToolArguments.optionalString("body", in: arguments) ?? "", taskId: target.taskId,
+            pullRequestRepository: pullRequestRepository(project)
+        )
 
         let published = try publishedName(for: branch, project: project)
         let head = published ?? branch

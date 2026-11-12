@@ -1017,6 +1017,35 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try onlyWatch().state, .readyToVerify, "green checks on the pushed head end the wait")
     }
 
+    /// SPEC D8 as amended (§13.5): the same passed round is refused on a PR the human neither authored nor
+    /// adopted, and pushed once the watch is adopted.
+    func testThePublisherRefusesAPRNeitherAuthoredNorAdoptedAndPushesAnAdoptedOne() async throws {
+        let (tip, _) = try await passedRound()
+        let watchId = try onlyWatch().id
+        fixture.gh.answerSearch([])
+        try await fixture.db.writer.write {
+            try $0.execute(sql: "UPDATE pr_watch SET authored = 0, adopted = 0 WHERE id = ?", arguments: [watchId])
+        }
+        await poll()
+
+        let refused = try XCTUnwrap(try watches.get(watchId))
+        XCTAssertEqual(refused.state, .parked)
+        XCTAssertTrue(refused.parkedReason?.contains("neither yours nor adopted") == true, refused.parkedReason ?? "")
+        XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), head)
+
+        try await fixture.db.writer.write {
+            try $0.execute(
+                sql: "UPDATE pr_watch SET adopted = 1, state = 'publishing', parked_reason = NULL WHERE id = ?",
+                arguments: [watchId]
+            )
+            try $0.execute(sql: "UPDATE pr_round SET outcome = NULL, ended_at = NULL WHERE watch_id = ?", arguments: [watchId])
+        }
+        await poll()
+
+        XCTAssertEqual(try rev("refs/heads/add-widgets", in: remote), tip)
+        XCTAssertEqual(try watches.rounds(watchId: watchId).map(\.outcome), ["published"])
+    }
+
     func testAPendingCheckHoldsAwaitingCIUntilItIsListedAsWaitingOnVerification() async throws {
         let (tip, _) = try await passedRound()
         await poll()

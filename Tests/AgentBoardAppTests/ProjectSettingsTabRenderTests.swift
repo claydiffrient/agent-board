@@ -619,7 +619,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         XCTAssertEqual(
             mounted.fields.map(\.stringValue),
             ["15", "2", "", "50", "verified-example", "example-verify {url}", "example-verification, example-sign-off", ""]
-                + roleModels
+                + roleModels + ["@me", "", "", "", "5"]
         )
         XCTAssertEqual(
             mounted.fields.map(\.placeholderString),
@@ -628,8 +628,9 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
                 "Press Return to add",
             ]
                 + Array(repeating: "Model id", count: roleModels.count)
+                + ["@me", "Comma-separated; every one must be present", "Required", "Optional", nil]
         )
-        XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off, .on, .off])
+        XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off, .on, .off, .off])
         if !mounted.collect(NSPopUpButton.self).isEmpty {
             XCTAssertEqual(popUpButtons(titled: "Default", in: mounted.host).count, 4, "one agent picker per role")
         }

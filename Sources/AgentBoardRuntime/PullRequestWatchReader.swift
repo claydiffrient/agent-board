@@ -61,7 +61,7 @@ public struct PullRequestWatchReader: Sendable {
     }
 
     /// One query for every listed pull request in `owner/name`. Drafts and anything GitHub no longer
-    /// returns are left out, feedback the viewer wrote never becomes an item, a conversation comment opens
+    /// returns are left out, feedback the viewer wrote is marked `viewerLatest`, a conversation comment opens
     /// one only when it is newer than the head commit (SPEC §13.1), and the checks named in
     /// `ignoring` count toward neither the checks state nor the failed checks.
     public func snapshots(
@@ -91,31 +91,36 @@ public struct PullRequestWatchReader: Sendable {
         return lines.isEmpty ? nil : lines.suffix(Self.logTailLines).joined(separator: "\n")
     }
 
-    private func run(_ arguments: [String], cwd: URL, what: String) throws -> String {
-        let result: CommandResult
+    func run(_ arguments: [String], cwd: URL, what: String) throws -> String {
+        let result = try launch(arguments, cwd: cwd)
+        guard result.status == 0 else { throw Self.failure(result, what: what) }
+        return result.stdout
+    }
+
+    /// Runs `gh` and returns its result whatever the exit status; throws only when `gh` cannot launch.
+    func launch(_ arguments: [String], cwd: URL) throws -> CommandResult {
         do {
-            result = try gh.run(arguments, cwd: cwd)
+            return try gh.run(arguments, cwd: cwd)
         } catch {
             throw PullRequestWatchFailure("\(error)", ghUnavailable: true)
         }
-        guard result.status == 0 else {
-            let said = [result.stderr, result.stdout]
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .first { !$0.isEmpty } ?? "exit \(result.status)"
-            let unauthenticated = result.status == Self.authRequiredStatus || said.contains("gh auth login")
-            if unauthenticated {
-                throw PullRequestWatchFailure("`gh` is not logged in; run `gh auth login`.", ghUnavailable: true)
-            }
-            throw PullRequestWatchFailure("`\(what)` failed: \(said)", ghUnavailable: false)
+    }
+
+    static func failure(_ result: CommandResult, what: String) -> PullRequestWatchFailure {
+        let said = [result.stderr, result.stdout]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? "exit \(result.status)"
+        if result.status == authRequiredStatus || said.contains("gh auth login") {
+            return PullRequestWatchFailure("`gh` is not logged in; run `gh auth login`.", ghUnavailable: true)
         }
-        return result.stdout
+        return PullRequestWatchFailure("`\(what)` failed: \(said)", ghUnavailable: false)
     }
 
     static func query(numbers: [Int]) -> String {
         let pullRequests = numbers.map { number in
             """
             pr\(number): pullRequest(number: \(number)) {
-              number url title body isDraft headRefName headRefOid baseRefName reviewDecision mergeable
+              number url title body state isDraft headRefName headRefOid baseRefName reviewDecision mergeable
               isCrossRepository headRepository { nameWithOwner }
               labels(first: 100) { nodes { name } }
               baseRef {
@@ -136,7 +141,7 @@ public struct PullRequestWatchReader: Sendable {
                 } } } } }
               }
               reviewThreads(first: 100) {
-                nodes { id isResolved isOutdated comments(last: 1) { nodes { author { login } body url path line } } }
+                nodes { id isResolved isOutdated comments(last: 1) { nodes { author { login } body url path line createdAt } } }
               }
               reviews(last: 50) { nodes { id state body url submittedAt author { login } } }
               comments(last: 100) { nodes { id author { login } body url createdAt } }
@@ -178,6 +183,18 @@ public struct PullRequestWatchReader: Sendable {
         }
     }
 
+    private static let plainTimestamp = ISO8601DateFormatter()
+    private static let fractionalTimestamp: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    /// A GitHub timestamp, with or without fractional seconds.
+    static func timestamp(_ stamp: String) -> Date? {
+        plainTimestamp.date(from: stamp) ?? fractionalTimestamp.date(from: stamp)
+    }
+
     public static func parseSnapshots(
         _ json: String, owner: String, name: String, ignoring: Set<String> = []
     ) -> [PRSnapshot]? {
@@ -198,6 +215,9 @@ public struct PullRequestWatchReader: Sendable {
             guard let viewer, let login = author?.login else { return false }
             return login.caseInsensitiveCompare(viewer) == .orderedSame
         }
+        func millis(_ stamp: String?) -> Int64? {
+            stamp.flatMap(timestamp).map { Int64($0.timeIntervalSince1970 * 1000) }
+        }
         var items: [PRSnapshotItem] = []
         for thread in pr.reviewThreads?.nodes ?? [] where !thread.isResolved {
             guard let latest = thread.comments?.nodes.last else { continue }
@@ -208,13 +228,13 @@ public struct PullRequestWatchReader: Sendable {
             items.append(PRSnapshotItem(
                 githubNodeId: thread.id, kind: .thread, author: latest.author?.login, body: body,
                 path: latest.path, line: latest.line, url: latest.url,
-                isOutdated: thread.isOutdated, viewerLatest: viewerLatest
+                isOutdated: thread.isOutdated, viewerLatest: viewerLatest, createdAt: millis(latest.createdAt)
             ))
         }
         // A review body stands until its author reviews again; an approval's body is not feedback.
         var latestByAuthor: [String: GraphQLResponse.Review] = [:]
         for review in pr.reviews?.nodes ?? [] where review.state != "PENDING" && review.state != "DISMISSED" {
-            guard let login = review.author?.login, !byViewer(review.author) else { continue }
+            guard let login = review.author?.login else { continue }
             latestByAuthor[login.lowercased()] = review
         }
         for review in latestByAuthor.values.sorted(by: { $0.id < $1.id }) where review.state != "APPROVED" {
@@ -224,19 +244,19 @@ public struct PullRequestWatchReader: Sendable {
                 body = PRSnapshotItem.emptyChangeRequestBody(author: login)
             }
             items.append(PRSnapshotItem(
-                githubNodeId: review.id, kind: .review, author: review.author?.login, body: body, url: review.url
+                githubNodeId: review.id, kind: .review, author: review.author?.login, body: body, url: review.url,
+                viewerLatest: byViewer(review.author), createdAt: millis(review.submittedAt)
             ))
         }
-        let iso = ISO8601DateFormatter()
-        let headCommittedAt = pr.commits?.nodes.last?.commit.committedDate.flatMap { iso.date(from: $0) }
-        for comment in pr.comments?.nodes ?? [] where !byViewer(comment.author) {
+        let headCommittedAt = pr.commits?.nodes.last?.commit.committedDate.flatMap(timestamp)
+        for comment in pr.comments?.nodes ?? [] {
             let body = PRSnapshotItem.visibleText(comment.body)
             guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            let createdAt = comment.createdAt.flatMap { iso.date(from: $0) }
+            let createdAt = comment.createdAt.flatMap(timestamp)
             let afterHead = createdAt.flatMap { created in headCommittedAt.map { created > $0 } } ?? false
             items.append(PRSnapshotItem(
                 githubNodeId: comment.id, kind: .comment, author: comment.author?.login, body: body, url: comment.url,
-                opensItem: afterHead
+                opensItem: afterHead, viewerLatest: byViewer(comment.author), createdAt: millis(comment.createdAt)
             ))
         }
         let standing = standings(of: pr, byViewer: byViewer)
@@ -248,7 +268,8 @@ public struct PullRequestWatchReader: Sendable {
         }
         return PRSnapshot(
             repoOwner: owner, repoName: name, number: pr.number, url: pr.url, title: pr.title,
-            body: PRSnapshotItem.visibleText(pr.body ?? ""), isDraft: pr.isDraft,
+            body: PRSnapshotItem.visibleText(pr.body ?? ""), isOpen: pr.state.map { $0 == "OPEN" } ?? true,
+            isDraft: pr.isDraft,
             headRef: pr.headRefName, headOid: pr.headRefOid, baseRef: pr.baseRefName,
             reviewDecision: pr.reviewDecision,
             approvedBy: standing.approvedBy, changesRequestedBy: standing.changesRequestedBy,
@@ -358,7 +379,6 @@ extension PullRequestWatchReader {
     fileprivate static func standings(
         of pr: GraphQLResponse.PullRequest, byViewer: (GraphQLResponse.Author?) -> Bool
     ) -> (approvedBy: [String], changesRequestedBy: [String]) {
-        let iso = ISO8601DateFormatter()
         var latest: [String: (login: String, review: GraphQLResponse.Review)] = [:]
         for review in pr.reviews?.nodes ?? [] {
             guard let login = review.author?.login, !byViewer(review.author) else { continue }
@@ -372,7 +392,7 @@ extension PullRequestWatchReader {
         var removedAt: [String: Date] = [:]
         for event in pr.timelineItems?.nodes ?? [] {
             guard let login = event.requestedReviewer?.login?.lowercased(),
-                  let at = event.createdAt.flatMap({ iso.date(from: $0) })
+                  let at = event.createdAt.flatMap(timestamp)
             else { continue }
             switch event.__typename {
             case "ReviewRequestedEvent": requestedAt[login] = max(at, requestedAt[login] ?? at)
@@ -387,7 +407,7 @@ extension PullRequestWatchReader {
                 approvedBy.append(entry.login)
                 continue
             }
-            let submitted = entry.review.submittedAt.flatMap { iso.date(from: $0) }
+            let submitted = entry.review.submittedAt.flatMap(timestamp)
             if let submitted, let requested = requestedAt[key], requested > submitted,
                removedAt[key].map({ $0 < requested }) ?? true { continue }
             changesRequestedBy.append(entry.login)
@@ -500,6 +520,7 @@ private struct GraphQLResponse: Decodable {
         let url: String?
         let path: String?
         let line: Int?
+        let createdAt: String?
     }
 
     struct Thread: Decodable {
@@ -539,6 +560,7 @@ private struct GraphQLResponse: Decodable {
         let url: String
         let title: String
         let body: String?
+        let state: String?
         let isDraft: Bool
         let headRefName: String
         let headRefOid: String

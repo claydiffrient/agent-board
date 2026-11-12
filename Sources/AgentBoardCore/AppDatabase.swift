@@ -273,6 +273,15 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("session_escalation") { db in
             try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN escalation TEXT")
         }
+        migrator.registerMigration("takeover") { db in
+            try db.execute(sql: Schema.takeover)
+        }
+        migrator.registerMigration("pr_watch_adoption") { db in
+            try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN authored INTEGER NOT NULL DEFAULT 1")
+            try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0")
+            try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN takeover_id TEXT")
+            try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN takeover_round INTEGER")
+        }
         return migrator
     }
 }

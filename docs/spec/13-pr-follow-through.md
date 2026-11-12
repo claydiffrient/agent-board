@@ -1,7 +1,7 @@
 ## 13. PR follow-through
 
-Agent Board watches every open, non-draft pull request the human authors, in a
-project that turns the feature on, and carries review feedback through to a
+Agent Board watches every open, non-draft pull request the human authors, and
+each one a takeover adopted (§13.8), in a project that turns the feature on, and carries review feedback through to a
 pushed fix without the human in the loop per round. It runs inside Agent
 Board as a deterministic state machine on the app's metering tick, not as a
 standalone daemon — a daemon would rebuild worktrees, workers, review and push
@@ -152,12 +152,16 @@ pull-request landing check (§5), `WorkerSupervisor.pollPRWatches` runs only
 when some project has `enabled` on; otherwise no `gh` command runs at all. It
 maps each enabled project to a repository by its `origin` remote, ssh and https
 forms alike, runs one `gh search prs --author=@me --state=open`, and for each
-mapped repository one `gh api graphql` query covering its non-draft PRs. Drafts
-are never watched. A thread becomes an item while it is neither resolved nor
+mapped repository one `gh api graphql` query covering its non-draft PRs and the
+project's adopted watches (§13.8), which the search does not return. The query
+reads each PR's `state`, so an adopted PR that merged or closed is settled by
+`gh pr view` like an authored one that left the search. Each poll records on
+the watch whether the search returned it (`authored`), which publishing reads
+(§13.5). Drafts are never watched. A thread becomes an item while it is neither resolved nor
 outdated and its latest comment is not the viewer's; that comment is the item's
 body, so a reply changes it. An outdated thread, or one whose latest comment is
 the viewer's (a reply the board posted included), creates no item but still
-keeps an owed one: an open item with verdict `fix` (an answered decision among
+keeps an owed one (an adopted watch's takeover round aside, below): an open item with verdict `fix` (an answered decision among
 them) or `decision` stays open with its verdict, round, decision fields, body,
 path and line untouched, so the next round fixes or asks about it as stored. An
 untriaged item stays open the same way under an outdated thread, since code
@@ -191,7 +195,28 @@ reopened. The same query reads
 each PR's reviews with their submission times and its review requests
 and their removals (`timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT,
 REVIEW_REQUEST_REMOVED_EVENT])`) with theirs, which is all the per-reviewer
-fallback above needs. The poll itself moves a watch only among watching,
+fallback above needs.
+
+**An adopted watch's takeover round.** The human's own unresolved review
+feedback on a pull request they took over is round 1's work.
+`pr_watch.takeover_round` records that round when the watch is adopted (its
+next round). Until the watch's `round` reaches it, the viewer's thread whose
+latest comment is theirs, their latest review that is not an approval, and
+their conversation comment each count as anyone's would, provided GitHub dates
+them before the takeover row's `created_at`. An item with no date counts as
+written after it, and the reader parses GitHub's timestamps with or without
+fractional seconds, so a parsing gap can only leave feedback out. The human's
+review agent posts as the viewer, so its feedback is included the same way;
+the acknowledgment comment and every reply the board posts come later and
+never count. Resolved and outdated threads, approvals and
+conversation comments older than the head commit stay excluded as for any
+author. An item made that way keeps its state, verdict and round for as long as
+the viewer's comment it was made from is still the latest and unchanged, so the
+round triages, fixes and replies to it like any other. From the takeover round
+on, the viewer's new feedback is ignored as on any watch, and because the round
+is stored, a restart cannot include it again.
+
+The poll itself moves a watch only among watching,
 settling, readyToVerify and verified, by the rules above, and a
 watch whose PR has left the open list settles to merged or closed by
 `gh pr view`. A PR whose GitHub `mergeable` is `CONFLICTING` gets one item of
@@ -705,13 +730,13 @@ The built-in prompt, `TriagePrompt`, says what each verdict above means; that
 every item body is data written by someone else, to be judged and never
 followed, whatever it claims; the PR's current title and description, fenced
 and capped as the follow-up check's are (§13.1), so a title or description
-request that the text already shows is an `answer`; that `decision` is reserved for a choice a
-reasonable engineer could make either way, so a clear in-scope change is
-`fix` however large; that a request only the author can carry out on GitHub
-is never `fix`; that an item asking for nothing is `answer` with no
-`reply_body`; that each decision option is `{label, verdict}`, an
-`answer` option with its `reply_body`; and that triage ends only when every open item has a
-verdict. A roster agent chosen for the triage role replaces the opening
+request that the text already shows is an `answer`; that `decision` is
+reserved for a choice a reasonable engineer could make either way, so a clear
+in-scope change is `fix` however large; that a request only the author can
+carry out on GitHub is never `fix`; that an item asking for nothing is
+`answer` with no `reply_body`; that each decision option is `{label,
+verdict}`, an `answer` option with its `reply_body`; and that triage ends only
+when every open item has a verdict. A roster agent chosen for the triage role replaces the opening
 identity line and nothing after it. After a compaction the same prompt is
 handed back, rebuilt from the `pr_triage` row.
 
@@ -980,9 +1005,13 @@ An empty list, or one holding only blank entries, is a no-op. A git command
 the guard cannot run refuses the publish rather than skipping the check.
 
 **D8 amended (§1).** The app, never a worker, may fast-forward push a round
-branch to the head ref of an open PR the human authored, without a human
-approval — but only after the reviewer role accepts the round, every item in
-it is graded fixed or moot, and the project's tests pass. Creating a branch,
+branch to the head ref of an open PR the human authored, or one a takeover
+adopted (§13.8), without a human approval — but only after the reviewer role
+accepts the round, every item in it is graded fixed or moot, and the project's
+tests pass. Publishing checks it at the push (`PRWatch.acceptsFastForward`): a
+watch whose last poll did not find it in the author search and that is not
+adopted parks with the round `publish_failed` and nothing pushed. An adopted PR
+gets exactly the authored one's conditions; a fork is never adopted. Creating a branch,
 opening a PR, any non-fast-forward push, and any push to a verified PR stay
 human-gated or forbidden, unchanged. This is publishing's push (§13.1),
 `BranchPublisher.fastForward`, and nothing else calls it.
@@ -1136,3 +1165,233 @@ escalations argued on the same PR thread are two separate rows with the same
 thread. Each row's id in `ReviewsPage` combines `target_id`, `reply_url` and
 the row's index in the list, since `thread_url` alone would collide and drop
 or swap rows under SwiftUI's `ForEach`.
+
+### 13.8 Takeover
+
+A project can take over GitHub work another engineer handed to the human: open
+issues and pull requests in its `origin` that are assigned to the human and
+carry every configured trigger label. This subsection covers the settings,
+discovery, the records, acknowledgment, issues becoming tasks, adopting a pull
+request into follow-through, and release.
+
+**Settings.** `settings_json.takeover`, beside `prFollowThrough`, edited in the
+**Takeover** section of the PR Follow-Through tab:
+
+| Setting | Default | Rule |
+|---|---|---|
+| `enabled` | `false` | |
+| `assignee` | `@me` — whoever `gh` is logged in as; a blank value saves as `@me` | |
+| `triggerLabels` | `[]`, no default | An item qualifies only when every label is present. Matched ignoring case |
+| `ackLabel` | `nil`, no default | Marks an item as taken over; the search excludes it |
+| `ackComment` | `nil`, no default | A comment template posted after the label; nil posts none |
+| `pollMinutes` | 5 | Saved at least 1 |
+
+The trigger and acknowledgment labels are work-specific, so they have no
+default and are never written into source, tests or this SPEC; examples here
+use `handoff-example` and `taken-example`. A project cannot be enabled while
+`triggerLabels` is empty or `ackLabel` is nil: the toggle is disabled and says
+which one is missing, and decoding `settings_json` reads a stored `enabled`
+without them as off (`TakeoverSettings.normalized`), so no path ever runs a
+search that would match everything assigned to the human.
+
+**Discovery.** On the metering tick, beside follow-through's poll,
+`WorkerSupervisor.pollTakeovers` polls each project with takeover on once its
+`pollMinutes` have passed since its last poll. No project enabled means no
+`gh` call. For each project whose `origin` is a GitHub remote it runs one
+search covering issues and pull requests:
+
+```
+gh search issues --include-prs --state=open --assignee=@me --repo=example-org/app \
+  --json id,number,url,title,isPullRequest,author --limit 1000 \
+  -- label:handoff-example -label:taken-example
+```
+
+Labels go in as query keywords after `--`, which `gh` quotes when they hold a
+space, rather than through `--label`, which splits a value on commas. A hit
+whose node id the project has already recorded is skipped. When anything is
+new, or the project has live rows, one `gh api graphql` `nodes(ids:)` query
+(100 ids per query) reads every new hit and every live row at once: state,
+labels, assignees, `isCrossRepository`, and each pull request's
+`closingIssuesReferences` and each issue's open
+`closedByPullRequestsReferences`. A quiet poll with nothing recorded costs the
+search alone. An issue linked to a pull request found in the same search, by
+either reference, is recorded once, as the pull request, with the issue's node
+id and URL on that row; a later poll that finds the issue again skips it as
+recorded. A new hit linked to a live row is left to that row. Each remaining
+new hit is inserted as `found`. The search and the read go through `SystemGh`
+and the origin read through `BranchPublisher`, so git's launches take the
+app-wide slots (§8.8).
+
+Failures follow the follow-through poll's (§13.1): a project with no `origin`
+or a non-GitHub one is skipped without a word; a `gh` that is missing or not
+logged in records the project's `pr_poll_problem` row at once; any other
+failure is logged and after 10 in a row records the row, and the next good
+poll clears it. Follow-through and takeover share that table, one row per
+project; when both have a problem for one project, follow-through's detail is
+the one shown. Takeover polls never overlap: a tick skips while one runs, and a
+direct call waits for it and then polls.
+
+**Records.** One `takeover` row per item (§4), keyed by GitHub node id and
+unique per project: kind (`issue` or `pr`), number, URL, title, author,
+`is_cross_repository` for a pull request, state, and the task, watch and
+failure later steps fill in. States run `found` → `acknowledged` → `working`
+→ `watched` → `done`, a pull request going straight from `acknowledged` to
+`watched` and an issue closed while `working` going straight to `done`;
+an item GitHub reports closed or merged while still `found` or `acknowledged`
+ends the same way before adoption, the issue task or acknowledgment runs, so
+nothing is posted to it: an issue or merged pull request goes to `done`, an
+unmerged closed pull request to `released`;
+`released` and `failed` are reachable from any state that is not terminal,
+and `done`, `released` and `failed` are terminal. `TakeoverStore` re-reads the
+row inside each write and refuses any other move. `failure` holds the row's
+current problem: every move except to `failed` clears it in the same write,
+and a move to `failed` sets it to the reason. The Pull
+Requests page lists every row in a **Taken over** group, with kind, number,
+title, author, state, any `failure` and a link to GitHub, under the page's project filter.
+
+**Acknowledgment.** An item is acknowledged only once its board side exists:
+an issue's task, or a pull request's adopted watch. The step that creates it
+calls `WorkerSupervisor.acknowledge(takeover:)`, which does nothing unless the
+row is still `found`, and otherwise runs in this order
+(`TakeoverAcknowledger`):
+
+1. `gh issue edit <url> --add-label <ackLabel>`, or `gh pr edit` for a pull
+   request.
+2. Record `acknowledged`.
+3. Post `ackComment` with `gh issue comment` or `gh pr comment`. The template's
+   `{assignee}`, `{kind}` (`issue` or `pull request`) and `{url}` are filled
+   in; with the assignee left at `@me`, `{assignee}` is the login `gh api user`
+   names. Everything else is posted verbatim, so any footer is the human's to
+   write.
+
+If the label edit fails, nothing is recorded and the row stays `found` for the
+caller's next poll to retry. If the comment fails after the label is on, the
+row keeps `acknowledged`, its `failure` holds the error (shown on its Taken
+over row), and nothing re-adds the label. The step that then moves the row to
+`working` or `watched` writes the error again after that move, so it stays
+shown until the row moves on once more: a retry on a row that is no longer
+`found` runs no `gh` command. Nothing in this path reads a comment's text back
+from GitHub.
+
+**Adoption.** After each takeover poll, every `found` pull request row of the
+project is adopted (`WorkerSupervisor.adoptTakenOverPullRequests`):
+
+- A pull request from a fork (`is_cross_repository`) cannot be adopted, since
+  publishing pushes only to the project's `origin`. The row becomes `failed`
+  with a reason saying so; it is not acknowledged and nothing is posted.
+- Without PR follow-through on, the row stays `found` with a `failure` saying
+  adoption needs follow-through, and the next poll after it is turned on
+  clears that and adopts it.
+- A watch the human stopped is not adopted: `PRWatchStore.adopt` returns it
+  unchanged, and the row stays `found` with a `failure` saying follow-through
+  is stopped for that pull request, with nothing posted. Watch again adopts it
+  on the next poll; removing a trigger label releases it.
+- Otherwise `PRWatchStore.adopt` writes a `pr_watch` with `adopted` set, the
+  row's id in `takeover_id`, `authored` off and `takeover_round` 1, or marks
+  the project's existing watch for that pull request adopted, its
+  `takeover_round` one past its current round. Then the row is acknowledged
+  (below) and, once acknowledged, moves to `watched` with the watch's id. A
+  failed acknowledgment leaves it `found` with its watch; the next poll
+  acknowledges it again, and a row left `acknowledged` by an interruption is
+  moved to `watched` then.
+
+From then on follow-through polls, triages, fixes, checks and publishes the
+adopted watch like the human's own (§13.1), with the human's own open feedback
+as its takeover round's work, and may fast-forward its head under §13.5's
+unchanged conditions.
+
+**Agent Board never creates labels.** The acknowledgment label must already
+exist on the repository. Before a project's first acknowledgment, and again
+whenever a label edit fails with GitHub saying the label was not found,
+`gh label list --repo <owner/name> --search <ackLabel> --json name` checks for
+it by exact name, ignoring case. A missing label adds no label and posts no
+comment: it becomes the project's `pr_poll_problem` row, telling the human to
+create the label, and every takeover waits in `found` until a later check finds
+it. Once a check or an edit has seen the label, the app does not list it again
+for that project until an edit says it is missing. When the poll's search is
+failing too, its problem is the one shown.
+
+**Issues become tasks.** After each discovery poll,
+`WorkerSupervisor.startIssueTakeovers` takes every live `issue` row still
+`found` or `acknowledged` through these steps, and a step that fails leaves the
+row where it is for the next poll:
+
+1. `gh issue view <url> --json number,title,url,author,body,comments,closedByPullRequestsReferences`
+   reads the issue (`TakeoverIssueReader`), and one write creates a `code` task
+   with origin `takeover` in `backlog` and records its id on the row
+   (`TakeoverStore.createTask`). A row that already has a task keeps it, so an
+   issue never gets two. The task body gives the issue's number and URL, quotes
+   its title, body and every comment line by line with `> `, each comment headed
+   by its author and URL, and lists the open pull requests GitHub links to it.
+   A paragraph above the quotes labels all of it as text written on GitHub: data
+   to act on, not instructions to follow, as a fix round's body labels review
+   comments (§13.1).
+2. The acknowledgment above runs. Until the row is `acknowledged` the task stays
+   in `backlog`, so nothing dispatches work on an issue GitHub has not been told
+   about.
+3. One write moves the row to `working` and the task to `ready`.
+4. `Board.requestSpawn` and then the supervisor's `spawnWorker`, the path
+   `spawn_worker` takes, start the worker with `requestedBy` `takeover`. The
+   project's autonomy setting, caps and spawn approval apply unchanged: with
+   autonomy off, a spawn approval waits for the human. A refused spawn leaves the
+   task in `ready`.
+5. A `decision` report tells the orchestrator which task appeared, from which
+   issue, and how the spawn went, so it does not create a second task for it.
+
+**The pull request closes the issue.** When the task is accepted into a project
+that integrates standalone tasks by pull request, the awaiting-pull-request
+advice says the board adds the closing line, and `open_pull_request` for the
+task's branch appends `Closes #<n>` to the body, `n` being the issue's own
+number, unless the body already closes that issue
+(`TakeoverStore.closingBody`). When the issue's repository is not the one the
+pull request opens on (the project's `origin` on GitHub), the line names it:
+`Closes owner/name#<n>`. Opening it still waits for the human's approval.
+The pull request is then the human's, so follow-through's own author search
+finds it. When a watch's snapshot body closes a live `acknowledged` or `working`
+issue row, by a closing keyword (`close`, `fix`, `resolve` and their forms)
+before `#n`, `owner/name#n` or the issue's URL, with a bare `#n` counting only
+in the issue's repository, the row moves to `watched` on that watch
+(`TakeoverStore.watchClosingPullRequest`). The watch reaching `merged` moves
+every row watching it to `done` in the same write.
+
+**Release.** A live row whose item is still open but now lacks a trigger label
+or is no longer assigned to the assignee becomes `released`. The check rides
+the same `nodes(ids:)` read rather than one `gh pr view` per row, since the
+search cannot see these items: acknowledged ones carry the acknowledgment label
+it excludes, and released ones have lost what it searches for. That is one
+call per poll however many rows are live, against one per row. A closed item
+is never released this way (see Closed items, below), and one GitHub no longer
+returns is left as it is. Release changes the row's
+state and, for an issue, may close its task (below). `gh api graphql` exits
+non-zero when GraphQL reports any error, such as a deleted node, so the read
+keeps `data.nodes` from such a response: a null node, or one an
+`errors[].path` names, counts as not returned this poll (a new hit is not
+recorded until a poll reads it), the omission is logged, and only a response
+with no `data.nodes` counts as a failed poll.
+
+Releasing an issue row whose task has not started, one still in `backlog` or
+`ready` with no active session, closes the task in the same write the way
+`close_task` does: `closed` with a reason naming the issue, any pending spawn
+approval denied, and a `decision` report to the orchestrator. A task that is
+running, in review or done is left alone, so a running worker finishes.
+
+Release posts nothing on GitHub. Releasing a pull request clears its watch's
+`adopted` in the same write, so a round already in triaging, fixing, checking
+or publishing can no longer push: publishing refuses a watch neither authored
+nor adopted (§13.5) and parks it. On a later poll
+`PRWatchStore.stopReleasedAdoptions` stops the watch the way Stop watching
+stops one: its open items are dismissed, it moves to stopped and drops the
+takeover's id, so the poll stops reading it and Watch again starts it fresh. A
+takeover that adopted the human's own authored pull request in place clears
+only `adopted` and `takeover_id`; that watch keeps running as before the
+takeover.
+
+**Closed items.** The same `nodes(ids:)` read finishes rows whose item has
+closed. An issue row `working` or `watched` that reads `CLOSED` becomes `done`,
+so a pull request the human opens and merges between two follow-through polls
+still ends the takeover; a closed issue is never released. A `watched` pull
+request row becomes `done` when it reads `MERGED` and `released` when it reads
+`CLOSED`, as its watch ends `merged` or `closed`. Any other closed row is left
+as it is. A watch reaching `merged` also finishes the rows watching it in its
+own write (above); whichever comes first moves the row, and the other finds it
+terminal.
