@@ -679,8 +679,7 @@ struct TakeoverRow: View {
             Text(takeover.kind == .pr ? "PR" : "Issue")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            Text("#\(takeover.number)")
-                .monospacedDigit()
+            numberView
             VStack(alignment: .leading, spacing: 2) {
                 Text(takeover.title)
                     .lineLimit(2)
@@ -702,11 +701,19 @@ struct TakeoverRow: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("State: \(takeover.state.rawValue)")
-            if let url = URL(string: takeover.url) {
-                Link("Open", destination: url)
-                    .help("Open \(takeover.kind == .pr ? "pull request" : "issue") #\(takeover.number) on GitHub")
-            }
         }
         .padding(.vertical, 2)
+    }
+
+    @ViewBuilder private var numberView: some View {
+        let label = issueNumberLabel(takeover.number)
+        if let url = URL(string: takeover.url) {
+            let noun = takeover.kind == .pr ? "pull request" : "issue"
+            let help: String = "Open \(noun) \(label) on GitHub"
+            Link(destination: url) { Text(verbatim: label).monospacedDigit() }
+                .help(help)
+        } else {
+            Text(verbatim: label).monospacedDigit()
+        }
     }
 }

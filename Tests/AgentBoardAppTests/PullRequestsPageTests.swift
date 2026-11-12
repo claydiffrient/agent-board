@@ -12,6 +12,10 @@ import XCTest
 final class PullRequestsPageTests: XCTestCase {
     private let label = "verified-example"
 
+    func testIssueNumberLabelIsNotGrouped() {
+        XCTAssertEqual(issueNumberLabel(13237), "#13237")
+    }
+
     private func project(_ db: AppDatabase, name: String = "app", label: String?) throws -> Project {
         var project = try ProjectStore(db).register(
             name: name, repoPath: "/tmp/pr-page-\(UUID().uuidString)", baseBranch: "main",
