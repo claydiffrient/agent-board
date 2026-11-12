@@ -308,6 +308,10 @@ template is literal, and the literal text before the first placeholder is the
   project did before this existed.
 - The base branch is published under its own name; it is the one ref on the
   remote Agent Board does not rename.
+- An epic built on a pull request (§4) publishes to that pull request's head
+  ref, ahead of and regardless of any template. The human named that branch, so
+  `RemoteRefPolicy.validateUpstream` checks it like any published name but
+  skips the template's namespace; it still refuses the base branch.
 
 `RemoteRefPolicy` guards the destination side of the refspec, which is a
 different question from `PublishPolicy`'s. It refuses a name that is not

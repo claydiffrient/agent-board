@@ -32,8 +32,13 @@ public struct RemoteBranchResolver {
     }
 
     /// Nil when the project sets no template, or when `branch` is not one Agent Board owns — the
-    /// base branch is the one ref on the remote that is not this feature's to rename.
+    /// base branch is the one ref on the remote that is not this feature's to rename. An epic built on
+    /// a pull request publishes to that pull request's head ref, template or not.
     public func publishedName(branch: String, project: Project) throws -> String? {
+        if PublishPolicy.isOwned(branch),
+           let headRef = try epics.list(projectId: project.id).first(where: { $0.branch == branch })?.upstreamRef {
+            return try RemoteRefPolicy.validateUpstream(headRef, baseBranch: project.baseBranch)
+        }
         guard let raw = project.settings.remoteBranchTemplate?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty
         else { return nil }

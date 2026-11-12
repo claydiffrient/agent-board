@@ -1403,6 +1403,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             throw ToolError(error.description)
         } catch let error as RemoteRefPolicyError {
             throw ToolError(error.description)
+        } catch let error as EpicUpstreamError {
+            throw ToolError(error.description)
         }
     }
 

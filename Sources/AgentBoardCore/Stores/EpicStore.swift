@@ -9,13 +9,19 @@ public struct EpicStore: Sendable {
     }
 
     @discardableResult
-    public func create(projectId: String, title: String, goal: String?) throws -> Epic {
+    public func create(projectId: String, title: String, goal: String?, upstream: EpicUpstream? = nil) throws -> Epic {
         try db.writer.write { db in
-            try Self.insert(db, projectId: projectId, title: title, goal: goal)
+            try Self.insert(db, projectId: projectId, title: title, goal: goal, upstream: upstream)
         }
     }
 
-    static func insert(_ db: Database, projectId: String, title: String, goal: String?) throws -> Epic {
+    /// An epic with an `upstream` ships by pull request from creation, and that pull request is its upstream.
+    static func insert(
+        _ db: Database, projectId: String, title: String, goal: String?, upstream: EpicUpstream? = nil
+    ) throws -> Epic {
+        if let upstream {
+            try validate(db, upstream: upstream, projectId: projectId)
+        }
         let id = Epic.newId()
         let epic = Epic(
             id: id,
@@ -24,10 +30,32 @@ public struct EpicStore: Sendable {
             goal: goal,
             branch: branchName(for: id),
             state: .planning,
-            createdAt: .nowMillis
+            createdAt: .nowMillis,
+            shipsByPullRequest: upstream == nil ? nil : true,
+            upstream: upstream
         )
         try epic.insert(db)
         return epic
+    }
+
+    private static func validate(_ db: Database, upstream: EpicUpstream, projectId: String) throws {
+        guard let project = try Project.fetchOne(db, key: projectId) else {
+            throw BoardError.projectNotFound(projectId)
+        }
+        try RemoteRefPolicy.validateUpstream(upstream.headRef, baseBranch: project.baseBranch)
+        let open = try Epic.fetchOne(
+            db,
+            sql: """
+            SELECT * FROM epic WHERE project_id = ? AND upstream_pr_number = ? AND state NOT IN (?, ?)
+            ORDER BY created_at, rowid LIMIT 1
+            """,
+            arguments: [projectId, upstream.pullRequest.number, EpicState.done, EpicState.abandoned]
+        )
+        if let open {
+            throw EpicUpstreamError.alreadyAdopted(
+                pullRequest: upstream.pullRequest.number, epicId: open.id, title: open.title
+            )
+        }
     }
 
     public static let branchPrefix = "agentboard/epic-"
