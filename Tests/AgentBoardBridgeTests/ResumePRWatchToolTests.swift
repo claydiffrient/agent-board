@@ -39,7 +39,7 @@ final class ResumePRWatchToolTests: XCTestCase {
         XCTAssertEqual(approval.kind, .prWatchResume)
         XCTAssertEqual(try PRWatchResumeRequest.decode(approval.payload), PRWatchResumeRequest(
             watchId: ours.id, number: 12, title: "Change 12", parkedReason: "Hit the round cap of 2.",
-            reason: "Raised the round cap."
+            reason: "Raised the round cap.", url: "https://github.com/example-org/app/pull/12"
         ))
         XCTAssertEqual(try watches.get(ours.id)?.state, .parked)
 

@@ -810,8 +810,8 @@ on at all.
   shows "restarted: head moved" while it waits for the next poll. An
   orchestrator that has dealt with the parked reason asks for Resume with
   `resume_pr_watch` (§6). It shows on Pending Approvals as "Resume a parked
-  pull request", with the PR, the parked reason and the orchestrator's reason
-  beneath, and granting it runs the same `PRWatchStore.resume`.
+  pull request", with the PR (its number links to GitHub when the request carries a URL),
+  the parked reason and the orchestrator's reason beneath, and granting it runs the same `PRWatchStore.resume`.
 - **Stopped.** Stopped watches sit in their own **Stopped** group after
   Parked, collapsed by default and absent while empty. A stopped row offers
   only **Watch again**, which runs `PRWatchStore.resume` as Resume does: the
@@ -1246,8 +1246,9 @@ and `done`, `released` and `failed` are terminal. `TakeoverStore` re-reads the
 row inside each write and refuses any other move. `failure` holds the row's
 current problem: every move except to `failed` clears it in the same write,
 and a move to `failed` sets it to the reason. The Pull
-Requests page lists every row in a **Taken over** group, with kind, number,
-title, author, state, any `failure` and a link to GitHub, under the page's project filter.
+Requests page lists every row in a **Taken over** group, with kind, number
+(a link to the item on GitHub, shown ungrouped as `#13237`), title, author, state and any
+`failure`, under the page's project filter.
 
 **Acknowledgment.** An item is acknowledged only once its board side exists:
 an issue's task, or a pull request's adopted watch. The step that creates it
