@@ -53,36 +53,35 @@ public struct NoteIndexEntry: Sendable, Equatable {
     public let title: String
     public let uri: String
     public let headings: [String]
-    public let pinned: Bool
 
-    public init(id: String, title: String, uri: String, headings: [String], pinned: Bool) {
+    public init(id: String, title: String, uri: String, headings: [String]) {
         self.id = id
         self.title = title
         self.uri = uri
         self.headings = headings
-        self.pinned = pinned
     }
 }
 
-/// What a spawning worker is told about its project's notes: the few written for this work in
-/// full, and every other note as a title and a resource uri.
+/// What a spawning worker is told about its project's notes (D13): the few written for this work in
+/// full, pinned notes as a title and a resource uri, and only a count of the rest.
 public struct SpawnNotes: Sendable, Equatable {
     public let full: [InjectedNote]
     public let index: [NoteIndexEntry]
+    public let unlistedCount: Int
 
-    public init(full: [InjectedNote] = [], index: [NoteIndexEntry] = []) {
+    public init(full: [InjectedNote] = [], index: [NoteIndexEntry] = [], unlistedCount: Int = 0) {
         self.full = full
         self.index = index
+        self.unlistedCount = unlistedCount
     }
 
-    public var isEmpty: Bool { full.isEmpty && index.isEmpty }
+    public var isEmpty: Bool { full.isEmpty && index.isEmpty && unlistedCount == 0 }
 }
 
 extension NoteStore {
     /// What a worker on `taskId` is told about this project's notes. A note the orchestrator
-    /// attached to the task or to its epic arrives in full; every other note in the project —
-    /// pinned ones included — arrives as an index entry naming the resource the worker can read
-    /// it from.
+    /// attached to the task or to its epic arrives in full; a pinned note arrives as an index entry
+    /// naming the resource the worker can read it from; every other note is only counted.
     public func notesForSpawn(projectId: String, taskId: String, epicId: String?) throws -> SpawnNotes {
         try db.reader.read { db in
             var reasons: [String: [NoteInjectionReason]] = [:]
@@ -120,19 +119,17 @@ extension NoteStore {
 
             let injected = Set(fullIds)
             let headings = try Self.headings(db, projectId: projectId)
-            let index = try Self.list(db, projectId: projectId)
-                .filter { !injected.contains($0.id) }
-                .map { note in
-                    NoteIndexEntry(
-                        id: note.id,
-                        title: note.title,
-                        uri: NoteResourceURI.uri(projectId: projectId, noteId: note.id),
-                        headings: headings[note.id] ?? [],
-                        pinned: note.pinned
-                    )
-                }
+            let rest = try Self.list(db, projectId: projectId).filter { !injected.contains($0.id) }
+            let index = rest.filter(\.pinned).map { note in
+                NoteIndexEntry(
+                    id: note.id,
+                    title: note.title,
+                    uri: NoteResourceURI.uri(projectId: projectId, noteId: note.id),
+                    headings: headings[note.id] ?? []
+                )
+            }
 
-            return SpawnNotes(full: full, index: index)
+            return SpawnNotes(full: full, index: index, unlistedCount: rest.count - index.count)
         }
     }
 }

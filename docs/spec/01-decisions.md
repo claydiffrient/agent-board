@@ -17,7 +17,7 @@ alternative named is the one worth reconsidering if the decision goes wrong.
 | D10 | Epics group tasks and own the integration branch | Merge scope becomes a lookup, not a judgment call | Flat tasks |
 | D11 | One orchestrator per project | cwd determines which CLAUDE.md, skills, and MCP servers load | One global orchestrator |
 | D12 | Notes are Agent Board's own store, Solo-scratchpad-shaped | Notes are a working surface, not Claude Code memory | View over `~/.claude/.../memory/` |
-| D13 | Task/epic-attached notes injected in full at spawn; every other note indexed by title and `note://` uri, fetched on demand | Stops three workers rediscovering the same constraint without charging every worker for every pinned note | Inject pinned notes in full too |
+| D13 | Task/epic-attached notes injected in full at spawn; pinned notes indexed by title (capped at 120 characters) and `note://` uri, fetched on demand; every other note only counted, with `search_notes` / `read_note` named as the way to it | Stops three workers rediscovering the same constraint without charging every worker for every note: an index of every note grew with each one written and became most of a large project's prompt | Inject pinned notes in full too; index every note |
 | D14 | Workers run `--permission-mode auto` | The shipped classifier already encodes 70 soft-deny rules | Hand-rolled PreToolUse denylist |
 | D15 | Blocked agents are answered by attaching to their real terminal | Auto mode's prompt text is written to be read; don't reproduce it | Native approval dialog |
 | D16 | Workers are `claude --bg` background sessions | Deletes process supervision, crash recovery, and scrollback from scope | App owns the PTYs |

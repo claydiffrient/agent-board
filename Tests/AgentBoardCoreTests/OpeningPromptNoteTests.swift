@@ -94,18 +94,17 @@ final class OpeningPromptNoteTests: XCTestCase {
         XCTAssertTrue(notes.full.isEmpty, "a pinned note was injected in full")
         XCTAssertEqual(notes.index.map(\.id), [note.id])
         XCTAssertEqual(notes.index[0].uri, uri(note))
-        XCTAssertTrue(notes.index[0].pinned)
         XCTAssertEqual(notes.index[0].headings, ["Commits", "Reviews"])
 
         let text = try prompt(s)
         XCTAssertTrue(text.contains("### Note index"))
-        XCTAssertTrue(text.contains("- House rules (pinned) — Commits · Reviews — `\(uri(note))`"))
+        XCTAssertTrue(text.contains("- House rules — Commits · Reviews — `\(uri(note))`"))
         XCTAssertFalse(text.contains("Imperative mood, no prefixes."), "a pinned note's body reached the prompt")
         XCTAssertFalse(text.contains("One reviewer."))
         XCTAssertFalse(text.contains(OpeningPrompt.noteOpenMarker), "an index entry was fenced as an injected note")
     }
 
-    func testANoteAttachedToSomeoneElsesTaskIsIndexedByTitleOnly() throws {
+    func testAnUnpinnedNoteIsCountedButNeitherListedNorReproduced() throws {
         let s = try seed()
         let other = try s.fixture.tasks.create(
             projectId: s.fixture.project.id, title: "Other", body: nil, acceptance: nil,
@@ -117,19 +116,26 @@ final class OpeningPromptNoteTests: XCTestCase {
         )
         try s.fixture.notes.attach(noteId: note.id, taskId: other.id)
 
+        let notes = try spawnNotes(s)
+        XCTAssertTrue(notes.index.isEmpty)
+        XCTAssertEqual(notes.unlistedCount, 1)
+
         let text = try prompt(s)
-        XCTAssertTrue(text.contains("Someone else's note"))
-        XCTAssertTrue(text.contains(uri(note)))
+        XCTAssertFalse(text.contains("Someone else's note"), "an unpinned note was listed by title")
+        XCTAssertFalse(text.contains(uri(note)))
         XCTAssertFalse(text.contains("Should never reach a worker unasked."))
+        XCTAssertTrue(text.contains("One note exists on this project and is not listed; find it with `search_notes`"), text)
     }
 
     func testEveryIndexEntryCarriesTheUriThatFetchesItsBody() throws {
         let s = try seed()
         var created: [Note] = []
         for title in ["First", "Second", "Third"] {
-            created.append(try s.fixture.notes.create(
+            let note = try s.fixture.notes.create(
                 projectId: s.fixture.project.id, title: title, sections: [("H", "body of \(title)")]
-            ))
+            )
+            try s.fixture.notes.pin(note.id, true)
+            created.append(note)
         }
 
         let notes = try spawnNotes(s)
@@ -145,14 +151,23 @@ final class OpeningPromptNoteTests: XCTestCase {
     func testTheIndexLineCapsItsSectionListAndCountsTheRest() throws {
         let entry = NoteIndexEntry(
             id: "n", title: "Long one", uri: "note://p/n",
-            headings: ["One", "Two", "Three", "Four", "Five"], pinned: false
+            headings: ["One", "Two", "Three", "Four", "Five"]
         )
         XCTAssertEqual(OpeningPrompt.entryLine(entry), "- Long one — One · Two · Three · +2 more — `note://p/n`")
     }
 
     func testAnEmptyNoteSaysSoRatherThanNamingNoSections() throws {
-        let entry = NoteIndexEntry(id: "n", title: "Nothing yet", uri: "note://p/n", headings: [], pinned: false)
+        let entry = NoteIndexEntry(id: "n", title: "Nothing yet", uri: "note://p/n", headings: [])
         XCTAssertEqual(OpeningPrompt.entryLine(entry), "- Nothing yet — no sections yet — `note://p/n`")
+    }
+
+    func testALongTitleIsCutAt120CharactersWithAnEllipsis() throws {
+        let title = String(repeating: "t", count: 300)
+        let entry = NoteIndexEntry(id: "n", title: title, uri: "note://p/n", headings: [])
+        XCTAssertEqual(
+            OpeningPrompt.entryLine(entry),
+            "- \(String(repeating: "t", count: 120))… — no sections yet — `note://p/n`"
+        )
     }
 
     // MARK: Overlap, absence and isolation
