@@ -71,6 +71,15 @@ For a task `T` in project `P`:
    standalone task's diff, and its reviewer's (§5.1), reads against that
    record while local `<base>` is still behind it, so commits the remote had
    are not shown as the task's.
+   **An epic built on a pull request** (§4) is cut from that pull request's
+   head instead: `WorktreeManager.fetchRemoteTip` fetches
+   `origin +refs/heads/<head ref>:refs/remotes/origin/<head ref>` and the
+   epic branch, still `agentboard/epic-<id>`, starts at the fetched commit.
+   This fetch does fail the spawn: a missing `origin`, a failed fetch or a
+   head ref the remote no longer has refuses it with
+   `SupervisorError.upstreamHeadUnavailable`, naming the pull request and the
+   ref, and nothing falls back to the base branch. The head branch itself is
+   never checked out locally.
    **A task inside an epic always branches from the local epic branch as it
    stands**: no fetch, no comparison with any remote. An existing epic branch
    is local integration state its tasks must see each other's merged work on,

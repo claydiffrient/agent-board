@@ -20,6 +20,7 @@ struct PullRequestsView: View {
     @State private var refreshing: Set<PRPageGroup> = []
     @State private var refreshErrors: [PRPageGroup: String] = [:]
     @State private var showsStopped = false
+    @State private var watchingByNumber = false
 
     init(projects: [Project], projectFilter: Binding<String?> = .constant(nil)) {
         self.projects = projects
@@ -38,6 +39,11 @@ struct PullRequestsView: View {
         projects.filter {
             $0.settings.prFollowThrough.enabled || $0.settings.takeover.enabled || $0.id == projectFilter
         }
+    }
+
+    /// Projects a pull request can be adopted into by number: follow-through on.
+    private var adoptable: [Project] {
+        projects.filter(\.settings.prFollowThrough.enabled)
     }
 
     private var showsTakenOver: Bool {
@@ -87,6 +93,21 @@ struct PullRequestsView: View {
                 }
                 .fixedSize()
                 Spacer()
+                Button("Watch pull request…") { watchingByNumber = true }
+                    .disabled(adoptable.isEmpty)
+                    .help(adoptable.isEmpty
+                        ? "Turn on PR follow-through in a project's settings to watch a pull request by number"
+                        : "Adopt a pull request you took over into follow-through, by its number")
+                    .popover(isPresented: $watchingByNumber, arrowEdge: .bottom) {
+                        WatchPullRequestForm(
+                            projects: adoptable,
+                            initialProjectId: projectFilter,
+                            watch: { number, projectId in
+                                try await env.supervisor.watchPullRequest(number: number, projectId: projectId)
+                            },
+                            close: { watchingByNumber = false }
+                        )
+                    }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -550,6 +571,10 @@ struct PullRequestRow: View {
                     .help("Leave this pull request to you; it moves to Stopped until you choose Watch again")
             } else {
                 Button(watch.paused ? "Resume" : "Pause", action: togglePause)
+                if watch.canStop {
+                    Button("Stop watching", action: stopWatching)
+                        .help("Release this pull request you adopted; it moves to Stopped until you choose Watch again")
+                }
             }
         }
         .padding(.vertical, 2)
@@ -679,8 +704,7 @@ struct TakeoverRow: View {
             Text(takeover.kind == .pr ? "PR" : "Issue")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            Text("#\(takeover.number)")
-                .monospacedDigit()
+            numberView
             VStack(alignment: .leading, spacing: 2) {
                 Text(takeover.title)
                     .lineLimit(2)
@@ -702,11 +726,103 @@ struct TakeoverRow: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("State: \(takeover.state.rawValue)")
-            if let url = URL(string: takeover.url) {
-                Link("Open", destination: url)
-                    .help("Open \(takeover.kind == .pr ? "pull request" : "issue") #\(takeover.number) on GitHub")
-            }
         }
         .padding(.vertical, 2)
+    }
+
+    @ViewBuilder private var numberView: some View {
+        let label = issueNumberLabel(takeover.number)
+        if let url = URL(string: takeover.url) {
+            let noun = takeover.kind == .pr ? "pull request" : "issue"
+            let help: String = "Open \(noun) \(label) on GitHub"
+            Link(destination: url) { Text(verbatim: label).monospacedDigit() }
+                .help(help)
+        } else {
+            Text(verbatim: label).monospacedDigit()
+        }
+    }
+}
+
+/// The page's **Watch pull request…** popover (SPEC §13.4): a project and a number, with any refusal inline.
+struct WatchPullRequestForm: View {
+    let projects: [Project]
+    let watch: (Int, String) async throws -> Void
+    let close: () -> Void
+
+    @State private var projectId: String?
+    @State private var number = ""
+    @State private var submitting = false
+    @State private var refusal: String?
+
+    init(
+        projects: [Project], initialProjectId: String?, watch: @escaping (Int, String) async throws -> Void,
+        close: @escaping () -> Void
+    ) {
+        self.projects = projects
+        self.watch = watch
+        self.close = close
+        let initial = projects.first { $0.id == initialProjectId } ?? projects.first
+        _projectId = State(initialValue: initial?.id)
+    }
+
+    private var parsedNumber: Int? {
+        let trimmed = number.trimmingCharacters(in: .whitespacesAndNewlines)
+        let digits = trimmed.hasPrefix("#") ? String(trimmed.dropFirst()) : trimmed
+        return Int(digits).flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Watch a pull request you took over")
+                .fontWeight(.semibold)
+            if projects.count > 1 {
+                Picker("Project", selection: $projectId) {
+                    ForEach(projects) { Text($0.name).tag(String?.some($0.id)) }
+                }
+            }
+            TextField("Pull request number", text: $number)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 320)
+                .onSubmit(submit)
+            if let refusal {
+                Label(refusal, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(width: 320, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("It must be open and in this project's own repository. Nothing is posted on GitHub; "
+                + "Stop watching releases it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 320, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel", action: close)
+                    .keyboardShortcut(.cancelAction)
+                Button(submitting ? "Watching…" : "Watch", action: submit)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(parsedNumber == nil || projectId == nil || submitting)
+            }
+        }
+        .padding(12)
+    }
+
+    private func submit() {
+        guard let number = parsedNumber, let projectId, !submitting else { return }
+        submitting = true
+        refusal = nil
+        _Concurrency.Task {
+            defer { submitting = false }
+            do {
+                try await watch(number, projectId)
+                AccessibilityNotification.Announcement("Watching pull request \(number)").post()
+                close()
+            } catch {
+                refusal = errorText(error)
+                AccessibilityNotification.Announcement("Not watched: \(errorText(error))").post()
+            }
+        }
     }
 }

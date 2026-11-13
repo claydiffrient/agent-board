@@ -222,7 +222,18 @@ public enum IntegrationPlan {
 
         var merged: [String] = []
         for entry in toMerge + alreadyMerged where !merged.contains(entry.branch) { merged.append(entry.branch) }
-        let verify = verification.integratorInstruction(epicBranch: epic.branch, baseBranch: baseBranch, mergedBranches: merged)
+        let upstream = epic.upstream
+        // SPEC §5.2 step 3: an epic built on a pull request diffs against that head, or the pull
+        // request's own commits are read as the integrator's.
+        let verify = verification.integratorInstruction(
+            epicBranch: epic.branch, baseBranch: upstream.map { "origin/\($0.headRef)" } ?? baseBranch,
+            mergedBranches: merged
+        )
+        let publishing = upstream.map {
+            "`\(epic.branch)` is pushed onto `\($0.headRef)`, the head of pull request #\($0.pullRequest.number), "
+                + "outside this session, by the orchestrator through an approval the human grants."
+        } ?? "The pull request from `\(epic.branch)` into `\(baseBranch)` is opened outside this session, by a human or "
+            + "by the orchestrator through an approval the human grants."
         sections.append("""
         ## How to work
         - You are in a dedicated git worktree checked out on `\(epic.branch)`. Work only in this directory.
@@ -238,8 +249,7 @@ public enum IntegrationPlan {
         ## When you are done
         1. Commit on `\(epic.branch)`. Write the message in imperative mood, with no conventional-commit prefix.
         2. Do not push. Do not open a PR. Both are denied at the tool layer; do not spend a turn discovering that. \
-        The pull request from `\(epic.branch)` into `\(baseBranch)` is opened outside this session, by a human or \
-        by the orchestrator through an approval the human grants.
+        \(publishing)
         3. Call `report_complete(summary, files_changed, tests_run, caveats)`. Say which branches you merged, which you \
         skipped and why, and \(verification.reportInstruction). That ends your task; do not start \
         further work afterwards.

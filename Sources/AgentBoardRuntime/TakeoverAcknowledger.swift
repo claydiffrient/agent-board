@@ -23,25 +23,34 @@ public struct TakeoverAcknowledger: Sendable {
 
     static func command(_ kind: TakeoverKind) -> String { kind == .pr ? "pr" : "issue" }
 
+    /// Where the takeover was triggered: the issue, for a pull request taken over through it (SPEC §13.8).
+    static func target(_ takeover: Takeover) -> (kind: TakeoverKind, url: String) {
+        if takeover.viaIssue, let issueURL = takeover.issueURL { return (.issue, issueURL) }
+        return (takeover.kind, takeover.url)
+    }
+
     public static func labelListArguments(label: String, repository: String) -> [String] {
         ["label", "list", "--repo", repository, "--search", label, "--json", "name", "--limit", "100"]
     }
 
     public static func addLabelArguments(_ takeover: Takeover, label: String) -> [String] {
-        [command(takeover.kind), "edit", takeover.url, "--add-label", label]
+        let place = target(takeover)
+        return [command(place.kind), "edit", place.url, "--add-label", label]
     }
 
     public static func commentArguments(_ takeover: Takeover, body: String) -> [String] {
-        [command(takeover.kind), "comment", takeover.url, "--body", body]
+        let place = target(takeover)
+        return [command(place.kind), "comment", place.url, "--body", body]
     }
 
     static let viewerArguments = ["api", "user", "--jq", ".login"]
 
     public static func render(_ template: String, assignee: String, takeover: Takeover) -> String {
-        template
+        let place = target(takeover)
+        return template
             .replacingOccurrences(of: "{assignee}", with: assignee)
-            .replacingOccurrences(of: "{kind}", with: takeover.kind == .pr ? "pull request" : "issue")
-            .replacingOccurrences(of: "{url}", with: takeover.url)
+            .replacingOccurrences(of: "{kind}", with: place.kind == .pr ? "pull request" : "issue")
+            .replacingOccurrences(of: "{url}", with: place.url)
     }
 
     public static func missingLabelProblem(_ label: String, repository: String) -> String {
@@ -71,7 +80,7 @@ public struct TakeoverAcknowledger: Sendable {
                try !labelExists(label, repository: repository, cwd: cwd) {
                 return missing
             }
-            throw PullRequestCheckFailure("`gh \(Self.command(takeover.kind)) edit --add-label` failed: \(said)")
+            throw PullRequestCheckFailure("`gh \(Self.command(Self.target(takeover).kind)) edit --add-label` failed: \(said)")
         }
 
         guard let acknowledged = try store.acknowledge(takeover.id, now: now) else { return .skipped }

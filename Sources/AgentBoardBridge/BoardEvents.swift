@@ -105,6 +105,9 @@ public protocol WorkerControl: Sendable {
     /// Merges the freshest project base branch into the epic branch, only on request (SPEC §5.2).
     /// The caller has already refused a terminal epic.
     func refreshEpic(epicId: String) async throws -> EpicRefreshAnswer
+    /// Reads pull request `number` from the project's GitHub remote as an epic upstream, refusing
+    /// one that is not open or comes from a fork (SPEC §6.1 `create_epic`).
+    func pullRequestUpstream(projectId: String, number: Int) async throws -> EpicUpstream
 }
 
 /// `assignAgent(scope: .reviewer)` refusing a task whose branch has no diff against its base: a

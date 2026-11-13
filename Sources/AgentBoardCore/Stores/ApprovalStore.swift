@@ -155,17 +155,18 @@ public struct ApprovalStore: Sendable {
         try db.reader.read { db in try Self.publishedEpicPullRequest(db, epicId: epicId) }
     }
 
-    /// Each PR-open epic's pull request, keyed by epic id, for the lane headers.
+    /// The pull request each epic awaits, keyed by epic id, for the lane headers: an upstream epic's
+    /// from creation, any other's while it is PR-open (`Board.awaitedPullRequest`).
     public func observeEpicPullRequests(projectId: String) -> ValueObservation<ValueReducers.Fetch<[String: PullRequestReference]>> {
         ValueObservation.tracking { db in
-            let ids = try String.fetchAll(
+            let epics = try Epic.fetchAll(
                 db,
-                sql: "SELECT id FROM epic WHERE project_id = ? AND state = ?",
+                sql: "SELECT * FROM epic WHERE project_id = ? AND (state = ? OR upstream_pr_number IS NOT NULL)",
                 arguments: [projectId, EpicState.pullRequestOpen]
             )
             var byEpic: [String: PullRequestReference] = [:]
-            for id in ids {
-                byEpic[id] = try Self.publishedEpicPullRequest(db, epicId: id)
+            for epic in epics {
+                byEpic[epic.id] = try Board.awaitedPullRequest(db, epic: epic)
             }
             return byEpic
         }

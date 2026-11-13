@@ -40,7 +40,10 @@ CREATE TABLE epic (
   state          TEXT NOT NULL,    -- planning | active | integrating | integrated | pull_request_open | done | abandoned
   created_at     INTEGER NOT NULL,
   review_level   TEXT,             -- none|agent|task|epic for this epic's tasks; NULL inherits the project's
-  ships_by_pull_request INTEGER    -- set when the integrator spawns (§5.2 step 4); NULL completes as a local merge
+  ships_by_pull_request INTEGER,   -- set when the integrator spawns (§5.2 step 4); NULL completes as a local merge
+  upstream_ref   TEXT,             -- head branch of the pull request this epic builds on; NULL = cut from the base branch
+  upstream_pr_number INTEGER,      -- that pull request's number
+  upstream_pr_url TEXT             -- and its URL
 );
 
 CREATE TABLE task (
@@ -227,7 +230,7 @@ CREATE TABLE request_epic (
 CREATE TABLE approval (
   id           TEXT PRIMARY KEY,
   project_id   TEXT NOT NULL REFERENCES project(id),
-  kind         TEXT NOT NULL,            -- spawn | integration | push | pull_request | pr_item_dismissal
+  kind         TEXT NOT NULL,            -- spawn | integration | push | pull_request | pr_item_dismissal | pr_watch_resume | pr_watch_adopt
   task_id      TEXT REFERENCES task(id),
   epic_id      TEXT REFERENCES epic(id),
   requested_by TEXT NOT NULL,            -- session_id of the requester, or 'human'
@@ -353,9 +356,10 @@ CREATE TABLE pr_watch (
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,  -- moves only when something other than last_polled_at changes
   authored         INTEGER NOT NULL DEFAULT 1,  -- the last poll's author search returned it (§13.5)
-  adopted          INTEGER NOT NULL DEFAULT 0,  -- watched for a takeover (§13.8); cleared when the takeover is released
-  takeover_id      TEXT,              -- the takeover that adopted it
+  adopted          INTEGER NOT NULL DEFAULT 0,  -- watched for a takeover or adopted by hand (§13.8); cleared when a takeover is released
+  takeover_id      TEXT,              -- the takeover that adopted it; NULL for a manual adoption
   takeover_round   INTEGER,           -- the round that works the human's own open feedback (§13.1)
+  adopted_at       INTEGER,           -- when a manual adoption ran; its cutoff for the human's own feedback (§13.8)
   UNIQUE (project_id, repo_owner, repo_name, number)
 );
 CREATE INDEX pr_watch_state ON pr_watch(state);
@@ -442,8 +446,9 @@ CREATE TABLE takeover (
   kind                TEXT NOT NULL,     -- issue | pr
   number              INTEGER NOT NULL,
   url                 TEXT NOT NULL,
-  issue_node_id       TEXT,              -- a pr row only: the issue found with it that it closes
+  issue_node_id       TEXT,              -- a pr row only: the issue found that it closes
   issue_url           TEXT,
+  via_issue           INTEGER NOT NULL DEFAULT 0,  -- a pr row taken over through issue_node_id alone
   title               TEXT NOT NULL,
   author              TEXT,
   is_cross_repository INTEGER NOT NULL DEFAULT 0,
@@ -488,6 +493,20 @@ already in either, so one never silently becomes the other, and `create_task`
 and `set_epic` refuse a terminal epic as a destination. The one reopen is a
 pull request recorded for a `done` epic (§5.2 step 5); otherwise a closed epic stays closed, and work left inside one is freed with
 `set_epic(task_id)` and no `epic_id` rather than by reviving the epic.
+
+**An epic built on a pull request.** `upstream_ref`, `upstream_pr_number` and
+`upstream_pr_url` are set together at creation or not at all; `Epic.upstream`
+reads them as one value. Such an epic adopts an open pull request: its branch
+`agentboard/epic-<id>` is cut from that pull request's head and published back
+onto it (§6.1). `EpicStore.insert` refuses a head ref that is not well-formed or
+is the base branch, and refuses a second epic in the same project, neither `done`
+nor `abandoned`, on the same pull request number; the error names the epic that
+already holds it. It sets `ships_by_pull_request` at creation, and
+`Board.epicPullRequestChecks` reports the upstream pull request from creation
+in every state but `done` and `abandoned`, so the merge check (§5.2 step 5)
+makes the epic `done` whenever that pull request merges. When it closes
+unmerged, an epic that was `integrated` or `pull_request_open` goes back to
+`active`; one still `planning`, `active` or `integrating` is left as it is.
 
 The token is issued before spawn (it has to be in the generated config files)
 and bound to the session afterwards; the SessionStart hook may arrive first and

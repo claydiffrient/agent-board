@@ -313,8 +313,16 @@ struct ApprovalsSidebar: View {
     /// Each part gets its own line budget, so a long parked reason cannot hide the orchestrator's (SPEC §13.4).
     private func resumeDetail(_ request: PRWatchResumeRequest) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("#\(request.number) \(request.title)")
-                .lineLimit(2)
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                if let url = request.url.flatMap(URL.init(string:)) {
+                    Link(destination: url) { Text(verbatim: issueNumberLabel(request.number)) }
+                        .help(String("Open pull request \(issueNumberLabel(request.number)) on GitHub"))
+                } else {
+                    Text(verbatim: issueNumberLabel(request.number))
+                }
+                Text(verbatim: request.title)
+            }
+            .lineLimit(2)
             Text(request.parkedLine)
                 .lineLimit(3)
             Text("Reason: \(request.reason)")
@@ -340,6 +348,8 @@ struct ApprovalsSidebar: View {
         case .prWatchResume:
             return (try? PRWatchResumeRequest.decode(approval.payload))?.stopped == true
                 ? "Watch a stopped pull request again" : "Resume a parked pull request"
+        case .prWatchAdopt:
+            return "Watch a pull request taken over by hand"
         }
     }
 

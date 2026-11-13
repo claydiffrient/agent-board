@@ -909,4 +909,74 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertFalse(after.adopted)
         XCTAssertNil(after.takeoverId)
     }
+
+    // MARK: - Manual adoption (SPEC §13.8)
+
+    private func answerView(state: String = "OPEN", fork: Bool = false) {
+        fixture.gh.answer(
+            arguments: PullRequestAdopter.arguments(number: 12, repository: repository),
+            stdout: #"{"number":12,"url":"\#(url)","title":"Add widgets","state":"\#(state)","isCrossRepository":\#(fork)}"#
+        )
+    }
+
+    private func decisions() throws -> [String] {
+        try fixture.reports.unconsumed(projectId: fixture.project.id).filter { $0.kind == .decision }.map(\.body)
+    }
+
+    /// A granted `watch_pr` adopts with no takeover row: the human's earlier feedback is round 1's work, nothing is
+    /// posted on GitHub, no release sweep touches it, and only Stop watching lets it go.
+    func testAGrantedWatchPRAdoptsAnOpenPullRequestThatOnlyStopWatchingReleases() async throws {
+        try enable()
+        answerView()
+        fixture.gh.answerSearch([])
+        fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: [
+            pullRequest(threads: [thread("T_mine", by: "me", at: "2026-10-20T09:00:00Z")]),
+        ])
+        let approval = try fixture.board.requestWatchAdoption(
+            projectId: fixture.project.id, number: 12, reason: "Reassigned to the human.", requestedBy: "orchestrator"
+        )
+
+        try await fixture.supervisor.approve(approvalId: approval.id)
+
+        let watch = try onlyWatch()
+        XCTAssertTrue(watch.isManualAdoption)
+        XCTAssertFalse(watch.authored)
+        XCTAssertEqual(watch.headOid, "c0ffee", "adopting polls the new watch at once")
+        XCTAssertEqual(try watches.items(watchId: watch.id).map(\.githubNodeId), ["T_mine"])
+        XCTAssertEqual(try decisions(), ["#12 Add widgets adopted into follow-through: Reassigned to the human."])
+        XCTAssertEqual(Set(fixture.gh.calls.map { Array($0.prefix(2)) }), [["pr", "view"], ["search", "prs"], ["api", "graphql"]])
+
+        try watches.stopReleasedAdoptions(projectId: fixture.project.id)
+        XCTAssertNotEqual(try onlyWatch().state, .stopped)
+        try await fixture.db.writer.write {
+            try $0.execute(sql: "UPDATE pr_watch SET state = 'settling' WHERE id = ?", arguments: [watch.id])
+        }
+        try watches.stopWatching(watchId: watch.id)
+        XCTAssertEqual(try watches.get(watch.id)?.state, .stopped)
+    }
+
+    func testAForkOrClosedPullRequestIsRefusedFromThePageAndFromAGrant() async throws {
+        try enable()
+        answerView(state: "CLOSED")
+        do {
+            try await fixture.supervisor.watchPullRequest(number: 12, projectId: fixture.project.id)
+            XCTFail("a closed pull request was adopted")
+        } catch {
+            XCTAssertTrue(errorText(error).contains("closed"), errorText(error))
+        }
+
+        answerView(fork: true)
+        let approval = try fixture.board.requestWatchAdoption(
+            projectId: fixture.project.id, number: 12, reason: "Reassigned to the human.", requestedBy: "orchestrator"
+        )
+        do {
+            try await fixture.supervisor.approve(approvalId: approval.id)
+            XCTFail("a fork's pull request was adopted")
+        } catch {}
+
+        XCTAssertEqual(try watches.live(projectId: fixture.project.id), [])
+        let reports = try decisions()
+        XCTAssertEqual(reports.count, 1, "\(reports)")
+        XCTAssertTrue(reports.first?.hasPrefix("#12 was not adopted: #12 comes from a fork.") == true, "\(reports)")
+    }
 }

@@ -324,7 +324,13 @@ just "3 closed" when every task in it is closed.
 lane and no jump-rail entry, and the rail itself is dropped when no epic has a
 lane. Every other epic state keeps its lane, even when empty — an
 `integrated` epic (§5.2 step 4) among them, with a teal badge and **Open PR**
-in its header. Turning Show
+in its header. An epic built on a pull request (§4) shows that pull request
+as a "PR #N" link in its header from creation until it is done or abandoned
+(`ApprovalStore.observeEpicPullRequests`, by `Board.awaitedPullRequest`'s
+rule), and its **Open PR** opens that pull request rather than a compare page.
+The New Epic sheet takes an optional **Pull request** number; creating with one
+makes the same lookup and refusals as `create_epic(pull_request:)` (§6) and
+shows a refusal under the field, leaving the sheet open. Turning Show
 Archived on brings those lanes back, collapsed by default like every `done`
 lane. Nothing records this: it is derived from the epic's state and its tasks'
 `archived_at` (`EpicLaneVisibility`), with no flag, state or column of its own.

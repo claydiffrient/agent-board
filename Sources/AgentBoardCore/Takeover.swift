@@ -127,6 +127,9 @@ public struct Takeover: Codable, FetchableRecord, PersistableRecord, Identifiabl
     /// The issue a found pull request closes, when both were found together (SPEC §13.8).
     public var issueNodeId: String?
     public var issueURL: String?
+    /// The pull request was taken over through `issueNodeId` alone, so the issue carries the trigger
+    /// labels, the assignment and the acknowledgment (SPEC §13.8).
+    public var viaIssue: Bool
     public var title: String
     public var author: String?
     public var isCrossRepository: Bool
@@ -146,6 +149,7 @@ public struct Takeover: Codable, FetchableRecord, PersistableRecord, Identifiabl
         case url
         case issueNodeId = "issue_node_id"
         case issueURL = "issue_url"
+        case viaIssue = "via_issue"
         case title
         case author
         case isCrossRepository = "is_cross_repository"
@@ -171,10 +175,11 @@ public struct TakeoverCandidate: Sendable, Equatable {
     public var isCrossRepository: Bool
     public var issueNodeId: String?
     public var issueURL: String?
+    public var viaIssue: Bool
 
     public init(
         githubNodeId: String, kind: TakeoverKind, number: Int, url: String, title: String, author: String?,
-        isCrossRepository: Bool = false, issueNodeId: String? = nil, issueURL: String? = nil
+        isCrossRepository: Bool = false, issueNodeId: String? = nil, issueURL: String? = nil, viaIssue: Bool = false
     ) {
         self.githubNodeId = githubNodeId
         self.kind = kind
@@ -185,6 +190,7 @@ public struct TakeoverCandidate: Sendable, Equatable {
         self.isCrossRepository = isCrossRepository
         self.issueNodeId = issueNodeId
         self.issueURL = issueURL
+        self.viaIssue = viaIssue
     }
 }
 

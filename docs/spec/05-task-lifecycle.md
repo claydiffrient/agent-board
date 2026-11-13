@@ -225,6 +225,12 @@ nobody reviewed.
   identifiers into that repository's history permanently (§6.1 renames the
   branch, not commits already made). Nothing here pushes: it is a local
   branch-to-branch merge.
+  An epic branch missing at accept is recreated before the merge, here and
+  for a shared branch's merge below: from local `<base>` for an ordinary
+  epic, and for an epic built on a pull request (§4) from its head, fetched
+  with `WorktreeManager.fetchRemoteTip` as §3.1 step 1 cuts it. A failed fetch
+  leaves the task unlanded with `SupervisorError.upstreamHeadUnavailable` in its
+  decision report; the base branch is never the fallback.
 
   **A task accepted off a shared branch (D6 amended, §1) does not merge or
   remove anything by itself.** Its branch carries every co-resident sibling's
@@ -810,7 +816,9 @@ than one that is finished; they merge nothing and are not part of this sequence.
    build — the command, or one worked out — and no tests. **None: CI verifies**
    runs neither: for every branch it merged or found already merged it checks
    `git merge-base --is-ancestor <branch> <epic branch>`, checks that the
-   epic's diff against the base branch adds no `<<<<<<<` or `>>>>>>>` line, and
+   epic's diff against the base branch — against `origin/<head ref>` for an
+   epic built on a pull request (§4), so the check covers only the epic's own
+   changes — adds no `<<<<<<<` or `>>>>>>>` line, and
    says in its report that the build and tests were left to CI. The prompt's
    opening line drops "leave the build green" under that policy. Under it a
    conflict the integrator resolved by hand still gets the narrowest build that
@@ -919,6 +927,16 @@ than one that is finished; they merge nothing and are not part of this sequence.
    records the same URL rather than opening another. The lane's state badge
    reads "PR #N open".
 
+   An epic built on a pull request (§4) publishes onto that pull request's
+   head ref (§6.1). Before an approved `push_branch` for it runs, Agent Board
+   reads `gh pr view <url> --json state,headRefName,isCrossRepository`; a pull
+   request that is no longer open, comes from a fork, or has a different head
+   ref fails the publish with a `decision` report saying which, and nothing is
+   pushed. The push is the ordinary no-force push, and the private-term guard
+   (§13.5) reads only the commits `origin/<head ref>` lacks. When git rejects it
+   because the head moved, the `decision` report tells the orchestrator to call
+   `refresh_epic` and `push_branch` again.
+
    The merge check that settles standalone tasks (§5) also reads each
    `pull_request_open` epic's newest recorded pull request with `gh pr view`,
    on launch, every 10 minutes, and never for a task-branch pull request inside
@@ -981,8 +999,12 @@ the rule §3.1 step 1 cuts epic branches by, so an epic cut from `origin/main`
 is not read as current against a lagging local `main`. `get_epic` never
 fetches, since orchestrators call it constantly and a fetch can take 10
 seconds, so `against` names the ref counted from (`origin/main` or `main`) and
-a count can be read as only as fresh as the last fetch. An epic branch not cut
-yet, or a missing base branch, reports `behind` and `ahead` as null with
+a count can be read as only as fresh as the last fetch. An epic built on a pull
+request (§4) is counted against `refs/remotes/origin/<head ref>` instead, the
+ref `refresh_epic` merges for it, as the last `fetchRemoteTip` left it, and
+`base` and `against` both name `origin/<head ref>`; local `<base>` plays no
+part. An epic branch not cut yet, a missing base branch, or a head ref never
+fetched into the repository reports `behind` and `ahead` as null with
 `unavailable` saying which. Drift is reporting only: it raises no attention
 badge and no notification.
 
@@ -992,6 +1014,12 @@ tip when local `<base>` is behind or equal to it, local `<base>` otherwise. A
 failed fetch falls back to local `<base>`, and the answer says so. Every answer
 names the ref merged (`Merged origin/main into …`, `already has every commit on
 origin/main`).
+An epic built on a pull request (§4) merges that pull request's head instead:
+`refresh_epic` fetches `origin/<head ref>` as §3.1 step 1 cuts it, merges the
+fetched tip, and names `origin/<head ref>` as the ref merged. A fetch that fails
+refuses the refresh, naming the pull request; the base branch is never merged
+in its place. `WorktreeManager.refreshCandidate` checks for a local base branch
+only when the start point is one, so the head ref needs no local branch.
 The merge commit is built with `merge-tree --write-tree` and `commit-tree` on
 no ref, as an accept's merge is (§5), and its subject names that same ref
 (`Merge origin/main into <epic title>`). Which commands a refresh runs follows

@@ -38,21 +38,31 @@ extension Board {
                 db,
                 sql: """
                 SELECT * FROM epic
-                WHERE state = ?1 AND (?2 IS NULL OR project_id = ?2) AND (?3 IS NULL OR id = ?3)
+                WHERE (state = ?1 OR (upstream_pr_number IS NOT NULL AND state NOT IN (?4, ?5)))
+                AND (?2 IS NULL OR project_id = ?2) AND (?3 IS NULL OR id = ?3)
                 ORDER BY created_at, rowid
                 """,
-                arguments: [EpicState.pullRequestOpen, projectId, epicId]
+                arguments: [EpicState.pullRequestOpen, projectId, epicId, EpicState.done, EpicState.abandoned]
             )
             return try epics.compactMap { epic in
-                try ApprovalStore.publishedEpicPullRequest(db, epicId: epic.id)
-                    .map { EpicPullRequestCheck(epic: epic, pullRequest: $0) }
+                try Self.awaitedPullRequest(db, epic: epic).map { EpicPullRequestCheck(epic: epic, pullRequest: $0) }
             }
         }
     }
 
+    /// The pull request whose merge makes `epic` done: an upstream epic's from creation (SPEC §4),
+    /// any other's once its own pull request is recorded.
+    static func awaitedPullRequest(_ db: Database, epic: Epic) throws -> PullRequestReference? {
+        if let upstream = epic.upstream {
+            return epic.state.isTerminal ? nil : upstream.pullRequest
+        }
+        guard epic.state == .pullRequestOpen else { return nil }
+        return try ApprovalStore.publishedEpicPullRequest(db, epicId: epic.id)
+    }
+
     /// The epic's pull request merged: the epic is `done`, `carriage` settles its tasks' landings, and
-    /// a `decision` report says so. False, writing nothing, when the epic has left `pullRequestOpen`
-    /// or recorded a newer pull request since the check read it.
+    /// a `decision` report says so. False, writing nothing, when the epic no longer awaits `pullRequest`
+    /// (it left `pullRequestOpen`, closed, or recorded a newer pull request) since the check read it.
     @discardableResult
     public func landEpicPullRequest(
         epicId: String, pullRequest: PullRequestReference, commit: String?, carriage: EpicCarriage
@@ -125,17 +135,24 @@ extension Board {
     public func reopenEpicAfterClosedPullRequest(epicId: String, pullRequest: PullRequestReference) throws -> Report? {
         try db.writer.write { db in
             guard let epic = try Self.stillAwaiting(db, epicId: epicId, pullRequest: pullRequest) else { return nil }
+            let next: String
+            if epic.upstream != nil {
+                // Still planning or running, it is already active; reopening would repeat this report every poll.
+                guard epic.state == .integrated || epic.state == .pullRequestOpen else { return nil }
+                next = "Reopen it on GitHub; this epic publishes onto that pull request's head and cannot open another"
+            } else {
+                next = "Reopen it, or open a new one with `open_pull_request(epic_id: \"\(epicId)\")`"
+            }
             try EpicStore.setState(db, epicId, .active)
             let text = "Epic \(epicId) (\(epic.title)) is active again: pull request #\(pullRequest.number) was closed "
-                + "without merging (\(pullRequest.url)). Reopen it, or open a new one with "
-                + "`open_pull_request(epic_id: \"\(epicId)\")`; nothing reached the base branch."
+                + "without merging (\(pullRequest.url)). \(next); nothing reached the base branch."
             return try Self.recordOnEpic(db, epic: epic, text: text, kind: .error)
         }
     }
 
     private static func stillAwaiting(_ db: Database, epicId: String, pullRequest: PullRequestReference) throws -> Epic? {
-        guard let epic = try Epic.fetchOne(db, key: epicId), epic.state == .pullRequestOpen,
-              try ApprovalStore.publishedEpicPullRequest(db, epicId: epicId) == pullRequest
+        guard let epic = try Epic.fetchOne(db, key: epicId),
+              try awaitedPullRequest(db, epic: epic) == pullRequest
         else { return nil }
         return epic
     }
@@ -155,6 +172,10 @@ extension Board {
     public static func nextStep(for epic: Epic) -> String? {
         switch epic.state {
         case .integrated:
+            if let upstream = epic.upstream {
+                return "Publish it onto pull request #\(upstream.pullRequest.number) with "
+                    + "`push_branch(branch: \"\(epic.branch)\")`; the epic is done when that pull request merges."
+            }
             return "Open its pull request with `open_pull_request(epic_id: \"\(epic.id)\", title: …)`."
         case .pullRequestOpen:
             return "Wait for its pull request to merge, which closes the epic. Tasks accepted into it meanwhile "
