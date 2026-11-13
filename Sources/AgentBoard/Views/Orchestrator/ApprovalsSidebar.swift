@@ -348,6 +348,8 @@ struct ApprovalsSidebar: View {
         case .prWatchResume:
             return (try? PRWatchResumeRequest.decode(approval.payload))?.stopped == true
                 ? "Watch a stopped pull request again" : "Resume a parked pull request"
+        case .prWatchAdopt:
+            return "Watch a pull request taken over by hand"
         }
     }
 

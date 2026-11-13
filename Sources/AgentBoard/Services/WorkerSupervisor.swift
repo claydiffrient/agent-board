@@ -186,6 +186,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let attention: ProjectAttentionStore
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
     @ObservationIgnored private let pullRequestWatch: PullRequestWatchReader
+    @ObservationIgnored private let pullRequestAdopter: PullRequestAdopter
     @ObservationIgnored private let pullRequestReplies: PullRequestReplier
     @ObservationIgnored private let pullRequestReviewRequests: PullRequestReviewRequester
     @ObservationIgnored private let prWatches: PRWatchStore
@@ -362,6 +363,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         attention = ProjectAttentionStore(db)
         pullRequestStates = PullRequestStateReader(gh: gh)
         pullRequestWatch = PullRequestWatchReader(gh: gh)
+        pullRequestAdopter = PullRequestAdopter(gh: gh)
         pullRequestReplies = PullRequestReplier(gh: gh)
         pullRequestReviewRequests = PullRequestReviewRequester(gh: gh)
         prWatches = PRWatchStore(db)
@@ -4778,8 +4780,43 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             case .prWatchResume:
                 defer { announceReports(projectId: approval.projectId) }
                 try board.applyWatchResume(approval)
+            case .prWatchAdopt:
+                defer { announceReports(projectId: approval.projectId) }
+                try await applyWatchAdoption(approval)
             }
         }
+    }
+
+    /// SPEC §6 `watch_pr`: a granted request runs the Pull Requests page's Watch pull request, and the outcome,
+    /// a refusal included, comes back to the orchestrator as a `decision` report.
+    private func applyWatchAdoption(_ approval: Approval) async throws {
+        let request = try PRWatchAdoptionRequest.decode(approval.payload)
+        do {
+            guard let project = try projects.get(approval.projectId) else {
+                throw SupervisorError.projectNotFound(approval.projectId)
+            }
+            let watch = try await adoptPullRequest(number: request.number, project: project)
+            try board.reportWatchAdopted(request, watch: watch, projectId: project.id)
+        } catch {
+            try board.reportWatchNotAdopted(request, projectId: approval.projectId, because: describe(error))
+            throw error
+        }
+    }
+
+    func watchPullRequest(number: Int, projectId: String) async throws {
+        guard let project = try projects.get(projectId) else { throw SupervisorError.projectNotFound(projectId) }
+        try await adoptPullRequest(number: number, project: project)
+    }
+
+    /// SPEC §13.8 manual adoption, shared by the page's Watch pull request and a granted `watch_pr`. The new
+    /// watch is polled at once so its row fills in without waiting for the tick.
+    @discardableResult
+    func adoptPullRequest(number: Int, project: Project) async throws -> PRWatch {
+        let adopter = pullRequestAdopter
+        let db = db
+        let watch = try await offMain { try adopter.adopt(number: number, project: project, db: db) }
+        try? await pollPRWatches(watchIds: [watch.id])
+        return watch
     }
 
     /// SPEC §13.4: a reply the human chose posts now, with no round and whatever `postFactualReplies` says.
@@ -4849,7 +4886,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     summary: "\(verb) from \(from) into \(base).",
                     url: result.url
                 )
-            case .spawn, .integration, .prItemDismissal, .prWatchResume:
+            case .spawn, .integration, .prItemDismissal, .prWatchResume, .prWatchAdopt:
                 return
             }
         } catch {

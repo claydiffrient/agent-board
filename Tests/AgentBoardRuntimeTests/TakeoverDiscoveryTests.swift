@@ -55,6 +55,62 @@ final class TakeoverDiscoveryTests: XCTestCase {
         XCTAssertEqual(rows.first?.state, .found)
     }
 
+    func testAnIssueWhoseOneSameRepositoryPullRequestIsNoHitBecomesThatPullRequestsRecord() throws {
+        let (store, projectId) = try fixture()
+        let gh = RecordingGh(
+            search: Self.search([
+                ("I_one", 4, false, "https://github.com/example-org/app/issues/4"),
+                ("I_fork", 5, false, "https://github.com/example-org/app/issues/5"),
+                ("I_two", 6, false, "https://github.com/example-org/app/issues/6"),
+            ]),
+            nodes: Self.nodes([
+                Self.node("I_one", typename: "Issue", prs: [Self.linkedPR("PR_lone", 40)]),
+                Self.node("I_fork", typename: "Issue", prs: [Self.linkedPR("PR_fork", 50, fork: true)]),
+                Self.node("I_two", typename: "Issue", prs: [Self.linkedPR("PR_a", 60), Self.linkedPR("PR_b", 61)]),
+            ])
+        )
+
+        _ = try TakeoverDiscovery(gh: gh).poll(
+            projectId: projectId, settings: settings, repository: "example-org/app", store: store, cwd: cwd
+        )
+
+        let rows = try store.page(projectId: projectId).sorted { $0.number < $1.number }
+        XCTAssertEqual(rows.map(\.kind), [.issue, .issue, .pr])
+        XCTAssertEqual(rows.map(\.number), [5, 6, 40])
+        let pr = try XCTUnwrap(rows.last)
+        XCTAssertEqual(pr.githubNodeId, "PR_lone")
+        XCTAssertEqual(pr.url, "https://github.com/example-org/app/pull/40")
+        XCTAssertEqual(pr.issueNodeId, "I_one")
+        XCTAssertEqual(pr.issueURL, "https://github.com/example-org/app/issues/4")
+        XCTAssertTrue(pr.viaIssue)
+        XCTAssertEqual(gh.calls.count, 2, "the linked pull request is read in the one nodes query")
+    }
+
+    func testAPullRequestTakenOverThroughItsIssueIsReleasedOnlyWhenTheIssueLosesItsLabels() throws {
+        let (store, projectId) = try fixture()
+        let row = try XCTUnwrap(store.record(projectId: projectId, TakeoverCandidate(
+            githubNodeId: "PR_lone", kind: .pr, number: 40, url: "https://github.com/example-org/app/pull/40",
+            title: "Fix", author: "example-author", issueNodeId: "I_one",
+            issueURL: "https://github.com/example-org/app/issues/4", viaIssue: true
+        )))
+        try store.acknowledge(row.id)
+        let bare = Self.node("PR_lone", typename: "PullRequest", labels: [])
+        func poll(issueLabels: [String]) throws -> TakeoverPollResult {
+            let gh = RecordingGh(
+                search: "[]",
+                nodes: Self.nodes([bare, Self.node("I_one", typename: "Issue", labels: issueLabels)])
+            )
+            return try TakeoverDiscovery(gh: gh).poll(
+                projectId: projectId, settings: settings, repository: "example-org/app", store: store, cwd: cwd
+            )
+        }
+
+        XCTAssertEqual(try poll(issueLabels: ["handoff-example", "ready example", "taken-example"]).released, [])
+        XCTAssertEqual(try store.get(row.id)?.state, .acknowledged)
+
+        XCTAssertEqual(try poll(issueLabels: ["handoff-example", "taken-example"]).released.map(\.id), [row.id])
+    }
+
     func testARecordedItemThatLostATriggerLabelIsReleased() throws {
         let (store, projectId) = try fixture()
         let recorded = try XCTUnwrap(store.record(projectId: projectId, TakeoverCandidate(
@@ -188,9 +244,9 @@ final class TakeoverDiscoveryTests: XCTestCase {
 
     private static func node(
         _ id: String, typename: String, labels: [String] = ["handoff-example", "ready example"],
-        linked: [String] = [], state: String = "OPEN"
+        linked: [String] = [], prs: [[String: Any]] = [], state: String = "OPEN"
     ) -> [String: Any] {
-        let links = ["nodes": linked.map { ["id": $0] }]
+        let links = ["nodes": linked.map { ["id": $0] as [String: Any] } + prs]
         var node: [String: Any] = [
             "__typename": typename, "id": id, "state": state,
             "labels": ["nodes": labels.map { ["name": $0] }],
@@ -203,6 +259,11 @@ final class TakeoverDiscoveryTests: XCTestCase {
             node["closedByPullRequestsReferences"] = links
         }
         return node
+    }
+
+    private static func linkedPR(_ id: String, _ number: Int, fork: Bool = false) -> [String: Any] {
+        ["id": id, "number": number, "url": "https://github.com/example-org/app/pull/\(number)",
+         "title": "Fix \(number)", "state": "OPEN", "isCrossRepository": fork, "author": ["login": "example-author"]]
     }
 
     private static func nodes(_ nodes: [[String: Any]]) -> String {

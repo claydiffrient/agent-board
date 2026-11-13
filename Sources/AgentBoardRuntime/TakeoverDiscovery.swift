@@ -31,8 +31,20 @@ public struct TakeoverNode: Sendable, Equatable {
     public var isCrossRepository: Bool
     /// A pull request's closing issues, or the open pull requests that close an issue.
     public var linkedNodeIds: [String]
+    /// An issue's linked pull requests, read in the same query so one can be taken over without a search hit.
+    public var linkedPullRequests: [TakeoverLinkedPullRequest] = []
 
     public var isOpen: Bool { state == "OPEN" }
+}
+
+public struct TakeoverLinkedPullRequest: Sendable, Equatable {
+    public var nodeId: String
+    public var number: Int
+    public var url: String
+    public var title: String
+    public var author: String?
+    public var isCrossRepository: Bool
+    public var state: String
 }
 
 public struct TakeoverPollResult: Sendable, Equatable {
@@ -79,7 +91,9 @@ public struct TakeoverDiscovery: Sendable {
               id state
               labels(first: 100) { nodes { name } }
               assignees(first: 100) { nodes { login } }
-              closedByPullRequestsReferences(first: 25, includeClosedPrs: false) { nodes { id } }
+              closedByPullRequestsReferences(first: 25, includeClosedPrs: false) {
+                nodes { id number url title state isCrossRepository author { login } }
+              }
             }
             ... on PullRequest {
               id state isCrossRepository
@@ -107,7 +121,9 @@ public struct TakeoverDiscovery: Sendable {
         let recorded = try store.recordedNodeIds(projectId: projectId)
         let live = try store.live(projectId: projectId)
         let fresh = hits.filter { !recorded.contains($0.nodeId) }
-        let ids = Array(Set(fresh.map(\.nodeId) + live.map(\.githubNodeId))).sorted().filter(Self.isNodeId)
+        let issuesOfLive = live.compactMap { $0.viaIssue ? $0.issueNodeId : nil }
+        let ids = Array(Set(fresh.map(\.nodeId) + live.map(\.githubNodeId) + issuesOfLive)).sorted()
+            .filter(Self.isNodeId)
         guard !ids.isEmpty else { return TakeoverPollResult(recorded: [], released: []) }
 
         var nodes: [String: TakeoverNode] = [:]
@@ -132,7 +148,7 @@ public struct TakeoverDiscovery: Sendable {
         var result = TakeoverPollResult(recorded: [], released: [])
         let owning = Set(live.flatMap { [$0.githubNodeId, $0.issueNodeId].compactMap { $0 } })
         let read = fresh.filter { nodes[$0.nodeId] != nil }
-        for candidate in Self.candidates(fresh: read, nodes: nodes, owning: owning) {
+        for candidate in Self.candidates(fresh: read, nodes: nodes, owning: owning, recorded: recorded) {
             if let row = try store.record(projectId: projectId, candidate, now: now) { result.recorded.append(row) }
         }
         for row in Self.releasable(live, nodes: nodes, settings: settings, viewer: viewer) {
@@ -164,9 +180,11 @@ public struct TakeoverDiscovery: Sendable {
     }
 
     /// The new hits to record. An issue whose open pull request is found with it is folded into that
-    /// pull request's row, and a hit linked to a live row is left to that row.
+    /// pull request's row, and a hit linked to a live row is left to that row. An issue whose one open
+    /// linked pull request is not a hit, and not from a fork, becomes that pull request's row instead of a
+    /// task (SPEC §13.8, Discovery).
     static func candidates(
-        fresh: [TakeoverSearchHit], nodes: [String: TakeoverNode], owning: Set<String>
+        fresh: [TakeoverSearchHit], nodes: [String: TakeoverNode], owning: Set<String>, recorded: Set<String> = []
     ) -> [TakeoverCandidate] {
         func links(_ id: String) -> Set<String> { Set(nodes[id]?.linkedNodeIds ?? []) }
         let prs = fresh.filter { $0.kind == .pr }.sorted { $0.number < $1.number }
@@ -180,7 +198,20 @@ public struct TakeoverDiscovery: Sendable {
                 if folded[pr.nodeId] == nil { folded[pr.nodeId] = issue }
             }
         }
-        return (prs + issues).compactMap { hit in
+        var throughIssue: [TakeoverCandidate] = []
+        for issue in issues where !claimed.contains(issue.nodeId) && links(issue.nodeId).isDisjoint(with: owning) {
+            let open = nodes[issue.nodeId]?.linkedPullRequests.filter { $0.state == "OPEN" } ?? []
+            guard open.count == 1, let pr = open.first, !pr.isCrossRepository, !recorded.contains(pr.nodeId),
+                  isNodeId(pr.nodeId) else { continue }
+            claimed.insert(issue.nodeId)
+            guard !throughIssue.contains(where: { $0.githubNodeId == pr.nodeId }) else { continue }
+            throughIssue.append(TakeoverCandidate(
+                githubNodeId: pr.nodeId, kind: .pr, number: pr.number, url: pr.url, title: pr.title,
+                author: pr.author, isCrossRepository: false, issueNodeId: issue.nodeId, issueURL: issue.url,
+                viaIssue: true
+            ))
+        }
+        return (prs + issues).compactMap { hit -> TakeoverCandidate? in
             guard !claimed.contains(hit.nodeId), links(hit.nodeId).isDisjoint(with: owning) else { return nil }
             let issue = folded[hit.nodeId]
             return TakeoverCandidate(
@@ -188,17 +219,22 @@ public struct TakeoverDiscovery: Sendable {
                 author: hit.author, isCrossRepository: nodes[hit.nodeId]?.isCrossRepository ?? false,
                 issueNodeId: issue?.nodeId, issueURL: issue?.url
             )
-        }
+        } + throughIssue
     }
 
     /// Live rows whose item is still open but has lost a trigger label or the assignment. A closed or
-    /// unreadable item is left alone.
+    /// unreadable item is left alone. A pull request taken over through its issue is judged on the issue
+    /// (SPEC §13.8, Release).
     static func releasable(
         _ live: [Takeover], nodes: [String: TakeoverNode], settings: TakeoverSettings, viewer: String?
     ) -> [Takeover] {
         let assignee = settings.assignee == TakeoverSettings.defaultAssignee ? viewer : settings.assignee
         return live.filter { row in
-            guard let node = nodes[row.githubNodeId], node.isOpen else { return false }
+            guard var node = nodes[row.githubNodeId], node.isOpen else { return false }
+            if row.viaIssue {
+                guard let issue = row.issueNodeId.flatMap({ nodes[$0] }), issue.isOpen else { return false }
+                node = issue
+            }
             let labelled = settings.triggerLabels.allSatisfy { wanted in
                 node.labels.contains { $0.caseInsensitiveCompare(wanted) == .orderedSame }
             }
@@ -235,7 +271,19 @@ public struct TakeoverDiscovery: Sendable {
     static func parseNodes(_ json: String) -> (viewer: String?, nodes: [TakeoverNode])? {
         struct Names: Decodable { struct Name: Decodable { let name: String }; let nodes: [Name?] }
         struct Logins: Decodable { struct Login: Decodable { let login: String? }; let nodes: [Login?] }
-        struct Ids: Decodable { struct Id: Decodable { let id: String }; let nodes: [Id?] }
+        struct Ids: Decodable {
+            struct Id: Decodable {
+                struct Author: Decodable { let login: String? }
+                let id: String
+                let number: Int?
+                let url: String?
+                let title: String?
+                let state: String?
+                let isCrossRepository: Bool?
+                let author: Author?
+            }
+            let nodes: [Id?]
+        }
         struct Node: Decodable {
             let id: String?
             let state: String?
@@ -281,7 +329,14 @@ public struct TakeoverDiscovery: Sendable {
                 nodeId: id, state: node.state ?? "",
                 labels: node.labels?.nodes.compactMap { $0?.name } ?? [],
                 assignees: node.assignees?.nodes.compactMap { $0?.login } ?? [],
-                isCrossRepository: node.isCrossRepository ?? false, linkedNodeIds: linked ?? []
+                isCrossRepository: node.isCrossRepository ?? false, linkedNodeIds: linked ?? [],
+                linkedPullRequests: node.closedByPullRequestsReferences?.nodes.compactMap { pr in
+                    guard let pr, let number = pr.number, let url = pr.url, let state = pr.state else { return nil }
+                    return TakeoverLinkedPullRequest(
+                        nodeId: pr.id, number: number, url: url, title: pr.title ?? "", author: pr.author?.login,
+                        isCrossRepository: pr.isCrossRepository ?? false, state: state
+                    )
+                } ?? []
             )
         }
         return (response.data?.viewer?.login, parsed)

@@ -57,6 +57,25 @@ final class TakeoverAcknowledgerTests: XCTestCase {
         XCTAssertNil(try store.get(issue.id)?.failure)
     }
 
+    func testAPullRequestTakenOverThroughItsIssueIsAcknowledgedOnTheIssueAlone() throws {
+        let (store, projectId) = try fixture()
+        let issueURL = "https://github.com/example-org/app/issues/4"
+        let pr = try XCTUnwrap(store.record(projectId: projectId, TakeoverCandidate(
+            githubNodeId: "PR_lone", kind: .pr, number: 40, url: "https://github.com/example-org/app/pull/40",
+            title: "Fix", author: "example-author", issueNodeId: "I_one", issueURL: issueURL, viaIssue: true
+        )))
+        let gh = ScriptedGh { _ in .ok("") }
+
+        _ = try TakeoverAcknowledger(gh: gh).acknowledge(
+            pr, settings: settings, repository: repository, labelConfirmed: true, store: store, cwd: cwd
+        )
+
+        XCTAssertEqual(gh.calls, [
+            ["issue", "edit", issueURL, "--add-label", "taken-example"],
+            ["issue", "comment", issueURL, "--body", "example-user took this issue: \(issueURL)"],
+        ])
+    }
+
     func testAMissingLabelIsAProblemAndNothingIsEdited() throws {
         let (store, projectId) = try fixture()
         let issue = try record(store, projectId, kind: .issue, number: 7)
