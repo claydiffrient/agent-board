@@ -194,7 +194,7 @@ struct NoteTools: Sendable {
             }
             try notes.pin(note.id, pinned)
             return ToolResult(text: pinned
-                ? "Pinned \"\(note.title)\". Every agent spawned on this project from now on sees it in full."
+                ? "Pinned \"\(note.title)\". It is now listed by title in every future worker's prompt on this project. Attach it with attach_note to put its text in front of a worker."
                 : "Unpinned \"\(note.title)\".")
         case "archive_note":
             let note = try spaceNote(try ToolArguments.requiredString("note_id", in: arguments), space: identity.projectId)
