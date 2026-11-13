@@ -96,6 +96,10 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var reviewLevel: ReviewLevel?
     /// Resolved when the integrator is spawned (SPEC §5.2); nil until then, which completes as a local merge.
     public var shipsByPullRequest: Bool?
+    /// The head branch of the pull request this epic builds on and publishes to (SPEC §4, §6.1); nil cuts from the base branch.
+    public var upstreamRef: String?
+    public var upstreamPullRequestNumber: Int?
+    public var upstreamPullRequestURL: String?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -107,11 +111,15 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case createdAt = "created_at"
         case reviewLevel = "review_level"
         case shipsByPullRequest = "ships_by_pull_request"
+        case upstreamRef = "upstream_ref"
+        case upstreamPullRequestNumber = "upstream_pr_number"
+        case upstreamPullRequestURL = "upstream_pr_url"
     }
 
     public init(
         id: String, projectId: String, title: String, goal: String?, branch: String,
-        state: EpicState, createdAt: Int64, reviewLevel: ReviewLevel? = nil, shipsByPullRequest: Bool? = nil
+        state: EpicState, createdAt: Int64, reviewLevel: ReviewLevel? = nil, shipsByPullRequest: Bool? = nil,
+        upstream: EpicUpstream? = nil
     ) {
         self.id = id
         self.projectId = projectId
@@ -122,11 +130,22 @@ public struct Epic: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         self.createdAt = createdAt
         self.reviewLevel = reviewLevel
         self.shipsByPullRequest = shipsByPullRequest
+        upstreamRef = upstream?.headRef
+        upstreamPullRequestNumber = upstream?.pullRequest.number
+        upstreamPullRequestURL = upstream?.pullRequest.url
     }
 
     public static func newId() -> String { BoardId.new() }
 
     public var createdDate: Date { createdAt.asDate }
+
+    public var upstream: EpicUpstream? {
+        guard let upstreamRef, let upstreamPullRequestNumber, let upstreamPullRequestURL else { return nil }
+        return EpicUpstream(
+            headRef: upstreamRef,
+            pullRequest: PullRequestReference(url: upstreamPullRequestURL, number: upstreamPullRequestNumber)
+        )
+    }
 }
 
 public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable, Equatable {

@@ -196,16 +196,34 @@ public enum RemoteRefPolicy {
     public static func validate(
         published raw: String, template: RemoteBranchTemplate, baseBranch: String
     ) throws -> String {
+        let name = try validateName(raw, baseBranch: baseBranch)
+        let namespace = template.namespace
+        guard name.hasPrefix(namespace), name.count > namespace.count else {
+            throw RemoteRefPolicyError.outsideNamespace(name: name, namespace: namespace)
+        }
+        return name
+    }
+
+    /// An adopted pull request's head ref (SPEC §6.1): every check but the template's namespace,
+    /// because the human named that branch, not the template.
+    @discardableResult
+    public static func validateUpstream(_ raw: String, baseBranch: String) throws -> String {
+        do {
+            return try validateName(raw, baseBranch: baseBranch)
+        } catch RemoteRefPolicyError.isBaseBranch(let name) {
+            throw EpicUpstreamError.headIsBaseBranch(name)
+        } catch is RemoteRefPolicyError {
+            throw EpicUpstreamError.malformedHeadRef(raw)
+        }
+    }
+
+    private static func validateName(_ raw: String, baseBranch: String) throws -> String {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw RemoteRefPolicyError.empty }
         guard !name.hasPrefix("refs/") else { throw RemoteRefPolicyError.qualifiedRef(name) }
         guard GitRefName.isWellFormed(name) else { throw RemoteRefPolicyError.malformed(name) }
         guard name != baseBranch.trimmingCharacters(in: .whitespacesAndNewlines) else {
             throw RemoteRefPolicyError.isBaseBranch(name)
-        }
-        let namespace = template.namespace
-        guard name.hasPrefix(namespace), name.count > namespace.count else {
-            throw RemoteRefPolicyError.outsideNamespace(name: name, namespace: namespace)
         }
         return name
     }

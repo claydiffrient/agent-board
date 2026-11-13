@@ -286,6 +286,9 @@ public struct BranchPublisher: Sendable {
     private func pushChecked(branch: String, publishedAs: String?, remote: String) throws -> PushResult {
         let result = try git(PublishCommand.push(remote: remote, branch: branch, published: publishedAs))
         guard result.status == 0 else {
+            if (result.stderr + result.stdout).contains("[rejected]") {
+                throw PublishFailure.notFastForward(branch: branch, onto: publishedAs ?? branch, detail: Self.detail(result))
+            }
             throw PublishFailure.pushFailed(branch: branch, detail: Self.detail(result))
         }
         let said = result.stdout + result.stderr

@@ -1310,9 +1310,11 @@ public struct Board: Sendable {
     /// `dependsOn` holds zero-based indices into the same `tasks` array; an index out of range or
     /// pointing at its own task throws `BoardError.invalidEpicDependency` and rolls the whole batch back.
     @discardableResult
-    public func createEpic(projectId: String, title: String, goal: String?, tasks: [NewEpicTask]) throws -> (Epic, [Task]) {
+    public func createEpic(
+        projectId: String, title: String, goal: String?, tasks: [NewEpicTask], upstream: EpicUpstream? = nil
+    ) throws -> (Epic, [Task]) {
         try db.writer.write { db in
-            let epic = try EpicStore.insert(db, projectId: projectId, title: title, goal: goal)
+            let epic = try EpicStore.insert(db, projectId: projectId, title: title, goal: goal, upstream: upstream)
             var created: [Task] = []
             for spec in tasks {
                 created.append(try TaskStore.insert(

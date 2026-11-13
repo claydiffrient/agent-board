@@ -15,6 +15,8 @@ struct EpicLaneHeader: View {
     let onClose: (EpicClosure) -> Void
     let onRemoveWorktrees: () -> Void
 
+    @Environment(\.openURL) private var openURL
+
     private var actions: [EpicLaneAction] {
         EpicLane.actions(state: epic.state, readyForIntegration: count.readyForIntegration)
     }
@@ -35,6 +37,13 @@ struct EpicLaneHeader: View {
             Text(epic.title)
                 .font(.subheadline.weight(.semibold))
             EpicStateBadge(state: epic.state, pullRequest: pullRequest)
+            if epic.upstream != nil, let pullRequest, let url = URL(string: pullRequest.url) {
+                Link(destination: url) {
+                    Text(verbatim: "PR " + issueNumberLabel(pullRequest.number))
+                        .font(.caption)
+                }
+                .help("This epic builds on \(pullRequest.url) and publishes onto its head branch.")
+            }
             Text(epic.branch)
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
@@ -87,9 +96,15 @@ struct EpicLaneHeader: View {
             .disabled(integrationPending)
             .help("Queues an approval. Nothing merges until you approve it in the approvals sidebar.")
         case .openPullRequest:
-            Button("Open PR") { onOpenPullRequest() }
-                .controlSize(.small)
-                .help("Opens a prefilled pull request page in your browser. Agent Board never creates the PR.")
+            if let upstream = epic.upstream, let url = URL(string: upstream.pullRequest.url) {
+                Button("Open PR") { openURL(url) }
+                    .controlSize(.small)
+                    .help("Opens \(upstream.pullRequest.url), the pull request this epic builds on.")
+            } else {
+                Button("Open PR") { onOpenPullRequest() }
+                    .controlSize(.small)
+                    .help("Opens a prefilled pull request page in your browser. Agent Board never creates the PR.")
+            }
         case .closeAsDone, .abandon, .removeWorktrees:
             EmptyView()
         }

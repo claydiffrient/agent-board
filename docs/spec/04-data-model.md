@@ -40,7 +40,10 @@ CREATE TABLE epic (
   state          TEXT NOT NULL,    -- planning | active | integrating | integrated | pull_request_open | done | abandoned
   created_at     INTEGER NOT NULL,
   review_level   TEXT,             -- none|agent|task|epic for this epic's tasks; NULL inherits the project's
-  ships_by_pull_request INTEGER    -- set when the integrator spawns (§5.2 step 4); NULL completes as a local merge
+  ships_by_pull_request INTEGER,   -- set when the integrator spawns (§5.2 step 4); NULL completes as a local merge
+  upstream_ref   TEXT,             -- head branch of the pull request this epic builds on; NULL = cut from the base branch
+  upstream_pr_number INTEGER,      -- that pull request's number
+  upstream_pr_url TEXT             -- and its URL
 );
 
 CREATE TABLE task (
@@ -489,6 +492,20 @@ already in either, so one never silently becomes the other, and `create_task`
 and `set_epic` refuse a terminal epic as a destination. The one reopen is a
 pull request recorded for a `done` epic (§5.2 step 5); otherwise a closed epic stays closed, and work left inside one is freed with
 `set_epic(task_id)` and no `epic_id` rather than by reviving the epic.
+
+**An epic built on a pull request.** `upstream_ref`, `upstream_pr_number` and
+`upstream_pr_url` are set together at creation or not at all; `Epic.upstream`
+reads them as one value. Such an epic adopts an open pull request: its branch
+`agentboard/epic-<id>` is cut from that pull request's head and published back
+onto it (§6.1). `EpicStore.insert` refuses a head ref that is not well-formed or
+is the base branch, and refuses a second epic in the same project, neither `done`
+nor `abandoned`, on the same pull request number; the error names the epic that
+already holds it. It sets `ships_by_pull_request` at creation, and
+`Board.epicPullRequestChecks` reports the upstream pull request from creation
+in every state but `done` and `abandoned`, so the merge check (§5.2 step 5)
+makes the epic `done` whenever that pull request merges. When it closes
+unmerged, an epic that was `integrated` or `pull_request_open` goes back to
+`active`; one still `planning`, `active` or `integrating` is left as it is.
 
 The token is issued before spawn (it has to be in the generated config files)
 and bound to the session afterwards; the SessionStart hook may arrive first and

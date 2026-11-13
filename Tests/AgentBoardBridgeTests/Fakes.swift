@@ -106,6 +106,21 @@ actor FakeWorkerControl: WorkerControl {
         refreshed.append(epicId)
         return EpicRefreshAnswer(.alreadyCurrent(head: "0000000000000000000000000000000000000000"), merged: "main")
     }
+
+    struct LookupFailure: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    var upstreams: [Int: Result<EpicUpstream, LookupFailure>] = [:]
+
+    func setUpstream(_ number: Int, _ result: Result<EpicUpstream, LookupFailure>) {
+        upstreams[number] = result
+    }
+
+    func pullRequestUpstream(projectId: String, number: Int) async throws -> EpicUpstream {
+        guard let result = upstreams[number] else { throw LookupFailure(description: "no pull request #\(number)") }
+        return try result.get()
+    }
 }
 
 struct BridgeFixture {

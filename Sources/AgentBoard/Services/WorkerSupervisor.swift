@@ -55,6 +55,8 @@ enum SupervisorError: LocalizedError {
     case pullRequestNotFetched(String)
     case fixRoundNotFound(title: String)
     case fixRoundNotAcceptable(title: String)
+    case upstreamHeadUnavailable(EpicUpstream, underlying: String)
+    case upstreamPushRefused(String)
 
     var errorDescription: String? {
         switch self {
@@ -73,6 +75,10 @@ enum SupervisorError: LocalizedError {
         case .rosterAgentNotUsable(let id, let projectName):
             return "roster agent \(id) is not in \(projectName)'s usable set; enable it for this project first"
         case .epicCloseRefused(let reason): return reason
+        case .upstreamHeadUnavailable(let upstream, let underlying):
+            return "could not fetch `\(upstream.headRef)`, the head of pull request #\(upstream.pullRequest.number) "
+                + "(\(upstream.pullRequest.url)), from origin, so the epic was not built on it: \(underlying)"
+        case .upstreamPushRefused(let reason): return reason
         case .epicStillOpen(let id):
             return "epic \(id) is still open; only a done or abandoned epic's worktrees are removed from its lane"
         case .epicNotFound(let id): return "epic \(id) not found"
@@ -185,6 +191,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let slots: WorktreeSlotStore
     @ObservationIgnored private let attention: ProjectAttentionStore
     @ObservationIgnored private let pullRequestStates: PullRequestStateReader
+    @ObservationIgnored private let epicUpstreams: EpicUpstreamReader
     @ObservationIgnored private let pullRequestWatch: PullRequestWatchReader
     @ObservationIgnored private let pullRequestAdopter: PullRequestAdopter
     @ObservationIgnored private let pullRequestReplies: PullRequestReplier
@@ -362,6 +369,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         slots = WorktreeSlotStore(db)
         attention = ProjectAttentionStore(db)
         pullRequestStates = PullRequestStateReader(gh: gh)
+        epicUpstreams = EpicUpstreamReader(gh: gh)
         pullRequestWatch = PullRequestWatchReader(gh: gh)
         pullRequestAdopter = PullRequestAdopter(gh: gh)
         pullRequestReplies = PullRequestReplier(gh: gh)
@@ -571,8 +579,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let projectBase = project.baseBranch
             // SPEC §3.1 step 1: only a new epic branch looks at the remote; an existing one is local
             // integration state its tasks branch from as it stands.
+            let upstream = epic.upstream
             let cut = try await offMain { () -> String? in
                 guard try !manager.branchExists(epicBranch) else { return nil }
+                if let upstream {
+                    try manager.ensureBranch(epicBranch, from: try Self.fetchUpstreamHead(upstream, manager: manager))
+                    return nil
+                }
                 let start = manager.freshestBase(projectBase)
                 try manager.ensureBranch(epicBranch, from: start.ref)
                 return start.warning
@@ -775,7 +788,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let manager = worktreeManager(for: project)
         let branch = epic.branch
         let base = project.baseBranch
-        return try await offMain { try manager.drift(of: branch, from: base) }
+        let upstream = epic.upstream
+        return try await offMain {
+            if let upstream { return try manager.drift(of: branch, fromRemoteHead: upstream.headRef) }
+            return try manager.drift(of: branch, from: base)
+        }
+    }
+
+    func pullRequestUpstream(projectId: String, number: Int) async throws -> EpicUpstream {
+        guard let project = try projects.get(projectId) else { throw SupervisorError.projectNotFound(projectId) }
+        let reader = epicUpstreams
+        let repo = URL(fileURLWithPath: project.repoPath)
+        return try await offMain { try reader.upstream(pullRequest: number, repoPath: repo) }
     }
 
     /// SPEC §5.2: the freshest base (§3.1 step 1) is merged, and the merge result is checked in a
@@ -787,8 +811,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func refreshEpic(epicId: String) async throws -> EpicRefreshAnswer {
         guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
         guard let project = try projects.get(epic.projectId) else { throw SupervisorError.projectNotFound(epic.projectId) }
+        let upstream = epic.upstream
         if let running = refreshes[epicId] {
-            return EpicRefreshAnswer(.inProgress(candidate: running.candidate), merged: project.baseBranch)
+            return EpicRefreshAnswer(
+                .inProgress(candidate: running.candidate),
+                merged: upstream.map { "origin/\($0.headRef)" } ?? project.baseBranch
+            )
         }
         let run = RefreshRun()
         refreshes[epicId] = run
@@ -803,7 +831,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let prepared: (start: BaseStartPoint, plan: RefreshCandidate)
         do {
             prepared = try await offMain {
-                let start = manager.freshestBase(base)
+                let start = try upstream.map {
+                    BaseStartPoint(ref: try Self.fetchUpstreamHead($0, manager: manager), name: "origin/\($0.headRef)")
+                } ?? manager.freshestBase(base)
                 let message = WorktreeManager.mergeSubject(taskTitle: start.name, targetTitle: epicTitle)
                 return (start, try manager.refreshCandidate(branch: branch, base: base, start: start, message: message))
             }
@@ -840,6 +870,26 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 head: previousHead, candidate: candidate, commands: steps, timeoutSeconds: commands.timeoutSeconds
             ))
         }
+    }
+
+    /// SPEC §3.1 step 1: an epic built on a pull request starts from its freshly fetched head, and
+    /// never from the base branch when that head cannot be read.
+    nonisolated private static func fetchUpstreamHead(_ upstream: EpicUpstream, manager: WorktreeManager) throws -> String {
+        do {
+            return try manager.fetchRemoteTip(upstream.headRef)
+        } catch {
+            throw SupervisorError.upstreamHeadUnavailable(upstream, underlying: "\(error)")
+        }
+    }
+
+    /// SPEC §5: an accept recreates a missing epic branch where spawn would have cut it, an
+    /// upstream epic's from its pull request's freshly fetched head and never from the base branch.
+    nonisolated private static func ensureEpicBranch(
+        _ epicBranch: String, upstream: EpicUpstream?, projectBase: String, manager: WorktreeManager
+    ) throws {
+        guard let upstream else { return try manager.ensureBranch(epicBranch, from: projectBase) }
+        guard try !manager.branchExists(epicBranch) else { return }
+        try manager.ensureBranch(epicBranch, from: try fetchUpstreamHead(upstream, manager: manager))
     }
 
     private func verifyRefresh(
@@ -2406,6 +2456,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let targetTitle = epic?.title ?? project.baseBranch
         let projectBase = project.baseBranch
         let epicBranch = epic?.branch
+        let upstream = epic?.upstream
         var byPullRequest = false
         if epic == nil {
             do {
@@ -2428,7 +2479,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 // Only an epic branch is ever cut here. A missing base branch comes back as
                 // `.noTargetBranch` instead, because creating one would land the work on a ref
                 // nobody pulls and call it done.
-                if let epicBranch { try manager.ensureBranch(epicBranch, from: projectBase) }
+                if let epicBranch {
+                    try Self.ensureEpicBranch(epicBranch, upstream: upstream, projectBase: projectBase, manager: manager)
+                }
                 return try manager.merge(
                     taskBranch: taskBranch, into: target,
                     taskTitle: taskTitle, targetTitle: targetTitle
@@ -3659,12 +3712,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let epicBranch = epic.branch
         let epicTitle = epic.title
         let projectBase = project.baseBranch
+        let upstream = epic.upstream
         let memberIds = members.map(\.taskId)
         let mergeTitle = sharedMergeTitle(memberIds)
         let outcome: BranchMerge
         do {
             outcome = try await offMain {
-                try manager.ensureBranch(epicBranch, from: projectBase)
+                try Self.ensureEpicBranch(epicBranch, upstream: upstream, projectBase: projectBase, manager: manager)
                 // Nothing to attribute, and the ledger's tip refs are all that is left to check.
                 guard try manager.branchExists(branch) else { return .nothingToMerge }
                 let base = try manager.mergeBase(branch, epicBranch) ?? projectBase
@@ -4860,12 +4914,22 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             privateTerms: project.settings.prFollowThrough.privateTerms
         )
         let base = request.base ?? project.baseBranch
+        let upstreamEpic = approval.kind == .push
+            ? try epics.list(projectId: project.id).first { $0.branch == request.branch && $0.upstream != nil }
+            : nil
         do {
             switch approval.kind {
             case .push:
+                if let upstream = upstreamEpic?.upstream {
+                    let reader = pullRequestStates
+                    let repo = URL(fileURLWithPath: project.repoPath)
+                    let state = try await offMain { try reader.upstream(of: upstream.pullRequest.url, cwd: repo) }
+                    if let refusal = state.refusal(for: upstream) { throw SupervisorError.upstreamPushRefused(refusal) }
+                }
+                let guardBase = upstreamEpic?.upstream?.headRef ?? base
                 let result = try await offMain {
                     try publisher.push(
-                        branch: request.branch, publishedAs: request.publishedBranch, base: base,
+                        branch: request.branch, publishedAs: request.publishedBranch, base: guardBase,
                         remote: request.remote
                     )
                 }
@@ -4890,11 +4954,12 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 return
             }
         } catch {
-            try? board.recordPublished(
-                approval: approval,
-                summary: "\(approval.kind.rawValue) failed for \(request.branch): \(describe(error))",
-                failed: true
-            )
+            var summary = "\(approval.kind.rawValue) failed for \(request.branch): \(describe(error))"
+            if let epic = upstreamEpic, let upstream = epic.upstream, case .notFastForward? = error as? PublishFailure {
+                summary += " Call `refresh_epic(epic_id: \"\(epic.id)\")` to merge origin/\(upstream.headRef) into "
+                    + "`\(epic.branch)`, then `push_branch(branch: \"\(epic.branch)\")` again."
+            }
+            try? board.recordPublished(approval: approval, summary: summary, failed: true)
             announceReports(projectId: approval.projectId)
             throw error
         }
