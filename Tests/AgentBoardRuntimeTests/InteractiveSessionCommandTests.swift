@@ -25,6 +25,15 @@ final class InteractiveSessionCommandTests: XCTestCase {
         XCTAssertFalse(args.contains("--model"))
     }
 
+    func testNameIsPassedOnFreshAndResumedLaunch() {
+        let command = InteractiveSessionCommand(sessionId: "abc", name: "My-App-orchestrator", cwd: URL(fileURLWithPath: "/repo"), configFiles: files, appendSystemPrompt: "rules")
+        for resume in [false, true] {
+            let args = command.arguments(resume: resume)
+            let flag = args.firstIndex(of: "-n")
+            XCTAssertEqual(flag.map { args[args.index(after: $0)] }, "My-App-orchestrator", "resume: \(resume)")
+        }
+    }
+
     func testTranscriptDetection() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let cwd = URL(fileURLWithPath: "/Users/x/proj")

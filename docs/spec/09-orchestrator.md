@@ -31,6 +31,14 @@
   orchestrator session for the project whose transcript does hold one takes
   the pin, or a new id if none does. A pin with no transcript yet is kept and
   started with `--session-id`.
+- **Session name.** Every launch — first, Restart, resume, and the fresh id
+  that replaces an empty pin — passes `-n <project name>-orchestrator`: the
+  project's name as the human set it, case kept, each whitespace run collapsed
+  to `-` (`ConsoleSessionName`). The Coordinator's console passes
+  `-n coordinator`. Other sessions address the console by that name
+  (ListAgents, SendMessage, `claude agents`). `claude` accepts any character in
+  a name, and `-n` with `--resume` records the new name on the resumed
+  session; a `/clear` fork's new session carries the name over.
 - **Restart** signals the child with SIGTERM and relaunches on its exit. It
   does not call SwiftTerm's `terminate()`, which cancels the exit monitor, so
   the relaunch would never fire.

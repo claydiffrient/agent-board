@@ -98,6 +98,7 @@ final class ProjectOrchestratorSource: ConsoleSessionSource {
 
         return InteractiveSessionCommand(
             sessionId: sessionId,
+            name: ConsoleSessionName.orchestrator(projectName: project.name),
             cwd: URL(fileURLWithPath: project.repoPath),
             configFiles: configFiles,
             appendSystemPrompt: OrchestratorPrompt.systemPrompt(project: project),
@@ -185,6 +186,7 @@ final class CoordinatorSource: ConsoleSessionSource {
         let registered = try projects.list()
         return InteractiveSessionCommand(
             sessionId: sessionId,
+            name: ConsoleSessionName.coordinator,
             cwd: folder,
             configFiles: configFiles,
             appendSystemPrompt: CoordinatorPrompt.systemPrompt(readOnlyRepos: registered.map(\.repoPath)),
