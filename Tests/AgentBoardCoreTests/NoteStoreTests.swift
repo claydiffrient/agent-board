@@ -129,6 +129,31 @@ final class NoteStoreTests: XCTestCase {
         XCTAssertEqual(try f.notes.pinned(projectId: f.project.id), [])
     }
 
+    func testAnArchivedNoteLeavesSpawnAndDefaultSearchButKeepsItsLinksUntilRestored() throws {
+        let f = try Fixture.make()
+        let task = try f.task("t")
+        let attached = try f.notes.create(projectId: f.project.id, title: "Attached marmot", sections: [])
+        let pinned = try f.notes.create(projectId: f.project.id, title: "Pinned marmot", sections: [])
+        let loose = try f.notes.create(projectId: f.project.id, title: "Loose marmot", sections: [])
+        try f.notes.attach(noteId: attached.id, taskId: task.id)
+        try f.notes.pin(pinned.id, true)
+
+        for note in [attached, pinned, loose] { try f.notes.archive(note.id) }
+
+        XCTAssertEqual(try f.notes.notesForSpawn(projectId: f.project.id, taskId: task.id, epicId: nil), SpawnNotes())
+        XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "marmot"), [])
+        XCTAssertEqual(try f.notes.search(projectId: f.project.id, query: "marmot", includeArchived: true).count, 3)
+        XCTAssertEqual(try f.notes.pinned(projectId: f.project.id), [])
+        XCTAssertEqual(try f.notes.get(pinned.id)?.pinned, false)
+        XCTAssertEqual(try f.notes.read(loose.id)?.0.isArchived, true)
+        XCTAssertEqual(try f.notes.links(noteId: attached.id).count, 1)
+
+        try f.notes.unarchive(attached.id)
+        let spawn = try f.notes.notesForSpawn(projectId: f.project.id, taskId: task.id, epicId: nil)
+        XCTAssertEqual(spawn.full.map(\.note.id), [attached.id])
+        XCTAssertEqual(spawn.unlistedCount, 0)
+    }
+
     func testAttachDetachAndLookups() throws {
         let f = try Fixture.make()
         let task = try f.task("t")

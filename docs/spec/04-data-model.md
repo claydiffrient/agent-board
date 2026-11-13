@@ -247,7 +247,8 @@ CREATE TABLE note (
   title       TEXT NOT NULL,
   pinned      INTEGER NOT NULL DEFAULT 0,
   version     INTEGER NOT NULL DEFAULT 1,
-  updated_at  INTEGER NOT NULL
+  updated_at  INTEGER NOT NULL,
+  archived_at INTEGER                   -- set by archive_note (§6); NULL once the human restores it
 );
 
 CREATE TABLE note_section (
@@ -555,6 +556,13 @@ this build does not know decodes as nil rather than resetting every other settin
 Notes are sectioned rather than a single body specifically so three concurrent
 workers appending to one note do not silently lose each other's writes. Whole-
 document replace is not offered.
+
+An archived note (`archived_at` set) is kept, not deleted: archiving unpins it and
+leaves its `note_link` rows alone, but it is neither injected nor indexed nor
+counted at spawn (D13), `search_notes` skips it unless asked, and `read_note`
+returns it with `archived: true`. It cannot be pinned again until the human
+restores it from the Notes screen (§10), which clears `archived_at` only.
+Deleting a note stays a human action there.
 
 An **archetype** is a template — role, system prompt, model, tool scope — and
 every assignment instantiates it in a fresh session. The role is the durable

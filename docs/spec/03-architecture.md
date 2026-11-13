@@ -165,10 +165,12 @@ For a task `T` in project `P`:
    `(session, task)`. A resume issues its replacement token with the same scope
    (§5).
 6. Compose the opening prompt: task title, body, acceptance criteria, epic goal,
-   task- and epic-attached notes in full, a one-line index of every other note in
-   the project naming its `note://` resource uri, the project's build and test
-   commands when `settings_json` records them, and the completion protocol
-   (commit, record one durable finding as a note, do not push, call
+   task- and epic-attached notes in full, a one-line index of the project's other
+   pinned notes naming each `note://` resource uri (title cut at 120 characters,
+   the first three headings at 48 each), one line counting the remaining notes
+   and naming `search_notes` and `read_note` as the way to them (D13), the
+   project's build and test commands when `settings_json` records them, and the
+   completion protocol (commit, record one durable finding as a note, do not push, call
    `report_complete`). Injection alone left D13 half-built: notes flowed in and
    nothing flowed back, so the prompt also points at `search_notes` in *How to
    work* and asks for a note before `report_complete` in *When you are done*,

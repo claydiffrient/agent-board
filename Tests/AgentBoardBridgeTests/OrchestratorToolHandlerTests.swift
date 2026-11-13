@@ -541,6 +541,27 @@ final class OrchestratorToolHandlerTests: XCTestCase {
         XCTAssertEqual(try f.notes.pinned(projectId: f.project.id).count, 0)
     }
 
+    func testArchiveNoteHidesTheNoteFromDefaultSearchAndReadMarksIt() async throws {
+        let note = try f.note("Superseded walrus")
+        try f.notes.pin(note.id, true)
+
+        let archived = try await f.call("archive_note", ["note_id": .string(note.id), "reason": .string("Fixed upstream.")])
+        XCTAssertTrue(archived.text.contains("Superseded walrus"), archived.text)
+
+        let hidden = try await f.callJSON("search_notes", ["query": .string("walrus")])
+        XCTAssertEqual(hidden.arrayValue?.count, 0)
+        let found = try await f.callJSON("search_notes", ["query": .string("walrus"), "include_archived": .bool(true)])
+        XCTAssertEqual(found.arrayValue?.first?["archived"], .bool(true))
+        let read = try await f.callJSON("read_note", ["id": .string(note.id)])
+        XCTAssertEqual(read["archived"], .bool(true))
+        XCTAssertEqual(read["pinned"], .bool(false))
+        XCTAssertEqual(read["sections"]?.arrayValue?.last?["body"], .string("Fixed upstream."))
+        await XCTAssertToolError(
+            try await f.call("pin_note", ["note_id": .string(note.id), "pinned": .bool(true)]),
+            containing: "archived"
+        )
+    }
+
     func testPinNoteRequiresABoolean() async throws {
         let note = try f.note("Always true")
         await XCTAssertToolError(

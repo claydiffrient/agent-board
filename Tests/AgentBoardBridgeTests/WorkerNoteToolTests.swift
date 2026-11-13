@@ -32,6 +32,7 @@ final class WorkerNoteToolTests: XCTestCase {
         }
         XCTAssertFalse(names.contains("attach_note"))
         XCTAssertFalse(names.contains("pin_note"))
+        XCTAssertFalse(names.contains("archive_note"))
     }
 
     func testEveryWorkerSchemaForbidsAdditionalProperties() async {
@@ -51,6 +52,11 @@ final class WorkerNoteToolTests: XCTestCase {
             try await call("pin_note", ["note_id": .string(note.id), "pinned": .bool(true)]),
             containing: "Unknown tool"
         )
+        await XCTAssertToolError(
+            try await call("archive_note", ["note_id": .string(note.id), "reason": .string("stale")]),
+            containing: "Unknown tool"
+        )
+        XCTAssertEqual(try f.notes.get(note.id)?.isArchived, false)
         XCTAssertEqual(try f.notes.links(noteId: note.id).count, 0)
         XCTAssertEqual(try f.notes.get(note.id)?.pinned, false)
     }

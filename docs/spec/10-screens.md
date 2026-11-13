@@ -594,7 +594,11 @@ for a queue entry — or the PR on GitHub while the review server is down.
 of tasks/epics each note is attached to. Shows which agent last wrote each
 section. Each section header carries a copy button that puts that section on the
 clipboard as `## heading` followed by the text on screen — unsaved edits
-included, since that is what the human is looking at.
+included, since that is what the human is looking at. Archived notes (§4) are
+hidden from the list and its search by default; once one exists, the list's
+footer offers "Show N archived", which lists them with an Archived badge and a
+Restore button each. Restore clears the archive and nothing else, so a restored
+note comes back unpinned. An archived note's pin toggle is disabled.
 
 **Searching notes** — the shared `SearchField` (see *Searching the board*)
 heads the Notes screen and filters the list in place through

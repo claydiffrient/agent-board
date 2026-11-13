@@ -28,7 +28,9 @@ final class SpawnNoteIndexTests: XCTestCase {
         let pinned = try f.note("Pinned advice", sections: [("Rule", "never force-push")])
         try f.notes.pin(pinned.id, true)
         let loose = try f.note("Loose note", sections: [("A", "alpha"), ("B", "beta")])
+        try f.notes.pin(loose.id, true)
         let empty = try f.note("Nothing learned yet")
+        try f.notes.pin(empty.id, true)
 
         let entries = try index()
         XCTAssertEqual(Set(entries.map(\.id)), Set([pinned.id, loose.id, empty.id]))
@@ -45,7 +47,7 @@ final class SpawnNoteIndexTests: XCTestCase {
         XCTAssertTrue(body[0].text.contains("beta"))
     }
 
-    func testTheIndexAndTheResourceListingAgreeOnEveryUriTheWorkerIsNotGivenInFull() async throws {
+    func testTheIndexAndTheResourceListingAgreeOnEveryPinnedNoteNotGivenInFull() async throws {
         let attached = try f.note("Attached", sections: [("H", "injected in full")])
         try f.notes.attach(noteId: attached.id, taskId: task.id)
         let pinned = try f.note("Pinned", sections: [("H", "indexed")])

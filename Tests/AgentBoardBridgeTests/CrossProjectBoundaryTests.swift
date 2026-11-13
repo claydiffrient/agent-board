@@ -25,7 +25,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "get_task", "update_task", "move_task", "close_task", "set_epic", "set_deps", "log_progress",
         "spawn_worker", "stop_worker", "archive_task", "unarchive_task", "get_report",
         "promote_proposal", "get_epic", "request_integration", "close_epic", "refresh_epic", "open_pull_request",
-        "read_note", "append_section", "replace_section", "attach_note", "pin_note",
+        "read_note", "append_section", "replace_section", "attach_note", "pin_note", "archive_note",
         "assign_to_agent", "add_comment", "delete_message", "reply_to_request", "add_pr_item",
         "get_pr_watch", "dismiss_pr_item", "resume_pr_watch",
     ]
@@ -56,7 +56,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
         "spawn_worker", "assign_to_agent", "stop_worker", "archive_task", "unarchive_task", "promote_proposal",
         "create_epic", "request_integration", "close_epic", "refresh_epic", "push_branch", "open_pull_request",
         "send_message",
-        "attach_note", "pin_note",
+        "attach_note", "pin_note", "archive_note",
         "update_status", "propose_task", "report_complete", "hand_off", "report_blocked", "acknowledge_shutdown",
         "commit_my_work", "accept_task", "reopen_task", "reply_to_request", "add_pr_item", "dismiss_pr_item",
         "resume_pr_watch", "watch_pr",
@@ -107,7 +107,7 @@ final class CrossProjectBoundaryTests: XCTestCase {
             "a tool was added to the orchestrator surface without a cross-project test in this file"
         )
         XCTAssertEqual(classified.subtracting(surface), [], "this audit names tools that no longer exist")
-        XCTAssertEqual(surface.count, 47)
+        XCTAssertEqual(surface.count, 48)
     }
 
     func testOnlySendMessageAcceptsAnotherProjectsId() async {
@@ -397,6 +397,11 @@ final class CrossProjectBoundaryTests: XCTestCase {
             try await f.call("pin_note", ["note_id": .string(foreignNote.id), "pinned": .bool(true)]),
             containing: "not in this project"
         )
+        await XCTAssertToolError(
+            try await f.call("archive_note", ["note_id": .string(foreignNote.id), "reason": .string("ours now")]),
+            containing: "not in this project"
+        )
+        XCTAssertEqual(try f.notes.get(foreignNote.id)?.isArchived, false)
         await XCTAssertToolError(
             try await f.call("attach_note", ["note_id": .string(ourNote.id), "task_id": .string(foreignTask.id)]),
             containing: "not in this project"

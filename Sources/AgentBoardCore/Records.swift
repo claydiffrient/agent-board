@@ -697,6 +697,8 @@ public struct Note: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var pinned: Bool
     public var version: Int64
     public var updatedAt: Int64
+    /// Set by `archive_note` or never; an archived note is kept but leaves spawn prompts and default search (SPEC §4).
+    public var archivedAt: Int64?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -705,16 +707,23 @@ public struct Note: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case pinned
         case version
         case updatedAt = "updated_at"
+        case archivedAt = "archived_at"
     }
 
-    public init(id: String, projectId: String?, title: String, pinned: Bool = false, version: Int64 = 1, updatedAt: Int64) {
+    public init(
+        id: String, projectId: String?, title: String, pinned: Bool = false, version: Int64 = 1, updatedAt: Int64,
+        archivedAt: Int64? = nil
+    ) {
         self.id = id
         self.projectId = projectId
         self.title = title
         self.pinned = pinned
         self.version = version
         self.updatedAt = updatedAt
+        self.archivedAt = archivedAt
     }
+
+    public var isArchived: Bool { archivedAt != nil }
 
     public static func newId() -> String { BoardId.new() }
 

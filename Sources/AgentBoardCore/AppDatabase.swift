@@ -293,6 +293,9 @@ public final class AppDatabase: Sendable {
             try db.execute(sql: "ALTER TABLE epic ADD COLUMN upstream_pr_number INTEGER")
             try db.execute(sql: "ALTER TABLE epic ADD COLUMN upstream_pr_url TEXT")
         }
+        migrator.registerMigration("note_archived_at") { db in
+            try db.execute(sql: "ALTER TABLE note ADD COLUMN archived_at INTEGER")
+        }
         return migrator
     }
 }
