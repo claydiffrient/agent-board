@@ -26,7 +26,8 @@ public struct TakeoverStore: Sendable {
             let row = Takeover(
                 id: Takeover.newId(), projectId: projectId, githubNodeId: candidate.githubNodeId,
                 kind: candidate.kind, number: candidate.number, url: candidate.url,
-                issueNodeId: candidate.issueNodeId, issueURL: candidate.issueURL, title: candidate.title,
+                issueNodeId: candidate.issueNodeId, issueURL: candidate.issueURL, viaIssue: candidate.viaIssue,
+                title: candidate.title,
                 author: candidate.author, isCrossRepository: candidate.isCrossRepository, state: .found,
                 taskId: nil, watchId: nil, failure: nil, createdAt: now, updatedAt: now
             )

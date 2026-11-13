@@ -271,13 +271,12 @@ public struct Board: Sendable {
     }
 
     /// Resolves the approval and queues a `decision` report so the orchestrator learns the outcome on its next pull.
-    /// A granted dismissal or resume is reported by `applyItemDismissal` or `applyWatchResume` instead,
-    /// which says what it did.
+    /// A granted dismissal, resume or adoption is reported by what applies it instead, which says what it did.
     @discardableResult
     public func resolveApproval(_ id: String, approved: Bool, by: String, reason: String? = nil) throws -> Approval {
         try db.writer.write { db in
             let approval = try ApprovalStore.resolve(db, id, approved ? .approved : .denied)
-            if approved, approval.kind == .prItemDismissal || approval.kind == .prWatchResume { return approval }
+            if approved, [.prItemDismissal, .prWatchResume, .prWatchAdopt].contains(approval.kind) { return approval }
             var body = "\(approval.kind.rawValue) \(approved ? "approved" : "denied")"
             if let taskId = approval.taskId {
                 body += " for task \(taskId)"
@@ -289,6 +288,8 @@ public struct Board: Sendable {
             } else if approval.kind == .prItemDismissal, let request = try? PRItemDismissalRequest.decode(approval.payload) {
                 body += " for item \(request.itemId)"
             } else if approval.kind == .prWatchResume, let request = try? PRWatchResumeRequest.decode(approval.payload) {
+                body += " for #\(request.number)"
+            } else if approval.kind == .prWatchAdopt, let request = try? PRWatchAdoptionRequest.decode(approval.payload) {
                 body += " for #\(request.number)"
             }
             if let reason, !reason.isEmpty {

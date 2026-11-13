@@ -282,6 +282,12 @@ public final class AppDatabase: Sendable {
             try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN takeover_id TEXT")
             try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN takeover_round INTEGER")
         }
+        migrator.registerMigration("takeover_via_issue") { db in
+            try db.execute(sql: "ALTER TABLE takeover ADD COLUMN via_issue INTEGER NOT NULL DEFAULT 0")
+        }
+        migrator.registerMigration("pr_watch_adopted_at") { db in
+            try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN adopted_at INTEGER")
+        }
         migrator.registerMigration("epic_upstream") { db in
             try db.execute(sql: "ALTER TABLE epic ADD COLUMN upstream_ref TEXT")
             try db.execute(sql: "ALTER TABLE epic ADD COLUMN upstream_pr_number INTEGER")

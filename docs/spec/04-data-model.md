@@ -230,7 +230,7 @@ CREATE TABLE request_epic (
 CREATE TABLE approval (
   id           TEXT PRIMARY KEY,
   project_id   TEXT NOT NULL REFERENCES project(id),
-  kind         TEXT NOT NULL,            -- spawn | integration | push | pull_request | pr_item_dismissal
+  kind         TEXT NOT NULL,            -- spawn | integration | push | pull_request | pr_item_dismissal | pr_watch_resume | pr_watch_adopt
   task_id      TEXT REFERENCES task(id),
   epic_id      TEXT REFERENCES epic(id),
   requested_by TEXT NOT NULL,            -- session_id of the requester, or 'human'
@@ -355,9 +355,10 @@ CREATE TABLE pr_watch (
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,  -- moves only when something other than last_polled_at changes
   authored         INTEGER NOT NULL DEFAULT 1,  -- the last poll's author search returned it (§13.5)
-  adopted          INTEGER NOT NULL DEFAULT 0,  -- watched for a takeover (§13.8); cleared when the takeover is released
-  takeover_id      TEXT,              -- the takeover that adopted it
+  adopted          INTEGER NOT NULL DEFAULT 0,  -- watched for a takeover or adopted by hand (§13.8); cleared when a takeover is released
+  takeover_id      TEXT,              -- the takeover that adopted it; NULL for a manual adoption
   takeover_round   INTEGER,           -- the round that works the human's own open feedback (§13.1)
+  adopted_at       INTEGER,           -- when a manual adoption ran; its cutoff for the human's own feedback (§13.8)
   UNIQUE (project_id, repo_owner, repo_name, number)
 );
 CREATE INDEX pr_watch_state ON pr_watch(state);
@@ -444,8 +445,9 @@ CREATE TABLE takeover (
   kind                TEXT NOT NULL,     -- issue | pr
   number              INTEGER NOT NULL,
   url                 TEXT NOT NULL,
-  issue_node_id       TEXT,              -- a pr row only: the issue found with it that it closes
+  issue_node_id       TEXT,              -- a pr row only: the issue found that it closes
   issue_url           TEXT,
+  via_issue           INTEGER NOT NULL DEFAULT 0,  -- a pr row taken over through issue_node_id alone
   title               TEXT NOT NULL,
   author              TEXT,
   is_cross_repository INTEGER NOT NULL DEFAULT 0,
