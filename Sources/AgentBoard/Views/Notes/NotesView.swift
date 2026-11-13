@@ -73,7 +73,7 @@ struct NotesView: View {
                     ContentUnavailableView(
                         "No notes yet",
                         systemImage: "note.text",
-                        description: Text("Notes you and your agents write show up here. Pinned notes go to every worker at spawn.")
+                        description: Text("Notes you and your agents write show up here. Pinned notes are listed by title in every worker's prompt.")
                     )
                 }
             }
