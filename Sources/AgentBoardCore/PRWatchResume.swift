@@ -11,9 +11,11 @@ public struct PRWatchResumeRequest: Codable, Sendable, Equatable {
     public var parkedReason: String?
     public var reason: String
     public var stopped: Bool
+    public var url: String?
 
     public init(
-        watchId: String, number: Int, title: String, parkedReason: String?, reason: String, stopped: Bool = false
+        watchId: String, number: Int, title: String, parkedReason: String?, reason: String, stopped: Bool = false,
+        url: String? = nil
     ) {
         self.watchId = watchId
         self.number = number
@@ -21,6 +23,7 @@ public struct PRWatchResumeRequest: Codable, Sendable, Equatable {
         self.parkedReason = parkedReason
         self.reason = reason
         self.stopped = stopped
+        self.url = url
     }
 
     public enum CodingKeys: String, CodingKey {
@@ -30,6 +33,7 @@ public struct PRWatchResumeRequest: Codable, Sendable, Equatable {
         case parkedReason = "parked_reason"
         case reason
         case stopped
+        case url
     }
 
     /// A request filed before `stopped` existed was for a parked watch.
@@ -41,6 +45,7 @@ public struct PRWatchResumeRequest: Codable, Sendable, Equatable {
         parkedReason = try container.decodeIfPresent(String.self, forKey: .parkedReason)
         reason = try container.decode(String.self, forKey: .reason)
         stopped = try container.decodeIfPresent(Bool.self, forKey: .stopped) ?? false
+        url = try container.decodeIfPresent(String.self, forKey: .url)
     }
 
     /// The approval's line for why follow-through let go of the PR.
@@ -85,7 +90,7 @@ extension Board {
             }
             let request = PRWatchResumeRequest(
                 watchId: watch.id, number: watch.number, title: watch.title, parkedReason: watch.parkedReason,
-                reason: reason, stopped: watch.state == .stopped
+                reason: reason, stopped: watch.state == .stopped, url: watch.url
             )
             return try ApprovalStore.insert(
                 db, projectId: projectId, kind: .prWatchResume, taskId: nil, epicId: nil, requestedBy: requestedBy,
