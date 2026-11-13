@@ -39,7 +39,7 @@ struct EpicLaneHeader: View {
             EpicStateBadge(state: epic.state, pullRequest: pullRequest)
             if epic.upstream != nil, let pullRequest, let url = URL(string: pullRequest.url) {
                 Link(destination: url) {
-                    Text(verbatim: "PR #\(pullRequest.number)")
+                    Text(verbatim: "PR " + issueNumberLabel(pullRequest.number))
                         .font(.caption)
                 }
                 .help("This epic builds on \(pullRequest.url) and publishes onto its head branch.")
