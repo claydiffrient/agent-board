@@ -63,7 +63,7 @@ public struct NoteIndexEntry: Sendable, Equatable {
 }
 
 /// What a spawning worker is told about its project's notes (D13): the few written for this work in
-/// full, pinned notes as a title and a resource uri, and only a count of the rest.
+/// full, pinned notes as a title and a resource uri, and only a count of the rest. Archived notes are none of these.
 public struct SpawnNotes: Sendable, Equatable {
     public let full: [InjectedNote]
     public let index: [NoteIndexEntry]
@@ -89,7 +89,7 @@ extension NoteStore {
             var byId: [String: Note] = [:]
 
             func absorb(_ notes: [Note], _ reason: NoteInjectionReason) {
-                for note in notes where note.projectId == projectId {
+                for note in notes where note.projectId == projectId && !note.isArchived {
                     if reasons[note.id] == nil {
                         order.append(note.id)
                         byId[note.id] = note
@@ -119,7 +119,7 @@ extension NoteStore {
 
             let injected = Set(fullIds)
             let headings = try Self.headings(db, projectId: projectId)
-            let rest = try Self.list(db, projectId: projectId).filter { !injected.contains($0.id) }
+            let rest = try Self.list(db, projectId: projectId).filter { !injected.contains($0.id) && !$0.isArchived }
             let index = rest.filter(\.pinned).map { note in
                 NoteIndexEntry(
                     id: note.id,

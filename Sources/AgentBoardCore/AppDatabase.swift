@@ -282,6 +282,9 @@ public final class AppDatabase: Sendable {
             try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN takeover_id TEXT")
             try db.execute(sql: "ALTER TABLE pr_watch ADD COLUMN takeover_round INTEGER")
         }
+        migrator.registerMigration("note_archived_at") { db in
+            try db.execute(sql: "ALTER TABLE note ADD COLUMN archived_at INTEGER")
+        }
         return migrator
     }
 }

@@ -12,19 +12,24 @@ struct NotesView: View {
     @State private var selectedNoteId: String?
     @State private var newNoteTitle: String?
     @State private var errorMessage: String?
+    @State private var showArchived = false
 
     private var store: NoteStore { NoteStore(env.db) }
 
     /// The list's own order, narrowed: a query filters the notes in place rather than re-ranking
     /// them, so a note keeps its position while the query is typed out and after it is cleared.
+    private var shown: [Note] {
+        showArchived ? notes.value : notes.value.filter { !$0.isArchived }
+    }
+
     private var visible: [Note] {
-        guard let matchIds else { return notes.value }
-        return notes.value.filter { matchIds.contains($0.id) }
+        guard let matchIds else { return shown }
+        return shown.filter { matchIds.contains($0.id) }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            SearchField(noun: .notes, text: $query, shown: visible.count, total: notes.value.count)
+            SearchField(noun: .notes, text: $query, shown: visible.count, total: shown.count)
                 .padding(.horizontal)
                 .padding(.vertical, 8)
             Divider()
@@ -77,6 +82,12 @@ struct NotesView: View {
                 Text("\(visible.count) note\(visible.count == 1 ? "" : "s")")
                 Spacer()
                 Text("\(notes.value.filter(\.pinned).count) pinned")
+                let archived = notes.value.filter(\.isArchived).count
+                if archived > 0 {
+                    Toggle("Show \(archived) archived", isOn: $showArchived)
+                        .toggleStyle(.checkbox)
+                        .help("Archived notes are out of every worker's prompt and default search")
+                }
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -96,6 +107,18 @@ struct NotesView: View {
                 Text("v\(note.version) · \(Format.relative(note.updatedDate))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            if note.isArchived {
+                Spacer()
+                Text("Archived")
+                    .font(.caption2)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Color.secondary.opacity(0.2), in: Capsule())
+                Button("Restore") { restore(note) }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .help("Return this note to default search and to workers' note count")
             }
         }
         .padding(.vertical, 2)
@@ -117,6 +140,14 @@ struct NotesView: View {
         }
     }
 
+    private func restore(_ note: Note) {
+        do {
+            try store.unarchive(note.id)
+        } catch {
+            errorMessage = errorText(error)
+        }
+    }
+
     /// Section headings and text are searched too: `note_fts.body` is every section's heading and
     /// body. A failure leaves the last result on screen rather than emptying the list.
     private func runSearch() {
@@ -125,7 +156,7 @@ struct NotesView: View {
             return
         }
         do {
-            matchIds = Set(try store.search(projectId: project.id, query: match).map(\.id))
+            matchIds = Set(try store.search(projectId: project.id, query: match, includeArchived: true).map(\.id))
         } catch {
             errorMessage = errorText(error)
         }

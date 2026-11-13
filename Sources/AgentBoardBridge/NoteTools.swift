@@ -4,8 +4,8 @@ import Foundation
 import GRDB
 
 /// The notes surface shared by both scopes. The five read/write tools are worker-visible;
-/// `attach_note` and `pin_note` are orchestrator-only, so `WorkerToolHandler` dispatches
-/// `workerDescriptors` alone and a worker asking for either gets tool-not-found.
+/// `attach_note`, `pin_note` and `archive_note` are orchestrator-only, so `WorkerToolHandler` dispatches
+/// `workerDescriptors` alone and a worker asking for any of them gets tool-not-found.
 struct NoteTools: Sendable {
     private let db: AppDatabase
     private let notes: NoteStore
@@ -89,7 +89,20 @@ struct NoteTools: Sendable {
         ),
     ]
 
-    static let orchestratorDescriptors: [ToolDescriptor] = workerDescriptors + [
+    static let orchestratorDescriptors: [ToolDescriptor] = workerDescriptors.map { descriptor in
+        guard descriptor.name == "search_notes" else { return descriptor }
+        return ToolDescriptor(
+            name: descriptor.name,
+            description: descriptor.description + " Archived notes are left out unless include_archived is true.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "query": ToolSchema.string("Words to match. FTS5 syntax is accepted."),
+                    "include_archived": ToolSchema.boolean("Also match notes archived with archive_note."),
+                ],
+                required: ["query"]
+            )
+        )
+    } + [
         ToolDescriptor(
             name: "attach_note",
             description: "Attach a note to a task or an epic. Every worker spawned on that task, or on a task in that "
@@ -113,6 +126,20 @@ struct NoteTools: Sendable {
                 required: ["note_id", "pinned"]
             )
         ),
+        ToolDescriptor(
+            name: "archive_note",
+            description: "Archive a note that has stopped being true: a fixed bug, a superseded decision. It is unpinned and "
+                + "leaves every worker's prompt and default search_notes results; its attachments stay but no longer "
+                + "inject it. Nothing is deleted, read_note still returns it marked archived, and the human can restore "
+                + "it from the Notes screen.",
+            inputSchema: ToolSchema.object(
+                properties: [
+                    "note_id": ToolSchema.string(),
+                    "reason": ToolSchema.string("What made the note untrue, recorded on the note for the human."),
+                ],
+                required: ["note_id", "reason"]
+            )
+        ),
     ]
 
     func call(_ name: String, arguments: JSONValue, identity: TokenIdentity) throws -> ToolResult {
@@ -124,7 +151,9 @@ struct NoteTools: Sendable {
         switch name {
         case "search_notes":
             let query = try ToolArguments.requiredString("query", in: arguments)
-            let matches = try notes.search(projectId: space, query: query)
+            let includeArchived = identity.scope == .orchestrator
+                && ToolArguments.optionalBool("include_archived", in: arguments) == true
+            let matches = try notes.search(projectId: space, query: query, includeArchived: includeArchived)
             return .json(.array(matches.map(Self.renderSummary)))
         case "read_note":
             let note = try spaceNote(try ToolArguments.requiredString("id", in: arguments), space: space)
@@ -160,10 +189,20 @@ struct NoteTools: Sendable {
         case "pin_note":
             let note = try spaceNote(try ToolArguments.requiredString("note_id", in: arguments), space: identity.projectId)
             let pinned = try ToolArguments.requiredBool("pinned", in: arguments)
+            if pinned, note.isArchived {
+                throw ToolError("\"\(note.title)\" is archived. Only the human can restore it, from the Notes screen.")
+            }
             try notes.pin(note.id, pinned)
             return ToolResult(text: pinned
                 ? "Pinned \"\(note.title)\". Every agent spawned on this project from now on sees it in full."
                 : "Unpinned \"\(note.title)\".")
+        case "archive_note":
+            let note = try spaceNote(try ToolArguments.requiredString("note_id", in: arguments), space: identity.projectId)
+            let reason = try ToolArguments.requiredString("reason", in: arguments)
+            try notes.appendSection(noteId: note.id, heading: "Archived", body: reason, writtenBy: identity.sessionId)
+            try notes.archive(note.id)
+            return ToolResult(text: "Archived \"\(note.title)\". It is out of every worker's prompt and default search; "
+                + "the human can restore it from the Notes screen.")
         default:
             throw ToolError("Unknown tool: \(name)")
         }
@@ -250,13 +289,18 @@ struct NoteTools: Sendable {
     }
 
     static func renderSummary(_ note: Note) -> JSONValue {
-        .object([
+        var fields: [String: JSONValue] = [
             "id": .string(note.id),
             "title": .string(note.title),
             "pinned": .bool(note.pinned),
             "version": .number(Double(note.version)),
             "updated_at": .millis(note.updatedAt),
-        ])
+        ]
+        if let archivedAt = note.archivedAt {
+            fields["archived"] = .bool(true)
+            fields["archived_at"] = .millis(archivedAt)
+        }
+        return .object(fields)
     }
 
     /// The one assembly of a note's full text. `read_note` and the `note://` resource both call it,

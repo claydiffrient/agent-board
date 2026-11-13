@@ -122,7 +122,10 @@ struct NoteEditorView: View {
                     Label(detail.note.pinned ? "Pinned" : "Pin", systemImage: detail.note.pinned ? "pin.fill" : "pin")
                 }
                 .toggleStyle(.button)
-                .help("A pinned note is injected in full into every worker spawned on this project.")
+                .disabled(detail.note.isArchived)
+                .help(detail.note.isArchived
+                    ? "Restore this archived note before pinning it."
+                    : "A pinned note is injected in full into every worker spawned on this project.")
                 Button(role: .destructive) {
                     confirmingDelete = true
                 } label: {

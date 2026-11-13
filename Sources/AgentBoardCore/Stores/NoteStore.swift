@@ -100,7 +100,10 @@ public struct NoteStore: Sendable {
         try db.reader.read { db in
             try Note.fetchAll(
                 db,
-                sql: "SELECT * FROM note WHERE project_id = ? AND pinned = 1 ORDER BY updated_at DESC, title",
+                sql: """
+                    SELECT * FROM note WHERE project_id = ? AND pinned = 1 AND archived_at IS NULL
+                    ORDER BY updated_at DESC, title
+                    """,
                 arguments: [projectId]
             )
         }
@@ -168,6 +171,23 @@ public struct NoteStore: Sendable {
                 sql: "UPDATE note SET pinned = ? WHERE id = ?",
                 arguments: [pinned, id]
             )
+        }
+    }
+
+    /// Archiving unpins the note and leaves its task and epic attachments in place (SPEC §4).
+    public func archive(_ id: String) throws {
+        try db.writer.write { db in
+            guard try Note.fetchOne(db, key: id) != nil else { throw NoteError.noteNotFound(id) }
+            try db.execute(
+                sql: "UPDATE note SET archived_at = COALESCE(archived_at, ?), pinned = 0 WHERE id = ?",
+                arguments: [Int64.nowMillis, id]
+            )
+        }
+    }
+
+    public func unarchive(_ id: String) throws {
+        try db.writer.write { db in
+            try db.execute(sql: "UPDATE note SET archived_at = NULL WHERE id = ?", arguments: [id])
         }
     }
 
@@ -244,25 +264,25 @@ public struct NoteStore: Sendable {
 
     /// Full-text search over one space's notes. `query` is FTS5 syntax; if it does not
     /// parse, every whitespace-separated token is re-tried as a quoted literal.
-    public func search(projectId: String?, query: String) throws -> [Note] {
+    public func search(projectId: String?, query: String, includeArchived: Bool = false) throws -> [Note] {
         let tokens = query.split(whereSeparator: \.isWhitespace)
         guard !tokens.isEmpty else { return [] }
         return try db.reader.read { db in
             do {
-                return try matches(db, projectId: projectId, match: query)
+                return try matches(db, projectId: projectId, match: query, includeArchived: includeArchived)
             } catch is DatabaseError {
                 let quoted = tokens.map { "\"\($0.replacingOccurrences(of: "\"", with: ""))\"" }.joined(separator: " ")
-                return try matches(db, projectId: projectId, match: quoted)
+                return try matches(db, projectId: projectId, match: quoted, includeArchived: includeArchived)
             }
         }
     }
 
-    private func matches(_ db: Database, projectId: String?, match: String) throws -> [Note] {
+    private func matches(_ db: Database, projectId: String?, match: String, includeArchived: Bool) throws -> [Note] {
         try Note.fetchAll(
             db,
             sql: """
             SELECT n.* FROM note_fts f JOIN note n ON n.rowid = f.rowid
-            WHERE f.note_fts MATCH ? AND n.project_id IS ?
+            WHERE f.note_fts MATCH ? AND n.project_id IS ?\(includeArchived ? "" : " AND n.archived_at IS NULL")
             ORDER BY bm25(note_fts), n.updated_at DESC
             """,
             arguments: [match, projectId]

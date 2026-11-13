@@ -54,9 +54,16 @@ final class NotesSearchRenderTests: XCTestCase {
         }
     }
 
+    /// Showing and restoring are clicks, which do not drive a SwiftUI binding offscreen; this pins the default.
+    func testAnArchivedNoteIsHiddenFromTheListAndItsSearchByDefault() throws {
+        let mount = try makeMount(archiving: Self.watchdog.title)
+        try type("idle", into: mount, expectingRows: 1)
+        try type("", into: mount, expectingRows: 2)
+    }
+
     // MARK: fixtures
 
-    private func makeMount() throws -> OffscreenMount {
+    private func makeMount(archiving archivedTitle: String? = nil) throws -> OffscreenMount {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
             name: "notes", repoPath: "/tmp/notes-search-\(UUID().uuidString)", baseBranch: "main",
@@ -70,11 +77,12 @@ final class NotesSearchRenderTests: XCTestCase {
                     arguments: [1_767_225_600_000 - Int64(offset) * 3_600_000, note.id]
                 )
             }
+            if fixture.title == archivedTitle { try NoteStore(db).archive(note.id) }
         }
         let mount = OffscreenMount(NotesView(project: project).environment(renderEnvironment(db: db)))
         self.mount = mount
         mount.window.layoutIfNeeded()
-        try waitForRows(Self.all.count, in: mount)
+        try waitForRows(Self.all.count - (archivedTitle == nil ? 0 : 1), in: mount)
         return mount
     }
 

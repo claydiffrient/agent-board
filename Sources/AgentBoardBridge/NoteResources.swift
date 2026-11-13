@@ -57,6 +57,7 @@ public struct NoteResourceHandler: ResourceHandler {
     static func describe(_ note: Note, headings: [String]) -> String {
         var parts: [String] = []
         if note.pinned { parts.append("Pinned into every agent on this project.") }
+        if note.isArchived { parts.append("Archived: no longer believed true.") }
         if headings.isEmpty {
             parts.append("No sections yet.")
         } else {
