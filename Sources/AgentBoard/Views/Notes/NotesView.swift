@@ -100,7 +100,7 @@ struct NotesView: View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: note.pinned ? "pin.fill" : "note.text")
                 .foregroundStyle(note.pinned ? Color.orange : Color.secondary)
-                .help(note.pinned ? "Pinned: injected into every worker on this project" : "")
+                .help(note.pinned ? "Pinned: listed by title in every worker's prompt on this project" : "")
             VStack(alignment: .leading, spacing: 2) {
                 Text(note.title)
                     .lineLimit(1)

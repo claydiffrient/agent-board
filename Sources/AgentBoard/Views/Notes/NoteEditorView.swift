@@ -125,7 +125,7 @@ struct NoteEditorView: View {
                 .disabled(detail.note.isArchived)
                 .help(detail.note.isArchived
                     ? "Restore this archived note before pinning it."
-                    : "A pinned note is injected in full into every worker spawned on this project.")
+                    : "A pinned note is listed by title in every worker's prompt on this project. Its text reaches a worker only when the note is attached to the task or epic, or when the worker reads it.")
                 Button(role: .destructive) {
                     confirmingDelete = true
                 } label: {
