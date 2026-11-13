@@ -9,6 +9,48 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.11.0 — 2026-11-12
+
+- **Epics.** An epic can now build on an open pull request in the project's
+  origin instead of shipping as a new one. The New Epic sheet has a **Pull
+  request** field (blank by default; `42` or `#42`), and an orchestrator
+  can ask for the same. Creation is refused, with the reason shown under
+  the field, for a pull request that is closed, merged, from a fork or
+  unreadable, whose branch is the project's base branch, or that already
+  has an unfinished epic. The epic's branch is cut from the pull request's
+  latest head, never from the base branch, and a head that can't be
+  fetched refuses the spawn. Refreshing the epic merges that head, and
+  **Open PR** and the lane header's PR link go to the pull request.
+  Publishing pushes onto the pull request's own branch after you approve
+  it, never forced; if it moved, refresh the epic and push again. The
+  epic is done when the pull request merges, and goes back to active if the
+  pull request closes unmerged.
+- **Pull requests.** A taken-over issue whose fix is already one open pull
+  request now adopts that pull request into follow-through instead of
+  creating a duplicate task. The issue stays the trigger, and the
+  acknowledgment goes on the issue alone. An issue with no open linked
+  pull request, several, or one from a fork still gets a task. A new
+  **Watch pull request…** button on the Pull Requests page, and an
+  orchestrator request that reaches you on Pending Approvals, adopts any
+  open pull request in the origin by number, with no label needed. Nothing
+  is posted on GitHub, only **Stop watching** releases it, and the first
+  round works only your own feedback dated before you adopted it. A
+  closed, merged or fork pull request, one already watched, and one you
+  stopped are refused; the stopped one points at **Watch again**.
+- **Pull requests.** Issue and pull request numbers in the Taken over group
+  and in Pending Approvals no longer show digit grouping (`#13,237`), and
+  are links to GitHub. A rejected push now says the branch moved on the
+  remote rather than showing only git's output.
+- **Notes.** A worker's prompt now lists only pinned notes, by title, and
+  counts the rest with a pointer to search them; notes attached to the
+  task or epic are still shown in full. Pin the few notes every task
+  needs. An orchestrator can archive a note that is no longer true:
+  it leaves worker prompts and default search, and nothing is deleted. The
+  Notes screen hides archived notes behind a **Show N archived** checkbox,
+  marks them with an Archived badge and offers **Restore**. The Pin
+  tooltip, row tooltip and empty state now say pinned notes are listed by
+  title, not injected, and so does the reply to pinning a note.
+
 ## 0.10.0 — 2026-11-11
 
 - **Reliability.** The 0.9.0 app could run out of file descriptors for a few
