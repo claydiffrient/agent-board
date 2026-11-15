@@ -5,6 +5,7 @@ import Foundation
 /// Unlike workers it is not `--bg`, so `--session-id` pins the id and `--resume` restores it.
 public struct InteractiveSessionCommand: Sendable, Equatable {
     public var sessionId: String
+    public var name: String?
     public var cwd: URL
     public var configFiles: SessionConfigFiles
     public var appendSystemPrompt: String
@@ -16,11 +17,12 @@ public struct InteractiveSessionCommand: Sendable, Equatable {
     public var projectsRoot: URL
     public var invocation: ClaudeInvocation
 
-    public init(sessionId: String, cwd: URL, configFiles: SessionConfigFiles, appendSystemPrompt: String,
+    public init(sessionId: String, name: String? = nil, cwd: URL, configFiles: SessionConfigFiles, appendSystemPrompt: String,
                 model: String? = nil, effort: Effort? = nil, strictMcpConfig: Bool = false, addDirs: [String] = [],
                 disallowedTools: [String] = [], projectsRoot: URL = ClaudeProjectPaths.defaultProjectsRoot,
                 invocation: ClaudeInvocation = .installed()) {
         self.sessionId = sessionId
+        self.name = name
         self.cwd = cwd
         self.configFiles = configFiles
         self.appendSystemPrompt = appendSystemPrompt
@@ -44,6 +46,7 @@ public struct InteractiveSessionCommand: Sendable, Equatable {
     public func arguments(resume: Bool? = nil) -> [String] {
         var args = invocation.prefix
         args += (resume ?? transcriptExists) ? ["--resume", sessionId] : ["--session-id", sessionId]
+        if let name { args += ["-n", name] }
         args += ["--mcp-config", configFiles.mcpConfigURL.path, "--settings", configFiles.settingsURL.path]
         if strictMcpConfig { args.append("--strict-mcp-config") }
         args += ["--append-system-prompt", appendSystemPrompt]
