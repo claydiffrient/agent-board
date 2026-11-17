@@ -238,6 +238,10 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var reviewLevel: ReviewLevel = .task
     /// Who reviews each task type under `agent` review (SPEC §4).
     public var reviewRouting: ReviewRoutingTable = ReviewRoutingTable()
+    /// The agent-review round whose reopen leaves the task in `review` for a person (SPEC §5).
+    public var reviewRoundCap: Int = 3
+    /// Globs a completion may not touch without a person's review, beyond the built-in list (SPEC §4, §5.1).
+    public var protectedPathGlobs: [String] = []
     /// Shell command that builds this project, e.g. `swift build` or `pnpm build`. Empty leaves the
     /// agent to work it out from the repo.
     public var buildCommand: String? = nil
@@ -249,10 +253,16 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         didSet { verificationTimeoutSeconds = verificationTimeoutSeconds.map(VerificationCommands.clampedTimeout) }
     }
     public var integrationVerification: IntegrationVerification = .buildAndTest
+    /// Run one at a time in a finished task's worktree before review is routed, each under the
+    /// verification timeout (SPEC §4, §5.1). Separate from `testCommand`, which may be the whole suite.
+    public var completionCheckCommands: [String] = []
     /// Run in a worktree just before Agent Board removes it (SPEC §3.1, §4). Nil removes the
     /// worktree and nothing else.
     public var worktreeTeardownCommand: String? = nil
     public var worktreeTeardownTimeoutSeconds: Int = WorktreeTeardownCommand.defaultTimeoutSeconds
+    /// Run in the project's own checkout when free disk space runs low (SPEC §14.3). Nil runs nothing.
+    public var cleanupCommand: String? = nil
+    public var cleanupCommandTimeoutSeconds: Int = ProjectCleanupCommand.defaultTimeoutSeconds
     public var archivePolicy: ArchivePolicy = .afterEpicMerge
     /// Whether a worker gets its own worktree, shares the project's checkout, or is decided per spawn.
     public var worktreeStrategy: WorktreeStrategy = .worktree
@@ -287,12 +297,17 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         modelGuidance: String? = nil,
         reviewLevel: ReviewLevel = .task,
         reviewRouting: ReviewRoutingTable = ReviewRoutingTable(),
+        reviewRoundCap: Int = 3,
+        protectedPathGlobs: [String] = [],
         buildCommand: String? = nil,
         testCommand: String? = nil,
         verificationTimeoutSeconds: Int? = nil,
         integrationVerification: IntegrationVerification = .buildAndTest,
+        completionCheckCommands: [String] = [],
         worktreeTeardownCommand: String? = nil,
         worktreeTeardownTimeoutSeconds: Int = WorktreeTeardownCommand.defaultTimeoutSeconds,
+        cleanupCommand: String? = nil,
+        cleanupCommandTimeoutSeconds: Int = ProjectCleanupCommand.defaultTimeoutSeconds,
         archivePolicy: ArchivePolicy = .afterEpicMerge,
         worktreeStrategy: WorktreeStrategy = .worktree,
         sharedCheckoutMaxAgents: Int = 3,
@@ -314,12 +329,17 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.modelGuidance = modelGuidance
         self.reviewLevel = reviewLevel
         self.reviewRouting = reviewRouting
+        self.reviewRoundCap = reviewRoundCap
+        self.protectedPathGlobs = protectedPathGlobs
         self.buildCommand = buildCommand
         self.testCommand = testCommand
         self.verificationTimeoutSeconds = verificationTimeoutSeconds.map(VerificationCommands.clampedTimeout)
         self.integrationVerification = integrationVerification
+        self.completionCheckCommands = Self.normalizedCommands(completionCheckCommands)
         self.worktreeTeardownCommand = worktreeTeardownCommand
         self.worktreeTeardownTimeoutSeconds = worktreeTeardownTimeoutSeconds
+        self.cleanupCommand = cleanupCommand
+        self.cleanupCommandTimeoutSeconds = cleanupCommandTimeoutSeconds
         self.archivePolicy = archivePolicy
         self.worktreeStrategy = worktreeStrategy
         self.sharedCheckoutMaxAgents = sharedCheckoutMaxAgents
@@ -351,15 +371,23 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
             let named = try legacy.decodeIfPresent(ReviewAgentChoice.self, forKey: .reviewAgent)
             reviewRouting = ReviewRoutingTable(defaultAssignee: named.map(ReviewAssignee.named) ?? .anyReviewer)
         }
+        reviewRoundCap = try c.decodeIfPresent(Int.self, forKey: .reviewRoundCap) ?? 3
+        protectedPathGlobs = try c.decodeIfPresent([String].self, forKey: .protectedPathGlobs) ?? []
         buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
         verificationTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .verificationTimeoutSeconds)
             .map(VerificationCommands.clampedTimeout)
         integrationVerification = try c.decodeIfPresent(IntegrationVerification.self, forKey: .integrationVerification)
             ?? .buildAndTest
+        completionCheckCommands = Self.normalizedCommands(
+            try c.decodeIfPresent([String].self, forKey: .completionCheckCommands) ?? []
+        )
         worktreeTeardownCommand = try c.decodeIfPresent(String.self, forKey: .worktreeTeardownCommand)
         worktreeTeardownTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .worktreeTeardownTimeoutSeconds)
             ?? WorktreeTeardownCommand.defaultTimeoutSeconds
+        cleanupCommand = try c.decodeIfPresent(String.self, forKey: .cleanupCommand)
+        cleanupCommandTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .cleanupCommandTimeoutSeconds)
+            ?? ProjectCleanupCommand.defaultTimeoutSeconds
         archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge
         worktreeStrategy = try c.decodeIfPresent(WorktreeStrategy.self, forKey: .worktreeStrategy) ?? .worktree
         sharedCheckoutMaxAgents = try c.decodeIfPresent(Int.self, forKey: .sharedCheckoutMaxAgents)
@@ -378,6 +406,10 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// never silently override that choice (SPEC §4).
     static func initialWorkerModels(defaultModel: String?) -> WorkerModelTable {
         defaultModel == nil ? .recommended : WorkerModelTable()
+    }
+
+    public static func normalizedCommands(_ commands: [String]) -> [String] {
+        commands.compactMap(VerificationCommands.normalized)
     }
 
     /// Settings written before the routing table named a single reviewer here; it decodes into the

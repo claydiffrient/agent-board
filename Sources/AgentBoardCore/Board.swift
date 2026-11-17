@@ -431,6 +431,9 @@ public struct Board: Sendable {
         public var endedSessionState: SessionState? = nil
         /// The task was closed while this session still ran on it, so the report moved nothing.
         public var closedUnderSession = false
+        /// Why the task waits for a person whatever the review level: it touched a protected path, or
+        /// its changes could not be listed (SPEC §5.1). Also written to the task's `progress`.
+        public var protectedPathReview: String? = nil
 
         /// Never true on a resend: the first call already ran the acceptance path.
         public var autoAccept: Bool {
@@ -449,7 +452,9 @@ public struct Board: Sendable {
     /// writes nothing — the guard reads inside this write transaction, so two concurrent resends
     /// cannot both pass it, and the review routing below never runs twice.
     @discardableResult
-    public func complete(taskId: String, sessionId: String, summary: String) throws -> CompletionOutcome {
+    public func complete(
+        taskId: String, sessionId: String, summary: String, changes: CompletionChanges? = nil
+    ) throws -> CompletionOutcome {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
             if let existing = try ReportStore.completion(db, taskId: taskId, sessionId: sessionId) {
@@ -510,7 +515,12 @@ public struct Board: Sendable {
                 try Self.announceIntegrated(db, epic: awaitingPullRequest)
             }
             let level = try ReviewPolicy.level(db, task: task)
-            let routing = try ReviewPolicy.routing(db, task: task, completedBy: sessionId)
+            var routing = try ReviewPolicy.routing(db, task: task, completedBy: sessionId)
+            let protectedPathReview = try changes.flatMap { try Self.protectedPathReview(db, task: task, changes: $0) }
+            if let protectedPathReview {
+                _ = try ProgressStore.append(db, taskId: taskId, sessionId: nil, kind: .status, text: protectedPathReview)
+                if case .humanReview = routing {} else { routing = .humanReview(reason: nil) }
+            }
             switch routing {
             case .autoAccept:
                 break
@@ -521,12 +531,29 @@ public struct Board: Sendable {
                     text: "Handed to rostered reviewer \(agentName) for agent review."
                 )
             case .humanReview(let reason):
-                try Self.leaveReviewToPerson(db, taskId: taskId, reason: reason)
+                try Self.leaveReviewToPerson(db, taskId: taskId, reason: reason, loggedReason: protectedPathReview)
             }
             return CompletionOutcome(
                 report: report, level: level, routing: routing, column: column, wasAlreadyComplete: false,
-                awaitingPullRequest: awaitingPullRequest
+                awaitingPullRequest: awaitingPullRequest, protectedPathReview: protectedPathReview
             )
+        }
+    }
+
+    /// SPEC §5.1: an agent reviewer loads `CLAUDE.md` and `.claude/` from the worker's own checkout, so
+    /// a task that changed them, or CI, or the project's own protected globs, goes to a person.
+    private static func protectedPathReview(_ db: Database, task: Task, changes: CompletionChanges) throws -> String? {
+        guard task.origin != .integration else { return nil }
+        switch changes {
+        case .unlisted(let reason):
+            return "Agent Board could not list the files this task changed (\(reason)), so it cannot rule out a "
+                + "change to the rules a reviewer loads or to CI. It waits for a person whatever the review level."
+        case .listed(let paths):
+            let globs = try settings(db, projectId: task.projectId).protectedPathGlobs
+            let hits = ProtectedPaths.matching(paths, extraGlobs: globs)
+            guard !hits.isEmpty else { return nil }
+            return "This task changed protected paths, which can change the rules a reviewer loads or the CI that "
+                + "checks it: \(hits.joined(separator: ", ")). It waits for a person whatever the review level."
         }
     }
 
@@ -590,9 +617,10 @@ public struct Board: Sendable {
         }
     }
 
-    static func leaveReviewToPerson(_ db: Database, taskId: String, reason: String?) throws {
+    /// `loggedReason` is stored when `reason` is nil but is not appended to `progress` again.
+    static func leaveReviewToPerson(_ db: Database, taskId: String, reason: String?, loggedReason: String? = nil) throws {
         try TaskStore.setReviewer(db, taskId, nil)
-        try TaskStore.enterHumanReview(db, taskId, reason: reason)
+        try TaskStore.enterHumanReview(db, taskId, reason: reason ?? loggedReason)
         if let reason {
             _ = try ProgressStore.append(db, taskId: taskId, sessionId: nil, kind: .status, text: reason)
         }
@@ -753,20 +781,44 @@ public struct Board: Sendable {
 
     /// Puts a rostered reviewer's approval on the task before the acceptance itself runs, so a person
     /// reading a task that reached `done` without them can see who approved it and why. The accept that
-    /// follows is the ordinary one — this deliberately does not move the task.
+    /// follows is the ordinary one — this deliberately does not move the task. Throws
+    /// `ReviewGradingRejection` when `grades` does not grade the previous round's findings (SPEC §5.1).
+    @discardableResult
     public func recordReviewVerdict(
-        taskId: String, sessionId: String?, reviewerName: String, verdict: String
-    ) throws {
+        taskId: String, sessionId: String?, reviewerName: String, verdict: String, grades: [GradedFinding] = []
+    ) throws -> ReviewRound {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
             guard task.column == .review else {
                 throw BoardError.invalidTransition(taskId: taskId, from: task.column, to: .done)
             }
-            _ = try ProgressStore.append(
-                db, taskId: taskId, sessionId: sessionId, kind: .note,
-                text: "\(Self.reviewPassedLead) Reviewer \(reviewerName) accepted this task into done.\n\n\(verdict)"
+            let previous = try ReviewRound.latest(db, taskId: taskId)
+            let graded = try ReviewRound.checkGrades(grades, against: previous)
+            var text = "\(Self.reviewPassedLead) Reviewer \(reviewerName) accepted this task into done.\n\n\(verdict)"
+            if let previous, !graded.isEmpty {
+                text += "\n\n" + ReviewRound.renderGrades(graded, ofRound: previous.number)
+            }
+            _ = try ProgressStore.append(db, taskId: taskId, sessionId: sessionId, kind: .note, text: text)
+            return try Self.insertRound(
+                db, taskId: taskId, after: previous, sessionId: sessionId, reviewerName: reviewerName,
+                outcome: .accepted, findings: [], verdict: verdict, grades: graded
             )
         }
+    }
+
+    static func insertRound(
+        _ db: Database, taskId: String, after previous: ReviewRound?, sessionId: String?, reviewerName: String,
+        outcome: ReviewRoundOutcome, findings: [String], verdict: String?, grades: [GradedFinding]
+    ) throws -> ReviewRound {
+        let head = try sessionId.flatMap { try AgentSession.fetchOne(db, key: $0) }?.reviewHead
+            .flatMap { $0.split(separator: " ").first.map(String.init) }
+        var round = ReviewRound(
+            id: nil, taskId: taskId, number: (previous?.number ?? 0) + 1, sessionId: sessionId,
+            reviewerName: reviewerName, outcome: outcome, findings: findings, verdict: verdict, grades: grades,
+            reviewedHead: head, at: .nowMillis
+        )
+        try round.insert(db)
+        return round
     }
 
     public static let reviewPassedLead = "Agent review passed."
@@ -784,28 +836,70 @@ public struct Board: Sendable {
         )
     }
 
+    public static let reviewRoundCapLead = "Agent review round cap reached."
+
+    public struct ReviewReopen: Sendable, Equatable {
+        public var report: Report
+        public var round: ReviewRound
+        public var cap: Int
+        public var capped: Bool { round.outcome == .capped }
+    }
+
     /// A rostered reviewer rejecting its task: back to `ready` with its findings on the task, so the
-    /// next agent picks the work up knowing what was wrong.
+    /// next agent picks the work up knowing what was wrong. The reopen that is the project's
+    /// `reviewRoundCap`-th round leaves the task in `review` for a person instead (SPEC §5).
     @discardableResult
     public func reviewReopen(
-        taskId: String, sessionId: String?, reviewerName: String, findings: String
-    ) throws -> Report {
+        taskId: String, sessionId: String?, reviewerName: String, findings: [String], grades: [GradedFinding] = []
+    ) throws -> ReviewReopen {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
             guard task.column == .review else {
                 throw BoardError.invalidTransition(taskId: taskId, from: task.column, to: .ready)
             }
-            let body = "\(Self.reviewFailedLead) Reviewer \(reviewerName) sent task \(taskId) (\(task.title)) "
-                + "back to ready.\n\n\(findings)"
-            _ = try ProgressStore.append(db, taskId: taskId, sessionId: sessionId, kind: .note, text: body)
+            let previous = try ReviewRound.latest(db, taskId: taskId)
+            let graded = try ReviewRound.checkGrades(grades, against: previous)
+            let cap = max(try Project.fetchOne(db, key: task.projectId)?.settings.reviewRoundCap ?? 3, 1)
+            let number = (previous?.number ?? 0) + 1
+            let capped = number >= cap
+            let rendered = ReviewRound.renderFindings(findings)
+            var detail = rendered
+            if let previous, !graded.isEmpty {
+                detail += "\n\n" + ReviewRound.renderGrades(graded, ofRound: previous.number)
+            }
+            let reviewerLine = capped
+                ? "Reviewer \(reviewerName) found task \(taskId) (\(task.title)) not yet acceptable in round \(number), "
+                    + "and the project's review round cap is \(cap), so it stays in review for a person."
+                : "Reviewer \(reviewerName) sent task \(taskId) (\(task.title)) back to ready."
+            let note = "\(Self.reviewFailedLead) \(reviewerLine)\n\n\(detail)"
+            _ = try ProgressStore.append(db, taskId: taskId, sessionId: sessionId, kind: .note, text: note)
+            if let sessionId { try Self.finishReview(db, sessionId: sessionId) }
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             try TaskStore.setFailed(db, taskId, false, reason: nil)
             try TaskStore.setReviewer(db, taskId, nil)
-            try TaskStore.move(db, taskId, to: .ready, before: nil)
-            if let sessionId { try Self.finishReview(db, sessionId: sessionId) }
-            return try ReportStore.insert(
-                db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .decision, body: body
+            let report: Report
+            if capped {
+                let held = "\(Self.reviewRoundCapLead) Round \(number) of agent review on task \(taskId) (\(task.title)) "
+                    + "reopened it, and the project's review round cap is \(cap), so it stays in review instead of "
+                    + "going back to ready. A person decides it now: Accept, or Reopen to send it back to a worker. "
+                    + "The last findings:\n\n\(rendered)"
+                _ = try ProgressStore.append(db, taskId: taskId, sessionId: nil, kind: .status, text: held)
+                try TaskStore.enterHumanReview(db, taskId, reason: held)
+                report = try ReportStore.insert(
+                    db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .decision,
+                    body: held + (graded.isEmpty ? "" : "\n\n" + ReviewRound.renderGrades(graded, ofRound: number - 1))
+                )
+            } else {
+                try TaskStore.move(db, taskId, to: .ready, before: nil)
+                report = try ReportStore.insert(
+                    db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .decision, body: note
+                )
+            }
+            let round = try Self.insertRound(
+                db, taskId: taskId, after: previous, sessionId: sessionId, reviewerName: reviewerName,
+                outcome: capped ? .capped : .reopened, findings: findings, verdict: nil, grades: graded
             )
+            return ReviewReopen(report: report, round: round, cap: cap)
         }
     }
 

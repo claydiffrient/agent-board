@@ -51,12 +51,7 @@ extension Board {
     ) throws -> Report {
         try db.writer.write { db in
             guard let epic = try Epic.fetchOne(db, key: epicId) else { throw BoardError.epicNotFound(epicId) }
-            for finding in findings {
-                guard let taskId = finding.taskId, try Task.fetchOne(db, key: taskId) != nil else { continue }
-                _ = try ProgressStore.append(
-                    db, taskId: taskId, sessionId: nil, kind: .error, text: "\(Self.worktreeCleanupLead) \(finding.text)"
-                )
-            }
+            try Self.appendCleanupProgress(db, findings)
             var lines = ["A human removed the worktrees epic \(epicId) (\(epic.title)) left on disk."]
             lines.append(
                 removed.isEmpty
@@ -69,6 +64,15 @@ extension Board {
             return try ReportStore.insert(
                 db, projectId: epic.projectId, taskId: nil, sessionId: nil, kind: .decision,
                 body: lines.joined(separator: "\n\n")
+            )
+        }
+    }
+
+    static func appendCleanupProgress(_ db: Database, _ findings: [WorktreeCleanupFinding]) throws {
+        for finding in findings {
+            guard let taskId = finding.taskId, try Task.fetchOne(db, key: taskId) != nil else { continue }
+            _ = try ProgressStore.append(
+                db, taskId: taskId, sessionId: nil, kind: .error, text: "\(Self.worktreeCleanupLead) \(finding.text)"
             )
         }
     }

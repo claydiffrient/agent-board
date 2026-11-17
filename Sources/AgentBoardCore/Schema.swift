@@ -382,6 +382,25 @@ enum Schema {
     CREATE INDEX task_commit_sha ON task_commit(sha);
     """
 
+    /// SPEC §5.1: one row per rostered reviewer's verdict on an ordinary task. `session_id` is not a
+    /// foreign key for the reason `task_comment.author_session_id` is not.
+    static let reviewRound = """
+    CREATE TABLE review_round (
+      id            INTEGER PRIMARY KEY,
+      task_id       TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+      number        INTEGER NOT NULL,
+      session_id    TEXT,
+      reviewer_name TEXT NOT NULL,
+      outcome       TEXT NOT NULL,
+      findings      TEXT NOT NULL,
+      verdict       TEXT,
+      grades        TEXT NOT NULL,
+      reviewed_head TEXT,
+      at            INTEGER NOT NULL,
+      UNIQUE (task_id, number)
+    );
+    """
+
     /// `author_session_id` is deliberately not a foreign key: `ProjectStore.delete` removes sessions
     /// before tasks, and the cascade from `task` is what removes a project's comments.
     static let taskComment = """

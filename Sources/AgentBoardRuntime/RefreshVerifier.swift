@@ -77,6 +77,55 @@ public enum RefreshVerifier {
         return outcome
     }
 
+    /// A finished task's "Check at completion" commands (SPEC §5.1), stopping at the first failure. Each
+    /// gets `timeoutSeconds` of awake time; the commands after a failure are recorded as not run.
+    public static func completionCheck(
+        _ commands: [String], timeoutSeconds: Int, in worktree: URL,
+        environment: [String: String] = ChildEnvironment.sanitized(),
+        isCancelled: @escaping @Sendable () -> Bool = { false }
+    ) -> CompletionCheck {
+        var check = CompletionCheck(steps: [], startedAt: .nowMillis, finishedAt: nil)
+        let clock = ContinuousClock()
+        for command in commands {
+            guard check.failure == nil, !check.interrupted else {
+                check.steps.append(CompletionCheck.Step(command: command, result: .notRun))
+                continue
+            }
+            let started = clock.now
+            let ran = Swift.Result {
+                try BoundedCommand.run(
+                    executable: "/bin/sh", arguments: ["-c", command], cwd: worktree, environment: environment,
+                    timeout: TimeInterval(timeoutSeconds), isCancelled: isCancelled
+                )
+            }
+            let elapsed = clock.now - started
+            let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+            switch ran {
+            case .failure(let error):
+                check.steps.append(CompletionCheck.Step(
+                    command: command, result: .failed, seconds: seconds, outputTail: String(describing: error)
+                ))
+            case .success(let result):
+                switch result.ending {
+                case .canceled:
+                    check.interrupted = true
+                    check.steps.append(CompletionCheck.Step(command: command, result: .notRun, seconds: seconds))
+                case .timedOut:
+                    check.steps.append(CompletionCheck.Step(
+                        command: command, result: .timedOut, seconds: seconds, outputTail: tail(result.output)
+                    ))
+                case .exited(let status):
+                    check.steps.append(CompletionCheck.Step(
+                        command: command, result: status == 0 ? .passed : .failed, exitStatus: status,
+                        seconds: seconds, outputTail: status == 0 ? "" : tail(result.output)
+                    ))
+                }
+            }
+        }
+        check.finishedAt = .nowMillis
+        return check
+    }
+
     static func tail(_ output: String) -> String {
         let lines = output.split(separator: "\n", omittingEmptySubsequences: false).suffix(tailLines)
         return String(lines.joined(separator: "\n").suffix(tailCharacters))

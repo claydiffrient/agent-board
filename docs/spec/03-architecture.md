@@ -303,10 +303,11 @@ human can run `claude stop <id>` before reopening the task.
 **Removing a worktree.** Every path that removes a task or epic worktree goes
 through `WorktreeManager.remove`: accepting a task, discarding one, the
 orphan reaper `reconcile` and the metering tick run (§5), **Remove worktrees** on a done or
-abandoned epic's lane (§5.2), and retiring a worktree slot. Archiving removes
+abandoned epic's lane (§5.2), the finished-work sweep — **Clean up worktrees** on
+the project's menu, or a low-disk cleanup — (§5), and retiring a worktree slot. Archiving removes
 nothing, and closing an epic removes nothing, so neither runs anything. A
 slot is not removed when its task is accepted or discarded: it is *released*
-(§5), and neither the orphan reaper nor **Remove worktrees** touches one. It
+(§5), and neither the orphan reaper, **Remove worktrees** nor the sweep touches one. It
 is removed only when `reconcile` retires it — a free slot numbered above the
 project's `worktreeSlots` — so the teardown hook runs in a slot then and at no
 other time: a `bazel clean --expunge` on release would delete exactly the warm
@@ -342,7 +343,7 @@ A hook runs at most once in a worktree. Each removal first claims its paths in
 the supervisor's in-flight set, and none of the others touches a claimed path:
 the reaper adds them to the worktrees it keeps, an accept or discard that finds
 one of its own already claimed leaves it and its branch to the claimant, and
-**Remove worktrees** names it as kept. Without that, the reaper — which sees an
+**Remove worktrees** and the finished-work sweep name it as kept. Without that, the reaper — which sees an
 accepted task's worktree as an orphan as soon as its sessions stop — would
 start a second hook beside the accept's, and two `git worktree remove` calls
 would race, the loser reporting a removal that never failed.

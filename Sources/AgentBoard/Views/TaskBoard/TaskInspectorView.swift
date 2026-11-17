@@ -65,6 +65,7 @@ struct TaskInspectorView: View {
                         .keyboardShortcut("s", modifiers: .command)
                         .disabled(!hasEdits)
                 }
+                if let check = task.completionCheck { completionCheck(check) }
                 dependencies
                 sessionList
                 TaskCommentsSection(task: task, drafts: drafts)
@@ -288,6 +289,45 @@ struct TaskInspectorView: View {
                 .padding(6)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor)))
             }
+        }
+    }
+
+    /// SPEC §5.1, §10: the board's own check from the latest `report_complete`.
+    private func completionCheck(_ check: CompletionCheck) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Completion check")
+                .font(.subheadline.weight(.semibold))
+            Text(check.headline)
+                .font(.caption)
+                .foregroundStyle(check.failure != nil || check.interrupted ? .red : .secondary)
+            if !check.isRunning {
+                ForEach(Array(check.steps.enumerated()), id: \.offset) { _, step in
+                    Label {
+                        Text(step.line)
+                    } icon: {
+                        Image(systemName: Self.symbol(for: step.result))
+                            .foregroundStyle(step.result == .passed ? .green : step.result == .notRun ? .secondary : .red)
+                    }
+                    .font(.caption)
+                }
+            }
+            if let failure = check.failure, !failure.outputTail.isEmpty {
+                Text(failure.outputTail)
+                    .font(.caption2.monospaced())
+                    .padding(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+            }
+        }
+        .textSelection(.enabled)
+    }
+
+    private static func symbol(for result: CompletionCheck.StepResult) -> String {
+        switch result {
+        case .passed: "checkmark.circle"
+        case .failed: "xmark.circle"
+        case .timedOut: "clock.badge.xmark"
+        case .notRun: "minus.circle"
         }
     }
 
