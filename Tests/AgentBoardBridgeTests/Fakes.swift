@@ -157,7 +157,8 @@ struct BridgeFixture {
         lockWait: FileLockWaitPolicy = .default,
         scopedCommits: RecordingScopedCommits? = nil,
         commitAnswerWithin: Duration = .seconds(30),
-        repoPath: String? = nil
+        repoPath: String? = nil,
+        branchTip: @escaping @Sendable (Project, String) throws -> String? = { _, _ in nil }
     ) throws -> BridgeFixture {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
@@ -169,7 +170,7 @@ struct BridgeFixture {
         )
         let events = RecordingEventSink()
         let control = FakeWorkerControl(board: Board(db))
-        let orchestrator = OrchestratorToolHandler(db: db, control: control, events: events)
+        let orchestrator = OrchestratorToolHandler(db: db, control: control, events: events, branchTip: branchTip)
         let commitsInFlight = CommitsInFlight()
         let worker = WorkerToolHandler(
             db: db, control: control, events: events, scopedCommits: scopedCommits,

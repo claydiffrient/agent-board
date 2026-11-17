@@ -23,13 +23,14 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let events: any BoardEventSink
     /// `owner/name` of the repository a project's pull requests open on, nil when it has none on GitHub.
     private let pullRequestRepository: @Sendable (Project) -> String?
-    /// The commit a local branch points at, nil when it cannot be read (SPEC §6 `push_branch`).
-    private let branchTip: @Sendable (Project, String) -> String?
+    /// The commit a local branch points at (SPEC §6 `push_branch`); throws when it cannot be read.
+    /// Nil only from a handler built without a reader, which leaves the approval unbound.
+    private let branchTip: @Sendable (Project, String) throws -> String?
 
     public init(
         db: AppDatabase, control: any WorkerControl, events: any BoardEventSink,
         pullRequestRepository: @escaping @Sendable (Project) -> String? = { _ in nil },
-        branchTip: @escaping @Sendable (Project, String) -> String? = { _, _ in nil }
+        branchTip: @escaping @Sendable (Project, String) throws -> String? = { _, _ in nil }
     ) {
         self.db = db
         projects = ProjectStore(db)
@@ -1384,7 +1385,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             projectId: project.id,
             kind: .push,
             request: PublishRequest(
-                branch: branch, publishedBranch: published, headOid: branchTip(project, branch)
+                branch: branch, publishedBranch: published, headOid: try approvedTip(project, branch)
             ),
             taskId: target.taskId,
             epicId: target.epicId,
@@ -1445,7 +1446,7 @@ public final class OrchestratorToolHandler: ToolHandler {
             kind: .pullRequest,
             request: PublishRequest(
                 branch: branch, base: base, title: title, body: body, publishedBranch: published,
-                headOid: branchTip(project, branch)
+                headOid: try approvedTip(project, branch)
             ),
             taskId: target.taskId,
             epicId: epic?.id ?? target.epicId,
@@ -1454,6 +1455,15 @@ public final class OrchestratorToolHandler: ToolHandler {
         )
         return ToolResult(text: "pull request approval \(approval.id) pending; nothing is pushed and no pull request "
             + "exists until the human approves. The URL reaches you via list_reports.")
+    }
+
+    /// SPEC §6: an approval is bound to the commit it shows, so an unreadable tip creates none.
+    private func approvedTip(_ project: Project, _ branch: String) throws -> String? {
+        do {
+            return try branchTip(project, branch)
+        } catch {
+            throw ToolError("Could not read the commit \(branch) points at, so no approval was created: \(error)")
+        }
     }
 
     private func publishedName(for branch: String, project: Project) throws -> String? {

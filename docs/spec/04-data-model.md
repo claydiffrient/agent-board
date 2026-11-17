@@ -241,9 +241,11 @@ CREATE TABLE approval (
   payload      TEXT                      -- JSON for kinds that carry one. push / pull_request: the
                                          -- PublishRequest (branch, base, title, body, remote, published
                                          -- name, headOid). headOid is the local branch's tip at request
-                                         -- time; a grant whose re-read tip differs pushes nothing, stays
-                                         -- `approved`, and files a failed-publish `decision` report naming
-                                         -- both commits. A row with no headOid publishes the tip at grant.
+                                         -- time (a tip that cannot be read refuses the request, §6); a grant
+                                         -- pushes exactly headOid by explicit refspec. One whose re-read tip
+                                         -- differs pushes nothing, stays `approved`, and files a failed-publish
+                                         -- `decision` report naming both commits. A legacy row with no headOid
+                                         -- publishes the tip at grant.
 );
 CREATE INDEX approval_pending ON approval(project_id, resolved_at);
 

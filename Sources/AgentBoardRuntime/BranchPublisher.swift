@@ -100,8 +100,10 @@ public enum PublishCommand {
     /// be mistaken for a remote, a tag, or — with an empty source — a delete.
     /// `published` renames the ref on the remote without touching the local branch: git writes the
     /// source ref to a differently named destination natively. Nil publishes the local name.
-    public static func push(remote: String, branch: String, published: String? = nil) -> [String] {
-        ["push", "--set-upstream", remote, "refs/heads/\(branch):refs/heads/\(published ?? branch)"]
+    /// `commit` pushes that object instead of the branch, so a commit landing on the branch after
+    /// its tip was checked is not published (SPEC §6 `push_branch`).
+    public static func push(remote: String, branch: String, published: String? = nil, commit: String? = nil) -> [String] {
+        ["push", "--set-upstream", remote, "\(commit ?? "refs/heads/\(branch)"):refs/heads/\(published ?? branch)"]
     }
 
     /// No `--force` and no `--set-upstream`: git refuses anything but a fast-forward of `onto`.
@@ -311,11 +313,11 @@ public struct BranchPublisher: Sendable {
         try requireBranch(branch)
         try requireTip(branch, is: expectedHead)
         try refusePrivateTerms(branch: branch, publishedAs: publishedAs, base: base, remote: remote)
-        return try pushChecked(branch: branch, publishedAs: publishedAs, remote: remote)
+        return try pushChecked(branch: branch, publishedAs: publishedAs, remote: remote, commit: expectedHead)
     }
 
-    private func pushChecked(branch: String, publishedAs: String?, remote: String) throws -> PushResult {
-        let result = try git(PublishCommand.push(remote: remote, branch: branch, published: publishedAs))
+    private func pushChecked(branch: String, publishedAs: String?, remote: String, commit: String?) throws -> PushResult {
+        let result = try git(PublishCommand.push(remote: remote, branch: branch, published: publishedAs, commit: commit))
         guard result.status == 0 else {
             if (result.stderr + result.stdout).contains("[rejected]") {
                 throw PublishFailure.notFastForward(branch: branch, onto: publishedAs ?? branch, detail: Self.detail(result))
@@ -360,7 +362,7 @@ public struct BranchPublisher: Sendable {
             branch: branch, publishedAs: publishedAs, base: base, remote: remote, title: title, body: body
         )
         let gh = try requireGh()
-        let pushed = try pushChecked(branch: branch, publishedAs: publishedAs, remote: remote)
+        let pushed = try pushChecked(branch: branch, publishedAs: publishedAs, remote: remote, commit: expectedHead)
         let head = publishedAs ?? branch
 
         let created = try ProcessRunner.run(
