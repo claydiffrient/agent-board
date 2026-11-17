@@ -799,9 +799,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let epicBranch = try task.epicId.flatMap { try epics.get($0) }?.branch
             let projectBase = project.baseBranch
             let cwd = URL(fileURLWithPath: session.cwd)
+            let ignoredBaseline = session.ignoredBaseline ?? [:]
             return .listed(try await offMain {
                 let base = epicBranch ?? manager.diffBase(taskId: taskId, base: projectBase)
-                return try ReviewCheckout.changedFiles(against: base, in: cwd)
+                return try ReviewCheckout.changedFiles(against: base, in: cwd, ignoredBaseline: ignoredBaseline)
             })
         } catch {
             return .unlisted(reason: describe(error))
@@ -1424,6 +1425,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 effort: plan.models.effort,
                 pluginDirs: (plan.rosterAgent?.pluginDirs ?? []).map(expandingHome)
             )
+            await recordIgnoredBaseline(plan, placeholder: placeholder)
             let spawned: SpawnedAgent
             do {
                 spawned = try await runtime.spawn(request)
@@ -1467,6 +1469,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             try? grants.revoke(token: grant.token)
             throw error
         }
+    }
+
+    /// SPEC §5.1: the gitignored review-rule files setup left, so a completion flags only the ones the
+    /// worker added or changed. A later attempt in the same worktree keeps the first attempt's record.
+    /// One that cannot be read is left unrecorded, which flags every such file.
+    private func recordIgnoredBaseline(_ plan: LaunchPlan, placeholder: AgentSession) async {
+        guard let path = plan.worktreePath else { return }
+        let cwd = plan.cwd
+        var recorded = try? sessions.firstIgnoredBaseline(taskId: plan.taskId, worktreePath: path)
+        if recorded == nil {
+            recorded = try? await offMain { try ReviewCheckout.ignoredReviewRules(in: cwd) }
+        }
+        guard let recorded else { return }
+        try? sessions.setIgnoredBaseline(placeholder.sessionId, recorded)
     }
 
     private func stopFailure(_ stop: () async throws -> Void) async -> String? {

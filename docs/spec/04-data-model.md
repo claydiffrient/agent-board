@@ -119,6 +119,7 @@ CREATE TABLE agent_session (
   escalation     TEXT,               -- §5 retries: why this attempt runs above what its task resolves to; NULL = it does not
   agent_stopped_at INTEGER,         -- §8.6: a `claude stop` succeeded after the row's last sign of life; a trigger clears it
   agent_started_at INTEGER,         -- §8: setup row promoted (or resumed); the cap and stall clocks start here, not at started_at
+  ignored_baseline TEXT,            -- §5.1: JSON path → SHA-256 of gitignored review-rule files at setup; NULL flags them all
   CHECK ((role = 'coordinator') = (project_id IS NULL))
 );
 

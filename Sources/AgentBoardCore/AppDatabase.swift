@@ -299,6 +299,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("review_round") { db in
             try db.execute(sql: Schema.reviewRound)
         }
+        migrator.registerMigration("session_ignored_baseline") { db in
+            try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN ignored_baseline TEXT")
+        }
         return migrator
     }
 }
