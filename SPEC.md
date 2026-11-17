@@ -69,6 +69,9 @@ Subsections stay in their parent's file. Numbers do not change when a title does
   Guardrails · §13.6 Reports to the orchestrator · §13.7 CDR, the review
   watcher · §13.8 Takeover.
 
+- **§14 [Disk-space monitoring](docs/spec/14-disk-space.md)** — watching free
+  space on the volumes that hold projects and their worktrees, and notifying
+  once per drop below a threshold. §14.1 Settings · §14.2 The event · §14.3 The project cleanup command.
 - **§15 [Human inbox and rulings](docs/spec/15-human-inbox.md)** — the
   human's append-only answers to what agents and the board ask, and the
   question episodes they answer. §15.1 Question episodes · §15.2 Verdicts and

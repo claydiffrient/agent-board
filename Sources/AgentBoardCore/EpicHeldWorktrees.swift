@@ -76,7 +76,7 @@ extension Board {
         }
     }
 
-    private static func resolved(_ path: String) -> String {
+    static func resolved(_ path: String) -> String {
         URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
     }
 }

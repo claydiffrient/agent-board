@@ -127,7 +127,9 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
    session's real terminal — D15, the only place a permission prompt is
    answered; **Stop** ends a worker that is wedged rather than asking.
 2. **Pending approvals** — spawns awaiting authorization and integration
-   requests.
+   requests. A push or pull request row names its branch and the short commit
+   the grant will publish (§4); a row recorded without one names only the
+   branch.
 3. **Pending reviews** — tasks in `review`, with branch, worktree and diffstat.
    Each row says who holds the review: `<reviewer> reviewing · <elapsed>` while
    a rostered reviewer's session is working, `<reviewer> stopped without a
@@ -280,6 +282,13 @@ deleted; when the watch was already gone the line reads "From Walk me through
 it" alone. Only that line, at the position `propose_task` writes it, is read:
 a matching line anywhere else in the report, which the session wrote after
 reading untrusted pull request text, names nothing. Every other origin, a worker's proposal included, shows no such line.
+
+The task inspector shows a **Completion check** section once a worker has
+reported complete (§5.1): the headline (running, passed, failed, interrupted,
+or "Not verified by the board"), a row per command with its result and
+duration, and the failing command's output tail in a monospaced block. It sits
+above Dependencies, so a reviewer of the task sees it without opening the
+Progress log, where the same text is also recorded.
 
 The task inspector shows a **Comments** thread above the Progress log, oldest
 first. Each comment names its author in words — `You`, `Orchestrator`,
@@ -709,10 +718,16 @@ not free. The header still costs that one line rather than collapsing to zero,
 because it carries the refresh button — the sweep is hourly, and a panel that
 vanished entirely would leave nobody to ask about a port that appeared since.
 
+**Project menu** — the sidebar row's context menu: **Project Settings…**, which
+opens the sheet below, and **Clean up worktrees**, which runs the finished-work
+sweep (§5) for that project at once and shows its result in an alert: what was
+removed and about how much space that freed, what was kept and why, and the
+unknown directories it left alone.
+
 **Project settings** — a sheet from the sidebar row's gear, in seven tabs:
 **General** (Repository, Workspace, Archive), **Agents** (Models, Review,
 Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Worktree
-teardown, Isolation, Publishing), **Notifications** (one switch per banner category — approvals, blocked workers, caps and stalls, worker failures, pull requests ready to verify, pull request decisions — and the project mute), **Advanced** (the `autoMode` classifier JSON,
+teardown, Disk cleanup (§14.3), Isolation, Publishing), **Notifications** (one switch per banner category — approvals, blocked workers, caps and stalls, worker failures, pull requests ready to verify, pull request decisions — and the project mute), **Advanced** (the `autoMode` classifier JSON,
 Extra MCP servers), and **PR Follow-Through** (Watch, Verification, Replies, Publish guard, Roles; §13.3), after Advanced. Tabs group by what a setting governs, not by how often it is
 touched. Every section is in exactly one tab; a section in none would be a stored
 setting with no UI. **Delete Project…** sits outside the tabs, at the left of the
@@ -738,7 +753,20 @@ first. A row's currently-named agent that has left the project entirely —
 deleted from the roster or opted out — stays listed anyway, suffixed
 `(not available)`, so the picker shows what routing will actually do rather
 than silently dropping the choice. A caption beneath the table repeats that it
-takes effect only while Review level is Agent.
+takes effect only while Review level is Agent. Under it, **Review round cap** is
+a stepper from 1 to 20 (default 3), disabled outside `agent` like the table,
+captioned that the round whose reopen reaches it leaves the task in Review for
+the human instead of sending it back (§5.1, "Review rounds"). Below it,
+**Protected paths** is a comma-separated text field of `protectedPathGlobs`
+(§4), enabled at every review level because the guard ignores the level,
+captioned with the built-in paths it always protects (§5.1).
+
+The Workflow tab's Verification section ends with **Check at completion**, a
+monospaced text editor holding `completionCheckCommands` (§4) one command per
+line, captioned that the board runs them in a finished task's worktree one at a
+time across every project, each stopped at the section's timeout, that the Test
+command is never run there, and that an empty list records the task as not
+verified by the board (§5.1).
 
 **Preview Leaked-Agent Sweep…** — in the app menu, beside About, because it is
 a one-off diagnostic and not a screen anyone lives in. It opens a `Window` scene
@@ -749,6 +777,11 @@ a human can copy it. **Run Again** re-runs it; nothing on the window can stop a
 session. The Status pane was rejected because a one-shot report there wants to
 become a live view, and a dry-run-only setting because its output would reach a
 human only through stderr.
+
+**Clean up now** — in the app menu, beside Preview Leaked-Agent Sweep. It runs
+the disk cleanup (§14.4) at once, whatever the free space, and joins a cleanup
+already running. Its result arrives as the follow-up notification and one
+`decision` report per project, not on a window.
 
 **What's New in Agent Board** — the release notes, opened from the Help menu and
 once on their own after an update installs. A `Window` scene rather than a
@@ -838,7 +871,9 @@ menu is `NSApp.helpMenu` when the menu opens, and it is never an item in the
 built menu.
 
 **Settings** — the standard macOS Settings window, opened with ⌘, from the app
-menu. It has two panes. **CDR** holds the **CDR command**, the path to CDR's
+menu. It has three panes. **Disk Space** holds the low-disk-space monitor's
+four settings (§14.1): the on/off switch, the low threshold, the rearm threshold
+(kept above the low threshold), and the check interval. **CDR** holds the **CDR command**, the path to CDR's
 `watcher/cli.mjs` that starts and stops the review watcher (§13.7); empty means
 auto-detect, and the line under it names the file in use or says none was found.
 **Terminal** holds the font family (installed monospaced

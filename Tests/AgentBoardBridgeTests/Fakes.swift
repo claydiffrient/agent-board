@@ -95,6 +95,33 @@ actor FakeWorkerControl: WorkerControl {
         nil
     }
 
+    var changes: CompletionChanges = .listed([])
+
+    func setChanges(_ changes: CompletionChanges) {
+        self.changes = changes
+    }
+
+    func completionChanges(taskId: String, sessionId: String) async -> CompletionChanges {
+        changes
+    }
+
+    var completionCheck: CompletionCheck?
+    private(set) var completionChecksRun: [(taskId: String, commands: [String])] = []
+
+    func setCompletionCheck(_ check: CompletionCheck) {
+        completionCheck = check
+    }
+
+    func runCompletionCheck(
+        taskId: String, sessionId: String, commands: [String], timeoutSeconds: Int
+    ) async -> CompletionCheck {
+        completionChecksRun.append((taskId, commands))
+        return completionCheck ?? CompletionCheck(
+            steps: commands.map { CompletionCheck.Step(command: $0, result: .passed) },
+            startedAt: 0, finishedAt: 0
+        )
+    }
+
     var drift: BaseDrift = .measured(behind: 0, ahead: 0, against: "main")
     private(set) var refreshed: [String] = []
 
@@ -157,7 +184,8 @@ struct BridgeFixture {
         lockWait: FileLockWaitPolicy = .default,
         scopedCommits: RecordingScopedCommits? = nil,
         commitAnswerWithin: Duration = .seconds(30),
-        repoPath: String? = nil
+        repoPath: String? = nil,
+        branchTip: @escaping @Sendable (Project, String) throws -> String? = { _, _ in nil }
     ) throws -> BridgeFixture {
         let db = try AppDatabase.inMemory()
         let project = try ProjectStore(db).register(
@@ -169,7 +197,7 @@ struct BridgeFixture {
         )
         let events = RecordingEventSink()
         let control = FakeWorkerControl(board: Board(db))
-        let orchestrator = OrchestratorToolHandler(db: db, control: control, events: events)
+        let orchestrator = OrchestratorToolHandler(db: db, control: control, events: events, branchTip: branchTip)
         let commitsInFlight = CommitsInFlight()
         let worker = WorkerToolHandler(
             db: db, control: control, events: events, scopedCommits: scopedCommits,

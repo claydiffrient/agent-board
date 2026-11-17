@@ -61,6 +61,9 @@ protocol WorkerSupervising: AnyObject {
     func heldWorktrees(epicId: String) throws -> [HeldWorktree]
     /// Removes them through the project's teardown hook and queues a `decision` report.
     func removeEpicWorktrees(epicId: String) async throws
+    func sweepFinishedWorktrees(projectId: String) async throws -> WorktreeSweepResult
+    /// SPEC §14.4: every project's sweep, then each cleanup command, then one follow-up notification.
+    func cleanUpDiskNow() async
     /// Opens the prefilled compare page for the epic branch; never creates the PR itself.
     @discardableResult
     func openPullRequest(epicId: String) async throws -> PullRequestOutcome
@@ -118,4 +121,8 @@ extension WorkerSupervising {
     func reportQueued(projectId: String) async {}
     func previewLeakedAgentSweep() async -> AgentSweepReport? { nil }
     func acceptWarning(taskId: String) async -> String? { nil }
+}
+
+extension WorkerSupervising {
+    func cleanUpDiskNow() async {}
 }

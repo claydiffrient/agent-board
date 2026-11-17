@@ -195,6 +195,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var closedAt: Int64?
     public var closedReason: String?
     public var closedBy: String?
+    /// Agent Board's own check from the latest `report_complete` (SPEC §5.1); nil before the first one.
+    public var completionCheck: CompletionCheck?
     /// The current block's episode stamp (SPEC §15.1); advances on every block, kept on unblock.
     public var blockedAt: Int64? = nil
     /// Why the task waits in `review` for a person, written with `reviewEnteredAt` (SPEC §15.1).
@@ -231,6 +233,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case closedAt = "closed_at"
         case closedReason = "closed_reason"
         case closedBy = "closed_by"
+        case completionCheck = "completion_check"
         case blockedAt = "blocked_at"
         case humanReviewReason = "human_review_reason"
         case reviewEnteredAt = "review_entered_at"
@@ -243,8 +246,10 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         createdAt: Int64, updatedAt: Int64, model: String? = nil, effort: Effort? = nil, reviewerAgentId: String? = nil,
         rosterAgentId: String? = nil, archivedAt: Int64? = nil, doneAt: Int64? = nil,
         unarchivedAt: Int64? = nil, landing: TaskLanding? = nil, landingDetail: String? = nil,
-        type: TaskType? = nil, closedAt: Int64? = nil, closedReason: String? = nil, closedBy: String? = nil
+        type: TaskType? = nil, closedAt: Int64? = nil, closedReason: String? = nil, closedBy: String? = nil,
+        completionCheck: CompletionCheck? = nil
     ) {
+        self.completionCheck = completionCheck
         self.closedAt = closedAt
         self.closedReason = closedReason
         self.closedBy = closedBy
@@ -372,6 +377,9 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
     /// SPEC §8: when the agent itself launched, which is where the cap and stall clocks start.
     /// `started_at` is the spawn, before a setup row's worktree and `post-checkout` hook ran.
     public var agentStartedAt: Int64?
+    /// The gitignored review-rule files in the worktree when its setup finished, path to SHA-256
+    /// (`ReviewCheckout.ignoredReviewRules`). Nil when none was recorded, so every such file counts as new.
+    public var ignoredBaseline: [String: String]?
 
     public enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -405,6 +413,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         case reviewBase = "review_base"
         case escalation
         case agentStartedAt = "agent_started_at"
+        case ignoredBaseline = "ignored_baseline"
     }
 
     public init(
@@ -415,7 +424,8 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         cacheWrite: Int = 0, estCostUSD: Double = 0, attempt: Int = 1, model: String? = nil, effort: Effort? = nil,
         lastTool: String? = nil, stopReason: String? = nil, blockedOnPath: String? = nil,
         rosterAgentId: String? = nil, toolStartedAt: Int64? = nil, toolsInFlight: Int = 0,
-        reviewHead: String? = nil, reviewBase: String? = nil, escalation: String? = nil, agentStartedAt: Int64? = nil
+        reviewHead: String? = nil, reviewBase: String? = nil, escalation: String? = nil, agentStartedAt: Int64? = nil,
+        ignoredBaseline: [String: String]? = nil
     ) {
         self.sessionId = sessionId
         self.shortId = shortId
@@ -448,6 +458,7 @@ public struct AgentSession: Codable, FetchableRecord, PersistableRecord, Identif
         self.reviewBase = reviewBase
         self.escalation = escalation
         self.agentStartedAt = agentStartedAt
+        self.ignoredBaseline = ignoredBaseline
     }
 
     public var id: String { sessionId }

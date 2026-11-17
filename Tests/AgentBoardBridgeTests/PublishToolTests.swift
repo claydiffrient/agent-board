@@ -64,6 +64,22 @@ final class PublishToolTests: XCTestCase {
         XCTAssertEqual(try pending(.push).count, 1)
     }
 
+    func testAnUnreadableTipRefusesBothRequestsNamingTheBranchAndCreatesNoApproval() async throws {
+        struct GitBroke: Error, CustomStringConvertible { var description: String { "index.lock exists" } }
+        f = try BridgeFixture.make(branchTip: { _, _ in throw GitBroke() })
+        let task = try f.task("t")
+        let branch = "agentboard/\(task.id)"
+
+        for (tool, arguments) in [
+            ("push_branch", ["branch": JSONValue.string(branch)]),
+            ("open_pull_request", ["branch": .string(branch), "title": .string("Ship it")]),
+        ] {
+            await XCTAssertToolError(try await f.call(tool, arguments), containing: branch)
+            await XCTAssertToolError(try await f.call(tool, arguments), containing: "index.lock exists")
+        }
+        XCTAssertTrue(try f.approvals.pending(projectId: f.project.id).isEmpty)
+    }
+
     // MARK: open_pull_request
 
     func testOpenPullRequestOnAnEpicUsesTheEpicBranchAndTheProjectBase() async throws {

@@ -297,6 +297,32 @@ public struct SessionStore: Sendable {
         }
     }
 
+    /// The baseline an earlier session of `taskId` recorded for the same worktree, which a later attempt
+    /// keeps: a file the earlier worker wrote is not setup's (SPEC §5.1).
+    public func firstIgnoredBaseline(taskId: String, worktreePath: String) throws -> [String: String]? {
+        try db.reader.read { db in
+            try AgentSession.fetchOne(
+                db,
+                sql: """
+                    SELECT * FROM agent_session
+                    WHERE task_id = ? AND worktree_path = ? AND ignored_baseline IS NOT NULL
+                    ORDER BY started_at, attempt LIMIT 1
+                    """,
+                arguments: [taskId, worktreePath]
+            )?.ignoredBaseline
+        }
+    }
+
+    public func setIgnoredBaseline(_ sessionId: String, _ baseline: [String: String]) throws {
+        try db.writer.write { db in
+            guard var session = try AgentSession.fetchOne(db, key: sessionId) else {
+                throw BoardError.sessionNotFound(sessionId)
+            }
+            session.ignoredBaseline = baseline
+            try session.update(db, columns: [AgentSession.CodingKeys.ignoredBaseline.rawValue])
+        }
+    }
+
     public func setShortId(_ sessionId: String, _ shortId: String) throws {
         try db.writer.write { db in
             try db.execute(

@@ -171,6 +171,87 @@ final class ReviewScopeTests: XCTestCase {
         XCTAssertTrue(try f.progress.list(taskId: task.id).contains { $0.text.contains("Sources/Search.swift:41") })
     }
 
+    // MARK: Review rounds
+
+    /// A reviewer `rev-<round>` spawned onto the task, which is in `review` again.
+    private func reviewer(round: Int) throws -> TokenIdentity {
+        if try f.tasks.get(task.id)?.column != .review { try f.tasks.move(task.id, to: .review) }
+        try f.session("rev-\(round)", state: .running, taskId: task.id)
+        return f.reviewerIdentity(sessionId: "rev-\(round)", taskId: task.id)
+    }
+
+    private func grade(_ finding: Int, _ grade: String = "not_fixed") -> JSONValue {
+        .object([
+            "finding": .number(Double(finding)), "grade": .string(grade),
+            "evidence": .string("Sources/Search.swift:41 still throws."),
+        ])
+    }
+
+    func testTheReopenThatReachesTheRoundCapLeavesTheTaskInReviewForAPerson() async throws {
+        try f.setReviewLevel(.agent)
+        _ = try await reportComplete()
+        _ = try await f.call("reopen_task", ["findings": .array([.string("The empty query throws.")])], as: try reviewer(round: 1))
+        _ = try await f.call(
+            "reopen_task",
+            ["findings": .array([.string("The empty query still throws.")]), "grades": .array([grade(1)])],
+            as: try reviewer(round: 2)
+        )
+        XCTAssertEqual(try f.tasks.get(task.id)?.column, .ready, "a reopen below the cap goes back to ready as before")
+
+        let answer = try await f.call(
+            "reopen_task",
+            ["findings": .array([.string("Round three: the empty query throws.")]), "grades": .array([grade(1, "partly_fixed")])],
+            as: try reviewer(round: 3)
+        )
+
+        let held = try XCTUnwrap(f.tasks.get(task.id))
+        XCTAssertEqual(held.column, .review, answer.text)
+        XCTAssertNotNil(held.reviewEnteredAt, "the cap opens a human-review episode (SPEC §15.1)")
+        XCTAssertEqual(held.humanReviewReason?.hasPrefix(Board.reviewRoundCapLead), true)
+        let progress = try f.progress.list(taskId: task.id)
+        XCTAssertTrue(progress.contains {
+            $0.text.hasPrefix(Board.reviewRoundCapLead) && $0.text.contains("Round three: the empty query throws.")
+        }, "\(progress.map(\.text))")
+        XCTAssertTrue(progress.contains { $0.text.contains("Finding 1: partly_fixed") }, "the grading is on the task")
+        let decisions = try f.reports.unconsumed(projectId: f.project.id).filter { $0.kind == .decision }
+        XCTAssertTrue(decisions.contains { $0.body.hasPrefix(Board.reviewRoundCapLead) }, "\(decisions.map(\.body))")
+        let notified = await f.events.events.contains {
+            if case .notify(_, let title, let body) = $0 { return title == Board.reviewRoundCapLead && body.contains("Round three") }
+            return false
+        }
+        XCTAssertTrue(notified)
+    }
+
+    func testARereviewThatLeavesAPreviousFindingUngradedIsRefused() async throws {
+        try f.setReviewLevel(.agent)
+        _ = try await reportComplete()
+        _ = try await f.call(
+            "reopen_task",
+            ["findings": .array([.string("The empty query throws."), .string("No test covers paging.")])],
+            as: try reviewer(round: 1)
+        )
+        let second = try reviewer(round: 2)
+
+        let refused = await refusal(of: try await f.call(
+            "accept_task", ["verdict": .string("Fixed."), "grades": .array([grade(1, "fixed")])], as: second
+        ))
+
+        XCTAssertTrue(refused.contains("finding 2"), refused)
+        XCTAssertEqual(try f.tasks.get(task.id)?.column, .review)
+        let accepted = await f.control.accepted
+        XCTAssertTrue(accepted.isEmpty)
+    }
+
+    private func refusal(of call: @autoclosure () async throws -> ToolResult) async -> String {
+        do {
+            return "answered: " + (try await call()).text
+        } catch let error as ToolError {
+            return error.message
+        } catch {
+            return "\(error)"
+        }
+    }
+
     /// SPEC §5.1: the reviewer's inputs are the task and the diff — no worker report, no progress, no notes.
     func testTheReviewerGetsTheTaskButNoWorkerReportProgressOrNotes() async throws {
         try f.setReviewLevel(.agent)
@@ -229,6 +310,21 @@ final class ReviewScopeTests: XCTestCase {
         XCTAssertEqual(try f.tasks.get(task.id)?.reviewerAgentId, agent.id)
         let accepted = await f.control.accepted
         XCTAssertTrue(accepted.isEmpty)
+    }
+
+    func testAgentReviewOfATaskThatChangedCLAUDEmdWaitsForAPerson() async throws {
+        try f.setReviewLevel(.agent)
+        _ = try f.rosterReviewer("Rowan")
+        await f.control.setChanges(.listed(["Sources/Search.swift", "Sources/CLAUDE.md"]))
+
+        let result = try await reportComplete()
+
+        XCTAssertTrue(result.text.contains("Sources/CLAUDE.md"), result.text)
+        XCTAssertEqual(try f.tasks.get(task.id)?.column, .review)
+        XCTAssertNil(try f.tasks.get(task.id)?.reviewerAgentId)
+        let assigned = await f.control.assigned
+        XCTAssertTrue(assigned.isEmpty)
+        XCTAssertTrue(try f.progress.list(taskId: task.id).contains { $0.text.contains("Sources/CLAUDE.md") })
     }
 }
 

@@ -101,6 +101,11 @@ public protocol WorkerControl: Sendable {
     /// Why a rostered reviewer's verdict must be refused: its checkout changed since it was spawned,
     /// or nothing recorded where it started. Nil when the checkout is as the reviewer found it.
     func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String?
+    /// What the finishing session's work changed, for the protected-path guard (SPEC §5.1).
+    func completionChanges(taskId: String, sessionId: String) async -> CompletionChanges
+    /// Runs `commands` in the checkout session `sessionId` finished the task in, queued behind every other
+    /// completion check in the app (SPEC §5.1). A checkout it cannot find comes back as a failed step.
+    func runCompletionCheck(taskId: String, sessionId: String, commands: [String], timeoutSeconds: Int) async -> CompletionCheck
     func baseDrift(epicId: String) async throws -> BaseDrift
     /// Merges the freshest project base branch into the epic branch, only on request (SPEC §5.2).
     /// The caller has already refused a terminal epic.

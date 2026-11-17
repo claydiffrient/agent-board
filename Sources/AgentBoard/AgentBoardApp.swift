@@ -33,6 +33,7 @@ struct AgentBoardApp: App {
             }
             CommandGroup(after: .appInfo) {
                 SweepPreviewMenuItem()
+                CleanUpNowMenuItem(supervisor: appEnvironment.supervisor)
             }
         }
 

@@ -37,7 +37,7 @@ stamp it answered in `question_at`:
 | Surface | Episode stamp | Written by |
 |---|---|---|
 | Blocked task | `task.blocked_at` | `TaskStore.setBlocked` on every block, through `Board.block` and the Notification hook's block; strictly later than the previous stamp, and kept on unblock |
-| Task held in review for a person | `task.review_entered_at`, with `task.human_review_reason` | `Board.leaveReviewToPerson`, from `humanReview` routing and from a reviewer that will not take the task |
+| Task held in review for a person | `task.review_entered_at`, with `task.human_review_reason` | `TaskStore.enterHumanReview`, from `humanReview` routing (including protected paths and a failed completion check), a reviewer that will not take the task, and the agent review round cap |
 | Parked PR watch | `pr_watch.parked_at` | `PRWatch.park`, which every park site calls: the round cap, a stacked PR, a fork, failed triages, a failed check, a refused publish |
 | Approval | the approval's id | One row per asking already |
 | PR decision item | `pr_item.decision_notified_at`, else the item's `created_at` | Already present |
