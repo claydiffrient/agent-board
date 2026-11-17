@@ -57,7 +57,7 @@ an empty note for every verdict marked *note*:
 | `approval` | `deny` (note) |
 | `pr_item` | `choose` (the option label in `choice`), `reply`, `dismiss` (note) |
 | `pr_watch` | `keep_parked` |
-| `review_finding` | `overrule` (note), `uphold`; the subject is `task_id` plus `finding_ref`, `"<round>:<index>"` |
+| `review_finding` | `overrule` (note), `uphold`; the subject is `task_id` plus `finding_ref`, `"<round>:<n>"`, where `n` is the finding's 1-based number as reviewers see it (`ReviewRound.findingRef`) |
 
 `choice` is set for `choose` and for nothing else. A note is at most 10,000
 characters. `dismiss` is not offered as an answer; it holds the human's PR item
@@ -116,3 +116,23 @@ working, Coordinator requests (they wait on an orchestrator), Ready to verify,
 and the machine conditions — stalled workers, overdue shutdowns, stranded
 reports, an unavailable poll, takeover failures, unlanded `done` tasks — which
 each already raise the attention signal.
+
+### 15.6 Overruled review findings
+
+A person can overrule a finding an agent reviewer raised in a `review_round`
+(§5.1), or uphold it. A finding is overruled while the newest standing ruling
+on it is `overrule`; an `uphold` written after it, superseding or not, puts the
+finding back. `ReviewRound.overruled` reads this for one round, and the board
+enforces it in code:
+
+- `ReviewRound.checkGrades` drops overruled findings from the set the next
+  round must grade, and refuses a grade that names one.
+- `ReviewPrompt` lists them in the re-review section as settled, each with the
+  person's note.
+- `Board.reviewReopen` refuses a reopen whose every finding cites only
+  overruled findings of the previous round ("finding 2"), and the refusal says
+  a person overruled them. A reopen with any finding that cites nothing, or
+  cites a finding still open, goes through.
+
+An overrule moves nothing: the task stays where it is, and accepting it is
+still a separate action.

@@ -793,7 +793,7 @@ public struct Board: Sendable {
                 throw BoardError.invalidTransition(taskId: taskId, from: task.column, to: .done)
             }
             let previous = try ReviewRound.latest(db, taskId: taskId)
-            let graded = try ReviewRound.checkGrades(grades, against: previous)
+            let graded = try ReviewRound.checkGrades(db, grades, against: previous)
             var text = "\(Self.reviewPassedLead) Reviewer \(reviewerName) accepted this task into done.\n\n\(verdict)"
             if let previous, !graded.isEmpty {
                 text += "\n\n" + ReviewRound.renderGrades(graded, ofRound: previous.number)
@@ -858,7 +858,12 @@ public struct Board: Sendable {
                 throw BoardError.invalidTransition(taskId: taskId, from: task.column, to: .ready)
             }
             let previous = try ReviewRound.latest(db, taskId: taskId)
-            let graded = try ReviewRound.checkGrades(grades, against: previous)
+            let graded = try ReviewRound.checkGrades(db, grades, against: previous)
+            if let previous {
+                try ReviewRound.checkReopen(
+                    findings, overruled: try ReviewRound.overruled(db, round: previous), round: previous.number
+                )
+            }
             let cap = max(try Project.fetchOne(db, key: task.projectId)?.settings.reviewRoundCap ?? 3, 1)
             let number = (previous?.number ?? 0) + 1
             let capped = number >= cap

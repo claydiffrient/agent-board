@@ -53,7 +53,7 @@ final class RulingTests: XCTestCase {
         let store = RulingStore(f.db)
         let required: [(RulingVerdict, RulingSubject)] = [
             (.instead, .task(task.id)), (.hold, .task(task.id)), (.reopen, .task(task.id)),
-            (.deny, .approval(approval.id)), (.overrule, .reviewFinding(taskId: task.id, ref: "1:0")),
+            (.deny, .approval(approval.id)), (.overrule, .reviewFinding(taskId: task.id, ref: "1:1")),
         ]
         for (verdict, subject) in required {
             XCTAssertThrowsError(try store.record(subject, question: "q", questionAt: 1, verdict: verdict, note: "  ")) {

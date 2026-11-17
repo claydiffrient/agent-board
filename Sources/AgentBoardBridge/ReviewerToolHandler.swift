@@ -213,6 +213,9 @@ public final class ReviewerToolHandler: ToolHandler {
             return try record()
         } catch let rejection as ReviewGradingRejection {
             throw ToolError("\(rejection.reason) Your verdict was not recorded. Correct `grades` and call again.")
+        } catch let rejection as ReviewReopenRejection {
+            throw ToolError("\(rejection.reason) Your verdict was not recorded. Accept the task, or reopen it "
+                + "with a finding that is not settled.")
         }
     }
 

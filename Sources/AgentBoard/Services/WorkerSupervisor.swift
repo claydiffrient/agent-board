@@ -688,6 +688,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     taskId: taskId, sessionId: nil, kind: .status, text: "Escalation: \(escalation)."
                 )
             }
+            let previousRound = scope == .reviewer ? try ReviewPrompt.previousRound(db: db, taskId: taskId) : nil
             beginSetup(
                 LaunchPlan(
                     project: project,
@@ -704,7 +705,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             workingDirectory: site.cwd.path,
                             agent: agent?.identity,
                             comments: try CommentStore(db).list(taskId: taskId),
-                            previousRound: try ReviewPrompt.previousRound(db: db, taskId: taskId)
+                            previousRound: previousRound,
+                            overruled: try previousRound.map { try ReviewRound.overruled(in: db, round: $0) } ?? [:]
                         )
                         : Self.openingPrompt(
                             task: task, branch: branch, attempt: placeholder.attempt, epicGoal: epic?.goal,

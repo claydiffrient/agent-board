@@ -844,6 +844,17 @@ answer by correcting `grades` and calling again. The grades are written under
 the verdict's `progress` note as "Grades of round N's findings:", one line per
 finding, so the human sees them in the task inspector, and on the round's row.
 
+A finding a person overruled (§15.6) leaves that set. `ReviewRound.checkGrades`
+reads the standing `review_finding` rulings on the previous round's findings
+inside the verdict's write transaction, does not require a grade for an
+overruled finding, and refuses a grade that names one. The re-review section
+lists overruled findings under "Settled by your human" with the person's note,
+and tells the reviewer not to grade them or raise them again.
+`Board.reviewReopen` refuses a reopen in which every finding cites, as
+"finding N", only overruled findings of the previous round; the refusal names
+them and says a person overruled them, and `reopen_task` tells the reviewer to
+accept or reopen with a finding that is not settled.
+
 The database is denied through the same `--disallowedTools` list as its writes,
 by `SpawnRequest.reviewerBoardDeny`: `Read(//**/agentboard.sqlite*)` and
 `Bash(*agentboard.sqlite*)` for the database file and its `-wal`/`-shm` wherever
