@@ -149,6 +149,16 @@ human's note.
     `withdraw` verdict. The refusal names the ruling's id and what lifts it.
     The human can still start the task or integrate from the board at any
     time; only the orchestrator's request is refused.
+  - Once a spawn or integration deny has lapsed, the next request on the same
+    task or epic always creates a pending approval, whatever the autonomy
+    setting, so an orchestrator cannot edit its way past a deny into a direct
+    spawn. The approval's reason quotes the lapsed deny's ruling and note. A
+    deny has lapsed when the subject's most recently resolved approval of
+    that kind carries a standing `deny` ruling that no longer refuses; once
+    the human resolves the new approval either way, that approval is the most
+    recent one and normal autonomy applies again (or the new deny refuses).
+    Nothing is stored for this: it is read from the `approval` and `ruling`
+    rows.
 - **Hold.** A `hold` is in force while the task is blocked and the ruling's
   `question_at` is at or after `task.blocked_at`, so it covers the block it
   answered and lapses when the worker blocks again. While it is in force:

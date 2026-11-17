@@ -208,8 +208,10 @@ public struct Board: Sendable {
             guard let project = try Project.fetchOne(db, key: task.projectId) else {
                 throw BoardError.projectNotFound(task.projectId)
             }
+            let lapsed = try Self.lapsedDeny(db, kind: .spawn, column: "task_id", subject: taskId)
             // SPEC §13.5's §8 amendment: a fix round skips approval where follow-through is on.
-            if project.settings.autonomyEnabled || (task.origin == .fixRound && project.settings.prFollowThrough.enabled) {
+            if lapsed == nil,
+               project.settings.autonomyEnabled || (task.origin == .fixRound && project.settings.prFollowThrough.enabled) {
                 return .proceed
             }
             if let existing = try ApprovalStore.pendingSpawn(db, taskId: taskId) {
@@ -217,7 +219,7 @@ public struct Board: Sendable {
             }
             let approval = try ApprovalStore.insert(
                 db, projectId: task.projectId, kind: .spawn, taskId: taskId, epicId: task.epicId,
-                requestedBy: requestedBy, reason: nil
+                requestedBy: requestedBy, reason: lapsed.map(Self.afterLapsedDeny)
             )
             return .approvalPending(approval)
         }
@@ -239,6 +241,30 @@ public struct Board: Sendable {
                 + "task changes: an edit to its title, body, acceptance, model, effort or dependencies, a human "
                 + "comment, or a reopen. The human can still start it from the board."
         )
+    }
+
+    /// SPEC §15.6: the deny on the subject's latest resolved approval of `kind`, once it no longer
+    /// refuses. A request after it waits for the human whatever the autonomy setting, until the
+    /// human resolves a newer approval on the same subject.
+    static func lapsedDeny(_ db: Database, kind: ApprovalKind, column: String, subject: String) throws -> Ruling? {
+        try Ruling.fetchOne(
+            db,
+            sql: """
+            SELECT r.* FROM ruling r
+            WHERE r.subject_kind = 'approval' AND r.verdict = 'deny'
+              AND NOT EXISTS (SELECT 1 FROM ruling s WHERE s.supersedes = r.id)
+              AND r.approval_id = (
+                SELECT a.id FROM approval a
+                WHERE a.\(column) = ?1 AND a.kind = ?2 AND a.resolved_at IS NOT NULL
+                ORDER BY a.resolved_at DESC, a.rowid DESC LIMIT 1)
+            ORDER BY r.answered_at DESC, r.rowid DESC LIMIT 1
+            """,
+            arguments: [subject, kind.rawValue]
+        )
+    }
+
+    static func afterLapsedDeny(_ deny: Ruling) -> String {
+        "Asked again after the human's deny lapsed (ruling \(deny.id)): \(deny.quoted)"
     }
 
     public static func holdRefusal(task: Task, hold: Ruling) -> String {
@@ -1526,9 +1552,11 @@ public struct Board: Sendable {
             if let refusal = try Self.deniedIntegration(db, epic: epic, epicTip: epicTip) {
                 throw refusal
             }
+            let lapsed = try Self.lapsedDeny(db, kind: .integration, column: "epic_id", subject: epicId)
             return try ApprovalStore.insert(
                 db, projectId: epic.projectId, kind: .integration, taskId: nil, epicId: epicId,
-                requestedBy: requestedBy, reason: nil, payload: try IntegrationRequest(epicTip: epicTip).encoded()
+                requestedBy: requestedBy, reason: lapsed.map(Self.afterLapsedDeny),
+                payload: try IntegrationRequest(epicTip: epicTip).encoded()
             )
         }
     }
