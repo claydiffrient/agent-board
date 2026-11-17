@@ -115,10 +115,10 @@ extension PRWatchStore {
         }
     }
 
-    /// Every handled thread, review and comment item, from any round, with a reply not yet posted and not
-    /// given up on (SPEC §13.2): a reply the human chose by answering a decision, whatever the setting, or a
-    /// factual reply handled since `postFactualReplies` was last turned on. A `fix` item qualifies only once
-    /// its own round pushed it, so a stale or parked round's fixes never claim "Fixed in"; `IS` keeps that
+    /// Every handled thread, review and comment item, from any round, with a factual reply not yet posted and
+    /// not given up on, handled since `postFactualReplies` was last turned on (SPEC §13.2). A reply the author
+    /// chose by answering a decision is owed instead, and only Post reply posts it. A `fix` item qualifies only
+    /// once its own round pushed it, so a stale or parked round's fixes never claim "Fixed in"; `IS` keeps that
     /// match when the round's fix task was deleted and both sides are null.
     public func pendingReplies(watchId: String) throws -> [PRItem] {
         try db.reader.read { db in
@@ -130,20 +130,37 @@ extension PRWatchStore {
                 JOIN project p ON p.id = w.project_id
                 WHERE i.watch_id = ? AND i.state = 'handled' AND i.reply_url IS NULL AND i.reply_abandoned_at IS NULL
                 AND i.kind IN ('thread', 'review', 'comment')
+                AND i.handled_at >= json_extract(p.settings_json, '$.prFollowThrough.postFactualRepliesSince')
                 AND (
-                  (i.verdict = 'answer' AND i.decision_answer IS NOT NULL AND i.reply_body IS NOT NULL)
-                  OR (i.handled_at >= json_extract(p.settings_json, '$.prFollowThrough.postFactualRepliesSince') AND (
-                    (i.verdict IN ('answer', 'already_done', 'follow_up') AND i.reply_body IS NOT NULL)
-                    OR (i.verdict = 'fix' AND EXISTS (
-                      SELECT 1 FROM pr_round r WHERE r.watch_id = i.watch_id AND r.number = i.round
-                      AND r.pushed_head_oid IS NOT NULL AND r.fix_task_id IS i.fix_task_id
-                    ))
+                  (i.verdict IN ('answer', 'already_done', 'follow_up') AND i.reply_body IS NOT NULL)
+                  OR (i.verdict = 'fix' AND EXISTS (
+                    SELECT 1 FROM pr_round r WHERE r.watch_id = i.watch_id AND r.number = i.round
+                    AND r.pushed_head_oid IS NOT NULL AND r.fix_task_id IS i.fix_task_id
                   ))
                 )
+                AND NOT (i.verdict = 'answer' AND \(Self.authorAnsweredSQL))
                 ORDER BY i.id
                 """,
                 arguments: [watchId]
             )
+        }
+    }
+
+    static let authorAnsweredSQL = """
+    EXISTS (SELECT 1 FROM ruling r WHERE r.pr_item_id = i.id AND r.verdict IN ('choose', 'reply')
+      AND NOT EXISTS (SELECT 1 FROM ruling s WHERE s.supersedes = r.id))
+    """
+
+    /// A reply the author chose by answering a decision, not yet posted (SPEC §13.4). It waits for Post reply.
+    static let owedReplySQL = """
+    i.state = 'handled' AND i.verdict = 'answer' AND i.reply_body IS NOT NULL AND i.reply_url IS NULL
+    AND i.reply_abandoned_at IS NULL AND i.kind IN ('thread', 'review', 'comment') AND \(authorAnsweredSQL)
+    """
+
+    /// The item when it holds an owed reply, else nil.
+    public func owedReply(itemId: Int64) throws -> PRItem? {
+        try db.reader.read { db in
+            try PRItem.fetchOne(db, sql: "SELECT i.* FROM pr_item i WHERE i.id = ? AND \(Self.owedReplySQL)", arguments: [itemId])
         }
     }
 
