@@ -14,12 +14,14 @@ public enum ProtectedPaths {
         }
     }
 
+    /// The review-rule names are matched case-insensitively, as macOS's default filesystem opens them;
+    /// `.github/workflows` is read by GitHub, which is case-sensitive.
     private static func isBuiltIn(_ parts: [String]) -> Bool {
-        guard let name = parts.last else { return false }
-        if name == "CLAUDE.md" || name == "CLAUDE.local.md" { return true }
-        if parts.dropLast().contains(".claude") { return true }
+        guard let name = parts.last?.lowercased() else { return false }
+        if name == "claude.md" || name == "claude.local.md" { return true }
+        if parts.dropLast().contains(where: { $0.lowercased() == ".claude" }) { return true }
         if parts.count > 2, parts[0] == ".github", parts[1] == "workflows" { return true }
-        return parts == [".mcp.json"]
+        return parts.count == 1 && name == ".mcp.json"
     }
 
     private static func components(of path: String) -> [String] {

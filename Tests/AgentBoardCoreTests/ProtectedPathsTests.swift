@@ -13,7 +13,12 @@ final class ProtectedPathsTests: XCTestCase {
             ".mcp.json",
             "scripts/hooks/pre-commit",
             "docs/claude.md",
+            ".Claude/settings.json",
+            "CLAUDE.LOCAL.md",
+            ".MCP.json",
             "docs/CLAUDE.md.bak",
+            ".GitHub/workflows/ci.yml",
+            "Scripts/hooks/pre-commit",
             ".claude",
             ".github/dependabot.yml",
             "sub/.mcp.json",
@@ -32,6 +37,10 @@ final class ProtectedPathsTests: XCTestCase {
             ".github/workflows/ci.yml",
             ".mcp.json",
             "scripts/hooks/pre-commit",
+            "docs/claude.md",
+            ".Claude/settings.json",
+            "CLAUDE.LOCAL.md",
+            ".MCP.json",
         ])
     }
 }

@@ -631,19 +631,32 @@ Before routing, `report_complete` lists what the task changed
 (`WorkerControl.completionChanges`): `git diff --name-only --no-renames
 <base>...HEAD` against the base a reviewer would be spawned with, plus
 uncommitted and untracked files in the worktree, which the reviewer would load
-too; in the shared checkout, the files of the commits `task_commit` attributes
-to the task. If any is protected (`ProtectedPaths.matching`) — a `CLAUDE.md` or
-`CLAUDE.local.md` at any depth, anything under a `.claude/` directory at any
-depth, anything under `.github/workflows/`, the root `.mcp.json`, or a match for
-the project's `protectedPathGlobs` (§4) — the task goes to `humanReview`
+too, plus gitignored review-rule files (`ReviewCheckout.ignoredReviewRules`)
+that are new or changed since the worktree's setup; in the shared checkout, the
+files of the commits `task_commit` attributes to the task. If any is protected
+(`ProtectedPaths.matching`) — a `CLAUDE.md` or `CLAUDE.local.md` at any depth,
+anything under a `.claude/` directory at any depth, the root `.mcp.json`, all
+four in any letter case, since macOS's default filesystem opens `docs/claude.md`
+for `docs/CLAUDE.md`; anything under `.github/workflows/`, exactly as cased; or
+a match for the project's `protectedPathGlobs` (§4), also exactly as cased —
+the task goes to `humanReview`
 whatever the project's or epic's review level, a `progress` row names the
 paths, and the worker's return text says so. A listing git cannot produce
 fails closed the same way, with the reason in the row. An epic's integration
 task and a PR follow-through fix round are not checked: both already wait on a
 person. Loading the rules from the base branch inside the reviewer session was
 considered and rejected as a larger runtime change for the same protection.
-The match is case-sensitive, so `docs/claude.md` is not protected, and a
-gitignored file appears in no listing.
+A worker can write a gitignored `CLAUDE.local.md` or
+`.claude/settings.local.json` that the reviewer in its worktree loads, but setup
+can write such files too: the repository's `post-checkout` hook, or Agent
+Board's own launch. So just before `claude --bg` runs, the worker's setup row
+records the ignored review-rule files then present with a SHA-256 of each
+(`agent_session.ignored_baseline`), and a completion lists only those added or
+changed since. A later attempt in the same worktree keeps the first attempt's
+record, so an earlier worker's file is not taken for setup's. A baseline that
+was never recorded, including for sessions started before the column existed,
+flags every such file. Ignored files matching only `protectedPathGlobs`, and
+ignored files in the shared checkout, are not listed.
 
 The spawn answers once the reviewer's setup row exists, so a setup that fails
 after that, launching `claude` or reading back its session, takes the same

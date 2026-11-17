@@ -302,6 +302,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("task_completion_check") { db in
             try db.execute(sql: "ALTER TABLE task ADD COLUMN completion_check TEXT")
         }
+        migrator.registerMigration("session_ignored_baseline") { db in
+            try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN ignored_baseline TEXT")
+        }
         return migrator
     }
 }
