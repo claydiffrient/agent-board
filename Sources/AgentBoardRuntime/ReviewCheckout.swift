@@ -25,6 +25,34 @@ public enum ReviewCheckout {
         }
     }
 
+    /// Every path a reviewer's checkout differs in from `base`: the branch's commits since `base`, plus
+    /// uncommitted and untracked files, which a reviewer in the same worktree loads too (SPEC §5.1).
+    /// `--no-renames` keeps a renamed-away file in the list under its old name.
+    public static func changedFiles(against base: String, in directory: URL) throws -> [String] {
+        let listings = [
+            ["diff", "--name-only", "-z", "--no-renames", "\(base)...HEAD"],
+            ["diff", "--name-only", "-z", "--no-renames", "HEAD"],
+            ["ls-files", "-z", "--others", "--exclude-standard"],
+        ]
+        return try unique(listings.flatMap { try nulSeparated(git($0, in: directory)) })
+    }
+
+    /// The paths the given commits touched, for work committed on a shared branch (SPEC §5.1).
+    public static func changedFiles(inCommits shas: [String], in directory: URL) throws -> [String] {
+        try unique(shas.flatMap { sha in
+            try nulSeparated(git(["show", "--name-only", "-z", "--no-renames", "--format=", sha], in: directory))
+        })
+    }
+
+    private static func nulSeparated(_ output: String) -> [String] {
+        output.split(separator: "\0").map { $0.trimmingCharacters(in: .newlines) }.filter { !$0.isEmpty }
+    }
+
+    private static func unique(_ paths: [String]) -> [String] {
+        var seen = Set<String>()
+        return paths.filter { seen.insert($0).inserted }
+    }
+
     private static func head(in directory: URL) throws -> String {
         try git(["rev-parse", "HEAD"], in: directory).trimmingCharacters(in: .whitespacesAndNewlines)
     }

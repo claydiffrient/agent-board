@@ -95,6 +95,16 @@ actor FakeWorkerControl: WorkerControl {
         nil
     }
 
+    var changes: CompletionChanges = .listed([])
+
+    func setChanges(_ changes: CompletionChanges) {
+        self.changes = changes
+    }
+
+    func completionChanges(taskId: String, sessionId: String) async -> CompletionChanges {
+        changes
+    }
+
     var drift: BaseDrift = .measured(behind: 0, ahead: 0, against: "main")
     private(set) var refreshed: [String] = []
 

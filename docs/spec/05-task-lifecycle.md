@@ -26,12 +26,14 @@ project setting an epic may override for its own tasks:
 | `epic` | inside an epic, goes straight to `done`; standalone, waits in `review` | you, at the epic's integration gate |
 
 The level is resolved on completion: the task's epic's `review_level` if it has
-one, otherwise the project's. Two rules override it unconditionally. An epic's
+one, otherwise the project's. Three rules override it unconditionally. An epic's
 integration task (`origin = integration`) always waits for a person, at every
 level — §5.2's gate is not weakened by this setting. And `agent` with no usable
 rostered reviewer — or with a routing row naming an agent (§4) that is no longer usable —
 falls back to `task` and says so in a `progress` row, rather than accepting work
-nobody reviewed.
+nobody reviewed. And a task whose changes touch a protected path — `CLAUDE.md`,
+`.claude/`, CI workflows, `.mcp.json` or the project's own globs — waits for a
+person at every level (§5.1).
 
 - `proposed` — created by a worker via `propose_task`. Neither the orchestrator
   nor a worker may promote a worker proposal without human approval when
@@ -595,6 +597,27 @@ that does **not** move the task to `running`: a review must stay in `review` or
 its own `accept_task` has nothing to decide. A reviewer that cannot be started
 leaves the task in `review` for a person and says so in a `progress` row, which
 is where `task` review would have parked it anyway.
+
+**A task that changed the rules its reviewer loads goes to a person.** A
+reviewer runs in the worker's worktree, so it loads that branch's `CLAUDE.md`
+and `.claude/`: a worker could rewrite the rules that judge its own change.
+Before routing, `report_complete` lists what the task changed
+(`WorkerControl.completionChanges`): `git diff --name-only --no-renames
+<base>...HEAD` against the base a reviewer would be spawned with, plus
+uncommitted and untracked files in the worktree, which the reviewer would load
+too; in the shared checkout, the files of the commits `task_commit` attributes
+to the task. If any is protected (`ProtectedPaths.matching`) — a `CLAUDE.md` or
+`CLAUDE.local.md` at any depth, anything under a `.claude/` directory at any
+depth, anything under `.github/workflows/`, the root `.mcp.json`, or a match for
+the project's `protectedPathGlobs` (§4) — the task goes to `humanReview`
+whatever the project's or epic's review level, a `progress` row names the
+paths, and the worker's return text says so. A listing git cannot produce
+fails closed the same way, with the reason in the row. An epic's integration
+task and a PR follow-through fix round are not checked: both already wait on a
+person. Loading the rules from the base branch inside the reviewer session was
+considered and rejected as a larger runtime change for the same protection.
+The match is case-sensitive, so `docs/claude.md` is not protected, and a
+gitignored file appears in no listing.
 
 The spawn answers once the reviewer's setup row exists, so a setup that fails
 after that, launching `claude` or reading back its session, takes the same

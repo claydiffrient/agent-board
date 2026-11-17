@@ -743,7 +743,10 @@ than silently dropping the choice. A caption beneath the table repeats that it
 takes effect only while Review level is Agent. Under it, **Review round cap** is
 a stepper from 1 to 20 (default 3), disabled outside `agent` like the table,
 captioned that the round whose reopen reaches it leaves the task in Review for
-the human instead of sending it back (§5.1, "Review rounds").
+the human instead of sending it back (§5.1, "Review rounds"). Below it,
+**Protected paths** is a comma-separated text field of `protectedPathGlobs`
+(§4), enabled at every review level because the guard ignores the level,
+captioned with the built-in paths it always protects (§5.1).
 
 **Preview Leaked-Agent Sweep…** — in the app menu, beside About, because it is
 a one-off diagnostic and not a screen anyone lives in. It opens a `Window` scene

@@ -205,7 +205,8 @@ public final class WorkerToolHandler: ToolHandler {
             return try await commitMyWork(task, arguments: arguments, identity: identity)
         case "report_complete":
             try await requireNoCommitInFlight(identity)
-            let outcome = try reportComplete(task, arguments: arguments, identity: identity)
+            let changes = try await completionChanges(task, identity: identity)
+            let outcome = try reportComplete(task, arguments: arguments, identity: identity, changes: changes)
             guard !outcome.wasAlreadyComplete else { return Self.completionResult(outcome) }
             if outcome.endedSessionState != nil || outcome.closedUnderSession {
                 await events.reportQueued(projectId: identity.projectId)
@@ -480,8 +481,14 @@ public final class WorkerToolHandler: ToolHandler {
         )
     }
 
+    /// Integration and fix-round results already wait on a person, so only a worker's own task is read.
+    private func completionChanges(_ task: BoardTask, identity: TokenIdentity) async throws -> CompletionChanges? {
+        guard task.origin != .integration, task.origin != .fixRound else { return nil }
+        return await control.completionChanges(taskId: task.id, sessionId: try requiredSession(identity))
+    }
+
     private func reportComplete(
-        _ task: BoardTask, arguments: JSONValue, identity: TokenIdentity
+        _ task: BoardTask, arguments: JSONValue, identity: TokenIdentity, changes: CompletionChanges?
     ) throws -> Board.CompletionOutcome {
         let summary = try ToolArguments.requiredString("summary", in: arguments)
         let files = arguments["files_changed"]?.arrayValue ?? []
@@ -496,7 +503,9 @@ public final class WorkerToolHandler: ToolHandler {
         let data = try encoder.encode(body)
         let sessionId = try requiredSession(identity)
         do {
-            return try board.complete(taskId: task.id, sessionId: sessionId, summary: String(decoding: data, as: UTF8.self))
+            return try board.complete(
+                taskId: task.id, sessionId: sessionId, summary: String(decoding: data, as: UTF8.self), changes: changes
+            )
         } catch BoardError.sessionNotOnTask {
             throw ToolError(
                 "Session \(sessionId) is not the agent currently working task \(task.id); another session holds it. "
@@ -561,6 +570,7 @@ public final class WorkerToolHandler: ToolHandler {
         }
         return ToolResult(
             text: "\(Self.recordedLine(outcome)) The task is now in \(outcome.column.rawValue.capitalized). "
+                + "\(outcome.protectedPathReview.map { $0 + " " } ?? "")"
                 + "\(awaitingPullRequestLine(outcome))Stop here; do not start further work."
         )
     }

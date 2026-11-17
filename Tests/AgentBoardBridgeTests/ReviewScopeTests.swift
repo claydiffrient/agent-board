@@ -308,6 +308,21 @@ final class ReviewScopeTests: XCTestCase {
         let accepted = await f.control.accepted
         XCTAssertTrue(accepted.isEmpty)
     }
+
+    func testAgentReviewOfATaskThatChangedCLAUDEmdWaitsForAPerson() async throws {
+        try f.setReviewLevel(.agent)
+        _ = try f.rosterReviewer("Rowan")
+        await f.control.setChanges(.listed(["Sources/Search.swift", "Sources/CLAUDE.md"]))
+
+        let result = try await reportComplete()
+
+        XCTAssertTrue(result.text.contains("Sources/CLAUDE.md"), result.text)
+        XCTAssertEqual(try f.tasks.get(task.id)?.column, .review)
+        XCTAssertNil(try f.tasks.get(task.id)?.reviewerAgentId)
+        let assigned = await f.control.assigned
+        XCTAssertTrue(assigned.isEmpty)
+        XCTAssertTrue(try f.progress.list(taskId: task.id).contains { $0.text.contains("Sources/CLAUDE.md") })
+    }
 }
 
 func XCTAssertThrowsErrorAsync<T>(

@@ -783,6 +783,31 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return try await offMain { try ReviewCheckout.change(since: head, in: cwd) }
     }
 
+    /// Diffed against the base a reviewer would be spawned with, or, in the shared checkout, read from the
+    /// commits `task_commit` attributes to the task.
+    func completionChanges(taskId: String, sessionId: String) async -> CompletionChanges {
+        do {
+            guard let session = try sessions.get(sessionId), let task = try tasks.get(taskId),
+                  let project = try projects.get(task.projectId)
+            else { return .unlisted(reason: "no session, task or project row to read it from") }
+            if SharedCheckoutGroup.isMember(session, of: project) {
+                let shas = try TaskCommitStore(db).shas(taskId: taskId)
+                let repo = URL(fileURLWithPath: project.repoPath)
+                return .listed(try await offMain { try ReviewCheckout.changedFiles(inCommits: shas, in: repo) })
+            }
+            let manager = worktreeManager(for: project)
+            let epicBranch = try task.epicId.flatMap { try epics.get($0) }?.branch
+            let projectBase = project.baseBranch
+            let cwd = URL(fileURLWithPath: session.cwd)
+            return .listed(try await offMain {
+                let base = epicBranch ?? manager.diffBase(taskId: taskId, base: projectBase)
+                return try ReviewCheckout.changedFiles(against: base, in: cwd)
+            })
+        } catch {
+            return .unlisted(reason: describe(error))
+        }
+    }
+
     func baseDrift(epicId: String) async throws -> BaseDrift {
         guard let epic = try epics.get(epicId) else { throw SupervisorError.epicNotFound(epicId) }
         guard let project = try projects.get(epic.projectId) else { throw SupervisorError.projectNotFound(epic.projectId) }

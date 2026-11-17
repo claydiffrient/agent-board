@@ -20,7 +20,8 @@ CREATE TABLE project (
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, defaultEffort,
                                    -- workerModels, allowsFableEscalation, modelGuidance,
-                                   -- reviewLevel, reviewRouting, reviewRoundCap, buildCommand, testCommand,
+                                   -- reviewLevel, reviewRouting, reviewRoundCap, protectedPathGlobs,
+                                   -- buildCommand, testCommand,
                                    -- verificationTimeoutSeconds (null = 30 min; else clamped
                                    --   to 60..86400, i.e. 1 min to 24 h, on decode and on set),
                                    -- integrationVerification, archivePolicy, worktreeStrategy,
@@ -754,6 +755,14 @@ Nothing else reads either value — the level is resolved once, on completion (�
 `settings_json.reviewRoundCap` is the agent-review round whose reopen leaves the
 task in `review` for a person instead of sending it back to `ready` (§5.1,
 "Review rounds"). An absent key decodes to **3**; a value below 1 is read as 1.
+
+`settings_json.protectedPathGlobs` lists globs, relative to the repository
+root, that a completed task may not change without a person's review, beyond
+the built-in `CLAUDE.md`, `.claude/`, `.github/workflows/` and `.mcp.json`
+(§5.1). `*` and `?` match within one path component and `**` spans any number,
+so `scripts/hooks/**` protects a project's own hook scripts. An absent key
+decodes to **`[]`**. It is edited as a comma-separated list under **Protected paths**
+in the Agents tab's Review section (§10).
 
 `settings_json.integrationVerification` is how much the epic integrator
 verifies on the board's machine after its merges (§5.2 step 3), and how much an

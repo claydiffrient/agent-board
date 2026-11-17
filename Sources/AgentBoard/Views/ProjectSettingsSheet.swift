@@ -81,6 +81,7 @@ struct ProjectSettingsSheet: View {
     @State private var worktreeRoot: String
     @State private var autoModeJSON: String
     @State private var extraServers: String
+    @State private var protectedPathGlobs: String
     @State private var checksAwaitingVerification: String
     @State private var triggerLabels: String
     @State private var archiveMode: ArchivePolicyMode
@@ -113,6 +114,7 @@ struct ProjectSettingsSheet: View {
         _worktreeRoot = State(initialValue: project.worktreeRoot)
         _autoModeJSON = State(initialValue: settings.autoModeJSON ?? "")
         _extraServers = State(initialValue: settings.extraMcpServers.joined(separator: ", "))
+        _protectedPathGlobs = State(initialValue: settings.protectedPathGlobs.joined(separator: ", "))
         _checksAwaitingVerification = State(
             initialValue: settings.prFollowThrough.checksAwaitingVerification.joined(separator: ", ")
         )
@@ -278,6 +280,10 @@ struct ProjectSettingsSheet: View {
             )
             .disabled(settings.reviewLevel != .agent)
             Text("The agent review round whose reopen stops the loop: the task stays in Review for you instead of going back to a worker.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("Protected paths", text: $protectedPathGlobs, prompt: Text("e.g. scripts/hooks/**"))
+            Text("Comma-separated globs. A task that changes one waits for you at any review level, as one that changes CLAUDE.md, .claude/, .github/workflows/ or .mcp.json always does.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .verification:
@@ -702,6 +708,7 @@ struct ProjectSettingsSheet: View {
         updated.notifications.mute = muteChoice.mute(existing: settings.notifications.mute)
         updated.prFollowThrough = Self.savedFollowThrough(settings.prFollowThrough, pendingTerm: newPrivateTerm)
         updated.prFollowThrough.checksAwaitingVerification = Self.checkNames(checksAwaitingVerification)
+        updated.protectedPathGlobs = Self.checkNames(protectedPathGlobs)
         updated.takeover = draftTakeover.normalized
         let trimmedJSON = autoModeJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.autoModeJSON = trimmedJSON.isEmpty ? nil : trimmedJSON

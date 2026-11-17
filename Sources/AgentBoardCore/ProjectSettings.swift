@@ -240,6 +240,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var reviewRouting: ReviewRoutingTable = ReviewRoutingTable()
     /// The agent-review round whose reopen leaves the task in `review` for a person (SPEC §5).
     public var reviewRoundCap: Int = 3
+    /// Globs a completion may not touch without a person's review, beyond the built-in list (SPEC §4, §5.1).
+    public var protectedPathGlobs: [String] = []
     /// Shell command that builds this project, e.g. `swift build` or `pnpm build`. Empty leaves the
     /// agent to work it out from the repo.
     public var buildCommand: String? = nil
@@ -290,6 +292,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         reviewLevel: ReviewLevel = .task,
         reviewRouting: ReviewRoutingTable = ReviewRoutingTable(),
         reviewRoundCap: Int = 3,
+        protectedPathGlobs: [String] = [],
         buildCommand: String? = nil,
         testCommand: String? = nil,
         verificationTimeoutSeconds: Int? = nil,
@@ -318,6 +321,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.reviewLevel = reviewLevel
         self.reviewRouting = reviewRouting
         self.reviewRoundCap = reviewRoundCap
+        self.protectedPathGlobs = protectedPathGlobs
         self.buildCommand = buildCommand
         self.testCommand = testCommand
         self.verificationTimeoutSeconds = verificationTimeoutSeconds.map(VerificationCommands.clampedTimeout)
@@ -356,6 +360,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
             reviewRouting = ReviewRoutingTable(defaultAssignee: named.map(ReviewAssignee.named) ?? .anyReviewer)
         }
         reviewRoundCap = try c.decodeIfPresent(Int.self, forKey: .reviewRoundCap) ?? 3
+        protectedPathGlobs = try c.decodeIfPresent([String].self, forKey: .protectedPathGlobs) ?? []
         buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
         verificationTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .verificationTimeoutSeconds)

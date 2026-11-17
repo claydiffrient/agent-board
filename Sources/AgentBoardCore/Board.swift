@@ -431,6 +431,9 @@ public struct Board: Sendable {
         public var endedSessionState: SessionState? = nil
         /// The task was closed while this session still ran on it, so the report moved nothing.
         public var closedUnderSession = false
+        /// Why the task waits for a person whatever the review level: it touched a protected path, or
+        /// its changes could not be listed (SPEC §5.1). Also written to the task's `progress`.
+        public var protectedPathReview: String? = nil
 
         /// Never true on a resend: the first call already ran the acceptance path.
         public var autoAccept: Bool {
@@ -449,7 +452,9 @@ public struct Board: Sendable {
     /// writes nothing — the guard reads inside this write transaction, so two concurrent resends
     /// cannot both pass it, and the review routing below never runs twice.
     @discardableResult
-    public func complete(taskId: String, sessionId: String, summary: String) throws -> CompletionOutcome {
+    public func complete(
+        taskId: String, sessionId: String, summary: String, changes: CompletionChanges? = nil
+    ) throws -> CompletionOutcome {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
             if let existing = try ReportStore.completion(db, taskId: taskId, sessionId: sessionId) {
@@ -510,7 +515,12 @@ public struct Board: Sendable {
                 try Self.announceIntegrated(db, epic: awaitingPullRequest)
             }
             let level = try ReviewPolicy.level(db, task: task)
-            let routing = try ReviewPolicy.routing(db, task: task, completedBy: sessionId)
+            var routing = try ReviewPolicy.routing(db, task: task, completedBy: sessionId)
+            let protectedPathReview = try changes.flatMap { try Self.protectedPathReview(db, task: task, changes: $0) }
+            if let protectedPathReview {
+                _ = try ProgressStore.append(db, taskId: taskId, sessionId: nil, kind: .status, text: protectedPathReview)
+                if case .humanReview = routing {} else { routing = .humanReview(reason: nil) }
+            }
             switch routing {
             case .autoAccept:
                 break
@@ -525,8 +535,25 @@ public struct Board: Sendable {
             }
             return CompletionOutcome(
                 report: report, level: level, routing: routing, column: column, wasAlreadyComplete: false,
-                awaitingPullRequest: awaitingPullRequest
+                awaitingPullRequest: awaitingPullRequest, protectedPathReview: protectedPathReview
             )
+        }
+    }
+
+    /// SPEC §5.1: an agent reviewer loads `CLAUDE.md` and `.claude/` from the worker's own checkout, so
+    /// a task that changed them, or CI, or the project's own protected globs, goes to a person.
+    private static func protectedPathReview(_ db: Database, task: Task, changes: CompletionChanges) throws -> String? {
+        guard task.origin != .integration else { return nil }
+        switch changes {
+        case .unlisted(let reason):
+            return "Agent Board could not list the files this task changed (\(reason)), so it cannot rule out a "
+                + "change to the rules a reviewer loads or to CI. It waits for a person whatever the review level."
+        case .listed(let paths):
+            let globs = try settings(db, projectId: task.projectId).protectedPathGlobs
+            let hits = ProtectedPaths.matching(paths, extraGlobs: globs)
+            guard !hits.isEmpty else { return nil }
+            return "This task changed protected paths, which can change the rules a reviewer loads or the CI that "
+                + "checks it: \(hits.joined(separator: ", ")). It waits for a person whatever the review level."
         }
     }
 
