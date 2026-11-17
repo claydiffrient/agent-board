@@ -46,6 +46,12 @@ enum Wiring {
             pullRequestRepository: { project in
                 let remote = try? BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath)).requireRemote()
                 return remote.flatMap(PullRequestLaunch.githubSlug(remoteURL:))
+            },
+            branchTip: { project, branch in
+                guard let tip = try BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath)).tip(of: branch) else {
+                    throw PublishFailure.noSuchBranch(branch)
+                }
+                return tip
             }
         )
         let commitsInFlight = CommitsInFlight()
@@ -145,6 +151,22 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
     func reviewCheckoutChange(taskId: String, sessionId: String?) async throws -> String? {
         guard let target else { throw SupervisorError.serverNotRunning }
         return try await target.reviewCheckoutChange(taskId: taskId, sessionId: sessionId)
+    }
+
+    func completionChanges(taskId: String, sessionId: String) async -> CompletionChanges {
+        guard let target else { return .unlisted(reason: SupervisorError.serverNotRunning.localizedDescription) }
+        return await target.completionChanges(taskId: taskId, sessionId: sessionId)
+    }
+
+    func runCompletionCheck(
+        taskId: String, sessionId: String, commands: [String], timeoutSeconds: Int
+    ) async -> CompletionCheck {
+        guard let target else {
+            return .couldNotRun(commands, reason: SupervisorError.serverNotRunning.localizedDescription)
+        }
+        return await target.runCompletionCheck(
+            taskId: taskId, sessionId: sessionId, commands: commands, timeoutSeconds: timeoutSeconds
+        )
     }
 
     func baseDrift(epicId: String) async throws -> BaseDrift {

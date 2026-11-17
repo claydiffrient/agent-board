@@ -64,6 +64,7 @@ public final class ReviewerToolHandler: ToolHandler {
             inputSchema: ToolSchema.object(
                 properties: [
                     "verdict": ToolSchema.string("What you checked and why the work is acceptable."),
+                    "grades": gradesSchema,
                 ],
                 required: ["verdict"]
             )
@@ -72,15 +73,29 @@ public final class ReviewerToolHandler: ToolHandler {
             name: "reopen_task",
             description: "Send the task back to Ready with your findings. Use it when anything must change; do "
                 + "not fix it yourself. Your findings are recorded on the task and reach the next worker's opening "
-                + "prompt verbatim, so be specific about what is wrong and where. Ends your review.",
+                + "prompt verbatim, so be specific about what is wrong and where. Once the project's review round "
+                + "cap is reached, the task stays in Review for a person instead. Ends your review.",
             inputSchema: ToolSchema.object(
                 properties: [
-                    "findings": ToolSchema.string("What is wrong, where, and what would make it acceptable."),
+                    "findings": ToolSchema.stringArray(
+                        "One entry per finding: what is wrong, where, and what would make it acceptable."
+                    ),
+                    "grades": gradesSchema,
                 ],
                 required: ["findings"]
             )
         ),
     ]
+
+    static let gradesSchema = ToolSchema.objectArray(
+        properties: [
+            "finding": ToolSchema.integer("The finding's number in your prompt's re-review section."),
+            "grade": ToolSchema.enumeration(FindingGrade.allCases.map(\.rawValue)),
+            "evidence": ToolSchema.string("The file and line, or the command, that shows the grade."),
+        ],
+        required: ["finding", "grade", "evidence"],
+        description: "Required on a re-review: one entry for every finding of the previous round, and none otherwise."
+    )
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
         Self.descriptors
@@ -120,9 +135,12 @@ public final class ReviewerToolHandler: ToolHandler {
                         + "passes. Stop here; do not start further work."
                 ), identity: identity)
             }
-            try board.recordReviewVerdict(
-                taskId: task.id, sessionId: identity.sessionId, reviewerName: name, verdict: verdict
-            )
+            let grades = try Self.grades(in: arguments)
+            _ = try graded {
+                try board.recordReviewVerdict(
+                    taskId: task.id, sessionId: identity.sessionId, reviewerName: name, verdict: verdict, grades: grades
+                )
+            }
             let warning = try await control.accept(
                 taskId: task.id,
                 acceptedBy: .reviewer(name: name, verdict: verdict, sessionId: identity.sessionId)
@@ -133,7 +151,7 @@ public final class ReviewerToolHandler: ToolHandler {
                     + "Stop here; do not start further work."
             ), identity: identity)
         case "reopen_task":
-            let findings = try ToolArguments.requiredString("findings", in: arguments)
+            let findings = try Self.findings(in: arguments)
             try requireUnderReview(task)
             try await requireUntouchedCheckout(
                 task, identity: identity,
@@ -142,19 +160,35 @@ public final class ReviewerToolHandler: ToolHandler {
             if task.origin == .fixRound {
                 try recordRoundReview(
                     task, identity: identity, name: try reviewerName(task, identity: identity), accepted: false,
-                    text: findings
+                    text: ReviewRound.renderFindings(findings)
                 )
                 return stoppingAfterwards(ToolResult(
                     text: "Recorded. Your findings go back to the round's fixer. Stop here; do not start further work."
                 ), identity: identity)
             }
-            try board.reviewReopen(
-                taskId: task.id, sessionId: identity.sessionId,
-                reviewerName: try reviewerName(task, identity: identity), findings: findings
-            )
+            let grades = try Self.grades(in: arguments)
+            let name = try reviewerName(task, identity: identity)
+            let reopen = try graded {
+                try board.reviewReopen(
+                    taskId: task.id, sessionId: identity.sessionId, reviewerName: name, findings: findings,
+                    grades: grades
+                )
+            }
             await events.reportQueued(projectId: identity.projectId)
+            guard reopen.capped else {
+                return stoppingAfterwards(ToolResult(
+                    text: "Sent back to Ready with your findings. Stop here; do not start further work."
+                ), identity: identity)
+            }
+            await events.notify(
+                projectId: identity.projectId, sessionId: identity.sessionId,
+                title: Board.reviewRoundCapLead,
+                body: "\(task.title): round \(reopen.round.number) of agent review reopened it, so it waits for you in "
+                    + "Review. \(ReviewRound.renderFindings(findings))"
+            )
             return stoppingAfterwards(ToolResult(
-                text: "Sent back to Ready with your findings. Stop here; do not start further work."
+                text: "Recorded your findings. This was round \(reopen.round.number), the project's review round cap, "
+                    + "so the task stays in Review for a person. Stop here; do not start further work."
             ), identity: identity)
         default:
             throw ToolError("Unknown tool: \(name)")
@@ -170,6 +204,38 @@ public final class ReviewerToolHandler: ToolHandler {
             await events.workerCompleted(projectId: identity.projectId, sessionId: sessionId)
         }
         return result
+    }
+
+    /// SPEC §5.1: a grading refusal records nothing and is the one refusal the reviewer may answer by
+    /// calling again.
+    private func graded<T>(_ record: () throws -> T) throws -> T {
+        do {
+            return try record()
+        } catch let rejection as ReviewGradingRejection {
+            throw ToolError("\(rejection.reason) Your verdict was not recorded. Correct `grades` and call again.")
+        }
+    }
+
+    static func findings(in arguments: JSONValue) throws -> [String] {
+        let raw = try arguments["findings"]?.stringValue.map { [$0] }
+            ?? ToolArguments.stringArray("findings", in: arguments) ?? []
+        let findings = raw.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !findings.isEmpty else { throw ToolError("Missing required argument: findings") }
+        return findings
+    }
+
+    static func grades(in arguments: JSONValue) throws -> [GradedFinding] {
+        guard let value = arguments["grades"], value != .null else { return [] }
+        guard let items = value.arrayValue else { throw ToolError("Argument grades must be an array") }
+        return try items.map { item in
+            guard let number = item["finding"]?.numberValue ?? item["finding"]?.stringValue.flatMap(Double.init),
+                  let grade = item["grade"]?.stringValue.flatMap(FindingGrade.init(rawValue:))
+            else {
+                throw ToolError("Each grade needs a finding number and a grade: "
+                    + FindingGrade.allCases.map(\.rawValue).joined(separator: ", ") + ".")
+            }
+            return GradedFinding(finding: Int(number), grade: grade, evidence: item["evidence"]?.stringValue ?? "")
+        }
     }
 
     private func recordRoundReview(

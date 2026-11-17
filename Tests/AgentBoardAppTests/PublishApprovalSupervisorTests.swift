@@ -35,9 +35,9 @@ final class PublishApprovalSupervisorTests: XCTestCase {
     }
 
     @discardableResult
-    private func pushApproval(branch: String, taskId: String? = nil) throws -> Approval {
+    private func pushApproval(branch: String, taskId: String? = nil, headOid: String? = nil) throws -> Approval {
         try fixture.board.requestPublish(
-            projectId: fixture.project.id, kind: .push, request: PublishRequest(branch: branch),
+            projectId: fixture.project.id, kind: .push, request: PublishRequest(branch: branch, headOid: headOid),
             taskId: taskId, requestedBy: "orch-session", reason: "Push \(branch)."
         )
     }
@@ -53,6 +53,35 @@ final class PublishApprovalSupervisorTests: XCTestCase {
         try await fixture.supervisor.approve(approvalId: approval.id)
         XCTAssertEqual(try remoteBranches(), ["agentboard/epic-1"])
         XCTAssertEqual(try fixture.approvals.get(approval.id)?.resolution, .approved)
+    }
+
+    func testAGrantAfterTheBranchMovedPushesNothingAndNamesBothCommits() async throws {
+        try addRemote()
+        let branch = "agentboard/epic-3"
+        try SupervisorFixture.git(["checkout", "-q", "-b", branch], cwd: fixture.repo)
+        let seen = try tip(branch)
+        let stale = try pushApproval(branch: branch, headOid: seen)
+        try SupervisorFixture.git(["commit", "-q", "--allow-empty", "-m", "Later work"], cwd: fixture.repo)
+        let moved = try tip(branch)
+
+        do {
+            try await fixture.supervisor.approve(approvalId: stale.id)
+            XCTFail("expected the moved branch to be refused")
+        } catch {
+            XCTAssertEqual(error as? PublishFailure, .headMoved(branch: branch, approved: seen, current: moved))
+        }
+        XCTAssertTrue(try remoteBranches().isEmpty)
+        let bodies = try ReportStore(fixture.db).unconsumed(projectId: fixture.project.id).map(\.body)
+        XCTAssertTrue(bodies.contains { $0.contains(seen) && $0.contains(moved) && $0.contains("push_branch") }, "\(bodies)")
+
+        let fresh = try pushApproval(branch: branch, headOid: moved)
+        try await fixture.supervisor.approve(approvalId: fresh.id)
+        XCTAssertEqual(try remoteBranches(), [branch])
+    }
+
+    private func tip(_ branch: String) throws -> String {
+        try SupervisorFixture.git(["rev-parse", "refs/heads/\(branch)"], cwd: fixture.repo)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func testAutonomyBeingOnDoesNotSkipTheApproval() async throws {

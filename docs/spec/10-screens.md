@@ -127,7 +127,9 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
    session's real terminal — D15, the only place a permission prompt is
    answered; **Stop** ends a worker that is wedged rather than asking.
 2. **Pending approvals** — spawns awaiting authorization and integration
-   requests.
+   requests. A push or pull request row names its branch and the short commit
+   the grant will publish (§4); a row recorded without one names only the
+   branch.
 3. **Pending reviews** — tasks in `review`, with branch, worktree and diffstat.
    Each row says who holds the review: `<reviewer> reviewing · <elapsed>` while
    a rostered reviewer's session is working, `<reviewer> stopped without a
@@ -280,6 +282,13 @@ deleted; when the watch was already gone the line reads "From Walk me through
 it" alone. Only that line, at the position `propose_task` writes it, is read:
 a matching line anywhere else in the report, which the session wrote after
 reading untrusted pull request text, names nothing. Every other origin, a worker's proposal included, shows no such line.
+
+The task inspector shows a **Completion check** section once a worker has
+reported complete (§5.1): the headline (running, passed, failed, interrupted,
+or "Not verified by the board"), a row per command with its result and
+duration, and the failing command's output tail in a monospaced block. It sits
+above Dependencies, so a reviewer of the task sees it without opening the
+Progress log, where the same text is also recorded.
 
 The task inspector shows a **Comments** thread above the Progress log, oldest
 first. Each comment names its author in words — `You`, `Orchestrator`,
@@ -744,7 +753,20 @@ first. A row's currently-named agent that has left the project entirely —
 deleted from the roster or opted out — stays listed anyway, suffixed
 `(not available)`, so the picker shows what routing will actually do rather
 than silently dropping the choice. A caption beneath the table repeats that it
-takes effect only while Review level is Agent.
+takes effect only while Review level is Agent. Under it, **Review round cap** is
+a stepper from 1 to 20 (default 3), disabled outside `agent` like the table,
+captioned that the round whose reopen reaches it leaves the task in Review for
+the human instead of sending it back (§5.1, "Review rounds"). Below it,
+**Protected paths** is a comma-separated text field of `protectedPathGlobs`
+(§4), enabled at every review level because the guard ignores the level,
+captioned with the built-in paths it always protects (§5.1).
+
+The Workflow tab's Verification section ends with **Check at completion**, a
+monospaced text editor holding `completionCheckCommands` (§4) one command per
+line, captioned that the board runs them in a finished task's worktree one at a
+time across every project, each stopped at the section's timeout, that the Test
+command is never run there, and that an empty list records the task as not
+verified by the board (§5.1).
 
 **Preview Leaked-Agent Sweep…** — in the app menu, beside About, because it is
 a one-off diagnostic and not a screen anyone lives in. It opens a `Window` scene

@@ -20,10 +20,12 @@ CREATE TABLE project (
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, defaultEffort,
                                    -- workerModels, allowsFableEscalation, modelGuidance,
-                                   -- reviewLevel, reviewRouting, buildCommand, testCommand,
+                                   -- reviewLevel, reviewRouting, reviewRoundCap, protectedPathGlobs,
+                                   -- buildCommand, testCommand,
                                    -- verificationTimeoutSeconds (null = 30 min; else clamped
                                    --   to 60..86400, i.e. 1 min to 24 h, on decode and on set),
-                                   -- integrationVerification, archivePolicy, worktreeStrategy,
+                                   -- integrationVerification, completionCheckCommands,
+                                   -- archivePolicy, worktreeStrategy,
                                    -- sharedCheckoutMaxAgents, worktreeSlots, rosterAgentIds,
                                    -- worktreeTeardownCommand, worktreeTeardownTimeoutSeconds,
                                    -- cleanupCommand, cleanupCommandTimeoutSeconds (§14.3),
@@ -74,7 +76,8 @@ CREATE TABLE task (
   type           TEXT,             -- code|docs|tests|plan|review; NULL = Default. Picks its review row (§4)
   closed_at      INTEGER,          -- entered closed (§5); cleared on leaving. afterDays reads it for a closed task
   closed_reason  TEXT,             -- why it was retired; required to enter closed
-  closed_by      TEXT              -- who closed it, e.g. "orchestrator (<session id>)"
+  closed_by      TEXT,             -- who closed it, e.g. "orchestrator (<session id>)"
+  completion_check TEXT            -- JSON CompletionCheck from the latest report_complete (§5.1); NULL before one
 );
 CREATE INDEX task_project_archived ON task(project_id, archived_at);
 CREATE INDEX task_project_done_at ON task(project_id, done_at);
@@ -119,6 +122,7 @@ CREATE TABLE agent_session (
   escalation     TEXT,               -- §5 retries: why this attempt runs above what its task resolves to; NULL = it does not
   agent_stopped_at INTEGER,         -- §8.6: a `claude stop` succeeded after the row's last sign of life; a trigger clears it
   agent_started_at INTEGER,         -- §8: setup row promoted (or resumed); the cap and stall clocks start here, not at started_at
+  ignored_baseline TEXT,            -- §5.1: JSON path → SHA-256 of gitignored review-rule files at setup; NULL flags them all
   CHECK ((role = 'coordinator') = (project_id IS NULL))
 );
 
@@ -238,7 +242,15 @@ CREATE TABLE approval (
   reason       TEXT,
   created_at   INTEGER NOT NULL,
   resolved_at  INTEGER,
-  resolution   TEXT                      -- approved | denied
+  resolution   TEXT,                     -- approved | denied
+  payload      TEXT                      -- JSON for kinds that carry one. push / pull_request: the
+                                         -- PublishRequest (branch, base, title, body, remote, published
+                                         -- name, headOid). headOid is the local branch's tip at request
+                                         -- time (a tip that cannot be read refuses the request, §6); a grant
+                                         -- pushes exactly headOid by explicit refspec. One whose re-read tip
+                                         -- differs pushes nothing, stays `approved`, and files a failed-publish
+                                         -- `decision` report naming both commits. A legacy row with no headOid
+                                         -- publishes the tip at grant.
 );
 CREATE INDEX approval_pending ON approval(project_id, resolved_at);
 
@@ -315,6 +327,22 @@ CREATE TABLE task_comment (
   created_at             INTEGER NOT NULL
 );
 CREATE INDEX task_comment_task_created ON task_comment(task_id, created_at);
+
+-- One row per rostered reviewer's verdict on an ordinary task (§5.1, "Review rounds").
+CREATE TABLE review_round (
+  id            INTEGER PRIMARY KEY,
+  task_id       TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  number        INTEGER NOT NULL,       -- 1, 2, … per task; never reset
+  session_id    TEXT,                   -- the reviewer's; not a foreign key, as task_comment's
+  reviewer_name TEXT NOT NULL,
+  outcome       TEXT NOT NULL,          -- accepted | reopened | capped
+  findings      TEXT NOT NULL,          -- JSON array of strings; [] for an acceptance
+  verdict       TEXT,                   -- accept_task's verdict
+  grades        TEXT NOT NULL,          -- JSON [{finding, grade, evidence}] of the previous round's findings
+  reviewed_head TEXT,                   -- SHA from the reviewer's review_head; the next round's diff starts here
+  at            INTEGER NOT NULL,
+  UNIQUE (task_id, number)
+);
 
 -- Human comments waiting for a live worker's or reviewer's next PostToolUse (§7).
 CREATE TABLE comment_delivery (
@@ -727,6 +755,35 @@ rest nil or `[]`.
 defaults to **`task`**, so a project that predates the setting behaves exactly as
 it did. `epic.review_level` overrides it for that epic's tasks; NULL inherits.
 Nothing else reads either value — the level is resolved once, on completion (§5).
+
+`settings_json.reviewRoundCap` is the agent-review round whose reopen leaves the
+task in `review` for a person instead of sending it back to `ready` (§5.1,
+"Review rounds"). An absent key decodes to **3**; a value below 1 is read as 1.
+
+`settings_json.protectedPathGlobs` lists globs, relative to the repository
+root, that a completed task may not change without a person's review, beyond
+the built-in `CLAUDE.md`, `.claude/`, `.github/workflows/` and `.mcp.json`
+(§5.1). `*` and `?` match within one path component and `**` spans any number,
+so `scripts/hooks/**` protects a project's own hook scripts. An absent key
+decodes to **`[]`**. It is edited as a comma-separated list under **Protected paths**
+in the Agents tab's Review section (§10).
+
+`settings_json.completionCheckCommands` is the project's **Check at
+completion** list: shell commands the board itself runs in a finished task's
+worktree after `report_complete`, before review is routed (§5.1). Each runs
+under `/bin/sh -c` with the verification timeout (`verificationTimeoutSeconds`),
+one after another, stopping at the first failure. Blank lines are dropped and an
+absent key decodes to **`[]`**, which records the task as not verified by the
+board. It is separate from `testCommand`, which can be a project's whole suite:
+nothing on this path runs the build or test command.
+
+`task.completion_check` is the JSON of that run (`CompletionCheck`): one step
+per command with its result (`passed`, `failed`, `timed_out`, `not_run`), exit
+status, duration in seconds and, for a failure, its output tail (the last 40
+lines, at most 4,000 characters, as an epic refresh keeps); `startedAt`,
+`finishedAt` (NULL while queued or running), and `interrupted` when Agent Board
+stopped mid-command. No steps and a `finishedAt` means not verified by the
+board. Each completion replaces it.
 
 `settings_json.integrationVerification` is how much the epic integrator
 verifies on the board's machine after its merges (§5.2 step 3), and how much an

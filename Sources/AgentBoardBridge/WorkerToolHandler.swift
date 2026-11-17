@@ -17,12 +17,13 @@ public final class WorkerToolHandler: ToolHandler {
     private let scopedCommits: (any ScopedCommitting)?
     private let commitsInFlight: CommitsInFlight
     private let commitAnswerWithin: Duration
+    private let completionCheckAnswerWithin: Duration
     private let events: any BoardEventSink
 
     public init(
         db: AppDatabase, control: any WorkerControl, events: any BoardEventSink,
         scopedCommits: (any ScopedCommitting)? = nil, commitsInFlight: CommitsInFlight = CommitsInFlight(),
-        commitAnswerWithin: Duration = .seconds(30)
+        commitAnswerWithin: Duration = .seconds(30), completionCheckAnswerWithin: Duration = .seconds(30)
     ) {
         tasks = TaskStore(db)
         sessions = SessionStore(db)
@@ -38,6 +39,7 @@ public final class WorkerToolHandler: ToolHandler {
         self.scopedCommits = scopedCommits
         self.commitsInFlight = commitsInFlight
         self.commitAnswerWithin = commitAnswerWithin
+        self.completionCheckAnswerWithin = completionCheckAnswerWithin
         self.events = events
     }
 
@@ -205,13 +207,14 @@ public final class WorkerToolHandler: ToolHandler {
             return try await commitMyWork(task, arguments: arguments, identity: identity)
         case "report_complete":
             try await requireNoCommitInFlight(identity)
-            let outcome = try reportComplete(task, arguments: arguments, identity: identity)
+            let changes = try await completionChanges(task, identity: identity)
+            let outcome = try reportComplete(task, arguments: arguments, identity: identity, changes: changes)
             guard !outcome.wasAlreadyComplete else { return Self.completionResult(outcome) }
             if outcome.endedSessionState != nil || outcome.closedUnderSession {
                 await events.reportQueued(projectId: identity.projectId)
                 return stoppingAfterwards(Self.completionResult(outcome), identity: identity)
             }
-            let result = await routeCompletion(task, outcome: outcome)
+            let result = await checkThenRoute(task, outcome: outcome, sessionId: try requiredSession(identity))
             await events.reportQueued(projectId: identity.projectId)
             return stoppingAfterwards(result, identity: identity)
         case "hand_off":
@@ -480,8 +483,14 @@ public final class WorkerToolHandler: ToolHandler {
         )
     }
 
+    /// Integration and fix-round results already wait on a person, so only a worker's own task is read.
+    private func completionChanges(_ task: BoardTask, identity: TokenIdentity) async throws -> CompletionChanges? {
+        guard task.origin != .integration, task.origin != .fixRound else { return nil }
+        return await control.completionChanges(taskId: task.id, sessionId: try requiredSession(identity))
+    }
+
     private func reportComplete(
-        _ task: BoardTask, arguments: JSONValue, identity: TokenIdentity
+        _ task: BoardTask, arguments: JSONValue, identity: TokenIdentity, changes: CompletionChanges?
     ) throws -> Board.CompletionOutcome {
         let summary = try ToolArguments.requiredString("summary", in: arguments)
         let files = arguments["files_changed"]?.arrayValue ?? []
@@ -496,13 +505,74 @@ public final class WorkerToolHandler: ToolHandler {
         let data = try encoder.encode(body)
         let sessionId = try requiredSession(identity)
         do {
-            return try board.complete(taskId: task.id, sessionId: sessionId, summary: String(decoding: data, as: UTF8.self))
+            return try board.complete(
+                taskId: task.id, sessionId: sessionId, summary: String(decoding: data, as: UTF8.self), changes: changes
+            )
         } catch BoardError.sessionNotOnTask {
             throw ToolError(
                 "Session \(sessionId) is not the agent currently working task \(task.id); another session holds it. "
                     + "Nothing was recorded. Stop here."
             )
         }
+    }
+
+    /// SPEC §5.1: the board's own check runs before review is routed. Claude Code abandons a tool call
+    /// after 60 seconds, so a check still running after `completionCheckAnswerWithin` answers the worker
+    /// at once and routes review itself when it ends.
+    private func checkThenRoute(_ task: BoardTask, outcome: Board.CompletionOutcome, sessionId: String) async -> ToolResult {
+        guard task.origin != .integration, task.origin != .fixRound else {
+            return await routeCompletion(task, outcome: outcome)
+        }
+        let settings = (try? projects.get(task.projectId))?.settings ?? ProjectSettings()
+        let commands = settings.completionCheckCommands
+        guard !commands.isEmpty else {
+            try? tasks.recordCompletionCheck(task.id, .notVerified())
+            return await routeCompletion(task, outcome: outcome)
+        }
+        try? tasks.recordCompletionCheck(task.id, .running(commands))
+        let timeout = settings.verification.timeoutSeconds
+        let run = _Concurrency.Task {
+            let check = await control.runCompletionCheck(
+                taskId: task.id, sessionId: sessionId, commands: commands, timeoutSeconds: timeout
+            )
+            try? tasks.recordCompletionCheck(task.id, check)
+            return await routeChecked(task, outcome: outcome, check: check)
+        }
+        if let result = await firstResult(of: run, within: completionCheckAnswerWithin) { return result }
+        return ToolResult(
+            text: "\(Self.recordedLine(outcome)) Agent Board is running this project's completion check in your "
+                + "checkout, one check at a time across the app, and routes review when it finishes, whatever its "
+                + "result. Stop here; do not start further work."
+        )
+    }
+
+    /// A failed check never reopens the task; it goes to review with the result on the task. It only
+    /// stops an acceptance without review, since nobody would then see the failure.
+    private func routeChecked(
+        _ task: BoardTask, outcome: Board.CompletionOutcome, check: CompletionCheck
+    ) async -> ToolResult {
+        let recorded = Self.recordedLine(outcome)
+        guard (try? tasks.get(task.id))?.column == .review else {
+            try? progress.append(
+                taskId: task.id, sessionId: nil, kind: .status,
+                text: "The completion check finished after the task left Review, so Agent Board routed nothing."
+            )
+            return ToolResult(text: "\(recorded) \(check.headline) Stop here; do not start further work.")
+        }
+        if outcome.autoAccept, !check.passed {
+            try? board.leaveReviewToPerson(
+                taskId: task.id,
+                reason: "Agent Board's completion check did not pass, so this task waits for a person instead of "
+                    + "being accepted without review."
+            )
+            return ToolResult(
+                text: "\(recorded) \(check.headline) The task waits in Review for a person instead of being "
+                    + "accepted without review. Stop here; do not start further work."
+            )
+        }
+        var result = await routeCompletion(task, outcome: outcome)
+        result.text = check.headline + " " + result.text
+        return result
     }
 
     /// Reached only by a first `report_complete`. A resend is answered before it gets here, because
@@ -561,6 +631,7 @@ public final class WorkerToolHandler: ToolHandler {
         }
         return ToolResult(
             text: "\(Self.recordedLine(outcome)) The task is now in \(outcome.column.rawValue.capitalized). "
+                + "\(outcome.protectedPathReview.map { $0 + " " } ?? "")"
                 + "\(awaitingPullRequestLine(outcome))Stop here; do not start further work."
         )
     }

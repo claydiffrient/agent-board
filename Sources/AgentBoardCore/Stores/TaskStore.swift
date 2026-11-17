@@ -287,6 +287,20 @@ public struct TaskStore: Sendable {
         try db.writer.write { db in try Self.setReviewer(db, id, rosterAgentId) }
     }
 
+    /// Writes the check to the task and the same text to its `progress` (SPEC §5.1).
+    public func recordCompletionCheck(_ id: String, _ check: CompletionCheck) throws {
+        let json = String(decoding: try JSONEncoder().encode(check), as: UTF8.self)
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE task SET completion_check = ?, updated_at = ? WHERE id = ?",
+                arguments: [json, Int64.nowMillis, id]
+            )
+            _ = try ProgressStore.append(
+                db, taskId: id, sessionId: nil, kind: check.failure == nil ? .status : .error, text: check.report
+            )
+        }
+    }
+
     static func setReviewer(_ db: Database, _ id: String, _ rosterAgentId: String?) throws {
         try db.execute(
             sql: "UPDATE task SET reviewer_agent_id = ?, updated_at = ? WHERE id = ?",
