@@ -23,7 +23,7 @@ final class ProjectRowBadgeRenderTests: XCTestCase {
 
     private func pixels(_ project: Project, _ attention: ProjectAttention?, width: CGFloat) throws -> Data {
         let hosting = NSHostingView(
-            rootView: ProjectRow(project: project, attention: attention, openSettings: {})
+            rootView: ProjectRow(project: project, attention: attention, openSettings: {}, cleanUpWorktrees: {})
                 .frame(width: width, alignment: .leading)
                 .background(Color(nsColor: .controlBackgroundColor))
         )

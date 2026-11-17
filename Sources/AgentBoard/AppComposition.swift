@@ -141,6 +141,7 @@ final class StubSupervisor: WorkerSupervising {
     func closeEpic(epicId: String, as closure: EpicClosure) async throws { throw StubError.notWired }
     func heldWorktrees(epicId: String) throws -> [HeldWorktree] { [] }
     func removeEpicWorktrees(epicId: String) async throws { throw StubError.notWired }
+    func sweepFinishedWorktrees(projectId: String) async throws -> WorktreeSweepResult { throw StubError.notWired }
     func openPullRequest(epicId: String) async throws -> PullRequestOutcome { throw StubError.notWired }
     func requestShutdown(projectId: String, requestedBy: String, reason: String?) async throws -> ShutdownOrder {
         throw StubError.notWired

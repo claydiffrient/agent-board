@@ -61,6 +61,7 @@ protocol WorkerSupervising: AnyObject {
     func heldWorktrees(epicId: String) throws -> [HeldWorktree]
     /// Removes them through the project's teardown hook and queues a `decision` report.
     func removeEpicWorktrees(epicId: String) async throws
+    func sweepFinishedWorktrees(projectId: String) async throws -> WorktreeSweepResult
     /// Opens the prefilled compare page for the epic branch; never creates the PR itself.
     @discardableResult
     func openPullRequest(epicId: String) async throws -> PullRequestOutcome

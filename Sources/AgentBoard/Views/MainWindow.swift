@@ -30,6 +30,7 @@ struct MainWindow: View {
     @State private var workspaceToDelete: Workspace?
     @State private var collapsed: Set<String>
     @State private var errorMessage: String?
+    @State private var worktreeSweep: WorktreeSweepResult?
     @State private var usageFooterHeight: CGFloat = 0
     @State private var fixedStackHeight: CGFloat = 0
     @State private var sidebarHeight: CGFloat = 0
@@ -98,6 +99,14 @@ struct MainWindow: View {
             Text("Its projects stay in the sidebar and become ungrouped.")
         }
         .errorAlert($errorMessage)
+        .alert(
+            "Clean up worktrees",
+            isPresented: Binding(get: { worktreeSweep != nil }, set: { if !$0 { worktreeSweep = nil } })
+        ) {
+            Button("OK") { worktreeSweep = nil }
+        } message: {
+            Text(worktreeSweep?.summary ?? "")
+        }
         .onChange(of: env.router.sequence) { openRoutedProject() }
     }
 
@@ -291,7 +300,8 @@ struct MainWindow: View {
         ProjectRow(
             project: project,
             attention: attentionById[project.id],
-            openSettings: { settingsProject = project }
+            openSettings: { settingsProject = project },
+            cleanUpWorktrees: { cleanUpWorktrees(project) }
         )
         .tag(SidebarSelection.project(project.id))
         .draggable(project.id)
@@ -386,6 +396,16 @@ struct MainWindow: View {
             try store.setOrdering(neighbour.id, workspace.ordering)
         } catch {
             errorMessage = errorText(error)
+        }
+    }
+
+    private func cleanUpWorktrees(_ project: Project) {
+        _Concurrency.Task {
+            do {
+                worktreeSweep = try await env.supervisor.sweepFinishedWorktrees(projectId: project.id)
+            } catch {
+                errorMessage = errorText(error)
+            }
         }
     }
 

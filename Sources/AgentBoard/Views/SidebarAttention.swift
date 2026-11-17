@@ -26,10 +26,24 @@ struct AttentionBadge: View {
 
 /// One project in the sidebar: its name, the attention badge when it is waiting on a human, and
 /// the settings gear. Kept out of `MainWindow` so a render test can mount a row on its own.
+/// The project row's context menu (SPEC §10).
+enum ProjectMenuItem: CaseIterable {
+    case settings
+    case cleanUpWorktrees
+
+    var title: String {
+        switch self {
+        case .settings: "Project Settings…"
+        case .cleanUpWorktrees: "Clean up worktrees"
+        }
+    }
+}
+
 struct ProjectRow: View {
     let project: Project
     let attention: ProjectAttention?
     let openSettings: () -> Void
+    let cleanUpWorktrees: () -> Void
 
     var body: some View {
         HStack {
@@ -45,6 +59,16 @@ struct ProjectRow: View {
             }
             .buttonStyle(.borderless)
             .help("Project settings")
+        }
+        .contextMenu {
+            ForEach(ProjectMenuItem.allCases, id: \.self) { item in
+                Button(item.title) {
+                    switch item {
+                    case .settings: openSettings()
+                    case .cleanUpWorktrees: cleanUpWorktrees()
+                    }
+                }
+            }
         }
     }
 }
