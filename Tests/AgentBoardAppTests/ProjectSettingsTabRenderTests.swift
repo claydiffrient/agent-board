@@ -519,9 +519,10 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         XCTAssertTrue(mounted.collect(NSTextView.self).isEmpty)
     }
 
-    func testWorkflowHoldsCommandsTeardownCleanupStrategyAndBranchTemplate() throws {
+    func testWorkflowHoldsCommandsCompletionCheckTeardownCleanupStrategyAndBranchTemplate() throws {
         let mounted = try mount(tab: .workflow, configure: {
             $0.buildCommand = "make"
+            $0.completionCheckCommands = ["make", "make lint"]
             $0.worktreeTeardownCommand = "make clean"
             $0.worktreeTeardownTimeoutSeconds = 90
             $0.cleanupCommand = "make clean-cache"
@@ -542,6 +543,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
                 "e.g. clay/{slug}",
             ]
         )
+        XCTAssertEqual(mounted.collect(NSTextView.self).map(\.string), ["make\nmake lint"])
 
         let sheet = try seededSheet(tab: .workflow) {
             $0.integrationVerification = .ciVerifies
