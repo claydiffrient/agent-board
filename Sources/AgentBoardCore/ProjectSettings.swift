@@ -253,6 +253,9 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         didSet { verificationTimeoutSeconds = verificationTimeoutSeconds.map(VerificationCommands.clampedTimeout) }
     }
     public var integrationVerification: IntegrationVerification = .buildAndTest
+    /// Run one at a time in a finished task's worktree before review is routed, each under the
+    /// verification timeout (SPEC §4, §5.1). Separate from `testCommand`, which may be the whole suite.
+    public var completionCheckCommands: [String] = []
     /// Run in a worktree just before Agent Board removes it (SPEC §3.1, §4). Nil removes the
     /// worktree and nothing else.
     public var worktreeTeardownCommand: String? = nil
@@ -297,6 +300,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         testCommand: String? = nil,
         verificationTimeoutSeconds: Int? = nil,
         integrationVerification: IntegrationVerification = .buildAndTest,
+        completionCheckCommands: [String] = [],
         worktreeTeardownCommand: String? = nil,
         worktreeTeardownTimeoutSeconds: Int = WorktreeTeardownCommand.defaultTimeoutSeconds,
         archivePolicy: ArchivePolicy = .afterEpicMerge,
@@ -326,6 +330,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.testCommand = testCommand
         self.verificationTimeoutSeconds = verificationTimeoutSeconds.map(VerificationCommands.clampedTimeout)
         self.integrationVerification = integrationVerification
+        self.completionCheckCommands = Self.normalizedCommands(completionCheckCommands)
         self.worktreeTeardownCommand = worktreeTeardownCommand
         self.worktreeTeardownTimeoutSeconds = worktreeTeardownTimeoutSeconds
         self.archivePolicy = archivePolicy
@@ -367,6 +372,9 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
             .map(VerificationCommands.clampedTimeout)
         integrationVerification = try c.decodeIfPresent(IntegrationVerification.self, forKey: .integrationVerification)
             ?? .buildAndTest
+        completionCheckCommands = Self.normalizedCommands(
+            try c.decodeIfPresent([String].self, forKey: .completionCheckCommands) ?? []
+        )
         worktreeTeardownCommand = try c.decodeIfPresent(String.self, forKey: .worktreeTeardownCommand)
         worktreeTeardownTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .worktreeTeardownTimeoutSeconds)
             ?? WorktreeTeardownCommand.defaultTimeoutSeconds
@@ -388,6 +396,10 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// never silently override that choice (SPEC §4).
     static func initialWorkerModels(defaultModel: String?) -> WorkerModelTable {
         defaultModel == nil ? .recommended : WorkerModelTable()
+    }
+
+    public static func normalizedCommands(_ commands: [String]) -> [String] {
+        commands.compactMap(VerificationCommands.normalized)
     }
 
     /// Settings written before the routing table named a single reviewer here; it decodes into the

@@ -69,6 +69,21 @@ public actor CommitsInFlight {
     }
 }
 
+/// Nil when `work` is still running after `limit`; `work` keeps running either way.
+func firstResult<Value: Sendable>(of work: _Concurrency.Task<Value, Never>, within limit: Duration) async -> Value? {
+    await withCheckedContinuation { continuation in
+        let first = FirstResume<Value?>(continuation)
+        let timer = _Concurrency.Task {
+            try? await _Concurrency.Task.sleep(for: limit)
+            first.resume(nil)
+        }
+        _Concurrency.Task {
+            first.resume(await work.value)
+            timer.cancel()
+        }
+    }
+}
+
 private final class FirstResume<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, Never>?

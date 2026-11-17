@@ -158,6 +158,17 @@ final class LateBoundSink: BoardEventSink, WorkerControl, @unchecked Sendable {
         return await target.completionChanges(taskId: taskId, sessionId: sessionId)
     }
 
+    func runCompletionCheck(
+        taskId: String, sessionId: String, commands: [String], timeoutSeconds: Int
+    ) async -> CompletionCheck {
+        guard let target else {
+            return .couldNotRun(commands, reason: SupervisorError.serverNotRunning.localizedDescription)
+        }
+        return await target.runCompletionCheck(
+            taskId: taskId, sessionId: sessionId, commands: commands, timeoutSeconds: timeoutSeconds
+        )
+    }
+
     func baseDrift(epicId: String) async throws -> BaseDrift {
         guard let target else { throw SupervisorError.serverNotRunning }
         return try await target.baseDrift(epicId: epicId)

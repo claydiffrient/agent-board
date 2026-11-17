@@ -24,7 +24,8 @@ CREATE TABLE project (
                                    -- buildCommand, testCommand,
                                    -- verificationTimeoutSeconds (null = 30 min; else clamped
                                    --   to 60..86400, i.e. 1 min to 24 h, on decode and on set),
-                                   -- integrationVerification, archivePolicy, worktreeStrategy,
+                                   -- integrationVerification, completionCheckCommands,
+                                   -- archivePolicy, worktreeStrategy,
                                    -- sharedCheckoutMaxAgents, worktreeSlots, rosterAgentIds,
                                    -- worktreeTeardownCommand, worktreeTeardownTimeoutSeconds,
                                    -- prFollowThrough, takeover (§13.8)
@@ -74,7 +75,8 @@ CREATE TABLE task (
   type           TEXT,             -- code|docs|tests|plan|review; NULL = Default. Picks its review row (§4)
   closed_at      INTEGER,          -- entered closed (§5); cleared on leaving. afterDays reads it for a closed task
   closed_reason  TEXT,             -- why it was retired; required to enter closed
-  closed_by      TEXT              -- who closed it, e.g. "orchestrator (<session id>)"
+  closed_by      TEXT,             -- who closed it, e.g. "orchestrator (<session id>)"
+  completion_check TEXT            -- JSON CompletionCheck from the latest report_complete (§5.1); NULL before one
 );
 CREATE INDEX task_project_archived ON task(project_id, archived_at);
 CREATE INDEX task_project_done_at ON task(project_id, done_at);
@@ -763,6 +765,23 @@ the built-in `CLAUDE.md`, `.claude/`, `.github/workflows/` and `.mcp.json`
 so `scripts/hooks/**` protects a project's own hook scripts. An absent key
 decodes to **`[]`**. It is edited as a comma-separated list under **Protected paths**
 in the Agents tab's Review section (§10).
+
+`settings_json.completionCheckCommands` is the project's **Check at
+completion** list: shell commands the board itself runs in a finished task's
+worktree after `report_complete`, before review is routed (§5.1). Each runs
+under `/bin/sh -c` with the verification timeout (`verificationTimeoutSeconds`),
+one after another, stopping at the first failure. Blank lines are dropped and an
+absent key decodes to **`[]`**, which records the task as not verified by the
+board. It is separate from `testCommand`, which can be a project's whole suite:
+nothing on this path runs the build or test command.
+
+`task.completion_check` is the JSON of that run (`CompletionCheck`): one step
+per command with its result (`passed`, `failed`, `timed_out`, `not_run`), exit
+status, duration in seconds and, for a failure, its output tail (the last 40
+lines, at most 4,000 characters, as an epic refresh keeps); `startedAt`,
+`finishedAt` (NULL while queued or running), and `interrupted` when Agent Board
+stopped mid-command. No steps and a `finishedAt` means not verified by the
+board. Each completion replaces it.
 
 `settings_json.integrationVerification` is how much the epic integrator
 verifies on the board's machine after its merges (§5.2 step 3), and how much an

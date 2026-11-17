@@ -291,6 +291,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var resuming: Set<String> = []
     /// Keyed by epic id; present from the moment a refresh is asked for until its outcome is known.
     @ObservationIgnored private var refreshes: [String: RefreshRun] = [:]
+    @ObservationIgnored private let completionChecks = CompletionCheckQueue()
+    @ObservationIgnored private let completionCheckStop = RefreshRun()
     /// Test-only: overrides the refresh check's timeout below what a project's settings can express
     /// (`VerificationCommands.timeoutRange` floors at 60s), so a test can drive the timeout path
     /// without a build that actually runs a minute.
@@ -425,6 +427,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func stop() async {
         meteringTask?.cancel()
         meteringTask = nil
+        completionCheckStop.cancel()
         let running = refreshes.values
         running.forEach { $0.cancel() }
         for run in running { await run.task?.value }
@@ -806,6 +809,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         } catch {
             return .unlisted(reason: describe(error))
         }
+    }
+
+    /// SPEC §5.1: run in the checkout the finishing session worked in, never the project's `testCommand`.
+    func runCompletionCheck(
+        taskId: String, sessionId: String, commands: [String], timeoutSeconds: Int
+    ) async -> CompletionCheck {
+        guard let session = try? sessions.get(sessionId), session.taskId == taskId else {
+            return .couldNotRun(commands, reason: "Agent Board has no record of the checkout session \(sessionId) worked in.")
+        }
+        let stop = completionCheckStop
+        return await completionChecks.run(
+            commands, timeoutSeconds: timeoutSeconds, in: URL(fileURLWithPath: session.cwd),
+            isCancelled: { stop.isCanceled }
+        )
     }
 
     func baseDrift(epicId: String) async throws -> BaseDrift {

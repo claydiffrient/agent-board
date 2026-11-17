@@ -283,6 +283,13 @@ it" alone. Only that line, at the position `propose_task` writes it, is read:
 a matching line anywhere else in the report, which the session wrote after
 reading untrusted pull request text, names nothing. Every other origin, a worker's proposal included, shows no such line.
 
+The task inspector shows a **Completion check** section once a worker has
+reported complete (§5.1): the headline (running, passed, failed, interrupted,
+or "Not verified by the board"), a row per command with its result and
+duration, and the failing command's output tail in a monospaced block. It sits
+above Dependencies, so a reviewer of the task sees it without opening the
+Progress log, where the same text is also recorded.
+
 The task inspector shows a **Comments** thread above the Progress log, oldest
 first. Each comment names its author in words — `You`, `Orchestrator`,
 `Rita · reviewer`, `Rita · worker`, or `Worker 3f9a1c2e` / `Reviewer 3f9a1c2e`
@@ -747,6 +754,13 @@ the human instead of sending it back (§5.1, "Review rounds"). Below it,
 **Protected paths** is a comma-separated text field of `protectedPathGlobs`
 (§4), enabled at every review level because the guard ignores the level,
 captioned with the built-in paths it always protects (§5.1).
+
+The Workflow tab's Verification section ends with **Check at completion**, a
+monospaced text editor holding `completionCheckCommands` (§4) one command per
+line, captioned that the board runs them in a finished task's worktree one at a
+time across every project, each stopped at the section's timeout, that the Test
+command is never run there, and that an empty list records the task as not
+verified by the board (§5.1).
 
 **Preview Leaked-Agent Sweep…** — in the app menu, beside About, because it is
 a one-off diagnostic and not a screen anyone lives in. It opens a `Window` scene

@@ -587,6 +587,32 @@ the newly-ready announcement, the grant revocation and the worktree removal are
 one code path (`WorkerControl.accept`), not a second one that has to be kept in
 step. The worker's return text tells it which happened.
 
+**The board checks the work itself before routing it.** `tests_run` is the
+worker's free text and nothing verifies it, so for an ordinary task (not an
+epic's integration task or a PR follow-through fix round, which already wait on
+a person or their own checks) `report_complete` runs the project's
+`completionCheckCommands` (§4) in the worktree the finishing session worked in,
+through `WorkerControl.runCompletionCheck` and `RefreshVerifier.completionCheck`.
+At most one completion check runs at a time across the whole app; the rest wait
+their turn in order (`CompletionCheckQueue`). The project's `testCommand` is
+never run here. The result is written to `task.completion_check` and as a
+`progress` row (an `error` row for a failure): each command, pass or fail, its
+duration, and the failing command's output tail. With no commands configured,
+the task records "Not verified by the board" and routing goes on at once.
+
+Claude Code abandons a tool call after 60 seconds, so a check still running
+after 30 seconds answers the worker at once that the check is running, and the
+board routes review itself when the check ends. A failed check never reopens
+the task: it goes to review with the failure attached. The one routing it
+changes is acceptance without review — a check that did not pass leaves the
+task in `review` for a person instead, since nobody would otherwise see the
+failure. A task a person moved out of `review` while its check ran is not
+routed again. A rostered reviewer's prompt carries the result under "Agent
+Board's completion check", with the output tail fenced as data: it is the
+board's own evidence, not the worker's claim, so the rule withholding the
+worker's report below does not cover it. A check cut off by the app quitting
+leaves the task in `review`, where a person picks it up.
+
 Under `agent` review the reviewer is **started**, not merely recorded:
 `report_complete` resolves the routing, writes `reviewer_agent_id`, and then
 spawns the reviewer through `WorkerControl.assignAgent(taskId:rosterAgentId:
@@ -746,8 +772,8 @@ its post-compaction brief, until a later review passes, a human reopens the task
 or it is accepted (`Board.closeReviewFindings`).
 
 A reviewer's inputs are the task — title, body, acceptance criteria and its
-comment thread — the diff on the task's branch, and on a re-review the previous
-round's findings. Nothing else: not the
+comment thread — the diff on the task's branch, the board's completion check
+(above), and on a re-review the previous round's findings. Nothing else: not the
 worker's report, not the task's `progress` rows (the worker's own notes and any
 hand-off summary), not project notes, not the board database. It checks the
 worker's claims by reading and running the code. The report is withheld on

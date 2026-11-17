@@ -105,6 +105,23 @@ actor FakeWorkerControl: WorkerControl {
         changes
     }
 
+    var completionCheck: CompletionCheck?
+    private(set) var completionChecksRun: [(taskId: String, commands: [String])] = []
+
+    func setCompletionCheck(_ check: CompletionCheck) {
+        completionCheck = check
+    }
+
+    func runCompletionCheck(
+        taskId: String, sessionId: String, commands: [String], timeoutSeconds: Int
+    ) async -> CompletionCheck {
+        completionChecksRun.append((taskId, commands))
+        return completionCheck ?? CompletionCheck(
+            steps: commands.map { CompletionCheck.Step(command: $0, result: .passed) },
+            startedAt: 0, finishedAt: 0
+        )
+    }
+
     var drift: BaseDrift = .measured(behind: 0, ahead: 0, against: "main")
     private(set) var refreshed: [String] = []
 

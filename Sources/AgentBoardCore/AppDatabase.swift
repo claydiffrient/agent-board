@@ -299,6 +299,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("review_round") { db in
             try db.execute(sql: Schema.reviewRound)
         }
+        migrator.registerMigration("task_completion_check") { db in
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN completion_check TEXT")
+        }
         return migrator
     }
 }

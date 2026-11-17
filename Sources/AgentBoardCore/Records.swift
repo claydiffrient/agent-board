@@ -195,6 +195,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var closedAt: Int64?
     public var closedReason: String?
     public var closedBy: String?
+    /// Agent Board's own check from the latest `report_complete` (SPEC §5.1); nil before the first one.
+    public var completionCheck: CompletionCheck?
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -226,6 +228,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case closedAt = "closed_at"
         case closedReason = "closed_reason"
         case closedBy = "closed_by"
+        case completionCheck = "completion_check"
     }
 
     public init(
@@ -235,8 +238,10 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         createdAt: Int64, updatedAt: Int64, model: String? = nil, effort: Effort? = nil, reviewerAgentId: String? = nil,
         rosterAgentId: String? = nil, archivedAt: Int64? = nil, doneAt: Int64? = nil,
         unarchivedAt: Int64? = nil, landing: TaskLanding? = nil, landingDetail: String? = nil,
-        type: TaskType? = nil, closedAt: Int64? = nil, closedReason: String? = nil, closedBy: String? = nil
+        type: TaskType? = nil, closedAt: Int64? = nil, closedReason: String? = nil, closedBy: String? = nil,
+        completionCheck: CompletionCheck? = nil
     ) {
+        self.completionCheck = completionCheck
         self.closedAt = closedAt
         self.closedReason = closedReason
         self.closedBy = closedBy
