@@ -586,17 +586,20 @@ public struct PRWatchListing: Sendable, Equatable, Identifiable {
     public var decisions: [PRItem]
     /// Every open item, oldest first, which the row offers to dismiss (SPEC §13.4).
     public var items: [PRItem]
+    /// Answered decisions whose reply waits for Post reply (SPEC §13.4), oldest answer first.
+    public var owedReplies: [PRItem]
     /// Oldest first.
     public var sessions: [PRListingSession]
 
     public init(
         watch: PRWatch, openItems: Int, decisions: [PRItem] = [], items: [PRItem] = [],
-        sessions: [PRListingSession] = []
+        owedReplies: [PRItem] = [], sessions: [PRListingSession] = []
     ) {
         self.watch = watch
         self.openItems = openItems
         self.decisions = decisions
         self.items = items
+        self.owedReplies = owedReplies
         self.sessions = sessions
     }
 

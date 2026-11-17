@@ -523,17 +523,28 @@ public struct PRWatchStore: Sendable {
             ),
             by: \.watchId
         )
+        let owed = Dictionary(
+            grouping: try PRItem.fetchAll(
+                db,
+                sql: """
+                SELECT i.* FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id
+                WHERE w.state NOT IN ('merged', 'closed') AND \(owedReplySQL)
+                ORDER BY i.handled_at, i.id
+                """
+            ),
+            by: \.watchId
+        )
         let sessions = try activeSessions(db)
         let listings = try rows.map { row in
             let watch = try PRWatch(row: row)
             let items = open[watch.id] ?? []
             return PRWatchListing(
                 watch: watch, openItems: row["open_items"], decisions: items.filter(\.isOpenDecision),
-                items: items, sessions: sessions[watch.id] ?? []
+                items: items, owedReplies: owed[watch.id] ?? [], sessions: sessions[watch.id] ?? []
             )
         }
         let grouped = Dictionary(grouping: listings) {
-            PRPageGroup.of($0.watch.state, openDecisions: $0.openDecisions)
+            PRPageGroup.of($0.watch.state, openDecisions: $0.openDecisions + $0.owedReplies.count)
         }
         return PRPageGroup.allCases.compactMap { group in
             grouped[group].map { PRWatchGroup(group: group, listings: $0) }

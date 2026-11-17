@@ -4962,13 +4962,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return watch
     }
 
-    /// SPEC §13.4: a reply the human chose posts now, with no round and whatever `postFactualReplies` says.
+    /// SPEC §13.4: answering records the human's ruling and posts nothing; a reply it chose is owed to Post reply.
     func answerPRDecision(itemId: Int64, choice: PRDecisionChoice) async throws {
-        let item = try await recording { try board.answerDecision(itemId: itemId, choice: choice) }
-        guard item.state == .handled, let watch = try? prWatches.get(item.watchId),
-              let project = try? projects.get(watch.projectId)
-        else { return }
+        try await recording { _ = try board.answerDecision(itemId: itemId, choice: choice) }
+    }
+
+    /// SPEC §13.4 Post reply: posts one owed reply now, whatever `postFactualReplies` says, and throws the
+    /// failure so the row can show it.
+    func postPRReply(itemId: Int64) async throws {
+        guard let item = try prWatches.owedReply(itemId: itemId) else {
+            throw PRVerdictRejection("Item \(itemId) has no reply waiting to be posted.")
+        }
+        guard let watch = try prWatches.get(item.watchId), let project = try projects.get(watch.projectId) else {
+            throw PRVerdictRejection("Item \(itemId)'s pull request is no longer watched.")
+        }
         await postReplies([item], watchId: watch.id, project: project)
+        if let after = try prWatches.item(itemId), after.replyURL == nil {
+            throw PRVerdictRejection("The reply was not posted: \(after.replyError ?? "another post of it is in flight.")")
+        }
     }
 
     func dismissPRItem(itemId: Int64, reason: String) async throws {

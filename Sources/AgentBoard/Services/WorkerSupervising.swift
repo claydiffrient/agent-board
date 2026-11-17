@@ -107,8 +107,10 @@ protocol WorkerSupervising: AnyObject {
     /// The human's dismissal of one open item (SPEC §13.1 dismissed items), after stopping any session
     /// still working the round it ends.
     func dismissPRItem(itemId: Int64, reason: String) async throws
-    /// The human's answer to an open decision (SPEC §13.4), posting the reply it chose.
+    /// The human's answer to an open decision (SPEC §13.4). It posts nothing; a reply it chose is owed.
     func answerPRDecision(itemId: Int64, choice: PRDecisionChoice) async throws
+    /// The human's Post reply on an owed reply (SPEC §13.4), throwing the failure to show inline.
+    func postPRReply(itemId: Int64) async throws
     /// The page's Watch pull request (SPEC §13.8 manual adoption); throws the refusal to show inline.
     func watchPullRequest(number: Int, projectId: String) async throws
 }
@@ -118,6 +120,7 @@ extension WorkerSupervising {
     func pollPRWatches(watchIds: Set<String>) async throws {}
     func dismissPRItem(itemId: Int64, reason: String) async throws {}
     func answerPRDecision(itemId: Int64, choice: PRDecisionChoice) async throws {}
+    func postPRReply(itemId: Int64) async throws {}
     func reopen(taskId: String, ruling note: String) async throws {}
     func watchPullRequest(number: Int, projectId: String) async throws {}
     func focusChanged(projectId: String?) {}
