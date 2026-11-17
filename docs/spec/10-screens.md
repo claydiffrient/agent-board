@@ -709,6 +709,12 @@ not free. The header still costs that one line rather than collapsing to zero,
 because it carries the refresh button — the sweep is hourly, and a panel that
 vanished entirely would leave nobody to ask about a port that appeared since.
 
+**Project menu** — the sidebar row's context menu: **Project Settings…**, which
+opens the sheet below, and **Clean up worktrees**, which runs the finished-work
+sweep (§5) for that project at once and shows its result in an alert: what was
+removed and about how much space that freed, what was kept and why, and the
+unknown directories it left alone.
+
 **Project settings** — a sheet from the sidebar row's gear, in seven tabs:
 **General** (Repository, Workspace, Archive), **Agents** (Models, Review,
 Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Worktree

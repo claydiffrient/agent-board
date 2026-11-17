@@ -5017,48 +5017,112 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             guard let project = try projects.get(epic.projectId) else {
                 throw SupervisorError.projectNotFound(epic.projectId)
             }
-            var findings: [WorktreeCleanupFinding] = []
-            var removable: [HeldWorktree] = []
-            for worktree in try board.heldWorktrees(epicId: epicId) {
-                if let holder = try sessions.activeHolder(worktreePath: worktree.path) {
-                    findings.append(WorktreeCleanupFinding(
-                        taskId: worktree.taskId,
-                        text: "kept worktree \(worktree.path): session \(holder.sessionId) is still running in it"
-                    ))
-                } else {
-                    removable.append(worktree)
-                }
-            }
-            let claim = claimTeardown(of: removable.map(\.path))
-            defer { releaseTeardown(claim) }
-            for worktree in removable where !claim.paths.contains(worktree.path) {
-                findings.append(WorktreeCleanupFinding(
-                    taskId: worktree.taskId, text: "kept worktree \(worktree.path): another teardown is removing it"
-                ))
-            }
-            let manager = worktreeManager(for: project)
-            let candidates = removable.filter { claim.paths.contains($0.path) }
-            let outcomes = await offMainResult {
-                candidates.map { ($0, Self.removeIfClean(manager, at: URL(fileURLWithPath: $0.path))) }
-            }
-            var removed: [String] = []
-            var notices: [String] = []
-            for (worktree, outcome) in outcomes {
-                switch outcome {
-                case .removed(let diagnostics, let teardownFailure):
-                    removed.append(worktree.path)
-                    notices.append(contentsOf: diagnostics)
-                    if let teardownFailure {
-                        findings.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: teardownFailure))
-                    }
-                case .kept(let reason):
-                    findings.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: reason))
-                }
-            }
-            report(notices + findings.map(\.text))
-            try board.recordEpicWorktreeRemoval(epicId: epicId, removed: removed, findings: findings)
+            let outcome = await removeFinishedWorktrees(try board.heldWorktrees(epicId: epicId), project: project)
+            let findings = outcome.kept + outcome.teardownFailures
+            report(outcome.notices + findings.map(\.text))
+            try board.recordEpicWorktreeRemoval(epicId: epicId, removed: outcome.removed, findings: findings)
             announceReports(projectId: project.id)
         }
+    }
+
+    /// SPEC §5, "Sweeping finished work's worktrees": removes every worktree of a done or closed task
+    /// and every worktree a done or abandoned epic holds, and names the rest. No branch is deleted.
+    @discardableResult
+    func sweepFinishedWorktrees(projectId: String) async throws -> WorktreeSweepResult {
+        try await recording {
+            guard let project = try projects.get(projectId) else { throw SupervisorError.projectNotFound(projectId) }
+            let scan = try board.worktreeSweepScan(projectId: projectId, home: home)
+            let volume = worktreeManager(for: project).worktreeRoot
+            let before = Self.availableBytes(on: volume, or: project.repoPath)
+            let outcome = await removeFinishedWorktrees(scan.finished, project: project)
+            let after = Self.availableBytes(on: volume, or: project.repoPath)
+            let placed = Set(placing.map(Self.resolved))
+            let result = WorktreeSweepResult(
+                projectId: projectId,
+                removed: outcome.removed,
+                kept: outcome.kept,
+                teardownFailures: outcome.teardownFailures,
+                unknown: scan.unknown.filter { !placed.contains(Self.resolved($0)) },
+                bytesReclaimed: before.flatMap { before in after.map { max(0, $0 - before) } }
+            )
+            report(outcome.notices)
+            if !result.removed.isEmpty || !result.kept.isEmpty || !result.teardownFailures.isEmpty {
+                try board.recordWorktreeSweep(result)
+                announceReports(projectId: projectId)
+            }
+            return result
+        }
+    }
+
+    private struct FinishedWorktreeRemoval {
+        var removed: [String] = []
+        var kept: [WorktreeCleanupFinding] = []
+        var teardownFailures: [WorktreeCleanupFinding] = []
+        var notices: [String] = []
+    }
+
+    /// Keeps the project's own checkout, a worktree a live session holds or a spawn is placing, and one
+    /// another teardown has claimed; removes the rest through `removeIfClean` under this sweep's claim.
+    private func removeFinishedWorktrees(_ worktrees: [HeldWorktree], project: Project) async -> FinishedWorktreeRemoval {
+        var outcome = FinishedWorktreeRemoval()
+        let ownCheckout = Self.resolved(project.repoPath)
+        var holders: [String: String] = [:]
+        for session in (try? sessions.all(projectId: project.id)) ?? [] where session.state.isActive {
+            if let path = session.worktreePath { holders[Self.resolved(path)] = session.sessionId }
+        }
+        let placed = Set(placing.map(Self.resolved))
+        var removable: [HeldWorktree] = []
+        for worktree in worktrees {
+            let path = Self.resolved(worktree.path)
+            let reason: String? = if path == ownCheckout {
+                "it is the project's own checkout"
+            } else if let holder = holders[path] {
+                "session \(holder) is still running in it"
+            } else if placed.contains(path) {
+                "a worker is being placed in it"
+            } else {
+                nil
+            }
+            if let reason {
+                outcome.kept.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: "kept worktree \(worktree.path): \(reason)"))
+            } else {
+                removable.append(worktree)
+            }
+        }
+        let claim = claimTeardown(of: removable.map(\.path))
+        defer { releaseTeardown(claim) }
+        for worktree in removable where !claim.paths.contains(worktree.path) {
+            outcome.kept.append(WorktreeCleanupFinding(
+                taskId: worktree.taskId, text: "kept worktree \(worktree.path): another teardown is removing it"
+            ))
+        }
+        let manager = worktreeManager(for: project)
+        let candidates = removable.filter { claim.paths.contains($0.path) }
+        let removals = await offMainResult {
+            candidates.map { ($0, Self.removeIfClean(manager, at: URL(fileURLWithPath: $0.path))) }
+        }
+        for (worktree, removal) in removals {
+            switch removal {
+            case .removed(let diagnostics, let teardownFailure):
+                outcome.removed.append(worktree.path)
+                outcome.notices.append(contentsOf: diagnostics)
+                if let teardownFailure {
+                    outcome.teardownFailures.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: teardownFailure))
+                }
+            case .kept(let reason):
+                outcome.kept.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: reason))
+            }
+        }
+        return outcome
+    }
+
+    private nonisolated static func availableBytes(on volume: URL, or fallback: String) -> Int64? {
+        for url in [volume, URL(fileURLWithPath: fallback)] {
+            if let bytes = try? url.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity {
+                return Int64(bytes)
+            }
+        }
+        return nil
     }
 
     /// SPEC §5.2 step 4: opens the compare page for the human. Never creates the PR, never pushes (D8).
