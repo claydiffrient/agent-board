@@ -86,6 +86,45 @@ public struct RulingStore: Sendable {
         try rulings(db, subject: subject, extra: "")
     }
 
+    /// The standing `hold` that covers the task's current block, nil when none does (SPEC §15.5).
+    public func holdInForce(taskId: String) throws -> Ruling? {
+        try db.reader.read { db in
+            try Task.fetchOne(db, key: taskId).flatMap { try Self.holdInForce(db, task: $0) }
+        }
+    }
+
+    static func holdInForce(_ db: Database, task: Task) throws -> Ruling? {
+        guard task.blocked else { return nil }
+        let since = task.blockedAt ?? 0
+        return try standing(db, subject: .task(task.id)).first { $0.verdict == .hold && $0.questionAt >= since }
+    }
+
+    /// The standing `keep_parked` that covers the watch's current parking, nil when none does.
+    static func keepParkedInForce(_ db: Database, watch: PRWatch) throws -> Ruling? {
+        guard watch.state == .parked else { return nil }
+        let since = watch.parkedAt ?? 0
+        return try standing(db, subject: .prWatch(watch.id)).first { $0.verdict == .keepParked && $0.questionAt >= since }
+    }
+
+    /// The project's denied approvals of `kind` whose `deny` ruling stands, newest ruling first.
+    static func standingDenials(
+        _ db: Database, projectId: String, kind: ApprovalKind
+    ) throws -> [(approval: Approval, ruling: Ruling)] {
+        let rulings = try Ruling.fetchAll(
+            db,
+            sql: """
+            SELECT r.* FROM ruling r JOIN approval a ON a.id = r.approval_id
+            WHERE r.subject_kind = 'approval' AND r.verdict = 'deny' AND a.project_id = ? AND a.kind = ?
+              AND NOT EXISTS (SELECT 1 FROM ruling s WHERE s.supersedes = r.id)
+            ORDER BY r.answered_at DESC, r.rowid DESC
+            """,
+            arguments: [projectId, kind.rawValue]
+        )
+        return try rulings.compactMap { ruling in
+            try ruling.approvalId.flatMap { try Approval.fetchOne(db, key: $0) }.map { ($0, ruling) }
+        }
+    }
+
     private static func rulings(_ db: Database, subject: RulingSubject, extra: String) throws -> [Ruling] {
         let (filter, arguments) = where_(subject)
         return try Ruling.fetchAll(

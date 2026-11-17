@@ -63,6 +63,11 @@ public final class StoreHookSink: HookSink {
         static func wait(_ wait: LockWait) -> Outcome { Outcome(lockWait: wait) }
     }
 
+    /// SPEC §15.5: a tool call does not clear a block the human upheld. Fails closed on a read error.
+    private func holdCovers(_ taskId: String) -> Bool {
+        do { return try RulingStore(db).holdInForce(taskId: taskId) != nil } catch { return true }
+    }
+
     public init(db: AppDatabase, events: any BoardEventSink, lockWait: FileLockWaitPolicy = .default) {
         hookEvents = HookEventStore(db)
         grants = TokenGrantStore(db)
@@ -501,7 +506,7 @@ public final class StoreHookSink: HookSink {
         case "PostToolUse":
             try? sessions.endToolCall(sessionId, at: .nowMillis, tool: event.toolName)
             if let taskId {
-                if let task = try? tasks.get(taskId), task.blocked {
+                if let task = try? tasks.get(taskId), task.blocked, !holdCovers(taskId) {
                     try? board.unblock(taskId: taskId, sessionId: sessionId)
                 }
                 if let tool = event.toolName {

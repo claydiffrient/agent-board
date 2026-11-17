@@ -104,6 +104,10 @@ public enum PublishCommand {
         ["push", "--porcelain", remote, "refs/heads/\(branch):refs/heads/\(onto)"]
     }
 
+    public static func branchTip(_ branch: String) -> [String] {
+        ["rev-parse", "--verify", "--quiet", "refs/heads/\(branch)^{commit}"]
+    }
+
     public static func branchExists(_ branch: String) -> [String] {
         ["rev-parse", "--verify", "--quiet", "refs/heads/\(branch)"]
     }
@@ -231,6 +235,15 @@ public struct BranchPublisher: Sendable {
 
     public func requireBranch(_ branch: String) throws {
         guard try refExists(PublishCommand.branchExists(branch)) else { throw PublishFailure.noSuchBranch(branch) }
+    }
+
+    /// Nil when the branch does not exist.
+    public func tip(of branch: String) throws -> String? {
+        let arguments = PublishCommand.branchTip(branch)
+        let result = try git(arguments)
+        if result.status == 1 { return nil }
+        guard result.status == 0 else { throw gitFailure(arguments, result) }
+        return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// `gh` present on disk and logged in, as two separate answers.

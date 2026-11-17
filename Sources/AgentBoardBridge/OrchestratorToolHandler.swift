@@ -23,10 +23,14 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let events: any BoardEventSink
     /// `owner/name` of the repository a project's pull requests open on, nil when it has none on GitHub.
     private let pullRequestRepository: @Sendable (Project) -> String?
+    /// The commit a local branch points at (SPEC §6 `push_branch`); throws when it cannot be read.
+    /// Nil only from a handler built without a reader, which leaves the approval unbound.
+    private let branchTip: @Sendable (Project, String) throws -> String?
 
     public init(
         db: AppDatabase, control: any WorkerControl, events: any BoardEventSink,
-        pullRequestRepository: @escaping @Sendable (Project) -> String? = { _ in nil }
+        pullRequestRepository: @escaping @Sendable (Project) -> String? = { _ in nil },
+        branchTip: @escaping @Sendable (Project, String) throws -> String? = { _, _ in nil }
     ) {
         self.db = db
         projects = ProjectStore(db)
@@ -46,6 +50,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         self.control = control
         self.events = events
         self.pullRequestRepository = pullRequestRepository
+        self.branchTip = branchTip
     }
 
     static let columnNames = TaskColumn.allCases.map(\.rawValue)
@@ -1334,10 +1339,9 @@ public final class OrchestratorToolHandler: ToolHandler {
                     + "task(s) are not done yet."
             )
         }
-        let approval = try board.requestIntegration(
-            epicId: epic.id,
-            requestedBy: identity.sessionId ?? "orchestrator"
-        )
+        let approval = try refusedByRuling {
+            try board.requestIntegration(epicId: epic.id, requestedBy: identity.sessionId ?? "orchestrator")
+        }
         return ToolResult(text: "integration approval \(approval.id) pending")
     }
 
@@ -1376,17 +1380,22 @@ public final class OrchestratorToolHandler: ToolHandler {
         let target = try publishTarget(branch: branch, identity: identity)
         let published = try publishedName(for: branch, project: project)
         let head = published ?? branch
-        let approval = try board.requestPublish(
-            projectId: project.id,
-            kind: .push,
-            request: PublishRequest(branch: branch, publishedBranch: published),
-            taskId: target.taskId,
-            epicId: target.epicId,
-            requestedBy: identity.sessionId ?? "orchestrator",
-            reason: published == nil
-                ? "Push \(branch) to the project's git remote."
-                : "Push \(branch) to the project's git remote as \(head)."
+        let request = PublishRequest(
+            branch: branch, publishedBranch: published, headOid: try approvedTip(project, branch)
         )
+        let approval = try refusedByRuling {
+            try board.requestPublish(
+                projectId: project.id,
+                kind: .push,
+                request: request,
+                taskId: target.taskId,
+                epicId: target.epicId,
+                requestedBy: identity.sessionId ?? "orchestrator",
+                reason: published == nil
+                    ? "Push \(branch) to the project's git remote."
+                    : "Push \(branch) to the project's git remote as \(head)."
+            )
+        }
         let destination = published == nil ? "reaches the remote" : "reaches the remote as \(head)"
         return ToolResult(text: "push approval \(approval.id) pending; the human must approve before "
             + "\(branch) \(destination). You will be told via list_reports.")
@@ -1434,19 +1443,40 @@ public final class OrchestratorToolHandler: ToolHandler {
                 : "\nThis epic is not ready for integration: \(counts.unfinished) of \(counts.total - counts.closed) task(s) are not done."
         }
 
-        let approval = try board.requestPublish(
-            projectId: project.id,
-            kind: .pullRequest,
-            request: PublishRequest(
-                branch: branch, base: base, title: title, body: body, publishedBranch: published
-            ),
-            taskId: target.taskId,
-            epicId: epic?.id ?? target.epicId,
-            requestedBy: identity.sessionId ?? "orchestrator",
-            reason: reason
+        let request = PublishRequest(
+            branch: branch, base: base, title: title, body: body, publishedBranch: published,
+            headOid: try approvedTip(project, branch)
         )
+        let approval = try refusedByRuling {
+            try board.requestPublish(
+                projectId: project.id,
+                kind: .pullRequest,
+                request: request,
+                taskId: target.taskId,
+                epicId: epic?.id ?? target.epicId,
+                requestedBy: identity.sessionId ?? "orchestrator",
+                reason: reason
+            )
+        }
         return ToolResult(text: "pull request approval \(approval.id) pending; nothing is pushed and no pull request "
             + "exists until the human approves. The URL reaches you via list_reports.")
+    }
+
+    /// SPEC §6: an approval is bound to the commit it shows, so an unreadable tip creates none.
+    private func approvedTip(_ project: Project, _ branch: String) throws -> String? {
+        do {
+            return try branchTip(project, branch)
+        } catch {
+            throw ToolError("Could not read the commit \(branch) points at, so no approval was created: \(error)")
+        }
+    }
+
+    private func refusedByRuling<T>(_ body: () throws -> T) throws -> T {
+        do {
+            return try body()
+        } catch let refusal as RulingRefusal {
+            throw ToolError(refusal.reason)
+        }
     }
 
     private func publishedName(for branch: String, project: Project) throws -> String? {

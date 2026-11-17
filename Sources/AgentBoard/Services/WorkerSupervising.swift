@@ -23,6 +23,8 @@ protocol WorkerSupervising: AnyObject {
     /// What the Accept confirmation must say first, or nil when nothing needs confirming (SPEC §5, `done`).
     func acceptWarning(taskId: String) async -> String?
     func reopen(taskId: String) async throws
+    /// Reopen with the human's note recorded as a `reopen` ruling (SPEC §15.5).
+    func reopen(taskId: String, ruling note: String) async throws
     /// Stops the task's reviewer session and starts a fresh one from the same roster agent; the task
     /// stays in `review` (SPEC §10, Pending reviews).
     func rerunReview(taskId: String) async throws
@@ -113,6 +115,7 @@ extension WorkerSupervising {
     func pollPRWatches(watchIds: Set<String>) async throws {}
     func dismissPRItem(itemId: Int64, reason: String) async throws {}
     func answerPRDecision(itemId: Int64, choice: PRDecisionChoice) async throws {}
+    func reopen(taskId: String, ruling note: String) async throws {}
     func watchPullRequest(number: Int, projectId: String) async throws {}
     func focusChanged(projectId: String?) {}
     func reportQueued(projectId: String) async {}

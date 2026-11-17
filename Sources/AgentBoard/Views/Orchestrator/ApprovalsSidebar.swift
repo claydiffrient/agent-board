@@ -150,14 +150,15 @@ struct ApprovalsSidebar: View {
             }
         }
         .alert("Deny request?", isPresented: denyPresented, presenting: denying) { approval in
-            TextField("Reason (optional)", text: $denyReason)
+            TextField("Reason", text: $denyReason)
             Button("Deny", role: .destructive) {
                 let reason = denyReason
                 run { try await env.supervisor.deny(approvalId: approval.id, reason: reason) }
             }
+            .disabled(denyReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             Button("Cancel", role: .cancel) {}
         } message: { approval in
-            Text("The orchestrator is told the decision, and the reason if you give one, through list_reports.\n\n\(describe(approval))")
+            Text("Your reason is recorded as a ruling. The orchestrator reads it through list_reports, and the same request is refused from now on.\n\n\(describe(approval))")
         }
         .errorAlert($errorMessage)
     }
