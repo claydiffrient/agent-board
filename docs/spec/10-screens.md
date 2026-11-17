@@ -718,10 +718,16 @@ not free. The header still costs that one line rather than collapsing to zero,
 because it carries the refresh button — the sweep is hourly, and a panel that
 vanished entirely would leave nobody to ask about a port that appeared since.
 
+**Project menu** — the sidebar row's context menu: **Project Settings…**, which
+opens the sheet below, and **Clean up worktrees**, which runs the finished-work
+sweep (§5) for that project at once and shows its result in an alert: what was
+removed and about how much space that freed, what was kept and why, and the
+unknown directories it left alone.
+
 **Project settings** — a sheet from the sidebar row's gear, in seven tabs:
 **General** (Repository, Workspace, Archive), **Agents** (Models, Review,
 Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Worktree
-teardown, Isolation, Publishing), **Notifications** (one switch per banner category — approvals, blocked workers, caps and stalls, worker failures, pull requests ready to verify, pull request decisions — and the project mute), **Advanced** (the `autoMode` classifier JSON,
+teardown, Disk cleanup (§14.3), Isolation, Publishing), **Notifications** (one switch per banner category — approvals, blocked workers, caps and stalls, worker failures, pull requests ready to verify, pull request decisions — and the project mute), **Advanced** (the `autoMode` classifier JSON,
 Extra MCP servers), and **PR Follow-Through** (Watch, Verification, Replies, Publish guard, Roles; §13.3), after Advanced. Tabs group by what a setting governs, not by how often it is
 touched. Every section is in exactly one tab; a section in none would be a stored
 setting with no UI. **Delete Project…** sits outside the tabs, at the left of the
@@ -771,6 +777,11 @@ a human can copy it. **Run Again** re-runs it; nothing on the window can stop a
 session. The Status pane was rejected because a one-shot report there wants to
 become a live view, and a dry-run-only setting because its output would reach a
 human only through stderr.
+
+**Clean up now** — in the app menu, beside Preview Leaked-Agent Sweep. It runs
+the disk cleanup (§14.4) at once, whatever the free space, and joins a cleanup
+already running. Its result arrives as the follow-up notification and one
+`decision` report per project, not on a window.
 
 **What's New in Agent Board** — the release notes, opened from the Help menu and
 once on their own after an update installs. A `Window` scene rather than a
@@ -860,7 +871,9 @@ menu is `NSApp.helpMenu` when the menu opens, and it is never an item in the
 built menu.
 
 **Settings** — the standard macOS Settings window, opened with ⌘, from the app
-menu. It has two panes. **CDR** holds the **CDR command**, the path to CDR's
+menu. It has three panes. **Disk Space** holds the low-disk-space monitor's
+four settings (§14.1): the on/off switch, the low threshold, the rearm threshold
+(kept above the low threshold), and the check interval. **CDR** holds the **CDR command**, the path to CDR's
 `watcher/cli.mjs` that starts and stops the review watcher (§13.7); empty means
 auto-detect, and the line under it names the file in use or says none was found.
 **Terminal** holds the font family (installed monospaced

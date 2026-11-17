@@ -1227,9 +1227,33 @@ leaves out the integration checkout while the integration task goes to
 `review`, because accepting it removes that checkout and reports anything it
 keeps; under `afterEpicMerge` the task is archived instead of accepted, so the
 checkout is listed. `get_epic` returns them as `held_worktrees` for a
-`done` or `abandoned` epic. The human removes them with **Remove worktrees** on
-the epic lane's menu (§10): each goes through `WorktreeManager.remove`, so the
+`done` or `abandoned` epic. They are removed with **Remove worktrees** on
+the epic lane's menu (§10), or by the finished-work sweep below on request or on
+low disk: each goes through `WorktreeManager.remove`, so the
 teardown hook runs first. One a live session holds, or one with uncommitted
 changes, is kept and named; no branch is deleted. A `decision` report lists
 what was removed and what was not, and each finding also goes on its task's
 progress.
+
+**Sweeping finished work's worktrees.** `WorkerSupervisor.sweepFinishedWorktrees`
+does for a whole project what **Remove worktrees** does for one epic. It runs
+from **Clean up worktrees** on the project's menu (§10) and from a low-disk
+cleanup. `Board.worktreeSweepScan` lists the candidates: every recorded
+`worktree_path` of a session on a `done` or `closed` task (an archived task is
+one of those), and `Board.heldWorktrees` of every `done` or `abandoned` epic,
+the integration checkout included. Slots are never candidates. Each candidate
+must exist on disk, and paths are compared after resolving symlinks, so a
+session that recorded `/var/...` matches git's `/private/var/...`. The project's
+own checkout, a worktree an active session or a spawn being placed holds, and a
+path another teardown has already claimed are kept and named. The rest are
+claimed in the supervisor's in-flight set, so the orphan reaper cannot race
+them, and removed through `WorktreeManager.remove`, so the teardown hook runs
+first. A worktree with uncommitted changes is kept and named; no branch is
+deleted. Directories under the worktree root that no session records, that are
+no epic's checkout and no slot are returned as unknown and left alone. The
+result lists what was removed, what was kept with its reason, the unknown
+directories, and the bytes reclaimed, measured as the volume's free space
+after minus before. When anything was removed or kept, one `decision` report
+for the project says so, and each finding also goes on its task's progress. A
+disk cleanup (§14.4) writes that report itself, for every project whether or
+not anything was removed, and folds in the project's cleanup command result.

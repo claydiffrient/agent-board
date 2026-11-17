@@ -28,6 +28,7 @@ CREATE TABLE project (
                                    -- archivePolicy, worktreeStrategy,
                                    -- sharedCheckoutMaxAgents, worktreeSlots, rosterAgentIds,
                                    -- worktreeTeardownCommand, worktreeTeardownTimeoutSeconds,
+                                   -- cleanupCommand, cleanupCommandTimeoutSeconds (§14.3),
                                    -- prFollowThrough, takeover (§13.8)
   created_at      INTEGER NOT NULL,
   workspace_id    TEXT REFERENCES workspace(id)  -- null = ungrouped; optional organization only
@@ -877,6 +878,12 @@ through 86,400. Both sit on Project settings' Workflow tab, in a Worktree teardo
 after Verification, because they are the same kind of setting as the build and
 test commands: a shell command the project chooses and Agent Board runs without
 interpreting it.
+
+`cleanupCommand` is the project's cleanup command, run in the project's own
+checkout when free disk space runs low (§14.3); nil or blank runs nothing.
+`cleanupCommandTimeoutSeconds` bounds it: 1800 by default, clamped to 1 through
+86,400. Both sit in their own Disk cleanup section on the Workflow tab, after
+Worktree teardown.
 
 `project.worktree_root` is the directory each task's worktree is cut under
 (§3.1 step 2). Registration sets it to `~/.agentboard/worktrees/<project-id>`,
