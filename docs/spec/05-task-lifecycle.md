@@ -558,6 +558,11 @@ high after attempt 1 failed", is the escalated `WorkerModelChoice`'s
 a `status` progress row records it on the task. Integrator, triage, fixer and
 follow-up check spawns do not escalate.
 
+Escalation does not bound the loop; the review round cap does (§5.1, "Review
+rounds"). A reopen below the cap sends the task back to `ready` and the retry
+escalates as above; the reopen that is the cap-th round leaves the task in
+`review` for a person, so no retry follows it until a person reopens the task.
+
 ### 5.1 Completion protocol
 
 A worker's closing instructions, injected at spawn, worded per placement
@@ -648,10 +653,13 @@ task back into `review` with its landing cleared.
 A rostered reviewer under `agent` review gets its own token scope (§6), narrower
 than a worker's: `get_my_task`, `log_progress`, `accept_task(verdict)` and
 `reopen_task(findings)` over the one task its token names, and nothing else — no
-spawn, no reassign, no other task. `accept_task` writes the verdict to `progress`
+spawn, no reassign, no other task. Both verdicts also take `grades` on a
+re-review ("Review rounds", below). `accept_task` writes the verdict to `progress`
 and then takes that same acceptance path, which spares that reviewer's own
-session; `reopen_task` puts the findings on the
-task and returns it to `ready` without flagging a failure. Either verdict marks
+session; `reopen_task` puts the findings — a list, one entry per finding, or a
+single string read as one — on the
+task and returns it to `ready` without flagging a failure, unless it is the
+round the cap stops. Either verdict marks
 the reviewer's session `completed` and, like `report_complete`, stops it once the
 answer is written (`afterResponse`). The verdict on the
 task is the point: a person reading a task that reached `done` without them can
@@ -715,7 +723,8 @@ its post-compaction brief, until a later review passes, a human reopens the task
 or it is accepted (`Board.closeReviewFindings`).
 
 A reviewer's inputs are the task — title, body, acceptance criteria and its
-comment thread — and the diff on the task's branch. Nothing else: not the
+comment thread — the diff on the task's branch, and on a re-review the previous
+round's findings. Nothing else: not the
 worker's report, not the task's `progress` rows (the worker's own notes and any
 hand-off summary), not project notes, not the board database. It checks the
 worker's claims by reading and running the code. The report is withheld on
@@ -726,6 +735,52 @@ did or did not disclose. `ReviewPrompt` says so; its
 `get_my_task` returns the task and its comments and nothing from `report` or
 `progress`; its scope has no note tools, and `NoteResourceHandler` lists no
 `note://` resource to a `reviewer` token and refuses to read one.
+
+**Review rounds.** Every verdict a rostered reviewer gives on an ordinary task
+is a round, numbered per task from 1 and stored as a `review_round` row (§4):
+the reviewer's name, the outcome (`accepted`, `reopened` or `capped`), the
+findings, the accept verdict, the grades it gave, and the commit it read, the
+SHA half of its session's `review_head`. Nothing resets the count: a human
+Accept or Reopen adds no round and removes none. A fix round's review (§13.1)
+is not a round here; it keeps its own record and its own cap.
+
+The reopen whose round number reaches the project's `reviewRoundCap`
+(`settings_json.reviewRoundCap`, default 3, at least 1; §4) does not send the
+task back. `Board.reviewReopen` records the reviewer's `progress` note as any
+reopen does, ends the reviewer's session, clears `reviewer_agent_id` and leaves
+the task in `review`, then writes a session-less `status` row headed "Agent
+review round cap reached." that quotes the last findings — the reason Pending
+reviews shows under Waiting on you (§10) — and the same text, with the round's
+grades, as a `decision` report to the orchestrator. `ReviewerToolHandler` posts
+a notification with that heading and tells the reviewer the task stayed in
+Review. The cap only stops agent reopens: a human Accept or Reopen is never
+refused by it, and a reopen after the human has sent the task back again is
+past the cap, so it too stays in `review`.
+
+A reviewer spawned on a task with an earlier round is told so in a "This is a
+re-review" section of `ReviewPrompt` (`ReviewPrompt.previousRound`, also used by
+`briefing://reviewer` and the post-compaction brief, which skip the reviewer's
+own round). It names the previous round's reviewer and outcome and the range to
+read first, `git diff <previous reviewed_head>..HEAD`, while `git diff
+<base>...HEAD` stays available for context; with no recorded head it reads the
+base range. When that round reopened, its findings follow, numbered from 1, each
+fenced between `<<<PREVIOUS REVIEW FINDING n id=…>>>` and its matching `<<<END …>>>`
+marker as an earlier reviewer's data rather than instructions. The reviewer must
+grade every one — `fixed`, `partly_fixed`, `not_fixed` or `moot`, each with
+evidence, the grades of a follow-up check (§13.1) apart from `needs_author` —
+may raise one again only by grading it `not_fixed` or `partly_fixed`, and may
+add a new finding only on code changed since that round or on something that
+round could not have seen.
+
+The grading is enforced, not only asked for. `accept_task` and `reopen_task`
+take `grades`, a list of `{finding, grade, evidence}`, and
+`ReviewRound.checkGrades` refuses the verdict, recording nothing, when an entry
+names a finding the previous round did not have, grades one twice, has blank
+evidence, or when any previous finding is left ungraded; with no earlier
+findings, any grade is refused. That refusal is the one a reviewer is told to
+answer by correcting `grades` and calling again. The grades are written under
+the verdict's `progress` note as "Grades of round N's findings:", one line per
+finding, so the human sees them in the task inspector, and on the round's row.
 
 The database is denied through the same `--disallowedTools` list as its writes,
 by `SpawnRequest.reviewerBoardDeny`: `Read(//**/agentboard.sqlite*)` and

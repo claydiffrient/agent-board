@@ -740,7 +740,10 @@ first. A row's currently-named agent that has left the project entirely —
 deleted from the roster or opted out — stays listed anyway, suffixed
 `(not available)`, so the picker shows what routing will actually do rather
 than silently dropping the choice. A caption beneath the table repeats that it
-takes effect only while Review level is Agent.
+takes effect only while Review level is Agent. Under it, **Review round cap** is
+a stepper from 1 to 20 (default 3), disabled outside `agent` like the table,
+captioned that the round whose reopen reaches it leaves the task in Review for
+the human instead of sending it back (§5.1, "Review rounds").
 
 **Preview Leaked-Agent Sweep…** — in the app menu, beside About, because it is
 a one-off diagnostic and not a screen anyone lives in. It opens a `Window` scene

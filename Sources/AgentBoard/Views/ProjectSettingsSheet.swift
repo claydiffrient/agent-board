@@ -272,6 +272,14 @@ struct ProjectSettingsSheet: View {
             Text("Who reviews each type of task. Applies only while Review level is Agent.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Stepper(
+                "Review round cap: \(settings.reviewRoundCap)",
+                value: $settings.reviewRoundCap, in: 1...20
+            )
+            .disabled(settings.reviewLevel != .agent)
+            Text("The agent review round whose reopen stops the loop: the task stays in Review for you instead of going back to a worker.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .verification:
             TextField("Build command", text: Binding(
                 get: { settings.buildCommand ?? "" },

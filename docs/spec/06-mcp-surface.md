@@ -144,8 +144,8 @@ of orchestrator scope: it is the authority to move one named task out of
 | `get_my_task()` | The task under review and its comment thread. No report and no `progress` rows (§5.1): the report is withheld on purpose, and the tool's description tells the reviewer never to file a finding about what the worker did or did not disclose |
 | `log_progress(text)` | Appends to `progress` |
 | `add_comment(body)` | Appends to the task's comment thread as `reviewer`, named from the roster. Touches no file, so it never trips the checkout check |
-| `accept_task(verdict)` | Writes the verdict to `progress`, then runs the ordinary acceptance (§5.1). Refused, with the task left in `review`, if the reviewer changed its checkout |
-| `reopen_task(findings)` | Writes the findings to `progress`; moves the task to `ready` without flagging failure. Refused on the same checkout check |
+| `accept_task(verdict, grades?)` | Writes the verdict, and its grades of the previous round's findings, to `progress` and a `review_round` row, then runs the ordinary acceptance (§5.1). Refused, with the task left in `review`, if the reviewer changed its checkout, or, recording nothing, if a re-review's `grades` leave a previous finding ungraded |
+| `reopen_task(findings, grades?)` | `findings` is a list, one entry per finding. Writes them and the grades to `progress` and a `review_round` row; moves the task to `ready` without flagging failure, or, on the round that reaches `reviewRoundCap`, leaves it in `review` for a person (§5.1, "Review rounds"). Refused on the same checkout and grading checks |
 
 Every call reads the task id off the token, never off the arguments, so a
 reviewer cannot reach a task it was not given. It cannot spawn, reassign, stop a

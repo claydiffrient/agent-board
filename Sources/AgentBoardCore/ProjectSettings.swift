@@ -238,6 +238,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     public var reviewLevel: ReviewLevel = .task
     /// Who reviews each task type under `agent` review (SPEC §4).
     public var reviewRouting: ReviewRoutingTable = ReviewRoutingTable()
+    /// The agent-review round whose reopen leaves the task in `review` for a person (SPEC §5).
+    public var reviewRoundCap: Int = 3
     /// Shell command that builds this project, e.g. `swift build` or `pnpm build`. Empty leaves the
     /// agent to work it out from the repo.
     public var buildCommand: String? = nil
@@ -287,6 +289,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         modelGuidance: String? = nil,
         reviewLevel: ReviewLevel = .task,
         reviewRouting: ReviewRoutingTable = ReviewRoutingTable(),
+        reviewRoundCap: Int = 3,
         buildCommand: String? = nil,
         testCommand: String? = nil,
         verificationTimeoutSeconds: Int? = nil,
@@ -314,6 +317,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.modelGuidance = modelGuidance
         self.reviewLevel = reviewLevel
         self.reviewRouting = reviewRouting
+        self.reviewRoundCap = reviewRoundCap
         self.buildCommand = buildCommand
         self.testCommand = testCommand
         self.verificationTimeoutSeconds = verificationTimeoutSeconds.map(VerificationCommands.clampedTimeout)
@@ -351,6 +355,7 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
             let named = try legacy.decodeIfPresent(ReviewAgentChoice.self, forKey: .reviewAgent)
             reviewRouting = ReviewRoutingTable(defaultAssignee: named.map(ReviewAssignee.named) ?? .anyReviewer)
         }
+        reviewRoundCap = try c.decodeIfPresent(Int.self, forKey: .reviewRoundCap) ?? 3
         buildCommand = try c.decodeIfPresent(String.self, forKey: .buildCommand)
         testCommand = try c.decodeIfPresent(String.self, forKey: .testCommand)
         verificationTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .verificationTimeoutSeconds)

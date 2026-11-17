@@ -694,7 +694,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             verification: project.settings.verification,
                             workingDirectory: site.cwd.path,
                             agent: agent?.identity,
-                            comments: try CommentStore(db).list(taskId: taskId)
+                            comments: try CommentStore(db).list(taskId: taskId),
+                            previousRound: try ReviewPrompt.previousRound(db: db, taskId: taskId)
                         )
                         : Self.openingPrompt(
                             task: task, branch: branch, attempt: placeholder.attempt, epicGoal: epic?.goal,
