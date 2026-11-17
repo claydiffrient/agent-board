@@ -172,7 +172,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let sleepLedger: SleepLedger
     /// Nil in tests that do not care; the app always supplies one. SPEC §8.3.
     @ObservationIgnored private let sleepGuard: SleepGuard?
-    @ObservationIgnored private let projects: ProjectStore
+    @ObservationIgnored let projects: ProjectStore
     @ObservationIgnored private let tasks: TaskStore
     @ObservationIgnored private let sessions: SessionStore
     @ObservationIgnored private let grants: TokenGrantStore
@@ -183,7 +183,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let epics: EpicStore
     @ObservationIgnored private let notes: NoteStore
     @ObservationIgnored private let roster: RosterStore
-    @ObservationIgnored private let board: Board
+    @ObservationIgnored let board: Board
     @ObservationIgnored private let archives: ArchiveSweep
     @ObservationIgnored private let messages: MessageStore
     @ObservationIgnored private let requests: RequestStore
@@ -246,6 +246,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Polled on the metering tick; a test substitutes one with an injected measurement. SPEC §14.
     @ObservationIgnored var diskSpace = DiskSpaceMonitor()
     @ObservationIgnored private var lowDiskSpaceSubscribers: [UUID: AsyncStream<LowDiskSpaceEvent>.Continuation] = [:]
+    @ObservationIgnored var diskCleanupRun: _Concurrency.Task<DiskCleanupSummary, Never>?
+    @ObservationIgnored var measureVolumes: @Sendable ([URL]) -> [VolumeSpace] = { SystemDiskSpace().volumes(holding: $0) }
     /// Millis of the last orphan reap on the tick. `start()` sets it, so the first one waits an interval.
     @ObservationIgnored private var lastOrphanReap: Int64 = 0
     /// One `reconcile` or tick reap per project at a time, so two passes never choose orphans at once (SPEC §5).
@@ -407,6 +409,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         refreshSleepAssertion()
         lastOrphanReap = sleepLedger.reading().nowMillis
         observeFullWakes()
+        cleanUpOnLowDiskSpace()
         startMetering()
     }
 
@@ -5033,6 +5036,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @discardableResult
     func sweepFinishedWorktrees(projectId: String) async throws -> WorktreeSweepResult {
         try await recording {
+            let result = try await sweepFinishedWorktreesUnrecorded(projectId: projectId)
+            if !result.removed.isEmpty || !result.kept.isEmpty || !result.teardownFailures.isEmpty {
+                try board.recordWorktreeSweep(result)
+                announceReports(projectId: projectId)
+            }
+            return result
+        }
+    }
+
+    /// The sweep without its `decision` report, for a caller that folds more into the report.
+    func sweepFinishedWorktreesUnrecorded(projectId: String) async throws -> WorktreeSweepResult {
+        try await recording {
             guard let project = try projects.get(projectId) else { throw SupervisorError.projectNotFound(projectId) }
             let scan = try board.worktreeSweepScan(projectId: projectId, home: home)
             let volume = worktreeManager(for: project).worktreeRoot
@@ -5049,10 +5064,6 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 bytesReclaimed: before.flatMap { before in after.map { max(0, $0 - before) } }
             )
             report(outcome.notices)
-            if !result.removed.isEmpty || !result.kept.isEmpty || !result.teardownFailures.isEmpty {
-                try board.recordWorktreeSweep(result)
-                announceReports(projectId: projectId)
-            }
             return result
         }
     }
@@ -5634,7 +5645,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     /// The orchestrator only learns of a queued report through the console notice.
-    private func announceReports(projectId: String) {
+    func announceReports(projectId: String) {
         consoles[projectId]?.reportsChanged()
     }
 

@@ -106,18 +106,22 @@ extension Board {
     }
 
     /// SPEC §5: one decision report for the project's sweep; each finding also lands on its task's progress.
+    /// A disk cleanup (SPEC §14.4) names itself as `trigger` and folds in its cleanup command's result.
     @discardableResult
-    public func recordWorktreeSweep(_ result: WorktreeSweepResult) throws -> Report {
+    public func recordWorktreeSweep(
+        _ result: WorktreeSweepResult, trigger: String = "Clean up worktrees", cleanup: ProjectCleanupResult? = nil
+    ) throws -> Report {
         try db.writer.write { db in
             guard let project = try Project.fetchOne(db, key: result.projectId) else {
                 throw BoardError.projectNotFound(result.projectId)
             }
             try Self.appendCleanupProgress(db, result.kept + result.teardownFailures)
-            var lines = ["Clean up worktrees swept the worktrees of finished work in \(project.name). No branch was deleted."]
+            var lines = ["\(trigger) swept the worktrees of finished work in \(project.name). No branch was deleted."]
             if !result.removed.isEmpty {
                 lines.append("Removed:\n" + result.removed.map { "- \($0)" }.joined(separator: "\n"))
             }
             lines.append(result.summary)
+            if let cleanup { lines.append(cleanup.summary) }
             return try ReportStore.insert(
                 db, projectId: project.id, taskId: nil, sessionId: nil, kind: .decision,
                 body: lines.joined(separator: "\n\n")

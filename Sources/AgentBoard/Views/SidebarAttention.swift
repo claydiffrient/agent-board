@@ -24,8 +24,6 @@ struct AttentionBadge: View {
     }
 }
 
-/// One project in the sidebar: its name, the attention badge when it is waiting on a human, and
-/// the settings gear. Kept out of `MainWindow` so a render test can mount a row on its own.
 /// The project row's context menu (SPEC §10).
 enum ProjectMenuItem: CaseIterable {
     case settings
@@ -39,6 +37,8 @@ enum ProjectMenuItem: CaseIterable {
     }
 }
 
+/// One project in the sidebar: its name, the attention badge when it is waiting on a human, and
+/// the settings gear. Kept out of `MainWindow` so a render test can mount a row on its own.
 struct ProjectRow: View {
     let project: Project
     let attention: ProjectAttention?

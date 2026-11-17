@@ -756,6 +756,11 @@ session. The Status pane was rejected because a one-shot report there wants to
 become a live view, and a dry-run-only setting because its output would reach a
 human only through stderr.
 
+**Clean up now** — in the app menu, beside Preview Leaked-Agent Sweep. It runs
+the disk cleanup (§14.4) at once, whatever the free space, and joins a cleanup
+already running. Its result arrives as the follow-up notification and one
+`decision` report per project, not on a window.
+
 **What's New in Agent Board** — the release notes, opened from the Help menu and
 once on their own after an update installs. A `Window` scene rather than a
 `WindowGroup`, so choosing the menu item again — or a second launch that decides

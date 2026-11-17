@@ -1137,4 +1137,6 @@ no epic's checkout and no slot are returned as unknown and left alone. The
 result lists what was removed, what was kept with its reason, the unknown
 directories, and the bytes reclaimed, measured as the volume's free space
 after minus before. When anything was removed or kept, one `decision` report
-for the project says so, and each finding also goes on its task's progress.
+for the project says so, and each finding also goes on its task's progress. A
+disk cleanup (§14.4) writes that report itself, for every project whether or
+not anything was removed, and folds in the project's cleanup command result.
