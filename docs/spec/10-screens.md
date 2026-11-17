@@ -718,7 +718,7 @@ unknown directories it left alone.
 **Project settings** — a sheet from the sidebar row's gear, in seven tabs:
 **General** (Repository, Workspace, Archive), **Agents** (Models, Review,
 Autonomy, Roster), **Limits** (Caps), **Workflow** (Verification, Worktree
-teardown, Isolation, Publishing), **Notifications** (one switch per banner category — approvals, blocked workers, caps and stalls, worker failures, pull requests ready to verify, pull request decisions — and the project mute), **Advanced** (the `autoMode` classifier JSON,
+teardown, Disk cleanup (§14.3), Isolation, Publishing), **Notifications** (one switch per banner category — approvals, blocked workers, caps and stalls, worker failures, pull requests ready to verify, pull request decisions — and the project mute), **Advanced** (the `autoMode` classifier JSON,
 Extra MCP servers), and **PR Follow-Through** (Watch, Verification, Replies, Publish guard, Roles; §13.3), after Advanced. Tabs group by what a setting governs, not by how often it is
 touched. Every section is in exactly one tab; a section in none would be a stored
 setting with no UI. **Delete Project…** sits outside the tabs, at the left of the

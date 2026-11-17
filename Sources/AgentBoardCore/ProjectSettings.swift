@@ -253,6 +253,9 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
     /// worktree and nothing else.
     public var worktreeTeardownCommand: String? = nil
     public var worktreeTeardownTimeoutSeconds: Int = WorktreeTeardownCommand.defaultTimeoutSeconds
+    /// Run in the project's own checkout when free disk space runs low (SPEC §14.3). Nil runs nothing.
+    public var cleanupCommand: String? = nil
+    public var cleanupCommandTimeoutSeconds: Int = ProjectCleanupCommand.defaultTimeoutSeconds
     public var archivePolicy: ArchivePolicy = .afterEpicMerge
     /// Whether a worker gets its own worktree, shares the project's checkout, or is decided per spawn.
     public var worktreeStrategy: WorktreeStrategy = .worktree
@@ -293,6 +296,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         integrationVerification: IntegrationVerification = .buildAndTest,
         worktreeTeardownCommand: String? = nil,
         worktreeTeardownTimeoutSeconds: Int = WorktreeTeardownCommand.defaultTimeoutSeconds,
+        cleanupCommand: String? = nil,
+        cleanupCommandTimeoutSeconds: Int = ProjectCleanupCommand.defaultTimeoutSeconds,
         archivePolicy: ArchivePolicy = .afterEpicMerge,
         worktreeStrategy: WorktreeStrategy = .worktree,
         sharedCheckoutMaxAgents: Int = 3,
@@ -320,6 +325,8 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         self.integrationVerification = integrationVerification
         self.worktreeTeardownCommand = worktreeTeardownCommand
         self.worktreeTeardownTimeoutSeconds = worktreeTeardownTimeoutSeconds
+        self.cleanupCommand = cleanupCommand
+        self.cleanupCommandTimeoutSeconds = cleanupCommandTimeoutSeconds
         self.archivePolicy = archivePolicy
         self.worktreeStrategy = worktreeStrategy
         self.sharedCheckoutMaxAgents = sharedCheckoutMaxAgents
@@ -360,6 +367,9 @@ public struct ProjectSettings: Codable, Sendable, Equatable {
         worktreeTeardownCommand = try c.decodeIfPresent(String.self, forKey: .worktreeTeardownCommand)
         worktreeTeardownTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .worktreeTeardownTimeoutSeconds)
             ?? WorktreeTeardownCommand.defaultTimeoutSeconds
+        cleanupCommand = try c.decodeIfPresent(String.self, forKey: .cleanupCommand)
+        cleanupCommandTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .cleanupCommandTimeoutSeconds)
+            ?? ProjectCleanupCommand.defaultTimeoutSeconds
         archivePolicy = try c.decodeIfPresent(ArchivePolicy.self, forKey: .archivePolicy) ?? .afterEpicMerge
         worktreeStrategy = try c.decodeIfPresent(WorktreeStrategy.self, forKey: .worktreeStrategy) ?? .worktree
         sharedCheckoutMaxAgents = try c.decodeIfPresent(Int.self, forKey: .sharedCheckoutMaxAgents)

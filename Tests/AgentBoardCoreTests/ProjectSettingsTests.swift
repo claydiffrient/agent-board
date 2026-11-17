@@ -34,6 +34,8 @@ final class ProjectSettingsTests: XCTestCase {
         settings.autoModeJSON = #"{"rules":[]}"#
         settings.extraMcpServers = ["mdn", "caniuse"]
         settings.caps.maxIdleSeconds = 60
+        settings.cleanupCommand = "make clean-cache"
+        settings.cleanupCommandTimeoutSeconds = 120
         XCTAssertEqual(ProjectSettings.decode(settings.encoded()), settings)
     }
 

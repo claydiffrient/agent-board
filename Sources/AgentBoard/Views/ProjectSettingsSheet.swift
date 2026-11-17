@@ -27,7 +27,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
         case .general: [.repository, .workspace, .archive]
         case .agents: [.models, .review, .autonomy, .roster]
         case .limits: [.caps]
-        case .workflow: [.verification, .teardown, .isolation, .publishing]
+        case .workflow: [.verification, .teardown, .cleanup, .isolation, .publishing]
         case .notifications: [.notifications]
         case .advanced: [.autoMode, .extraMcpServers]
         case .prFollowThrough: [.prWatch, .prVerification, .prReplies, .publishGuard, .prRoles, .takeover]
@@ -36,7 +36,7 @@ enum ProjectSettingsTab: String, CaseIterable, Identifiable {
 }
 
 enum ProjectSettingsSection: String, CaseIterable, Identifiable {
-    case repository, workspace, caps, models, review, verification, teardown, isolation, publishing
+    case repository, workspace, caps, models, review, verification, teardown, cleanup, isolation, publishing
     case archive, notifications, autonomy, autoMode, extraMcpServers, roster
     case prWatch, prVerification, prReplies, prRoles, publishGuard, takeover
 
@@ -51,6 +51,7 @@ enum ProjectSettingsSection: String, CaseIterable, Identifiable {
         case .review: "Review"
         case .verification: "Verification"
         case .teardown: "Worktree teardown"
+        case .cleanup: "Disk cleanup"
         case .isolation: "Isolation"
         case .publishing: "Publishing"
         case .archive: "Archive"
@@ -300,6 +301,15 @@ struct ProjectSettingsSheet: View {
             ), prompt: Text("e.g. [ \"$(bazel info workspace)\" = \"$PWD\" ] && bazel clean --expunge"))
             TextField("Teardown timeout (seconds)", value: $settings.worktreeTeardownTimeoutSeconds, format: .number)
             Text("Runs in a task's or epic's worktree, as its working directory, just before Agent Board removes it, to clean up what tools built for it elsewhere: a Bazel output base, a Docker volume. Left empty, removal deletes the worktree and nothing else. A failure or timeout never stops the removal; it is recorded on the task and in the decision report. It does not run on a worktree kept for uncommitted changes.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .cleanup:
+            TextField("Cleanup command", text: Binding(
+                get: { settings.cleanupCommand ?? "" },
+                set: { settings.cleanupCommand = $0.isEmpty ? nil : $0 }
+            ), prompt: Text("e.g. make clean-cache"))
+            TextField("Cleanup timeout (seconds)", value: $settings.cleanupCommandTimeoutSeconds, format: .number)
+            Text("Runs in this project's own checkout when free disk space runs low, after finished worktrees are removed, to prune what builds leave behind. Left empty, nothing runs. A failure or timeout is recorded and reported; it never stops the rest of the cleanup.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .isolation:
@@ -690,6 +700,8 @@ struct ProjectSettingsSheet: View {
         updated.testCommand = VerificationCommands(test: settings.testCommand).test
         updated.worktreeTeardownCommand = settings.worktreeTeardown?.command
         updated.worktreeTeardownTimeoutSeconds = WorktreeTeardownCommand.clampedTimeout(settings.worktreeTeardownTimeoutSeconds)
+        updated.cleanupCommand = settings.projectCleanup?.command
+        updated.cleanupCommandTimeoutSeconds = ProjectCleanupCommand.clampedTimeout(settings.cleanupCommandTimeoutSeconds)
         updated.archivePolicy = ArchivePolicy.make(mode: archiveMode, days: archiveDays)
         updated.notifications.mute = muteChoice.mute(existing: settings.notifications.mute)
         updated.prFollowThrough = Self.savedFollowThrough(settings.prFollowThrough, pendingTerm: newPrivateTerm)
