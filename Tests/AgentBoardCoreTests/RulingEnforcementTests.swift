@@ -77,6 +77,7 @@ final class RulingEnforcementTests: XCTestCase {
         let next = try f.board.requestIntegration(epicId: epic.id, requestedBy: "orch", epicTip: "abc")
         XCTAssertNotEqual(next.id, first.id)
         XCTAssertTrue(next.isPending)
+        XCTAssertTrue(next.reason?.contains("Finish the second task first.") == true, next.reason ?? "nil")
     }
 
     func testAHoldOnTheCurrentBlockRefusesASpawn() throws {
