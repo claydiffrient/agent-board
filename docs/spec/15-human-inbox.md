@@ -86,3 +86,33 @@ rulings on their PR item:
 
 Deny reasons from before this section existed lived only in `decision`
 reports, which have all been consumed, so they cannot be recovered.
+
+### 15.5 The inbox
+
+`InboxStore` derives the inbox from the database alone, across projects or
+for one: each surface's open-question predicate, minus every row a ruling has
+answered for the current episode (§15.1). `observe(projectId:)` and
+`items(projectId:)` return the rows, oldest asking first; `count` and
+`observeCount` count those same rows, so the badge and the page cannot
+disagree.
+
+| Row | Waiting while | Answered by a ruling with |
+|---|---|---|
+| Approval | `resolved_at IS NULL` | any ruling on the approval |
+| Blocked task | `task.blocked = 1`, from `report_blocked` or a Claude Code prompt | `question_at >= blocked_at` |
+| Human review | in `review` with no `reviewer_agent_id` | `question_at >= review_entered_at` |
+| Reviewer stopped | in `review` under a rostered reviewer whose session is the task's newest and is idle or ended | `question_at >=` that session's `started_at` |
+| Proposal | in `proposed` while the project's autonomy is off | — (Promote or Dismiss) |
+| PR decision | open item with verdict `decision` on a watch not merged, closed, stopped or paused, follow-through on | `question_at >= COALESCE(decision_notified_at, created_at)` |
+| Parked watch | `state = parked`, follow-through on | `question_at >= parked_at` |
+
+A row stays out while its ruling stands for the episode: a `hold` takes a
+blocked task out while `task.blocked` stays 1, and the next block advances
+`blocked_at` and brings it back. A missing stamp, on a row from before §15.1
+existed, reads as 0.
+
+Out, by construction: a task in `review` while its rostered reviewer is
+working, Coordinator requests (they wait on an orchestrator), Ready to verify,
+and the machine conditions — stalled workers, overdue shutdowns, stranded
+reports, an unavailable poll, takeover failures, unlanded `done` tasks — which
+each already raise the attention signal.

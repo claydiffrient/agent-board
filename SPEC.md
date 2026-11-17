@@ -72,4 +72,4 @@ Subsections stay in their parent's file. Numbers do not change when a title does
 - **§15 [Human inbox and rulings](docs/spec/15-human-inbox.md)** — the
   human's append-only answers to what agents and the board ask, and the
   question episodes they answer. §15.1 Question episodes · §15.2 Verdicts and
-  subjects · §15.3 Standing rulings · §15.4 Carried-over answers
+  subjects · §15.3 Standing rulings · §15.4 Carried-over answers · §15.5 The inbox

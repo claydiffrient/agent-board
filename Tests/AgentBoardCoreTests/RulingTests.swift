@@ -15,13 +15,18 @@ final class RulingTests: XCTestCase {
             XCTAssertThrowsError(try db.execute(sql: "UPDATE ruling SET note = 'changed' WHERE id = ?", arguments: [ruling.id])) {
                 XCTAssertTrue("\($0)".contains("rulings are append-only"), "\($0)")
             }
+            try db.execute(sql: """
+                INSERT INTO pr_watch (id, project_id, repo_owner, repo_name, number, url, title, head_ref, head_oid,
+                  base_ref, state, created_at, updated_at)
+                VALUES ('w', ?, 'octo', 'example', 1, 'u', 't', 'h', 'oid', 'main', 'watching', 0, 0)
+                """, arguments: [f.project.id])
             XCTAssertThrowsError(try db.execute(
                 sql: """
                 INSERT INTO ruling (id, project_id, subject_kind, task_id, pr_watch_id, question, question_at, verdict, answered_at)
                 VALUES ('two', ?, 'task', ?, 'w', 'q', 1, 'proceed', 1)
                 """,
                 arguments: [f.project.id, task.id]
-            ))
+            )) { XCTAssertTrue("\($0)".contains("CHECK constraint failed"), "\($0)") }
         }
         XCTAssertEqual(try RulingStore(f.db).history(.task(task.id)), [ruling])
     }
