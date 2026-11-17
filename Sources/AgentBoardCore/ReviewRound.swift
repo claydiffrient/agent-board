@@ -99,7 +99,7 @@ public struct ReviewRound: Codable, FetchableRecord, MutablePersistableRecord, S
     /// A `review_finding` ruling's `finding_ref`: the round's number and the finding's 1-based number (SPEC §15.2).
     public static func findingRef(round: Int, finding: Int) -> String { "\(round):\(finding)" }
 
-    /// The findings of `round` whose newest standing ruling is `overrule`, keyed by finding number (SPEC §15.6).
+    /// The findings of `round` whose newest standing ruling is `overrule`, keyed by finding number (SPEC §15.7).
     public static func overruled(_ db: Database, round: ReviewRound) throws -> [Int: Ruling] {
         var result: [Int: Ruling] = [:]
         for number in round.findings.indices.map({ $0 + 1 }) {
@@ -118,7 +118,7 @@ public struct ReviewRound: Codable, FetchableRecord, MutablePersistableRecord, S
     }
 
     /// SPEC §5.1: a verdict after an earlier round grades each of that round's findings exactly once,
-    /// with evidence, except the ones a person overruled (§15.6), which it must leave out. Returns the
+    /// with evidence, except the ones a person overruled (§15.7), which it must leave out. Returns the
     /// grades in finding order.
     static func checkGrades(_ db: Database, _ grades: [GradedFinding], against previous: ReviewRound?) throws -> [GradedFinding] {
         let count = previous?.findings.count ?? 0
@@ -156,7 +156,7 @@ public struct ReviewRound: Codable, FetchableRecord, MutablePersistableRecord, S
         })
     }
 
-    /// SPEC §15.6: a reopen whose every finding cites only overruled findings rests on nothing a person left open.
+    /// SPEC §15.7: a reopen whose every finding cites only overruled findings rests on nothing a person left open.
     static func checkReopen(_ findings: [String], overruled: [Int: Ruling], round: Int) throws {
         guard !overruled.isEmpty else { return }
         let cited = findings.map(citedFindings)
@@ -168,7 +168,7 @@ public struct ReviewRound: Codable, FetchableRecord, MutablePersistableRecord, S
     }
 }
 
-/// A reopen refused because its findings rest only on findings a person overruled (SPEC §15.6).
+/// A reopen refused because its findings rest only on findings a person overruled (SPEC §15.7).
 public struct ReviewReopenRejection: Error, Sendable, Equatable {
     public var reason: String
 }

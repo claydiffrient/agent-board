@@ -27,7 +27,7 @@ final class ReviewRoundTests: XCTestCase {
         XCTAssertTrue(prompt.contains("`git diff main...HEAD`"), prompt)
     }
 
-    /// SPEC §15.6: an overruled finding leaves the set a re-review grades, and cannot carry a reopen alone.
+    /// SPEC §15.7: an overruled finding leaves the set a re-review grades, and cannot carry a reopen alone.
     func testAnOverruledFindingIsSettledForTheNextRound() throws {
         let f = try Fixture.make()
         let task = try f.task("write the parser", column: .review)

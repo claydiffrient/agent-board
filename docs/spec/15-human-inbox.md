@@ -87,7 +87,7 @@ rulings on their PR item:
 Deny reasons from before this section existed lived only in `decision`
 reports, which have all been consumed, so they cannot be recovered.
 
-### 15.5 The inbox
+### 15.5 Membership
 
 `InboxStore` derives the inbox from the database alone, across projects or
 for one: each surface's open-question predicate, minus every row a ruling has
@@ -117,7 +117,50 @@ and the machine conditions — stalled workers, overdue shutdowns, stranded
 reports, an unavailable poll, takeover failures, unlanded `done` tasks — which
 each already raise the attention signal.
 
-### 15.6 Overruled review findings
+### 15.6 Enforcement
+
+The board reads standing rulings inside the same write that would act on an
+agent's request, so a ruling holds even against an orchestrator that misreads
+it. Each refusal quotes the ruling: its verdict, when it was given, and the
+human's note.
+
+- **Deny.** Pending Approvals' Deny… needs a reason, and `Board.denyApproval`
+  resolves the approval and records a `deny` ruling on it, with the reason as
+  its note, in one transaction. A request identical to a denied one is then
+  refused:
+  - `push_branch` and `open_pull_request` (`Board.requestPublish`): the same
+    approval kind, local branch and head commit: the `headOid` every publish
+    request carries (§6), which a grant also checks the branch against
+    (§4). A row from before `headOid` existed has none and matches nothing.
+    The same branch at a new commit is a new request and creates an approval
+    as before.
+  - `spawn_worker` and `assign_to_agent` (`Board.requestSpawn`): a spawn of
+    the same task. The human can still start the task from the board.
+  - `request_integration` (`Board.requestIntegration`): the same epic.
+- **Hold.** A `hold` is in force while the task is blocked and the ruling's
+  `question_at` is at or after `task.blocked_at`, so it covers the block it
+  answered and lapses when the worker blocks again. While it is in force:
+  - `Board.requestSpawn` refuses the task, whatever the autonomy setting.
+  - `WorkerSupervisor.resume` refuses every resume of a session on the task
+    except the shutdown wind-down (§8.1), which tells the worker to stop.
+  - `StoreHookSink` does not clear the block on `PostToolUse`, so the task
+    stays `blocked = 1` while the worker keeps making tool calls.
+- **Reopen.** The inbox's Reopen calls `Board.reopen` with the human's note,
+  which records a `reopen` ruling on the task, answering the current
+  `review_entered_at`, before the task goes back to `ready`. The `decision`
+  report quotes it. The board's existing Reopen buttons record nothing.
+- **Keep parked.** `resume_pr_watch` is refused while a `keep_parked` ruling
+  answers the watch's current `parked_at`. The human's own Resume on the Pull
+  Requests page, and granting a resume approval, are unaffected: both are the
+  human acting.
+- **Worker prompts.** The spawn prompt (`OpeningPrompt.compose`) and the
+  resume prompt open with a "Your human's rulings on this task" section
+  listing the task's standing rulings, newest first, each with the question
+  it answered. It sits above the task body and the comment thread, and says a
+  ruling outranks the worker's own judgment, the task body, any comment and
+  any reviewer finding.
+
+### 15.7 Overruled review findings
 
 A person can overrule a finding an agent reviewer raised in a `review_round`
 (§5.1), or uphold it. A finding is overruled while the newest standing ruling

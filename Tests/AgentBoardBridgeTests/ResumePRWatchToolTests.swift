@@ -55,6 +55,20 @@ final class ResumePRWatchToolTests: XCTestCase {
         XCTAssertEqual(try f.approvals.pending(projectId: f.project.id), [approval])
     }
 
+    func testResumePRWatchIsRefusedWhileTheHumanRuledTheWatchStaysParked() async throws {
+        let f = try BridgeFixture.make()
+        let parked = try watch(f, number: 12, in: f.project.id)
+        try RulingStore(f.db).record(
+            .prWatch(parked.id), question: "Hit the round cap of 2.", questionAt: 1, verdict: .keepParked
+        )
+
+        await XCTAssertToolError(
+            try await f.call("resume_pr_watch", ["number": .number(12), "reason": .string("Raised the round cap.")]),
+            containing: "stays parked"
+        )
+        XCTAssertEqual(try f.approvals.pending(projectId: f.project.id), [])
+    }
+
     func testGrantingResumesTheWatchAndAWatchNoLongerParkedIsReportedNotThrown() throws {
         let f = try BridgeFixture.make()
         let watches = PRWatchStore(f.db)

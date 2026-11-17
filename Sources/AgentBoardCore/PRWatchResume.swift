@@ -85,6 +85,12 @@ extension Board {
                     ? "A request to watch a stopped pull request again needs a reason: why follow-through should take it back."
                     : "A resume request needs a reason: what was done about the parked reason.")
             }
+            if let kept = try RulingStore.keepParkedInForce(db, watch: watch) {
+                throw PRVerdictRejection(
+                    "The human ruled that #\(watch.number) stays parked: \(kept.quoted). A resume request is refused "
+                        + "until the human resumes it themselves."
+                )
+            }
             if let existing = try pendingWatchResume(db, projectId: projectId, watchId: watch.id) {
                 return existing
             }

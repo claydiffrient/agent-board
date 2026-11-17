@@ -185,7 +185,7 @@ public enum ReviewPrompt {
         return lines.joined(separator: "\n")
     }
 
-    /// SPEC §15.6: a person's overrule outranks the reviewer, so the finding is neither graded nor raised again.
+    /// SPEC §15.7: a person's overrule outranks the reviewer, so the finding is neither graded nor raised again.
     static func settled(_ overruled: [Int: Ruling]) -> String {
         var lines = ["### Settled by your human",
             "A person overruled the findings below. They are settled: do not grade them, and do not raise them "

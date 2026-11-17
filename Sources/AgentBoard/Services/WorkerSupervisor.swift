@@ -52,6 +52,7 @@ enum SupervisorError: LocalizedError {
     case watchNotFound(String)
     case triageTaskNotAssignable(title: String)
     case triageNotResumable(title: String)
+    case rulingRefused(String)
     case pullRequestNotFetched(String)
     case fixRoundNotFound(title: String)
     case fixRoundNotAcceptable(title: String)
@@ -67,6 +68,7 @@ enum SupervisorError: LocalizedError {
         case .triageNotResumable(let title):
             return "\"\(title)\" is a pull request triage or follow-up check, which is not resumed; follow-through "
                 + "starts a fresh one"
+        case .rulingRefused(let reason): return reason
         case .pullRequestNotFetched(let reason): return "the pull request could not be fetched: \(reason)"
         case .fixRoundNotFound(let title): return "\"\(title)\" is not a pull request round's fix task"
         case .fixRoundNotAcceptable(let title):
@@ -718,7 +720,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             workingDirectory: site.cwd.path,
                             agent: agent?.identity,
                             reviewFindings: try ProgressStore(db).openReviewFindings(taskId: taskId),
-                            comments: try CommentStore(db).list(taskId: taskId)
+                            comments: try CommentStore(db).list(taskId: taskId),
+                            rulings: try RulingStore(db).standing(.task(taskId))
                         ),
                     models: models,
                     attempt: placeholder.attempt,
@@ -1746,7 +1749,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         workingDirectory: worktree.path,
                         agent: agent?.identity,
                         reviewFindings: try ProgressStore(db).openReviewFindings(taskId: task.id),
-                        comments: try CommentStore(db).list(taskId: task.id)
+                        comments: try CommentStore(db).list(taskId: task.id),
+                        rulings: try RulingStore(db).standing(.task(task.id))
                     ),
                     models: models,
                     attempt: placeholder.attempt,
@@ -2170,17 +2174,26 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let placement = try projects.get(session.projectId).map {
                 WorkerStanding.recorded(session: session, project: $0, taskId: session.taskId ?? "").placement
             } ?? .worktree
+            let rulings = try session.taskId.map { try RulingStore(db).standing(.task($0)) } ?? []
             try await resume(session, mergingEpic: true) { merge in
-                Self.resumePrompt(previousStop: session.stopReason, placement: placement, merge: merge)
+                Self.resumePrompt(
+                    previousStop: session.stopReason, placement: placement, merge: merge, rulings: rulings
+                )
             }
         }
     }
 
+    /// `honoringHold` is false only for the shutdown wind-down, which tells a worker to stop rather than work.
     private func resume(
-        _ session: AgentSession, mergingEpic: Bool = false, prompt: (ResumeMerge?) -> String
+        _ session: AgentSession, mergingEpic: Bool = false, honoringHold: Bool = true,
+        prompt: (ResumeMerge?) -> String
     ) async throws {
         do {
             let sessionId = session.sessionId
+            if honoringHold, let taskId = session.taskId, let task = try tasks.get(taskId),
+               let hold = try RulingStore(db).holdInForce(taskId: taskId) {
+                throw SupervisorError.rulingRefused(Board.holdRefusal(task: task, hold: hold))
+            }
             // SPEC §5: until the row is active again only this mark keeps a reap out of the worktree.
             if let path = session.worktreePath {
                 if tearingDown.contains(Self.resolved(path)) { throw SupervisorError.worktreeBeingRemoved(path: path) }
@@ -3978,9 +3991,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func reopen(taskId: String) async throws {
+        try await reopen(taskId: taskId, note: nil)
+    }
+
+    /// The inbox's Reopen (SPEC §15.6): the note is recorded as a `reopen` ruling the next worker is spawned with.
+    func reopen(taskId: String, ruling note: String) async throws {
+        try await reopen(taskId: taskId, note: Optional(note))
+    }
+
+    private func reopen(taskId: String, note: String?) async throws {
         try await recording {
             try await stopLiveSessions(onTask: taskId, by: .human)
-            let report = try board.reopen(taskId: taskId)
+            let report = try board.reopen(taskId: taskId, ruling: note)
             report.projectId.map { announceReports(projectId: $0) }
         }
     }
@@ -5038,12 +5060,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         announceReports(projectId: approval.projectId)
     }
 
+    /// SPEC §15.6: the reason is required, because it becomes the note on the `deny` ruling.
     func deny(approvalId: String, reason: String?) async throws {
         try await recording {
-            let trimmed = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let approval = try board.resolveApproval(
-                approvalId, approved: false, by: "human", reason: trimmed?.isEmpty == false ? trimmed : nil
-            )
+            let (approval, _) = try board.denyApproval(approvalId, reason: reason ?? "")
             announceReports(projectId: approval.projectId)
         }
     }
@@ -5302,7 +5322,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )) ?? false
         guard claimed else { return }
         do {
-            try await resume(session) { _ in ShutdownOrder.windDownOrder(reason: order.reason, via: .resume) }
+            try await resume(session, honoringHold: false) { _ in
+                ShutdownOrder.windDownOrder(reason: order.reason, via: .resume)
+            }
         } catch {
             try? deliveries.releaseDelivery(orderId: order.id, sessionId: session.sessionId)
         }
@@ -6056,7 +6078,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// The commit step differs by placement: `git commit` is refused in a shared checkout, so a
     /// resumed co-resident worker told to "commit on this branch" is sent at a command that fails.
     static func resumePrompt(
-        previousStop: String?, placement: WorkerPlacement = .worktree, merge: ResumeMerge? = nil
+        previousStop: String?, placement: WorkerPlacement = .worktree, merge: ResumeMerge? = nil,
+        rulings: [Ruling] = []
     ) -> String {
         var lines = ["Agent Board resumed this session."]
         if let merge { lines += mergeNotice(merge) }
@@ -6072,7 +6095,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             + "If a resume or a compaction has left you without the instructions you were spawned with, "
             + "read the MCP resource `\(BriefingResourceURI.worker)` — it returns them in full."
         )
-        return lines.joined(separator: " ")
+        let text = lines.joined(separator: " ")
+        return OpeningPrompt.rulingsSection(rulings).map { "\($0)\n\n\(text)" } ?? text
     }
 
     /// SPEC §5 "Resumed": a conflict comes first, so a worker waking into conflict markers
@@ -6168,12 +6192,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         workingDirectory: String? = nil,
         agent: AgentIdentity? = nil,
         reviewFindings: String? = nil,
-        comments: [TaskComment] = []
+        comments: [TaskComment] = [],
+        rulings: [Ruling] = []
     ) -> String {
         OpeningPrompt.compose(
             task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes,
             verification: verification, placement: placement, workingDirectory: workingDirectory,
-            agent: agent, reviewFindings: reviewFindings, comments: comments
+            agent: agent, reviewFindings: reviewFindings, comments: comments, rulings: rulings
         )
     }
 
