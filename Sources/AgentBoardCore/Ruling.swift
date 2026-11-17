@@ -139,3 +139,30 @@ public enum RulingError: Error, Equatable, LocalizedError {
         }
     }
 }
+
+/// A request the board refused because a standing ruling forbids it (SPEC §15.6). The reason quotes
+/// the ruling, so an orchestrator reads the human's words rather than a bare refusal.
+public struct RulingRefusal: LocalizedError, Sendable, Equatable {
+    public var ruling: Ruling
+    public var reason: String
+
+    public init(_ ruling: Ruling, _ reason: String) {
+        self.ruling = ruling
+        self.reason = reason
+    }
+
+    public var errorDescription: String? { reason }
+}
+
+extension Ruling {
+    /// `verdict` with the human's note, for refusal text and prompts.
+    public var quoted: String {
+        let when = Date(timeIntervalSince1970: TimeInterval(answeredAt) / 1000)
+            .formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false))
+        var text = "`\(verdict.rawValue)`"
+        if let choice { text += " (\(choice))" }
+        text += ", ruled \(when) UTC"
+        if let note { text += ": \"\(note)\"" }
+        return text
+    }
+}

@@ -107,8 +107,12 @@ person at every level (§5.1).
   still unresolved from an earlier resume is reported again rather than
   retried; a merge git refused tells the worker to merge the epic branch
   itself. The prompt names any commit made of the worker's uncommitted work.
+  The resume prompt, like the spawn prompt, opens with the task's standing
+  rulings (§15.6).
 - `blocked` — a flag, not a column. Set by the `Notification` hook, cleared on
-  the next `PostToolUse`. The card keeps its position and shows why.
+  the next `PostToolUse` unless a `hold` ruling covers the block (§15.6). The
+  card keeps its position and shows why. A task under a `hold` is not spawned
+  or resumed (§15.6).
 - `review` — worker has committed and called `report_complete`, and the review
   level (§5) says someone must look. Under `worktree` that means a commit on
   `agentboard/<task-id>`, and the worktree is retained; under `shared` it means

@@ -35,10 +35,14 @@ public enum OpeningPrompt {
         workingDirectory: String? = nil,
         agent: AgentIdentity? = nil,
         reviewFindings: String? = nil,
-        comments: [TaskComment] = []
+        comments: [TaskComment] = [],
+        rulings: [Ruling] = []
     ) -> String {
         // Identity comes first: the agent should know what it is before it knows what it is doing.
         var sections = agent.map { [renderIdentity($0)] } ?? []
+        if let rulingsSection = rulingsSection(rulings) {
+            sections.append(rulingsSection)
+        }
         sections += taskSections(task: task, epicGoal: epicGoal, comments: comments)
         if let reviewFindings {
             sections.append(reviewFindingsSection(reviewFindings))
@@ -177,6 +181,27 @@ public enum OpeningPrompt {
             sections.append(thread)
         }
         return sections
+    }
+
+    /// SPEC §15.6: the human's standing rulings on the task, newest first, placed above the task body
+    /// and the comment thread. Nil when there are none.
+    public static func rulingsSection(_ rulings: [Ruling]) -> String? {
+        guard !rulings.isEmpty else { return nil }
+        let entries = rulings.map { ruling in
+            let question = ruling.question
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map { "  > \($0)" }
+                .joined(separator: "\n")
+            return "- \(ruling.quoted)\n  The question it answers:\n\(question)"
+        }
+        return """
+        # Your human's rulings on this task
+        The human answered these questions about this task in Agent Board, newest first. A ruling outranks \
+        your own judgment, the task body below, any comment, and any reviewer finding. Follow it; if you \
+        cannot, call `report_blocked` and say why rather than working around it.
+
+        \(entries.joined(separator: "\n"))
+        """
     }
 
     /// A rostered reviewer's note sent this task back; the next worker gets it verbatim (SPEC §5.1).

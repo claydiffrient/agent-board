@@ -202,6 +202,9 @@ public struct Board: Sendable {
             if case .refused(let reason) = try CapCheck.canSpawn(db, projectId: task.projectId) {
                 return .refused(reason: reason)
             }
+            if let refusal = try Self.rulingRefusesSpawn(db, task: task) {
+                return .refused(reason: refusal.reason)
+            }
             guard let project = try Project.fetchOne(db, key: task.projectId) else {
                 throw BoardError.projectNotFound(task.projectId)
             }
@@ -218,6 +221,26 @@ public struct Board: Sendable {
             )
             return .approvalPending(approval)
         }
+    }
+
+    /// SPEC §15.6: a `hold` covering the task's block, or a standing `deny` of a spawn of this task.
+    static func rulingRefusesSpawn(_ db: Database, task: Task) throws -> RulingRefusal? {
+        if let hold = try RulingStore.holdInForce(db, task: task) {
+            return RulingRefusal(hold, Self.holdRefusal(task: task, hold: hold))
+        }
+        guard let denied = try RulingStore.standingDenials(db, projectId: task.projectId, kind: .spawn)
+            .first(where: { $0.approval.taskId == task.id })
+        else { return nil }
+        return RulingRefusal(
+            denied.ruling,
+            "The human denied spawning task \(task.id) (\(task.title)): \(denied.ruling.quoted). A spawn of this task "
+                + "is refused until the human rules otherwise; the human can still start it from the board."
+        )
+    }
+
+    public static func holdRefusal(task: Task, hold: Ruling) -> String {
+        "The human put task \(task.id) (\(task.title)) on hold: \(hold.quoted). Spawning or resuming a worker on it "
+            + "is refused until the human rules otherwise."
     }
 
     /// Raises the shutdown order and queues a `decision` report, because an orchestrator that is
@@ -275,32 +298,53 @@ public struct Board: Sendable {
     @discardableResult
     public func resolveApproval(_ id: String, approved: Bool, by: String, reason: String? = nil) throws -> Approval {
         try db.writer.write { db in
-            let approval = try ApprovalStore.resolve(db, id, approved ? .approved : .denied)
-            if approved, [.prItemDismissal, .prWatchResume, .prWatchAdopt].contains(approval.kind) { return approval }
-            var body = "\(approval.kind.rawValue) \(approved ? "approved" : "denied")"
-            if let taskId = approval.taskId {
-                body += " for task \(taskId)"
-                if let task = try Task.fetchOne(db, key: taskId) {
-                    body += " (\(task.title))"
-                }
-            } else if let epicId = approval.epicId {
-                body += " for epic \(epicId)"
-            } else if approval.kind == .prItemDismissal, let request = try? PRItemDismissalRequest.decode(approval.payload) {
-                body += " for item \(request.itemId)"
-            } else if approval.kind == .prWatchResume, let request = try? PRWatchResumeRequest.decode(approval.payload) {
-                body += " for #\(request.number)"
-            } else if approval.kind == .prWatchAdopt, let request = try? PRWatchAdoptionRequest.decode(approval.payload) {
-                body += " for #\(request.number)"
-            }
-            if let reason, !reason.isEmpty {
-                body += ": \(reason)"
-            }
-            body += "\n\nResolved by: \(by)"
-            _ = try ReportStore.insert(
-                db, projectId: approval.projectId, taskId: approval.taskId, sessionId: nil, kind: .decision, body: body
-            )
-            return approval
+            try Self.resolveApproval(db, id, approved: approved, by: by, reason: reason)
         }
+    }
+
+    /// The human's Deny (SPEC §15.6): resolves the approval and records a `deny` ruling whose note is
+    /// the reason, in one transaction, so an identical request is refused from then on.
+    @discardableResult
+    public func denyApproval(_ id: String, reason: String) throws -> (approval: Approval, ruling: Ruling) {
+        try db.writer.write { db in
+            guard let pending = try Approval.fetchOne(db, key: id) else { throw BoardError.approvalNotFound(id) }
+            let approval = try Self.resolveApproval(db, id, approved: false, by: "human", reason: reason)
+            let ruling = try RulingStore.record(
+                db, .approval(id), question: pending.reason ?? "\(pending.kind.rawValue) request",
+                questionAt: pending.createdAt, verdict: .deny, choice: nil, note: reason, supersedes: nil,
+                now: .nowMillis
+            )
+            return (approval, ruling)
+        }
+    }
+
+    @discardableResult
+    static func resolveApproval(_ db: Database, _ id: String, approved: Bool, by: String, reason: String?) throws -> Approval {
+        let approval = try ApprovalStore.resolve(db, id, approved ? .approved : .denied)
+        if approved, [.prItemDismissal, .prWatchResume, .prWatchAdopt].contains(approval.kind) { return approval }
+        var body = "\(approval.kind.rawValue) \(approved ? "approved" : "denied")"
+        if let taskId = approval.taskId {
+            body += " for task \(taskId)"
+            if let task = try Task.fetchOne(db, key: taskId) {
+                body += " (\(task.title))"
+            }
+        } else if let epicId = approval.epicId {
+            body += " for epic \(epicId)"
+        } else if approval.kind == .prItemDismissal, let request = try? PRItemDismissalRequest.decode(approval.payload) {
+            body += " for item \(request.itemId)"
+        } else if approval.kind == .prWatchResume, let request = try? PRWatchResumeRequest.decode(approval.payload) {
+            body += " for #\(request.number)"
+        } else if approval.kind == .prWatchAdopt, let request = try? PRWatchAdoptionRequest.decode(approval.payload) {
+            body += " for #\(request.number)"
+        }
+        if let reason, !reason.isEmpty {
+            body += ": \(reason)"
+        }
+        body += "\n\nResolved by: \(by)"
+        _ = try ReportStore.insert(
+            db, projectId: approval.projectId, taskId: approval.taskId, sessionId: nil, kind: .decision, body: body
+        )
+        return approval
     }
 
     /// A worker's half of the wind-down: the resume note is recorded against the order and the task,
@@ -968,9 +1012,17 @@ public struct Board: Sendable {
     /// A closed task (SPEC §5) is unarchived and goes back through the readiness check, so one whose
     /// dependency left `done` meanwhile lands in `backlog`; the report quotes why it had been closed.
     @discardableResult
-    public func reopen(taskId: String) throws -> Report {
+    public func reopen(taskId: String, ruling note: String? = nil) throws -> Report {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
+            let ruling = try note.map { note in
+                try RulingStore.record(
+                    db, .task(taskId), question: task.humanReviewReason ?? "Task \(task.title) waits in review for a person.",
+                    questionAt: task.reviewEnteredAt ?? .nowMillis, verdict: .reopen, choice: nil, note: note,
+                    supersedes: nil, now: .nowMillis
+                )
+            }
+            let ruled = ruling.map { "\n\nThe human's ruling: \($0.quoted)" } ?? ""
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             try TaskStore.setFailed(db, taskId, false, reason: nil)
             try TaskStore.move(db, taskId, to: .ready, before: nil)
@@ -978,7 +1030,7 @@ public struct Board: Sendable {
             guard task.column == .closed else {
                 return try ReportStore.insert(
                     db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision,
-                    body: "Task \(taskId) (\(task.title)) was reopened by a human and is back in ready."
+                    body: "Task \(taskId) (\(task.title)) was reopened by a human and is back in ready." + ruled
                 )
             }
             try db.execute(sql: "UPDATE task SET archived_at = NULL WHERE id = ?", arguments: [taskId])
@@ -992,6 +1044,7 @@ public struct Board: Sendable {
                 db, projectId: task.projectId, taskId: taskId, sessionId: nil, kind: .decision,
                 body: "Task \(taskId) (\(task.title)) was reopened by a human and is in \(column.rawValue). "
                     + "It had been closed by \(task.closedBy ?? "an unknown actor"): \(task.closedReason ?? "no reason recorded")"
+                    + ruled
             )
         }
     }
@@ -1461,6 +1514,14 @@ public struct Board: Sendable {
             if let existing = try ApprovalStore.pendingIntegration(db, epicId: epicId) {
                 return existing
             }
+            if let denied = try RulingStore.standingDenials(db, projectId: epic.projectId, kind: .integration)
+                .first(where: { $0.approval.epicId == epicId }) {
+                throw RulingRefusal(
+                    denied.ruling,
+                    "The human denied integrating epic \(epicId): \(denied.ruling.quoted). An integration request for "
+                        + "this epic is refused until the human rules otherwise."
+                )
+            }
             return try ApprovalStore.insert(
                 db, projectId: epic.projectId, kind: .integration, taskId: nil, epicId: epicId,
                 requestedBy: requestedBy, reason: nil
@@ -1491,11 +1552,33 @@ public struct Board: Sendable {
             ) {
                 return existing
             }
+            if let refusal = try Self.deniedPublish(db, projectId: projectId, kind: kind, request: request) {
+                throw refusal
+            }
             return try ApprovalStore.insert(
                 db, projectId: projectId, kind: kind, taskId: taskId, epicId: epicId,
                 requestedBy: requestedBy, reason: reason, payload: try request.encoded()
             )
         }
+    }
+
+    /// SPEC §15.6: the same kind, branch and head commit as a publish whose `deny` stands. A request
+    /// with no head commit matches nothing, since it cannot say which commit it would publish.
+    static func deniedPublish(
+        _ db: Database, projectId: String, kind: ApprovalKind, request: PublishRequest
+    ) throws -> RulingRefusal? {
+        guard let head = request.headOid else { return nil }
+        guard let denied = try RulingStore.standingDenials(db, projectId: projectId, kind: kind).first(where: {
+            guard let prior = try? $0.approval.publishRequest() else { return false }
+            return prior.branch == request.branch && prior.headOid == head
+        }) else { return nil }
+        let what = kind == .push ? "a push of" : "a pull request from"
+        return RulingRefusal(
+            denied.ruling,
+            "The human denied \(what) \(request.branch) at \(head.prefix(7)): \(denied.ruling.quoted). The same "
+                + "request at the same commit is refused. Ask again only once the branch has a new commit that "
+                + "addresses the reason."
+        )
     }
 
     /// What the board keeps once a `push` or `pull_request` approval has actually run: a `progress`

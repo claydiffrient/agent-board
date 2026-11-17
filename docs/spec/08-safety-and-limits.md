@@ -23,6 +23,10 @@ Per project, overridable:
   sets one. The concurrent-workers and session-ceiling caps are unaffected
   too, since both count on `role = 'worker'` in `agent_session`, which a
   rostered session still is.
+- A human ruling is a limit too (§15.6): a `hold` refuses spawning and
+  resuming the task and keeps its block from clearing, and a `deny` refuses an
+  identical push, pull request, spawn or integration request. These are
+  checked in code inside the write that would act, never left to a prompt.
 - A stopped agent's task returns to `ready` with its `failure_reason` set, and a
   `failed` report goes to the orchestrator (§9.1). Leaving it in `running` with
   no session strands it: nothing can be spawned from `running`.

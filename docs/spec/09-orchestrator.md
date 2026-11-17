@@ -42,6 +42,12 @@
 - **Restart** signals the child with SIGTERM and relaunches on its exit. It
   does not call SwiftTerm's `terminate()`, which cancels the exit monitor, so
   the relaunch would never fire.
+- **Rulings bind the orchestrator.** A human's Deny records a `deny` ruling
+  with its reason (§15). Asking again for the same push or pull request at the
+  same commit, the same spawn, or the same integration is refused with the
+  ruling quoted, as are `spawn_worker` on a task under a `hold` and
+  `resume_pr_watch` on a watch ruled `keep_parked` (§15.6). The refusal is
+  final until the human acts; a new commit on the branch is a new request.
 - Resume sends a fixed app-authored first turn ("Agent Board resumed this
   session; continue from where you left off") because a resumed background
   session otherwise waits for input until the idle cap stops it.

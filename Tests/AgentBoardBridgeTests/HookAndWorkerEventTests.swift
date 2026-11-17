@@ -122,6 +122,21 @@ final class HookAndWorkerEventTests: XCTestCase {
         XCTAssertTrue(items.isEmpty)
     }
 
+    func testPostToolUseLeavesABlockTheHumanHeld() async throws {
+        let task = try f.task("Add the sidebar", column: .running)
+        try f.session("w-held", taskId: task.id)
+        _ = try f.board.block(taskId: task.id, sessionId: "w-held", reason: "Should I drop the cache?")
+        try RulingStore(f.db).record(
+            .task(task.id), question: "Should I drop the cache?",
+            questionAt: try XCTUnwrap(f.tasks.get(task.id)?.blockedAt), verdict: .hold, note: "Not until Friday."
+        )
+
+        let event = HookEvent(name: "PostToolUse", sessionId: "w-held", toolName: "Bash", rawJSON: "{}")
+        _ = await f.hooks.handle(event, identity: f.workerIdentity(sessionId: "w-held", taskId: task.id))
+
+        XCTAssertEqual(try f.tasks.get(task.id)?.blocked, true)
+    }
+
     /// `workerCompleted` runs `claude stop` on the session waiting on this very call, so the answer
     /// has to be built before it is raised, not after. The handler hands the stop back on the result
     /// instead of awaiting it; `BoardServer` runs it once the body is on the wire.
