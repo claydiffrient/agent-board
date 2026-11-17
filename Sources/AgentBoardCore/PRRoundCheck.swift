@@ -463,8 +463,7 @@ extension Board {
             else { continue }
             try TaskStore.close(db, taskId, reason: "Pull request #\(watch.number) parked: \(reason)", by: "follow-through", at: now)
         }
-        watch.state = .parked
-        watch.parkedReason = reason
+        watch.park(reason: reason, at: now)
         watch.updatedAt = now
         try watch.update(db)
         try PRWatchStore.report(db, watch: watch, .parked(reason: reason))

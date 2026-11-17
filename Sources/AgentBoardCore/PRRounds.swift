@@ -55,9 +55,11 @@ extension PRWatchStore {
             arguments: [watch.id, watch.resumedAt ?? 0]
         ) ?? 0
         guard rounds >= cap else { return false }
-        watch.state = .parked
-        watch.parkedReason = "#\(watch.number) has run its round cap of \(cap) round\(cap == 1 ? "" : "s") without the "
-            + "feedback settling. Resume it to allow \(cap) more."
+        watch.park(
+            reason: "#\(watch.number) has run its round cap of \(cap) round\(cap == 1 ? "" : "s") without the "
+                + "feedback settling. Resume it to allow \(cap) more.",
+            at: now
+        )
         watch.updatedAt = now
         try watch.update(db)
         try report(db, watch: watch, .parked(reason: watch.parkedReason))
@@ -149,8 +151,7 @@ extension PRWatchStore {
             )
             let failures = outcomes.prefix { $0 == .triageFailed }.count
             if let failure, failures >= Self.failedSessionsBeforePark {
-                watch.state = .parked
-                watch.parkedReason = "Triage failed \(failures) times in a row. The last failure: \(failure)"
+                watch.park(reason: "Triage failed \(failures) times in a row. The last failure: \(failure)", at: now)
             } else {
                 watch.state = .settling
             }
@@ -248,9 +249,11 @@ extension Board {
     static func fixUnlessStacked(_ db: Database, watch: inout PRWatch) throws {
         let base = try Project.fetchOne(db, key: watch.projectId)?.baseBranch
         if let base, watch.baseRef != base {
-            watch.state = .parked
-            watch.parkedReason = "#\(watch.number) is stacked on `\(watch.baseRef)`, not `\(base)`, so a fix "
-                + "round would leave the layers above it to restack, which is yours to do."
+            watch.park(
+                reason: "#\(watch.number) is stacked on `\(watch.baseRef)`, not `\(base)`, so a fix "
+                    + "round would leave the layers above it to restack, which is yours to do.",
+                at: .nowMillis
+            )
             try PRWatchStore.report(db, watch: watch, .parked(reason: watch.parkedReason))
         } else {
             watch.state = .fixing

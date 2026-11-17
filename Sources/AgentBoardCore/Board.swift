@@ -592,6 +592,7 @@ public struct Board: Sendable {
 
     static func leaveReviewToPerson(_ db: Database, taskId: String, reason: String?) throws {
         try TaskStore.setReviewer(db, taskId, nil)
+        try TaskStore.enterHumanReview(db, taskId, reason: reason)
         if let reason {
             _ = try ProgressStore.append(db, taskId: taskId, sessionId: nil, kind: .status, text: reason)
         }

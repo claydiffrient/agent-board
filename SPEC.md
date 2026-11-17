@@ -68,3 +68,8 @@ Subsections stay in their parent's file. Numbers do not change when a title does
   Verdicts · §13.3 Settings · §13.4 Where it lives in the app · §13.5
   Guardrails · §13.6 Reports to the orchestrator · §13.7 CDR, the review
   watcher · §13.8 Takeover.
+
+- **§15 [Human inbox and rulings](docs/spec/15-human-inbox.md)** — the
+  human's append-only answers to what agents and the board ask, and the
+  question episodes they answer. §15.1 Question episodes · §15.2 Verdicts and
+  subjects · §15.3 Standing rulings · §15.4 Carried-over answers

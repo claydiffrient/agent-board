@@ -266,7 +266,7 @@ extension Board {
 
     public func parkPublishing(watchId: String, reason: String, now: Int64 = .nowMillis) throws {
         try endPublishing(watchId: watchId, outcome: .publishFailed, state: .parked, now: now) { _, watch, _ in
-            watch.parkedReason = reason
+            watch.park(reason: reason, at: now)
         }
     }
 

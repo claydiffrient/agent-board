@@ -195,6 +195,11 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var closedAt: Int64?
     public var closedReason: String?
     public var closedBy: String?
+    /// The current block's episode stamp (SPEC §15.1); advances on every block, kept on unblock.
+    public var blockedAt: Int64? = nil
+    /// Why the task waits in `review` for a person, written with `reviewEnteredAt` (SPEC §15.1).
+    public var humanReviewReason: String? = nil
+    public var reviewEnteredAt: Int64? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -226,6 +231,9 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case closedAt = "closed_at"
         case closedReason = "closed_reason"
         case closedBy = "closed_by"
+        case blockedAt = "blocked_at"
+        case humanReviewReason = "human_review_reason"
+        case reviewEnteredAt = "review_entered_at"
     }
 
     public init(

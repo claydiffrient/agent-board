@@ -275,10 +275,29 @@ public struct TaskStore: Sendable {
         }
     }
 
+    /// A block stamps a new `blocked_at`, strictly later than the last, so each block is its own
+    /// question episode (SPEC §15.1).
     static func setBlocked(_ db: Database, _ id: String, _ blocked: Bool, reason: String?) throws {
+        let now = Int64.nowMillis
         try db.execute(
-            sql: "UPDATE task SET blocked = ?, blocked_reason = ?, updated_at = ? WHERE id = ?",
-            arguments: [blocked, blocked ? reason : nil, Int64.nowMillis, id]
+            sql: """
+            UPDATE task SET blocked = ?, blocked_reason = ?, updated_at = ?,
+              blocked_at = CASE WHEN ? THEN MAX(?, COALESCE(blocked_at, 0) + 1) ELSE blocked_at END
+            WHERE id = ?
+            """,
+            arguments: [blocked, blocked ? reason : nil, now, blocked, now, id]
+        )
+    }
+
+    /// Stamps a new human-review episode, strictly later than the last (SPEC §15.1).
+    static func enterHumanReview(_ db: Database, _ id: String, reason: String?) throws {
+        let now = Int64.nowMillis
+        try db.execute(
+            sql: """
+            UPDATE task SET human_review_reason = ?, review_entered_at = MAX(?, COALESCE(review_entered_at, 0) + 1)
+            WHERE id = ?
+            """,
+            arguments: [reason, now, id]
         )
     }
 

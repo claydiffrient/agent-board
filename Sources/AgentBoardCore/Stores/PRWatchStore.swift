@@ -147,9 +147,11 @@ public struct PRWatchStore: Sendable {
             }
             if snapshot.isCrossRepository, [.watching, .settling, .readyToVerify, .verified].contains(watch.state) {
                 let fork = snapshot.headRepository.map { "the fork `\($0)`" } ?? "a fork GitHub no longer has"
-                watch.state = .parked
-                watch.parkedReason = "#\(watch.number) comes from \(fork), and Agent Board pushes only to "
-                    + "`\(watch.repoOwner)/\(watch.repoName)`, so follow-through does not run on it."
+                watch.park(
+                    reason: "#\(watch.number) comes from \(fork), and Agent Board pushes only to "
+                        + "`\(watch.repoOwner)/\(watch.repoName)`, so follow-through does not run on it.",
+                    at: now
+                )
                 watch.updatedAt = now
                 try watch.update(db)
                 try Self.report(db, watch: watch, .parked(reason: watch.parkedReason))
