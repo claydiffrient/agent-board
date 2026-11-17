@@ -137,6 +137,24 @@ final class BranchPublisherRepoTests: XCTestCase {
         XCTAssertEqual(try git(["rev-parse", "--abbrev-ref", "HEAD"], in: repo), "main")
     }
 
+    /// git hands `pre-push` the source it was given, so this sees whether the approved commit or
+    /// the branch name — whatever it points at by then — was pushed.
+    func testABoundPushNamesTheApprovedCommitAsItsSourceNotTheBranch() throws {
+        try addRemote()
+        try git(["branch", "agentboard/epic-4"], in: repo)
+        let approved = try git(["rev-parse", "refs/heads/agentboard/epic-4"], in: repo)
+        let seen = root.appendingPathComponent("pre-push.txt")
+        let hook = repo.appendingPathComponent(".git/hooks/pre-push")
+        try "#!/bin/sh\ncat > '\(seen.path)'\n".write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+
+        _ = try publisher.push(branch: "agentboard/epic-4", publishedAs: "release/four", expectedHead: approved)
+
+        let line = try String(contentsOf: seen, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(line.split(separator: " ").prefix(3).map(String.init), [approved, approved, "refs/heads/release/four"])
+        XCTAssertEqual(try git(["rev-parse", "refs/heads/release/four"], in: remote), approved)
+    }
+
     func testTheRemoteCheckPassesOnceARemoteExists() throws {
         try addRemote()
         XCTAssertEqual(try publisher.requireRemote(), remote.path)

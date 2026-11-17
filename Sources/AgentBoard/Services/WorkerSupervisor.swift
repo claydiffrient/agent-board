@@ -291,6 +291,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var resuming: Set<String> = []
     /// Keyed by epic id; present from the moment a refresh is asked for until its outcome is known.
     @ObservationIgnored private var refreshes: [String: RefreshRun] = [:]
+    @ObservationIgnored private let completionChecks = CompletionCheckQueue()
+    @ObservationIgnored private let completionCheckStop = RefreshRun()
     /// Test-only: overrides the refresh check's timeout below what a project's settings can express
     /// (`VerificationCommands.timeoutRange` floors at 60s), so a test can drive the timeout path
     /// without a build that actually runs a minute.
@@ -425,6 +427,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     func stop() async {
         meteringTask?.cancel()
         meteringTask = nil
+        completionCheckStop.cancel()
         let running = refreshes.values
         running.forEach { $0.cancel() }
         for run in running { await run.task?.value }
@@ -694,7 +697,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             verification: project.settings.verification,
                             workingDirectory: site.cwd.path,
                             agent: agent?.identity,
-                            comments: try CommentStore(db).list(taskId: taskId)
+                            comments: try CommentStore(db).list(taskId: taskId),
+                            previousRound: try ReviewPrompt.previousRound(db: db, taskId: taskId)
                         )
                         : Self.openingPrompt(
                             task: task, branch: branch, attempt: placeholder.attempt, epicGoal: epic?.goal,
@@ -780,6 +784,46 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         let cwd = URL(fileURLWithPath: session.cwd)
         return try await offMain { try ReviewCheckout.change(since: head, in: cwd) }
+    }
+
+    /// Diffed against the base a reviewer would be spawned with, or, in the shared checkout, read from the
+    /// commits `task_commit` attributes to the task.
+    func completionChanges(taskId: String, sessionId: String) async -> CompletionChanges {
+        do {
+            guard let session = try sessions.get(sessionId), let task = try tasks.get(taskId),
+                  let project = try projects.get(task.projectId)
+            else { return .unlisted(reason: "no session, task or project row to read it from") }
+            if SharedCheckoutGroup.isMember(session, of: project) {
+                let shas = try TaskCommitStore(db).shas(taskId: taskId)
+                let repo = URL(fileURLWithPath: project.repoPath)
+                return .listed(try await offMain { try ReviewCheckout.changedFiles(inCommits: shas, in: repo) })
+            }
+            let manager = worktreeManager(for: project)
+            let epicBranch = try task.epicId.flatMap { try epics.get($0) }?.branch
+            let projectBase = project.baseBranch
+            let cwd = URL(fileURLWithPath: session.cwd)
+            let ignoredBaseline = session.ignoredBaseline ?? [:]
+            return .listed(try await offMain {
+                let base = epicBranch ?? manager.diffBase(taskId: taskId, base: projectBase)
+                return try ReviewCheckout.changedFiles(against: base, in: cwd, ignoredBaseline: ignoredBaseline)
+            })
+        } catch {
+            return .unlisted(reason: describe(error))
+        }
+    }
+
+    /// SPEC §5.1: run in the checkout the finishing session worked in, never the project's `testCommand`.
+    func runCompletionCheck(
+        taskId: String, sessionId: String, commands: [String], timeoutSeconds: Int
+    ) async -> CompletionCheck {
+        guard let session = try? sessions.get(sessionId), session.taskId == taskId else {
+            return .couldNotRun(commands, reason: "Agent Board has no record of the checkout session \(sessionId) worked in.")
+        }
+        let stop = completionCheckStop
+        return await completionChecks.run(
+            commands, timeoutSeconds: timeoutSeconds, in: URL(fileURLWithPath: session.cwd),
+            isCancelled: { stop.isCanceled }
+        )
     }
 
     func baseDrift(epicId: String) async throws -> BaseDrift {
@@ -1398,6 +1442,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 effort: plan.models.effort,
                 pluginDirs: (plan.rosterAgent?.pluginDirs ?? []).map(expandingHome)
             )
+            await recordIgnoredBaseline(plan, placeholder: placeholder)
             let spawned: SpawnedAgent
             do {
                 spawned = try await runtime.spawn(request)
@@ -1441,6 +1486,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             try? grants.revoke(token: grant.token)
             throw error
         }
+    }
+
+    /// SPEC §5.1: the gitignored review-rule files setup left, so a completion flags only the ones the
+    /// worker added or changed. A later attempt in the same worktree keeps the first attempt's record.
+    /// One that cannot be read is left unrecorded, which flags every such file.
+    private func recordIgnoredBaseline(_ plan: LaunchPlan, placeholder: AgentSession) async {
+        guard let path = plan.worktreePath else { return }
+        let cwd = plan.cwd
+        var recorded = try? sessions.firstIgnoredBaseline(taskId: plan.taskId, worktreePath: path)
+        if recorded == nil {
+            recorded = try? await offMain { try ReviewCheckout.ignoredReviewRules(in: cwd) }
+        }
+        guard let recorded else { return }
+        try? sessions.setIgnoredBaseline(placeholder.sessionId, recorded)
     }
 
     private func stopFailure(_ stop: () async throws -> Void) async -> String? {
@@ -4930,7 +4989,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 let result = try await offMain {
                     try publisher.push(
                         branch: request.branch, publishedAs: request.publishedBranch, base: guardBase,
-                        remote: request.remote
+                        remote: request.remote, expectedHead: request.headOid
                     )
                 }
                 try board.recordPublished(approval: approval, summary: "Push approved: \(result.summary).")
@@ -4938,7 +4997,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 let result = try await offMain {
                     try publisher.openPullRequest(
                         branch: request.branch, publishedAs: request.publishedBranch, base: base,
-                        title: request.title ?? request.branch, body: request.body ?? "", remote: request.remote
+                        title: request.title ?? request.branch, body: request.body ?? "", remote: request.remote,
+                        expectedHead: request.headOid
                     )
                 }
                 let verb = result.alreadyOpen ? "Pull request already open" : "Pull request opened"
@@ -4958,6 +5018,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if let epic = upstreamEpic, let upstream = epic.upstream, case .notFastForward? = error as? PublishFailure {
                 summary += " Call `refresh_epic(epic_id: \"\(epic.id)\")` to merge origin/\(upstream.headRef) into "
                     + "`\(epic.branch)`, then `push_branch(branch: \"\(epic.branch)\")` again."
+            }
+            if case .headMoved? = error as? PublishFailure {
+                let tool = approval.kind == .push ? "push_branch" : "open_pull_request"
+                summary += " Call `\(tool)` for \(request.branch) again."
             }
             try? board.recordPublished(approval: approval, summary: summary, failed: true)
             announceReports(projectId: approval.projectId)

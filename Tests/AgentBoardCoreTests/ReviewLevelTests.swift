@@ -421,8 +421,8 @@ final class ReviewLevelTests: XCTestCase {
 
         let report = try f.board.reviewReopen(
             taskId: task.id, sessionId: "rev-1", reviewerName: "Rowan",
-            findings: "The empty input case throws; see Parser.swift:41."
-        )
+            findings: ["The empty input case throws; see Parser.swift:41."]
+        ).report
 
         XCTAssertEqual(try f.tasks.get(task.id)?.column, .ready)
         XCTAssertNil(try f.tasks.get(task.id)?.reviewerAgentId)
@@ -438,7 +438,7 @@ final class ReviewLevelTests: XCTestCase {
             taskId: task.id, sessionId: "rev-1", reviewerName: "Rowan", verdict: "fine"
         ))
         XCTAssertThrowsError(try f.board.reviewReopen(
-            taskId: task.id, sessionId: "rev-1", reviewerName: "Rowan", findings: "nope"
+            taskId: task.id, sessionId: "rev-1", reviewerName: "Rowan", findings: ["nope"]
         ))
     }
 }

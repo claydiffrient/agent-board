@@ -18,6 +18,8 @@ public enum PublishFailure: Error, CustomStringConvertible, Equatable, Sendable 
     case noPullRequestURL(output: String)
     case privateTerm(term: String, site: PrivateTermSite)
     case privateTermCheckFailed(detail: String)
+    /// SPEC §4: the branch's tip is no longer the commit the human was shown when asked to approve.
+    case headMoved(branch: String, approved: String, current: String)
 
     public var description: String {
         switch self {
@@ -48,6 +50,10 @@ public enum PublishFailure: Error, CustomStringConvertible, Equatable, Sendable 
         case .privateTermCheckFailed(let detail):
             return "Refused to publish: the private-term check could not read what would be sent, "
                 + "so nothing was pushed: \(detail)"
+        case .headMoved(let branch, let approved, let current):
+            return "\(branch) moved after this approval was requested: the human approved \(approved), and the "
+                + "branch is now at \(current). Nothing was pushed. Request the publish again so the human "
+                + "approves \(current)."
         }
     }
 }
@@ -94,14 +100,20 @@ public enum PublishCommand {
     /// be mistaken for a remote, a tag, or — with an empty source — a delete.
     /// `published` renames the ref on the remote without touching the local branch: git writes the
     /// source ref to a differently named destination natively. Nil publishes the local name.
-    public static func push(remote: String, branch: String, published: String? = nil) -> [String] {
-        ["push", "--set-upstream", remote, "refs/heads/\(branch):refs/heads/\(published ?? branch)"]
+    /// `commit` pushes that object instead of the branch, so a commit landing on the branch after
+    /// its tip was checked is not published (SPEC §6 `push_branch`).
+    public static func push(remote: String, branch: String, published: String? = nil, commit: String? = nil) -> [String] {
+        ["push", "--set-upstream", remote, "\(commit ?? "refs/heads/\(branch)"):refs/heads/\(published ?? branch)"]
     }
 
     /// No `--force` and no `--set-upstream`: git refuses anything but a fast-forward of `onto`.
     /// `--porcelain` makes the rejection a status flag rather than localized prose.
     public static func fastForward(remote: String, branch: String, onto: String) -> [String] {
         ["push", "--porcelain", remote, "refs/heads/\(branch):refs/heads/\(onto)"]
+    }
+
+    public static func branchTip(_ branch: String) -> [String] {
+        ["rev-parse", "--verify", "--quiet", "refs/heads/\(branch)^{commit}"]
     }
 
     public static func branchExists(_ branch: String) -> [String] {
@@ -233,6 +245,25 @@ public struct BranchPublisher: Sendable {
         guard try refExists(PublishCommand.branchExists(branch)) else { throw PublishFailure.noSuchBranch(branch) }
     }
 
+    /// Nil when the branch does not exist.
+    public func tip(of branch: String) throws -> String? {
+        let arguments = PublishCommand.branchTip(branch)
+        let result = try git(arguments)
+        if result.status == 1 { return nil }
+        guard result.status == 0 else { throw gitFailure(arguments, result) }
+        return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// SPEC §4: throws `headMoved` when `expected` is set and the branch's tip is another commit.
+    public func requireTip(_ branch: String, is expected: String?) throws {
+        guard let expected else { return }
+        let current = try tip(of: branch)
+        guard let current else { throw PublishFailure.noSuchBranch(branch) }
+        guard current == expected else {
+            throw PublishFailure.headMoved(branch: branch, approved: expected, current: current)
+        }
+    }
+
     /// `gh` present on disk and logged in, as two separate answers.
     @discardableResult
     public func requireGh() throws -> URL {
@@ -275,16 +306,18 @@ public struct BranchPublisher: Sendable {
     /// `publishedAs` is the name the branch takes on the remote; the local branch is never renamed.
     /// `base` bounds what the private-term guard reads.
     public func push(
-        branch: String, publishedAs: String? = nil, base: String? = nil, remote: String = "origin"
+        branch: String, publishedAs: String? = nil, base: String? = nil, remote: String = "origin",
+        expectedHead: String? = nil
     ) throws -> PushResult {
         try requireRemote(remote)
         try requireBranch(branch)
+        try requireTip(branch, is: expectedHead)
         try refusePrivateTerms(branch: branch, publishedAs: publishedAs, base: base, remote: remote)
-        return try pushChecked(branch: branch, publishedAs: publishedAs, remote: remote)
+        return try pushChecked(branch: branch, publishedAs: publishedAs, remote: remote, commit: expectedHead)
     }
 
-    private func pushChecked(branch: String, publishedAs: String?, remote: String) throws -> PushResult {
-        let result = try git(PublishCommand.push(remote: remote, branch: branch, published: publishedAs))
+    private func pushChecked(branch: String, publishedAs: String?, remote: String, commit: String?) throws -> PushResult {
+        let result = try git(PublishCommand.push(remote: remote, branch: branch, published: publishedAs, commit: commit))
         guard result.status == 0 else {
             if (result.stderr + result.stdout).contains("[rejected]") {
                 throw PublishFailure.notFastForward(branch: branch, onto: publishedAs ?? branch, detail: Self.detail(result))
@@ -320,15 +353,16 @@ public struct BranchPublisher: Sendable {
     /// ref that exists on the remote.
     public func openPullRequest(
         branch: String, publishedAs: String? = nil, base: String, title: String, body: String,
-        remote: String = "origin"
+        remote: String = "origin", expectedHead: String? = nil
     ) throws -> PullRequestResult {
         try requireRemote(remote)
         try requireBranch(branch)
+        try requireTip(branch, is: expectedHead)
         try refusePrivateTerms(
             branch: branch, publishedAs: publishedAs, base: base, remote: remote, title: title, body: body
         )
         let gh = try requireGh()
-        let pushed = try pushChecked(branch: branch, publishedAs: publishedAs, remote: remote)
+        let pushed = try pushChecked(branch: branch, publishedAs: publishedAs, remote: remote, commit: expectedHead)
         let head = publishedAs ?? branch
 
         let created = try ProcessRunner.run(

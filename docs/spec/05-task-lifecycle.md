@@ -26,12 +26,14 @@ project setting an epic may override for its own tasks:
 | `epic` | inside an epic, goes straight to `done`; standalone, waits in `review` | you, at the epic's integration gate |
 
 The level is resolved on completion: the task's epic's `review_level` if it has
-one, otherwise the project's. Two rules override it unconditionally. An epic's
+one, otherwise the project's. Three rules override it unconditionally. An epic's
 integration task (`origin = integration`) always waits for a person, at every
 level — §5.2's gate is not weakened by this setting. And `agent` with no usable
 rostered reviewer — or with a routing row naming an agent (§4) that is no longer usable —
 falls back to `task` and says so in a `progress` row, rather than accepting work
-nobody reviewed.
+nobody reviewed. And a task whose changes touch a protected path — `CLAUDE.md`,
+`.claude/`, CI workflows, `.mcp.json` or the project's own globs — waits for a
+person at every level (§5.1).
 
 - `proposed` — created by a worker via `propose_task`. Neither the orchestrator
   nor a worker may promote a worker proposal without human approval when
@@ -558,6 +560,11 @@ high after attempt 1 failed", is the escalated `WorkerModelChoice`'s
 a `status` progress row records it on the task. Integrator, triage, fixer and
 follow-up check spawns do not escalate.
 
+Escalation does not bound the loop; the review round cap does (§5.1, "Review
+rounds"). A reopen below the cap sends the task back to `ready` and the retry
+escalates as above; the reopen that is the cap-th round leaves the task in
+`review` for a person, so no retry follows it until a person reopens the task.
+
 ### 5.1 Completion protocol
 
 A worker's closing instructions, injected at spawn, worded per placement
@@ -580,6 +587,32 @@ the newly-ready announcement, the grant revocation and the worktree removal are
 one code path (`WorkerControl.accept`), not a second one that has to be kept in
 step. The worker's return text tells it which happened.
 
+**The board checks the work itself before routing it.** `tests_run` is the
+worker's free text and nothing verifies it, so for an ordinary task (not an
+epic's integration task or a PR follow-through fix round, which already wait on
+a person or their own checks) `report_complete` runs the project's
+`completionCheckCommands` (§4) in the worktree the finishing session worked in,
+through `WorkerControl.runCompletionCheck` and `RefreshVerifier.completionCheck`.
+At most one completion check runs at a time across the whole app; the rest wait
+their turn in order (`CompletionCheckQueue`). The project's `testCommand` is
+never run here. The result is written to `task.completion_check` and as a
+`progress` row (an `error` row for a failure): each command, pass or fail, its
+duration, and the failing command's output tail. With no commands configured,
+the task records "Not verified by the board" and routing goes on at once.
+
+Claude Code abandons a tool call after 60 seconds, so a check still running
+after 30 seconds answers the worker at once that the check is running, and the
+board routes review itself when the check ends. A failed check never reopens
+the task: it goes to review with the failure attached. The one routing it
+changes is acceptance without review — a check that did not pass leaves the
+task in `review` for a person instead, since nobody would otherwise see the
+failure. A task a person moved out of `review` while its check ran is not
+routed again. A rostered reviewer's prompt carries the result under "Agent
+Board's completion check", with the output tail fenced as data: it is the
+board's own evidence, not the worker's claim, so the rule withholding the
+worker's report below does not cover it. A check cut off by the app quitting
+leaves the task in `review`, where a person picks it up.
+
 Under `agent` review the reviewer is **started**, not merely recorded:
 `report_complete` resolves the routing, writes `reviewer_agent_id`, and then
 spawns the reviewer through `WorkerControl.assignAgent(taskId:rosterAgentId:
@@ -590,6 +623,40 @@ that does **not** move the task to `running`: a review must stay in `review` or
 its own `accept_task` has nothing to decide. A reviewer that cannot be started
 leaves the task in `review` for a person and says so in a `progress` row, which
 is where `task` review would have parked it anyway.
+
+**A task that changed the rules its reviewer loads goes to a person.** A
+reviewer runs in the worker's worktree, so it loads that branch's `CLAUDE.md`
+and `.claude/`: a worker could rewrite the rules that judge its own change.
+Before routing, `report_complete` lists what the task changed
+(`WorkerControl.completionChanges`): `git diff --name-only --no-renames
+<base>...HEAD` against the base a reviewer would be spawned with, plus
+uncommitted and untracked files in the worktree, which the reviewer would load
+too, plus gitignored review-rule files (`ReviewCheckout.ignoredReviewRules`)
+that are new or changed since the worktree's setup; in the shared checkout, the
+files of the commits `task_commit` attributes to the task. If any is protected
+(`ProtectedPaths.matching`) — a `CLAUDE.md` or `CLAUDE.local.md` at any depth,
+anything under a `.claude/` directory at any depth, the root `.mcp.json`, all
+four in any letter case, since macOS's default filesystem opens `docs/claude.md`
+for `docs/CLAUDE.md`; anything under `.github/workflows/`, exactly as cased; or
+a match for the project's `protectedPathGlobs` (§4), also exactly as cased —
+the task goes to `humanReview`
+whatever the project's or epic's review level, a `progress` row names the
+paths, and the worker's return text says so. A listing git cannot produce
+fails closed the same way, with the reason in the row. An epic's integration
+task and a PR follow-through fix round are not checked: both already wait on a
+person. Loading the rules from the base branch inside the reviewer session was
+considered and rejected as a larger runtime change for the same protection.
+A worker can write a gitignored `CLAUDE.local.md` or
+`.claude/settings.local.json` that the reviewer in its worktree loads, but setup
+can write such files too: the repository's `post-checkout` hook, or Agent
+Board's own launch. So just before `claude --bg` runs, the worker's setup row
+records the ignored review-rule files then present with a SHA-256 of each
+(`agent_session.ignored_baseline`), and a completion lists only those added or
+changed since. A later attempt in the same worktree keeps the first attempt's
+record, so an earlier worker's file is not taken for setup's. A baseline that
+was never recorded, including for sessions started before the column existed,
+flags every such file. Ignored files matching only `protectedPathGlobs`, and
+ignored files in the shared checkout, are not listed.
 
 The spawn answers once the reviewer's setup row exists, so a setup that fails
 after that, launching `claude` or reading back its session, takes the same
@@ -648,10 +715,13 @@ task back into `review` with its landing cleared.
 A rostered reviewer under `agent` review gets its own token scope (§6), narrower
 than a worker's: `get_my_task`, `log_progress`, `accept_task(verdict)` and
 `reopen_task(findings)` over the one task its token names, and nothing else — no
-spawn, no reassign, no other task. `accept_task` writes the verdict to `progress`
+spawn, no reassign, no other task. Both verdicts also take `grades` on a
+re-review ("Review rounds", below). `accept_task` writes the verdict to `progress`
 and then takes that same acceptance path, which spares that reviewer's own
-session; `reopen_task` puts the findings on the
-task and returns it to `ready` without flagging a failure. Either verdict marks
+session; `reopen_task` puts the findings — a list, one entry per finding, or a
+single string read as one — on the
+task and returns it to `ready` without flagging a failure, unless it is the
+round the cap stops. Either verdict marks
 the reviewer's session `completed` and, like `report_complete`, stops it once the
 answer is written (`afterResponse`). The verdict on the
 task is the point: a person reading a task that reached `done` without them can
@@ -715,7 +785,8 @@ its post-compaction brief, until a later review passes, a human reopens the task
 or it is accepted (`Board.closeReviewFindings`).
 
 A reviewer's inputs are the task — title, body, acceptance criteria and its
-comment thread — and the diff on the task's branch. Nothing else: not the
+comment thread — the diff on the task's branch, the board's completion check
+(above), and on a re-review the previous round's findings. Nothing else: not the
 worker's report, not the task's `progress` rows (the worker's own notes and any
 hand-off summary), not project notes, not the board database. It checks the
 worker's claims by reading and running the code. The report is withheld on
@@ -726,6 +797,52 @@ did or did not disclose. `ReviewPrompt` says so; its
 `get_my_task` returns the task and its comments and nothing from `report` or
 `progress`; its scope has no note tools, and `NoteResourceHandler` lists no
 `note://` resource to a `reviewer` token and refuses to read one.
+
+**Review rounds.** Every verdict a rostered reviewer gives on an ordinary task
+is a round, numbered per task from 1 and stored as a `review_round` row (§4):
+the reviewer's name, the outcome (`accepted`, `reopened` or `capped`), the
+findings, the accept verdict, the grades it gave, and the commit it read, the
+SHA half of its session's `review_head`. Nothing resets the count: a human
+Accept or Reopen adds no round and removes none. A fix round's review (§13.1)
+is not a round here; it keeps its own record and its own cap.
+
+The reopen whose round number reaches the project's `reviewRoundCap`
+(`settings_json.reviewRoundCap`, default 3, at least 1; §4) does not send the
+task back. `Board.reviewReopen` records the reviewer's `progress` note as any
+reopen does, ends the reviewer's session, clears `reviewer_agent_id` and leaves
+the task in `review`, then writes a session-less `status` row headed "Agent
+review round cap reached." that quotes the last findings — the reason Pending
+reviews shows under Waiting on you (§10) — and the same text, with the round's
+grades, as a `decision` report to the orchestrator. `ReviewerToolHandler` posts
+a notification with that heading and tells the reviewer the task stayed in
+Review. The cap only stops agent reopens: a human Accept or Reopen is never
+refused by it, and a reopen after the human has sent the task back again is
+past the cap, so it too stays in `review`.
+
+A reviewer spawned on a task with an earlier round is told so in a "This is a
+re-review" section of `ReviewPrompt` (`ReviewPrompt.previousRound`, also used by
+`briefing://reviewer` and the post-compaction brief, which skip the reviewer's
+own round). It names the previous round's reviewer and outcome and the range to
+read first, `git diff <previous reviewed_head>..HEAD`, while `git diff
+<base>...HEAD` stays available for context; with no recorded head it reads the
+base range. When that round reopened, its findings follow, numbered from 1, each
+fenced between `<<<PREVIOUS REVIEW FINDING n id=…>>>` and its matching `<<<END …>>>`
+marker as an earlier reviewer's data rather than instructions. The reviewer must
+grade every one — `fixed`, `partly_fixed`, `not_fixed` or `moot`, each with
+evidence, the grades of a follow-up check (§13.1) apart from `needs_author` —
+may raise one again only by grading it `not_fixed` or `partly_fixed`, and may
+add a new finding only on code changed since that round or on something that
+round could not have seen.
+
+The grading is enforced, not only asked for. `accept_task` and `reopen_task`
+take `grades`, a list of `{finding, grade, evidence}`, and
+`ReviewRound.checkGrades` refuses the verdict, recording nothing, when an entry
+names a finding the previous round did not have, grades one twice, has blank
+evidence, or when any previous finding is left ungraded; with no earlier
+findings, any grade is refused. That refusal is the one a reviewer is told to
+answer by correcting `grades` and calling again. The grades are written under
+the verdict's `progress` note as "Grades of round N's findings:", one line per
+finding, so the human sees them in the task inspector, and on the round's row.
 
 The database is denied through the same `--disallowedTools` list as its writes,
 by `SpawnRequest.reviewerBoardDeny`: `Read(//**/agentboard.sqlite*)` and

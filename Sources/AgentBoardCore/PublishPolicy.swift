@@ -13,10 +13,13 @@ public struct PublishRequest: Codable, Sendable, Equatable {
     /// template. Nil means the local name is published as-is, which is what every approval row
     /// written before remote naming existed decodes to.
     public var publishedBranch: String?
+    /// The local branch's tip when the approval was requested (SPEC §4). A grant publishes only
+    /// that commit; nil, which every row written before this field decodes to, publishes the tip.
+    public var headOid: String?
 
     public init(
         branch: String, base: String? = nil, title: String? = nil, body: String? = nil,
-        remote: String = "origin", publishedBranch: String? = nil
+        remote: String = "origin", publishedBranch: String? = nil, headOid: String? = nil
     ) {
         self.branch = branch
         self.base = base
@@ -24,10 +27,13 @@ public struct PublishRequest: Codable, Sendable, Equatable {
         self.body = body
         self.remote = remote
         self.publishedBranch = publishedBranch
+        self.headOid = headOid
     }
 
     /// What the remote and the pull request see.
     public var head: String { publishedBranch ?? branch }
+
+    public var shortHeadOid: String? { headOid.map { String($0.prefix(7)) } }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -37,6 +43,7 @@ public struct PublishRequest: Codable, Sendable, Equatable {
         body = try c.decodeIfPresent(String.self, forKey: .body)
         remote = try c.decodeIfPresent(String.self, forKey: .remote) ?? "origin"
         publishedBranch = try c.decodeIfPresent(String.self, forKey: .publishedBranch)
+        headOid = try c.decodeIfPresent(String.self, forKey: .headOid)
     }
 
     public func encoded() throws -> String {

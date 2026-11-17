@@ -81,6 +81,8 @@ struct ProjectSettingsSheet: View {
     @State private var worktreeRoot: String
     @State private var autoModeJSON: String
     @State private var extraServers: String
+    @State private var protectedPathGlobs: String
+    @State private var completionCheckCommands: String
     @State private var checksAwaitingVerification: String
     @State private var triggerLabels: String
     @State private var archiveMode: ArchivePolicyMode
@@ -113,6 +115,8 @@ struct ProjectSettingsSheet: View {
         _worktreeRoot = State(initialValue: project.worktreeRoot)
         _autoModeJSON = State(initialValue: settings.autoModeJSON ?? "")
         _extraServers = State(initialValue: settings.extraMcpServers.joined(separator: ", "))
+        _protectedPathGlobs = State(initialValue: settings.protectedPathGlobs.joined(separator: ", "))
+        _completionCheckCommands = State(initialValue: settings.completionCheckCommands.joined(separator: "\n"))
         _checksAwaitingVerification = State(
             initialValue: settings.prFollowThrough.checksAwaitingVerification.joined(separator: ", ")
         )
@@ -272,6 +276,18 @@ struct ProjectSettingsSheet: View {
             Text("Who reviews each type of task. Applies only while Review level is Agent.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Stepper(
+                "Review round cap: \(settings.reviewRoundCap)",
+                value: $settings.reviewRoundCap, in: 1...20
+            )
+            .disabled(settings.reviewLevel != .agent)
+            Text("The agent review round whose reopen stops the loop: the task stays in Review for you instead of going back to a worker.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("Protected paths", text: $protectedPathGlobs, prompt: Text("e.g. scripts/hooks/**"))
+            Text("Comma-separated globs. A task that changes one waits for you at any review level, as one that changes CLAUDE.md, .claude/, .github/workflows/ or .mcp.json always does.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .verification:
             TextField("Build command", text: Binding(
                 get: { settings.buildCommand ?? "" },
@@ -291,6 +307,16 @@ struct ProjectSettingsSheet: View {
                 }
             }
             Text("What the epic integrator runs on this Mac after its merges, and what an epic refresh runs. Build only skips the tests, and so does a refresh under None; None checks that every task branch reached the epic branch and no conflict marker was committed, builds only a conflict it resolved by hand, and leaves the rest to the pull request's CI.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Check at completion")
+                TextEditor(text: $completionCheckCommands)
+                    .font(.body.monospaced())
+                    .frame(minHeight: 60)
+                    .accessibilityLabel("Check at completion")
+            }
+            Text("One command per line. When a worker reports complete, Agent Board runs these in its worktree, one at a time across every project, each stopped at the timeout above, and records the result on the task for review. The Test command is never run here, so keep these to a fast build or targeted tests. Left empty, a task records that the board did not verify it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .teardown:
@@ -694,6 +720,10 @@ struct ProjectSettingsSheet: View {
         updated.notifications.mute = muteChoice.mute(existing: settings.notifications.mute)
         updated.prFollowThrough = Self.savedFollowThrough(settings.prFollowThrough, pendingTerm: newPrivateTerm)
         updated.prFollowThrough.checksAwaitingVerification = Self.checkNames(checksAwaitingVerification)
+        updated.protectedPathGlobs = Self.checkNames(protectedPathGlobs)
+        updated.completionCheckCommands = ProjectSettings.normalizedCommands(
+            completionCheckCommands.components(separatedBy: .newlines)
+        )
         updated.takeover = draftTakeover.normalized
         let trimmedJSON = autoModeJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.autoModeJSON = trimmedJSON.isEmpty ? nil : trimmedJSON

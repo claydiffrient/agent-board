@@ -251,6 +251,7 @@ final class PublishRequestPublishedBranchTests: XCTestCase {
         let request = try PublishRequest.decode(legacy)
         XCTAssertEqual(request.branch, "agentboard/epic-7")
         XCTAssertNil(request.publishedBranch)
+        XCTAssertNil(request.headOid)
         XCTAssertEqual(request.head, "agentboard/epic-7")
         XCTAssertEqual(request.remote, "origin")
     }
