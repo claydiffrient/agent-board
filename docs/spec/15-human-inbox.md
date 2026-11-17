@@ -135,8 +135,20 @@ human's note.
     The same branch at a new commit is a new request and creates an approval
     as before.
   - `spawn_worker` and `assign_to_agent` (`Board.requestSpawn`): a spawn of
-    the same task. The human can still start the task from the board.
-  - `request_integration` (`Board.requestIntegration`): the same epic.
+    the same task, until the task changes at or after the ruling's
+    `answered_at`. A change is an edit to its title, body, acceptance, model,
+    effort or dependencies, a human comment on it, or a reopen; each moves
+    `task.changed_at`, which no column move, block or landing touches.
+  - `request_integration` (`Board.requestIntegration`): the same epic, until
+    a task in the epic is accepted, closed or added at or after the ruling,
+    or the epic branch's tip differs from the one the denied request
+    recorded. The orchestrator's request records the tip in the approval's
+    payload; a request without one cannot lift the deny by tip.
+  - A deny stands only for the request as it was when denied, so a spawn or
+    integration deny lapses as above rather than being withdrawn; there is no
+    `withdraw` verdict. The refusal names the ruling's id and what lifts it.
+    The human can still start the task or integrate from the board at any
+    time; only the orchestrator's request is refused.
 - **Hold.** A `hold` is in force while the task is blocked and the ruling's
   `question_at` is at or after `task.blocked_at`, so it covers the block it
   answered and lapses when the worker blocks again. While it is in force:

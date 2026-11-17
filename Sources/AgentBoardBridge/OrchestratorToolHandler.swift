@@ -1339,8 +1339,12 @@ public final class OrchestratorToolHandler: ToolHandler {
                     + "task(s) are not done yet."
             )
         }
+        let project = try requireProject(identity)
+        let tip = try? branchTip(project, epic.branch)
         let approval = try refusedByRuling {
-            try board.requestIntegration(epicId: epic.id, requestedBy: identity.sessionId ?? "orchestrator")
+            try board.requestIntegration(
+                epicId: epic.id, requestedBy: identity.sessionId ?? "orchestrator", epicTip: tip
+            )
         }
         return ToolResult(text: "integration approval \(approval.id) pending")
     }

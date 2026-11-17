@@ -228,13 +228,16 @@ public struct Board: Sendable {
         if let hold = try RulingStore.holdInForce(db, task: task) {
             return RulingRefusal(hold, Self.holdRefusal(task: task, hold: hold))
         }
+        let changedAt = try TaskStore.changedAt(db, task.id)
         guard let denied = try RulingStore.standingDenials(db, projectId: task.projectId, kind: .spawn)
-            .first(where: { $0.approval.taskId == task.id })
+            .first(where: { $0.approval.taskId == task.id && (changedAt ?? .min) < $0.ruling.answeredAt })
         else { return nil }
         return RulingRefusal(
             denied.ruling,
-            "The human denied spawning task \(task.id) (\(task.title)): \(denied.ruling.quoted). A spawn of this task "
-                + "is refused until the human rules otherwise; the human can still start it from the board."
+            "The human denied spawning task \(task.id) (\(task.title)), ruling \(denied.ruling.id): "
+                + "\(denied.ruling.quoted). A spawn of the task as it stands is refused. The deny lapses once the "
+                + "task changes: an edit to its title, body, acceptance, model, effort or dependencies, a human "
+                + "comment, or a reopen. The human can still start it from the board."
         )
     }
 
@@ -1028,6 +1031,7 @@ public struct Board: Sendable {
                 )
             }
             let ruled = ruling.map { "\n\nThe human's ruling: \($0.quoted)" } ?? ""
+            try TaskStore.markChanged(db, taskId)
             try TaskStore.setBlocked(db, taskId, false, reason: nil)
             try TaskStore.setFailed(db, taskId, false, reason: nil)
             try TaskStore.move(db, taskId, to: .ready, before: nil)
@@ -1511,7 +1515,7 @@ public struct Board: Sendable {
     /// The only path that creates an `integration` approval row: `request_integration` and the epic
     /// lane button both land here. A pending request is returned as-is rather than duplicated.
     @discardableResult
-    public func requestIntegration(epicId: String, requestedBy: String) throws -> Approval {
+    public func requestIntegration(epicId: String, requestedBy: String, epicTip: String? = nil) throws -> Approval {
         try db.writer.write { db in
             guard let epic = try Epic.fetchOne(db, key: epicId) else {
                 throw BoardError.epicNotFound(epicId)
@@ -1519,19 +1523,41 @@ public struct Board: Sendable {
             if let existing = try ApprovalStore.pendingIntegration(db, epicId: epicId) {
                 return existing
             }
-            if let denied = try RulingStore.standingDenials(db, projectId: epic.projectId, kind: .integration)
-                .first(where: { $0.approval.epicId == epicId }) {
-                throw RulingRefusal(
-                    denied.ruling,
-                    "The human denied integrating epic \(epicId): \(denied.ruling.quoted). An integration request for "
-                        + "this epic is refused until the human rules otherwise."
-                )
+            if let refusal = try Self.deniedIntegration(db, epic: epic, epicTip: epicTip) {
+                throw refusal
             }
             return try ApprovalStore.insert(
                 db, projectId: epic.projectId, kind: .integration, taskId: nil, epicId: epicId,
-                requestedBy: requestedBy, reason: nil
+                requestedBy: requestedBy, reason: nil, payload: try IntegrationRequest(epicTip: epicTip).encoded()
             )
         }
+    }
+
+    /// SPEC §15.6: a `deny` on integrating this epic stands until a task in the epic is accepted,
+    /// closed or added after the ruling, or the epic branch's tip differs from the denied request's.
+    static func deniedIntegration(_ db: Database, epic: Epic, epicTip: String?) throws -> RulingRefusal? {
+        let denials = try RulingStore.standingDenials(db, projectId: epic.projectId, kind: .integration)
+        guard let denied = try denials.first(where: { denial in
+            guard denial.approval.epicId == epic.id else { return false }
+            if let tip = epicTip, let prior = IntegrationRequest.decode(denial.approval.payload)?.epicTip, prior != tip {
+                return false
+            }
+            let moved = try Bool.fetchOne(
+                db,
+                sql: """
+                SELECT EXISTS (SELECT 1 FROM task WHERE epic_id = ?1
+                  AND (created_at >= ?2 OR done_at >= ?2 OR closed_at >= ?2))
+                """,
+                arguments: [epic.id, denial.ruling.answeredAt]
+            ) ?? false
+            return !moved
+        }) else { return nil }
+        return RulingRefusal(
+            denied.ruling,
+            "The human denied integrating epic \(epic.id), ruling \(denied.ruling.id): \(denied.ruling.quoted). "
+                + "An integration request for the epic as it stands is refused. The deny lapses once a task in the "
+                + "epic is accepted, closed or added, or the epic branch \(epic.branch) moves to a new commit."
+        )
     }
 
     /// The only path that creates a `push` or `pull_request` approval row. Pushing and opening a

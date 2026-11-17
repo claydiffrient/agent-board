@@ -80,7 +80,8 @@ CREATE TABLE task (
   completion_check TEXT,           -- JSON CompletionCheck from the latest report_complete (§5.1); NULL before one
   blocked_at     INTEGER,          -- the current block's question episode (§15.1); advances on every block, kept on unblock
   human_review_reason TEXT,        -- why it waits in review for a person; NULL for routing that gives none (§15.1)
-  review_entered_at INTEGER        -- the human-review episode, stamped with human_review_reason (§15.1)
+  review_entered_at INTEGER,       -- the human-review episode, stamped with human_review_reason (§15.1)
+  changed_at     INTEGER           -- last edit to what a worker is asked to do, human comment, or reopen; lifts a spawn deny (§15.6)
 );
 CREATE INDEX task_project_archived ON task(project_id, archived_at);
 CREATE INDEX task_project_done_at ON task(project_id, done_at);

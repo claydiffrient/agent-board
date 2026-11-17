@@ -309,6 +309,9 @@ public final class AppDatabase: Sendable {
             try db.execute(sql: Schema.ruling)
             try db.execute(sql: Schema.rulingBackfill)
         }
+        migrator.registerMigration("task_changed_at") { db in
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN changed_at INTEGER")
+        }
         return migrator
     }
 }

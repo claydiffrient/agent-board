@@ -25,6 +25,60 @@ final class RulingEnforcementTests: XCTestCase {
         XCTAssertTrue(next.isPending)
     }
 
+    func testADeniedSpawnIsRefusedUntilTheTaskIsEdited() throws {
+        let f = try Fixture.make()
+        let task = try f.task("Wire the thing", column: .ready)
+        guard case .approvalPending(let first) = try f.board.requestSpawn(taskId: task.id, requestedBy: "orch") else {
+            return XCTFail("autonomy off should queue a spawn approval")
+        }
+        try f.board.denyApproval(first.id, reason: "Not until the schema lands.")
+
+        guard case .refused(let reason) = try f.board.requestSpawn(taskId: task.id, requestedBy: "orch") else {
+            return XCTFail("an unchanged task was spawnable after a deny")
+        }
+        XCTAssertTrue(reason.contains("lapses once the task changes"), reason)
+
+        var edited = try XCTUnwrap(f.tasks.get(task.id))
+        edited.body = "Wait for the schema task, then wire the thing."
+        try f.tasks.update(edited)
+
+        guard case .approvalPending(let next) = try f.board.requestSpawn(taskId: task.id, requestedBy: "orch") else {
+            return XCTFail("the deny outlived an edit to the task body")
+        }
+        XCTAssertNotEqual(next.id, first.id)
+        XCTAssertTrue(next.isPending)
+    }
+
+    func testADeniedIntegrationIsRefusedUntilAnotherTaskInTheEpicIsAccepted() throws {
+        let f = try Fixture.make()
+        let (epic, _) = try f.board.createEpic(projectId: f.project.id, title: "Ship it", goal: nil, tasks: [])
+        func epicTask(_ title: String) throws -> BoardTask {
+            try f.tasks.create(
+                projectId: f.project.id, title: title, body: nil, acceptance: nil, priority: nil,
+                column: .review, origin: .orchestrator, epicId: epic.id
+            )
+        }
+        let done = try epicTask("First")
+        let pending = try epicTask("Second")
+        try f.board.accept(taskId: done.id)
+        try f.db.writer.write {
+            try $0.execute(sql: "UPDATE task SET created_at = created_at - 10000, done_at = done_at - 10000")
+        }
+        let first = try f.board.requestIntegration(epicId: epic.id, requestedBy: "orch", epicTip: "abc")
+        try f.board.denyApproval(first.id, reason: "Finish the second task first.")
+
+        XCTAssertThrowsError(try f.board.requestIntegration(epicId: epic.id, requestedBy: "orch", epicTip: "abc")) {
+            let reason = ($0 as? RulingRefusal)?.reason ?? "\($0)"
+            XCTAssertTrue(reason.contains("lapses once a task in the epic is accepted"), reason)
+        }
+
+        try f.board.accept(taskId: pending.id)
+
+        let next = try f.board.requestIntegration(epicId: epic.id, requestedBy: "orch", epicTip: "abc")
+        XCTAssertNotEqual(next.id, first.id)
+        XCTAssertTrue(next.isPending)
+    }
+
     func testAHoldOnTheCurrentBlockRefusesASpawn() throws {
         let f = try Fixture.make()
         let task = try f.task("Wire the thing", column: .running)
