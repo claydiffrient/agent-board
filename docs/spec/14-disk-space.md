@@ -47,3 +47,27 @@ Each `lowDiskSpace` event is a `LowDiskSpaceEvent` carrying the volume's mount
 point, name and free bytes. `WorkerSupervisor.lowDiskSpaceEvents()` returns an
 `AsyncStream` per subscriber that receives every event raised after the call;
 this is what a later cleanup sweep subscribes to.
+
+### 14.3 The project cleanup command
+
+Each project may set a **cleanup command** in Project settings (`cleanupCommand`,
+§4), for what builds leave behind outside any one worktree — a build cache, a
+package store. It lives in Project settings rather than a file in the repository
+for the same reason the teardown hook does (§3.1): it runs unattended, so it is
+the human's choice, not something a branch can change. Empty by default, and an
+empty or blank command runs nothing. Example: `make clean-cache`.
+
+`ProjectCleanupRunner` runs it the way `WorktreeManager` runs the teardown hook:
+`/bin/zsh -c <command>` with the project's own checkout (`repo_path`) as its
+working directory and `PWD`, under `ChildEnvironment.sanitized()`, off the main
+thread, as the leader of its own process group (`BoundedCommand`). One that
+outlives `cleanupCommandTimeoutSeconds` (default 1800, clamped to 1 second
+through 24 hours, like the teardown timeout) has its whole process group sent
+`SIGTERM`, then `SIGKILL` five seconds later. The deadline is measured on
+`CLOCK_UPTIME_RAW`, so a sleeping Mac does not use it up.
+
+The run returns a `ProjectCleanupResult`: the command, the checkout, how it
+ended (an exit status, a timeout, or a failure to start) and the last 2,000
+characters of its combined output. A command that fails is a result, never a
+thrown error, so it cannot stop the rest of a cleanup; its `summary` is the
+text for the notification and the `decision` report.

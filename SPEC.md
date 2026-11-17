@@ -71,4 +71,4 @@ Subsections stay in their parent's file. Numbers do not change when a title does
 
 - **§14 [Disk-space monitoring](docs/spec/14-disk-space.md)** — watching free
   space on the volumes that hold projects and their worktrees, and notifying
-  once per drop below a threshold. §14.1 Settings · §14.2 The event.
+  once per drop below a threshold. §14.1 Settings · §14.2 The event · §14.3 The project cleanup command.
