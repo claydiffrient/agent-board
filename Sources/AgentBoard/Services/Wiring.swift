@@ -46,6 +46,9 @@ enum Wiring {
             pullRequestRepository: { project in
                 let remote = try? BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath)).requireRemote()
                 return remote.flatMap(PullRequestLaunch.githubSlug(remoteURL:))
+            },
+            branchTip: { project, branch in
+                try? BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath)).tip(of: branch)
             }
         )
         let commitsInFlight = CommitsInFlight()

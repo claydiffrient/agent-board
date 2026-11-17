@@ -127,7 +127,9 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
    session's real terminal — D15, the only place a permission prompt is
    answered; **Stop** ends a worker that is wedged rather than asking.
 2. **Pending approvals** — spawns awaiting authorization and integration
-   requests.
+   requests. A push or pull request row names its branch and the short commit
+   the grant will publish (§4); a row recorded without one names only the
+   branch.
 3. **Pending reviews** — tasks in `review`, with branch, worktree and diffstat.
    Each row says who holds the review: `<reviewer> reviewing · <elapsed>` while
    a rostered reviewer's session is working, `<reviewer> stopped without a

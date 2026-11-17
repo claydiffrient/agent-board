@@ -354,10 +354,11 @@ struct ApprovalsSidebar: View {
     }
 
     /// Both names when they differ: the human is approving a write to the published ref, and the
-    /// local branch is what they would look at to check it.
+    /// local branch is what they would look at to check it. The commit is the one a grant publishes (SPEC §10).
     private func branchOf(_ approval: Approval) -> String {
         guard let request = try? approval.publishRequest() else { return "?" }
-        return request.head == request.branch ? request.branch : "\(request.head) (local \(request.branch))"
+        let name = request.head == request.branch ? request.branch : "\(request.head) (local \(request.branch))"
+        return request.shortHeadOid.map { "\(name) at \($0)" } ?? name
     }
 
     private func requester(_ requestedBy: String) -> String {

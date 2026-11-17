@@ -4930,7 +4930,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 let result = try await offMain {
                     try publisher.push(
                         branch: request.branch, publishedAs: request.publishedBranch, base: guardBase,
-                        remote: request.remote
+                        remote: request.remote, expectedHead: request.headOid
                     )
                 }
                 try board.recordPublished(approval: approval, summary: "Push approved: \(result.summary).")
@@ -4938,7 +4938,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 let result = try await offMain {
                     try publisher.openPullRequest(
                         branch: request.branch, publishedAs: request.publishedBranch, base: base,
-                        title: request.title ?? request.branch, body: request.body ?? "", remote: request.remote
+                        title: request.title ?? request.branch, body: request.body ?? "", remote: request.remote,
+                        expectedHead: request.headOid
                     )
                 }
                 let verb = result.alreadyOpen ? "Pull request already open" : "Pull request opened"
@@ -4958,6 +4959,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if let epic = upstreamEpic, let upstream = epic.upstream, case .notFastForward? = error as? PublishFailure {
                 summary += " Call `refresh_epic(epic_id: \"\(epic.id)\")` to merge origin/\(upstream.headRef) into "
                     + "`\(epic.branch)`, then `push_branch(branch: \"\(epic.branch)\")` again."
+            }
+            if case .headMoved? = error as? PublishFailure {
+                let tool = approval.kind == .push ? "push_branch" : "open_pull_request"
+                summary += " Call `\(tool)` for \(request.branch) again."
             }
             try? board.recordPublished(approval: approval, summary: summary, failed: true)
             announceReports(projectId: approval.projectId)

@@ -23,10 +23,13 @@ public final class OrchestratorToolHandler: ToolHandler {
     private let events: any BoardEventSink
     /// `owner/name` of the repository a project's pull requests open on, nil when it has none on GitHub.
     private let pullRequestRepository: @Sendable (Project) -> String?
+    /// The commit a local branch points at, nil when it cannot be read (SPEC §6 `push_branch`).
+    private let branchTip: @Sendable (Project, String) -> String?
 
     public init(
         db: AppDatabase, control: any WorkerControl, events: any BoardEventSink,
-        pullRequestRepository: @escaping @Sendable (Project) -> String? = { _ in nil }
+        pullRequestRepository: @escaping @Sendable (Project) -> String? = { _ in nil },
+        branchTip: @escaping @Sendable (Project, String) -> String? = { _, _ in nil }
     ) {
         self.db = db
         projects = ProjectStore(db)
@@ -46,6 +49,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         self.control = control
         self.events = events
         self.pullRequestRepository = pullRequestRepository
+        self.branchTip = branchTip
     }
 
     static let columnNames = TaskColumn.allCases.map(\.rawValue)
@@ -1379,7 +1383,9 @@ public final class OrchestratorToolHandler: ToolHandler {
         let approval = try board.requestPublish(
             projectId: project.id,
             kind: .push,
-            request: PublishRequest(branch: branch, publishedBranch: published),
+            request: PublishRequest(
+                branch: branch, publishedBranch: published, headOid: branchTip(project, branch)
+            ),
             taskId: target.taskId,
             epicId: target.epicId,
             requestedBy: identity.sessionId ?? "orchestrator",
@@ -1438,7 +1444,8 @@ public final class OrchestratorToolHandler: ToolHandler {
             projectId: project.id,
             kind: .pullRequest,
             request: PublishRequest(
-                branch: branch, base: base, title: title, body: body, publishedBranch: published
+                branch: branch, base: base, title: title, body: body, publishedBranch: published,
+                headOid: branchTip(project, branch)
             ),
             taskId: target.taskId,
             epicId: epic?.id ?? target.epicId,

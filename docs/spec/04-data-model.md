@@ -237,7 +237,13 @@ CREATE TABLE approval (
   reason       TEXT,
   created_at   INTEGER NOT NULL,
   resolved_at  INTEGER,
-  resolution   TEXT                      -- approved | denied
+  resolution   TEXT,                     -- approved | denied
+  payload      TEXT                      -- JSON for kinds that carry one. push / pull_request: the
+                                         -- PublishRequest (branch, base, title, body, remote, published
+                                         -- name, headOid). headOid is the local branch's tip at request
+                                         -- time; a grant whose re-read tip differs pushes nothing, stays
+                                         -- `approved`, and files a failed-publish `decision` report naming
+                                         -- both commits. A row with no headOid publishes the tip at grant.
 );
 CREATE INDEX approval_pending ON approval(project_id, resolved_at);
 
