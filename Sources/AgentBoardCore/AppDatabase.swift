@@ -296,6 +296,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("note_archived_at") { db in
             try db.execute(sql: "ALTER TABLE note ADD COLUMN archived_at INTEGER")
         }
+        migrator.registerMigration("review_round") { db in
+            try db.execute(sql: Schema.reviewRound)
+        }
         return migrator
     }
 }

@@ -20,7 +20,7 @@ CREATE TABLE project (
   orch_session_id TEXT,            -- pinned uuid, resumed lazily
   settings_json   TEXT NOT NULL,   -- caps, autoMode block, mcp allowlist, defaultModel, defaultEffort,
                                    -- workerModels, allowsFableEscalation, modelGuidance,
-                                   -- reviewLevel, reviewRouting, buildCommand, testCommand,
+                                   -- reviewLevel, reviewRouting, reviewRoundCap, buildCommand, testCommand,
                                    -- verificationTimeoutSeconds (null = 30 min; else clamped
                                    --   to 60..86400, i.e. 1 min to 24 h, on decode and on set),
                                    -- integrationVerification, archivePolicy, worktreeStrategy,
@@ -314,6 +314,22 @@ CREATE TABLE task_comment (
   created_at             INTEGER NOT NULL
 );
 CREATE INDEX task_comment_task_created ON task_comment(task_id, created_at);
+
+-- One row per rostered reviewer's verdict on an ordinary task (§5.1, "Review rounds").
+CREATE TABLE review_round (
+  id            INTEGER PRIMARY KEY,
+  task_id       TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  number        INTEGER NOT NULL,       -- 1, 2, … per task; never reset
+  session_id    TEXT,                   -- the reviewer's; not a foreign key, as task_comment's
+  reviewer_name TEXT NOT NULL,
+  outcome       TEXT NOT NULL,          -- accepted | reopened | capped
+  findings      TEXT NOT NULL,          -- JSON array of strings; [] for an acceptance
+  verdict       TEXT,                   -- accept_task's verdict
+  grades        TEXT NOT NULL,          -- JSON [{finding, grade, evidence}] of the previous round's findings
+  reviewed_head TEXT,                   -- SHA from the reviewer's review_head; the next round's diff starts here
+  at            INTEGER NOT NULL,
+  UNIQUE (task_id, number)
+);
 
 -- Human comments waiting for a live worker's or reviewer's next PostToolUse (§7).
 CREATE TABLE comment_delivery (
@@ -726,6 +742,10 @@ rest nil or `[]`.
 defaults to **`task`**, so a project that predates the setting behaves exactly as
 it did. `epic.review_level` overrides it for that epic's tasks; NULL inherits.
 Nothing else reads either value — the level is resolved once, on completion (§5).
+
+`settings_json.reviewRoundCap` is the agent-review round whose reopen leaves the
+task in `review` for a person instead of sending it back to `ready` (§5.1,
+"Review rounds"). An absent key decodes to **3**; a value below 1 is read as 1.
 
 `settings_json.integrationVerification` is how much the epic integrator
 verifies on the board's machine after its merges (§5.2 step 3), and how much an
