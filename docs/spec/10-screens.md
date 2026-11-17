@@ -838,7 +838,9 @@ menu is `NSApp.helpMenu` when the menu opens, and it is never an item in the
 built menu.
 
 **Settings** — the standard macOS Settings window, opened with ⌘, from the app
-menu. It has two panes. **CDR** holds the **CDR command**, the path to CDR's
+menu. It has three panes. **Disk Space** holds the low-disk-space monitor's
+four settings (§14.1): the on/off switch, the low threshold, the rearm threshold
+(kept above the low threshold), and the check interval. **CDR** holds the **CDR command**, the path to CDR's
 `watcher/cli.mjs` that starts and stops the review watcher (§13.7); empty means
 auto-detect, and the line under it names the file in use or says none was found.
 **Terminal** holds the font family (installed monospaced

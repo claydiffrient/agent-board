@@ -243,6 +243,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// Millis of the last archive sweep; 0 means none yet, so the first tick after launch sweeps
     /// and picks up whatever came due while the app was closed.
     @ObservationIgnored private var lastArchiveSweep: Int64 = 0
+    /// Polled on the metering tick; a test substitutes one with an injected measurement. SPEC §14.
+    @ObservationIgnored var diskSpace = DiskSpaceMonitor()
+    @ObservationIgnored private var lowDiskSpaceSubscribers: [UUID: AsyncStream<LowDiskSpaceEvent>.Continuation] = [:]
     /// Millis of the last orphan reap on the tick. `start()` sets it, so the first one waits an interval.
     @ObservationIgnored private var lastOrphanReap: Int64 = 0
     /// One `reconcile` or tick reap per project at a time, so two passes never choose orphans at once (SPEC §5).
@@ -5604,6 +5607,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if prWatchPoll == nil { _Concurrency.Task { await self.pollPRWatches() } }
         }
         pollDueTakeovers(all, now: now)
+        checkDiskSpace(all)
         if now - lastOrphanReap >= Self.orphanReapIntervalMillis {
             lastOrphanReap = now
             reapOrphanedWorktreesOnTick(all)
@@ -5627,6 +5631,28 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         transcriptTailers = transcriptTailers.filter { metered.contains($0.key) }
         refreshSleepAssertion(all)
+    }
+
+    /// Every volume holding a project checkout or worktree root. SPEC §14.
+    func checkDiskSpace(_ all: [Project]) {
+        let events = diskSpace.tick(paths: all.flatMap {
+            [URL(fileURLWithPath: $0.repoPath), URL(fileURLWithPath: $0.worktreeRoot)]
+        })
+        for event in events {
+            postBanner(event.title, event.body, nil)
+            for subscriber in lowDiskSpaceSubscribers.values { subscriber.yield(event) }
+        }
+    }
+
+    /// Each call is an independent subscriber that receives every `lowDiskSpace` event from now on.
+    func lowDiskSpaceEvents() -> AsyncStream<LowDiskSpaceEvent> {
+        let (stream, continuation) = AsyncStream<LowDiskSpaceEvent>.makeStream()
+        let id = UUID()
+        lowDiskSpaceSubscribers[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            _Concurrency.Task { @MainActor in self?.lowDiskSpaceSubscribers[id] = nil }
+        }
+        return stream
     }
 
     /// Driven by the observed `agent_session` rows and nothing else, so a worker that died without

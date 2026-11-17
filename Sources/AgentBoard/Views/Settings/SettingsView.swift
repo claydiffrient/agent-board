@@ -1,3 +1,4 @@
+import AgentBoardCore
 import AgentBoardRuntime
 import AppKit
 import SwiftUI
@@ -12,6 +13,8 @@ struct SettingsView: View {
                 .tabItem { Label("Terminal", systemImage: "apple.terminal") }
             CDRSettingsPane()
                 .tabItem { Label("CDR", systemImage: "checkmark.bubble") }
+            DiskSpaceSettingsPane()
+                .tabItem { Label("Disk Space", systemImage: "internaldrive") }
         }
         .frame(width: 560, height: 760)
     }
@@ -20,6 +23,37 @@ struct SettingsView: View {
 enum CDRSettings {
     /// The path to CDR's `watcher/cli.mjs`; empty means auto-detect. SPEC §13.7.
     static let commandKey = "cdr.command"
+}
+
+/// SPEC §14.1.
+struct DiskSpaceSettingsPane: View {
+    @AppStorage(DiskSpaceSettings.enabledKey) private var enabled = DiskSpaceSettings.defaults.enabled
+    @AppStorage(DiskSpaceSettings.lowThresholdKey) private var low = DiskSpaceSettings.defaults.lowThresholdGB
+    @AppStorage(DiskSpaceSettings.rearmThresholdKey) private var rearm = DiskSpaceSettings.defaults.rearmThresholdGB
+    @AppStorage(DiskSpaceSettings.intervalKey) private var interval = DiskSpaceSettings.defaults.checkIntervalMinutes
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Notify when free disk space is low", isOn: $enabled)
+                Stepper(value: $low, in: 1...1000) {
+                    LabeledContent("Low threshold", value: "\(low) GB")
+                }
+                .onChange(of: low) { if rearm <= low { rearm = low + 1 } }
+                Stepper(value: $rearm, in: (low + 1)...2000) {
+                    LabeledContent("Notify again after rising above", value: "\(rearm) GB")
+                }
+                Stepper(value: $interval, in: 1...60) {
+                    LabeledContent("Check every", value: interval == 1 ? "1 minute" : "\(interval) minutes")
+                }
+            } footer: {
+                Text("Checks each volume that holds a project checkout or worktree root. One notification per drop below the low threshold; the next waits until free space has risen above the second threshold.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
 }
 
 struct CDRSettingsPane: View {
