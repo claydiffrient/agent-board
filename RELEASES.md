@@ -9,6 +9,68 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.12.0 — 2026-11-17
+
+- **Review.** Agent review now stops after a set number of rounds. In the
+  project's Settings, on the Agents tab under Review, **Review round cap**
+  (1 to 20, default 3, enabled only when Review level is Agent) sets the
+  round whose reopen stops the loop: the task stays in Review for you, with
+  an "Agent review round cap reached" row quoting the last findings and a
+  notification, instead of going back to a worker. Your own Accept or
+  Reopen is never refused, and the count never resets. Each re-review also
+  builds on the last: the reviewer reads the diff since the previous round
+  first and must grade every earlier finding as fixed, partly fixed, not
+  fixed or moot, with evidence. A verdict that skips, repeats or invents a
+  finding, or leaves evidence blank, is refused. The grades show in the
+  task's progress log.
+- **Review.** A task that changes the rules that judge it now goes to you
+  at any review level, and a progress row names the paths. Protected by
+  default are `CLAUDE.md` and `CLAUDE.local.md`, anything under `.claude/`,
+  the root `.mcp.json` and anything under `.github/workflows/`. Add your
+  own in **Protected paths** (same section, comma-separated globs such as
+  `scripts/hooks/**`, empty by default). If Agent Board cannot list the
+  task's changes, the task also goes to you.
+- **Verification.** Agent Board now runs its own check when a worker
+  reports complete. Under Workflow › Verification, **Check at completion**
+  takes one command per line (empty by default). They run one at a time in
+  the task's worktree, stop at the first failure, use the project's
+  timeout, and queue behind any other check running in the app. The result
+  appears in a **Completion check** section of the task inspector, in the
+  progress log and in an agent reviewer's prompt. A failure does not reopen
+  the task: it goes to review with the failure attached and stays there
+  for you even where review would be skipped. With no commands, the task
+  is recorded as not verified by the board. The Test command is never run
+  here.
+- **Approvals.** A push or pull request approval now applies to the commit
+  you saw. Pending Approvals shows the short commit beside the branch, and
+  granting pushes exactly that commit. If the branch has moved, nothing is
+  pushed and the failed-publish report names both commits; request the
+  publish again and approve the new tip. Approvals made before this
+  release publish the current tip, as before.
+- **Disk space.** Agent Board now watches free space on every volume that
+  holds a project's checkout or worktrees. Below 25 GB it posts a "Low
+  disk space" notification and cleans up: it removes the worktrees of
+  finished tasks and epics, runs each project's cleanup command, then
+  posts "Disk cleanup finished" with the space recovered per volume and
+  anything kept or failed. Worktrees in use, with uncommitted changes, or
+  unknown to Agent Board are left alone, and branches are never removed.
+  Each project gets a decision report. The volume stays quiet until it
+  rises above 35 GB. In Settings, **Disk Space** sets whether to notify,
+  the low threshold, the rearm threshold and the check interval (every 5
+  minutes by default).
+- **Disk space.** Each project's Settings, Workflow tab, has a **Disk
+  cleanup** section with a **Cleanup command** (empty by default, so
+  nothing runs) and a **Cleanup timeout (seconds)**, 1800 by default. It
+  runs in the project's checkout after the worktree sweep, for things like
+  a build cache. A failure or timeout is reported and never stops the rest.
+  To clean up on demand, right-click a project and choose **Clean up
+  worktrees** for that project's finished worktrees, or choose **Clean up
+  now** in the app menu to run the full cleanup for every project.
+- **Consoles.** Orchestrator consoles are now named
+  `<project name>-orchestrator` and the Coordinator's console
+  `coordinator`, so other sessions can address them by name, including
+  after a restart or resume.
+
 ## 0.11.0 — 2026-11-12
 
 - **Epics.** An epic can now build on an open pull request in the project's
