@@ -3254,9 +3254,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
               let watch = try? prWatches.get(watchId), !watch.paused
         else { return }
         for decision in decisions {
+            let question = decision.id.map {
+                BannerQuestion(
+                    kind: .prDecision, subjectId: String($0),
+                    questionAt: decision.decisionNotifiedAt ?? decision.createdAt
+                )
+            }
             post(
                 "Pull request decision waiting", body: "#\(watch.number): \(decision.decisionQuestion ?? watch.title)",
-                projectId: project.id, category: .prDecisions, subject: .pullRequest(watch.id)
+                projectId: project.id, category: .prDecisions, subject: .pullRequest(watch.id), question: question
             )
         }
     }
@@ -5490,13 +5496,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// to it, or against that project's notification preferences.
     private func post(
         _ title: String, body: String, projectId: String?, category: NotificationCategory,
-        subject: NotificationRoute.Subject = .project
+        subject: NotificationRoute.Subject = .project, question: BannerQuestion? = nil
     ) {
         guard shouldNotify(projectId: projectId, category: category) else { return }
         postBanner(
             notificationTitle(title, projectId: projectId),
             body,
-            projectId.map { NotificationRoute(projectId: $0, subject: subject) }
+            projectId.map { NotificationRoute(projectId: $0, subject: subject, question: question) }
         )
     }
 
@@ -5887,9 +5893,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             preferences: { preferences[$0] ?? NotificationPreferences() }
         )
         for notice in raised {
-            postBanner(notice.title, notice.body, NotificationRoute(notice))
+            postBanner(notice.title, notice.body, NotificationRoute(notice, question: soleOpenApproval(notice)))
         }
         return raised
+    }
+
+    /// An "Approval waiting" banner offers Deny only while its project has exactly one open approval,
+    /// so the banner's text and the request it denies cannot disagree (SPEC §15.6).
+    private func soleOpenApproval(_ notice: AttentionNotice) -> BannerQuestion? {
+        guard notice.reason == .pendingApproval,
+              let open = try? InboxStore(db).items(projectId: notice.projectId).filter({ $0.kind == .approval }),
+              open.count == 1
+        else { return nil }
+        return BannerQuestion(open[0])
     }
 
     private func notificationPreferencesByProject() -> [String: NotificationPreferences] {

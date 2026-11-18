@@ -140,7 +140,12 @@ human's note.
 
 - **Deny.** Pending Approvals' Deny… needs a reason, and `Board.denyApproval`
   resolves the approval and records a `deny` ruling on it, with the reason as
-  its note, in one transaction. A request identical to a denied one is then
+  its note, in one transaction. The Inbox's Deny and the "Approval waiting"
+  banner's typed Deny… (§10, Inbox) take the same path; so does a decision's
+  Reply, from the page or the banner's Reply…, through `Board.answerDecision`
+  with the reply owed (§13.4). A banner answer writes nothing when its Inbox
+  row is no longer open for the episode the banner announced, so a question
+  answered twice gets one ruling. A request identical to a denied one is then
   refused:
   - `push_branch` and `open_pull_request` (`Board.requestPublish`): the same
     approval kind, local branch and head commit: the `headOid` every publish

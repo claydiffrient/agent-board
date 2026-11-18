@@ -982,7 +982,8 @@ on at all.
   decision announces itself once, and a new reply on its thread, which clears
   the verdict, clears the stamp too. It reads "Pull request decision waiting —
   <project>", with `#n: <question>` as its body, routes like the Ready to
-  verify banner, and is the **Pull request decisions** category, on by
+  verify banner, offers a typed **Reply…** that records the reply owed
+  (§10, Inbox), and is the **Pull request decisions** category, on by
   default. The Ready to verify banner (phase 1)
   is decided after each poll's transition: `PRWatchStore.claimReadyNotification`
   records the watch's head in `ready_notified_oid` and fires only when that head

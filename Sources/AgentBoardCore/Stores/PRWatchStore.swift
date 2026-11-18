@@ -638,12 +638,13 @@ public struct PRWatchStore: Sendable {
                 arguments: [watchId]
             )
             let watch = try PRWatch.fetchOne(db, key: watchId)
-            for var item in unannounced {
+            return try unannounced.map { item in
+                var item = item
                 item.decisionNotifiedAt = now
                 try item.update(db)
                 if let watch { try Self.report(db, watch: watch, .decision(question: item.decisionQuestion)) }
+                return item
             }
-            return unannounced
         }
     }
 }

@@ -27,14 +27,19 @@ struct NotificationRoute: Equatable, Hashable {
 
     var projectId: String
     var subject: Subject
+    /// Set when the banner can answer its question in place (SPEC §15.6).
+    var question: BannerQuestion?
 
-    init(projectId: String, subject: Subject = .project) {
+    init(projectId: String, subject: Subject = .project, question: BannerQuestion? = nil) {
         self.projectId = projectId
         self.subject = subject
+        self.question = question
     }
 
-    init(_ notice: AttentionNotice, subjectId: String? = nil) {
-        self.init(projectId: notice.projectId, subject: Self.subject(for: notice.reason, id: subjectId))
+    init(_ notice: AttentionNotice, subjectId: String? = nil, question: BannerQuestion? = nil) {
+        self.init(
+            projectId: notice.projectId, subject: Self.subject(for: notice.reason, id: subjectId), question: question
+        )
     }
 
     static func subject(for reason: AttentionReason, id: String? = nil) -> Subject {
@@ -73,6 +78,7 @@ extension NotificationRoute {
     var userInfo: [String: String] {
         var info = [Key.projectId: projectId, Key.subject: subject.kind]
         if let id = subject.identifier { info[Key.subjectId] = id }
+        if let question { info.merge(question.userInfo) { current, _ in current } }
         return info
     }
 
@@ -82,7 +88,7 @@ extension NotificationRoute {
         guard let projectId = userInfo[Key.projectId] as? String, !projectId.isEmpty else { return nil }
         let id = userInfo[Key.subjectId] as? String
         let kind = userInfo[Key.subject] as? String ?? ""
-        self.init(projectId: projectId, subject: Subject(kind: kind, id: id))
+        self.init(projectId: projectId, subject: Subject(kind: kind, id: id), question: BannerQuestion(userInfo: userInfo))
     }
 }
 

@@ -526,6 +526,23 @@ and Pending reviews in the Orchestrator sidebar, and Needs you and Parked on the
 Pull Requests page — stay, and each shows the newest standing ruling that
 answers the row's current episode as the same "Ruled: hold — <note>" chip.
 
+**Answering from a banner.** Two notification banners carry a text-input
+action that answers their Inbox row without opening the window: "Approval
+waiting" offers **Deny…** and "Pull request decision waiting" offers
+**Reply…**. Each banner's payload names its question — the approval or PR item
+and the episode it announced (`BannerQuestion`, in the notification's
+`userInfo` beside its route) — and `NotificationResponder` hands the typed text
+to `BannerAnswering`, which finds that row in `InboxStore` and answers it
+through `InboxAnswering`, the Answer zone's own path. So a banner Deny is
+`Board.denyApproval` and a banner Reply is `Board.answerDecision` with the reply
+owed, exactly as from the page (§15.6, §13.4): one ruling, no grant, nothing
+posted. Blank text writes nothing. If the row has left the Inbox — answered on
+the page or from another banner, approved, or asked again since the banner —
+nothing is written. The approval banner offers Deny only while its project has
+exactly one open approval, since that banner is per project rather than per
+request (§7) and would otherwise not say which one it denies; with more, it is
+click-only. Any other response to a banner is a click and follows its route.
+
 **Roster** — the cross-project register of archetypes (§4), and the one screen
 not scoped to a project: a `Roster` row in the sidebar beside `At a Glance` and
 above the workspace sections, so it does not join Task Board and Status inside a
