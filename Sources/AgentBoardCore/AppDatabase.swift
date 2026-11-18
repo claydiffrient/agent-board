@@ -312,6 +312,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("task_changed_at") { db in
             try db.execute(sql: "ALTER TABLE task ADD COLUMN changed_at INTEGER")
         }
+        migrator.registerMigration("ruling_delivery") { db in
+            try db.execute(sql: Schema.rulingDelivery)
+        }
         migrator.registerMigration("task_blocked_source") { db in
             try db.execute(sql: "ALTER TABLE task ADD COLUMN blocked_source TEXT")
         }

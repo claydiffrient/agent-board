@@ -187,13 +187,7 @@ public enum OpeningPrompt {
     /// and the comment thread. Nil when there are none.
     public static func rulingsSection(_ rulings: [Ruling]) -> String? {
         guard !rulings.isEmpty else { return nil }
-        let entries = rulings.map { ruling in
-            let question = ruling.question
-                .split(separator: "\n", omittingEmptySubsequences: false)
-                .map { "  > \($0)" }
-                .joined(separator: "\n")
-            return "- \(ruling.quoted)\n  The question it answers:\n\(question)"
-        }
+        let entries = rulings.map(rulingEntry)
         return """
         # Your human's rulings on this task
         The human answered these questions about this task in Agent Board, newest first. A ruling outranks \
@@ -202,6 +196,14 @@ public enum OpeningPrompt {
 
         \(entries.joined(separator: "\n"))
         """
+    }
+
+    static func rulingEntry(_ ruling: Ruling) -> String {
+        let question = ruling.question
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { "  > \($0)" }
+            .joined(separator: "\n")
+        return "- \(ruling.quoted)\n  The question it answers:\n\(question)"
     }
 
     /// A rostered reviewer's note sent this task back; the next worker gets it verbatim (SPEC §5.1).

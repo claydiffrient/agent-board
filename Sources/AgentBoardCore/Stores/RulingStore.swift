@@ -66,6 +66,7 @@ public struct RulingStore: Sendable {
         }
         try ruling.insert(db)
         try RulingReport.queue(db, ruling)
+        try RulingDeliveryStore.queue(db, ruling)
         return ruling
     }
 

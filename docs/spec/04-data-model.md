@@ -537,6 +537,17 @@ CREATE INDEX ruling_pr_watch ON ruling(pr_watch_id, answered_at);
 CREATE INDEX ruling_approval ON ruling(approval_id);
 CREATE INDEX ruling_supersedes ON ruling(supersedes);
 CREATE TRIGGER ruling_immutable BEFORE UPDATE ON ruling BEGIN SELECT RAISE(ABORT, 'rulings are append-only'); END;
+
+-- A proceed, instead or hold ruling owed to one live session (§15.8). delivered_at is the claim, set
+-- once by the PostToolUse hook or by a resume, whichever reaches the session first.
+CREATE TABLE ruling_delivery (
+  ruling_id     TEXT NOT NULL REFERENCES ruling(id) ON DELETE CASCADE,
+  session_id    TEXT NOT NULL REFERENCES agent_session(session_id) ON DELETE CASCADE,
+  delivered_at  INTEGER,
+  delivered_via TEXT,             -- hook | resume
+  PRIMARY KEY (ruling_id, session_id)
+);
+CREATE INDEX ruling_delivery_session ON ruling_delivery(session_id);
 ```
 
 Every `epic.state` value is written by exactly one place, and nothing writes one

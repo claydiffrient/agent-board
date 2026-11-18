@@ -13,6 +13,7 @@ public final class StoreHookSink: HookSink {
     private let deliveries: ShutdownDeliveryStore
     private let notes: NoteStore
     private let comments: CommentStore
+    private let rulingDeliveries: RulingDeliveryStore
     private let epics: EpicStore
     private let coordinator: CoordinatorStore
     private let locks: FileLockStore
@@ -79,6 +80,7 @@ public final class StoreHookSink: HookSink {
         deliveries = ShutdownDeliveryStore(db)
         notes = NoteStore(db)
         comments = CommentStore(db)
+        rulingDeliveries = RulingDeliveryStore(db)
         epics = EpicStore(db)
         coordinator = CoordinatorStore(db)
         locks = FileLockStore(db)
@@ -522,6 +524,15 @@ public final class StoreHookSink: HookSink {
                 try? comments.dropDeliveries(sessionId: sessionId)
                 return .respond(.context(brief))
             }
+            if let owed = try? rulingDeliveries.claim(sessionId: sessionId, via: .hook), !owed.isEmpty {
+                if let taskId {
+                    _ = try? progress.append(
+                        taskId: taskId, sessionId: sessionId, kind: .status,
+                        text: RulingDelivery.progressText(owed, via: .hook)
+                    )
+                }
+                return .respond(.context(RulingDelivery.context(owed)))
+            }
             if let delivery = (try? comments.takeDelivery(sessionId: sessionId)) ?? nil {
                 if let taskId {
                     let what = delivery.count == 1 ? "the human's comment" : "\(delivery.count) of the human's comments"
@@ -608,6 +619,7 @@ public final class StoreHookSink: HookSink {
             // A `/clear` fork arrives next under a new id, and `adoptFork` hands it this queue.
             if event.sessionEndReason != "clear" {
                 try? comments.dropDeliveries(sessionId: sessionId)
+                try? rulingDeliveries.dropOwed(sessionId: sessionId)
             }
 
         default:
