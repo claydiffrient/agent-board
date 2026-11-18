@@ -167,14 +167,21 @@ struct TaskCardView: View {
                 Text("No diffstat available")
                     .foregroundStyle(.tertiary)
             }
-            HStack {
-                Button("Accept", action: onAccept)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                Button("Reopen", action: onReopen)
-                    .controlSize(.small)
+            if task.origin == .fixRound {
+                Text("Pull request fix round: Agent Board pushes it once its check passes. Resume a parked one on the Pull Requests page.")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .padding(.top, 2)
+            } else {
+                HStack {
+                    Button("Accept", action: onAccept)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    Button("Reopen", action: onReopen)
+                        .controlSize(.small)
+                }
+                .padding(.top, 2)
             }
-            .padding(.top, 2)
         }
         .font(.caption)
         .task(id: task.id) {
