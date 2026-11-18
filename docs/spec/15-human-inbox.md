@@ -100,11 +100,25 @@ disagree.
 |---|---|---|
 | Approval | `resolved_at IS NULL` | any ruling on the approval |
 | Blocked task | `task.blocked = 1`, from `report_blocked` or a Claude Code prompt | `question_at >= blocked_at` |
-| Human review | in `review` with no `reviewer_agent_id` | `question_at >= review_entered_at` |
+| Human review | in `review` with no `reviewer_agent_id` | `question_at >= review_entered_at`; or, when the task has review rounds, `review_finding` rulings at or after `review_entered_at` on every finding of the latest round, at least one an `overrule` |
 | Reviewer stopped | in `review` under a rostered reviewer whose session is the task's newest and is idle or ended | `question_at >=` that session's `started_at` |
 | Proposal | in `proposed` while the project's autonomy is off | — (Promote or Dismiss) |
 | PR decision | open item with verdict `decision` on a watch not merged, closed, stopped or paused, follow-through on | `question_at >= COALESCE(decision_notified_at, created_at)` |
 | Parked watch | `state = parked`, follow-through on | `question_at >= parked_at` |
+
+A blocked row carries `task.blocked_source`: `worker` when `report_blocked` (or
+`update_status` with `blocked`) set it, `prompt` when the Notification hook
+did, for a `permission_prompt`, `agent_needs_input` or `elicitation*`
+notification. Every `Board.block` caller names its source; the column is
+cleared with the block. A prompt block is answered only in the terminal (D15),
+so the Inbox offers it no verdict (§10). A row from before the column existed
+reads as `worker`.
+
+A review held for a person after the round cap (or after a reviewer reopen)
+leaves the inbox once the human has ruled on every finding of its latest round
+and overruled at least one: one overrule alone leaves the other findings
+waiting, and upholding every finding answers nothing, since the reviewer's
+verdict then stands and the next move is Accept or Reopen.
 
 A row stays out while its ruling stands for the episode: a `hold` takes a
 blocked task out while `task.blocked` stays 1, and the next block advances
@@ -194,10 +208,15 @@ enforces it in code:
   round must grade, and refuses a grade that names one.
 - `ReviewPrompt` lists them in the re-review section as settled, each with the
   person's note.
-- `Board.reviewReopen` refuses a reopen whose every finding cites only
-  overruled findings of the previous round ("finding 2"), and the refusal says
-  a person overruled them. A reopen with any finding that cites nothing, or
-  cites a finding still open, goes through.
+- `Board.reviewReopen` refuses a reopen whose every finding re-raises only
+  overruled findings of the previous round, and the refusal says a person
+  overruled them. A reopen with any finding that re-raises nothing, or one
+  still open, goes through. `reopen_task`'s `finding_refs` says what each
+  finding re-raises: one list per finding, in order, of the previous round's
+  1-based finding numbers, empty for a new finding. It must have one entry per
+  finding and name only findings the previous round had, or the reopen is
+  refused. Without `finding_refs`, the "finding N" citations in each finding's
+  text stand in, which a reviewer that rephrases gets past.
 
 An overrule moves nothing: the task stays where it is, and accepting it is
 still a separate action.

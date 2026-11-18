@@ -81,6 +81,7 @@ public final class ReviewerToolHandler: ToolHandler {
                         "One entry per finding: what is wrong, where, and what would make it acceptable."
                     ),
                     "grades": gradesSchema,
+                    "finding_refs": findingRefsSchema,
                 ],
                 required: ["findings"]
             )
@@ -96,6 +97,13 @@ public final class ReviewerToolHandler: ToolHandler {
         required: ["finding", "grade", "evidence"],
         description: "Required on a re-review: one entry for every finding of the previous round, and none otherwise."
     )
+
+    static let findingRefsSchema: JSONValue = .object([
+        "type": .string("array"),
+        "items": ToolSchema.integerArray(),
+        "description": .string("On a re-review: one list per finding, in order, of the previous round's finding "
+            + "numbers it raises again; an empty list for a new finding."),
+    ])
 
     public func tools(for identity: TokenIdentity) async -> [ToolDescriptor] {
         Self.descriptors
@@ -171,7 +179,7 @@ public final class ReviewerToolHandler: ToolHandler {
             let reopen = try graded {
                 try board.reviewReopen(
                     taskId: task.id, sessionId: identity.sessionId, reviewerName: name, findings: findings,
-                    grades: grades
+                    grades: grades, findingRefs: try Self.findingRefs(in: arguments)
                 )
             }
             await events.reportQueued(projectId: identity.projectId)
@@ -225,6 +233,22 @@ public final class ReviewerToolHandler: ToolHandler {
         let findings = raw.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         guard !findings.isEmpty else { throw ToolError("Missing required argument: findings") }
         return findings
+    }
+
+    static func findingRefs(in arguments: JSONValue) throws -> [[Int]]? {
+        guard let value = arguments["finding_refs"], value != .null else { return nil }
+        guard let lists = value.arrayValue else { throw ToolError("Argument finding_refs must be an array of arrays") }
+        return try lists.map { list in
+            guard let numbers = list.arrayValue else {
+                throw ToolError("Each finding_refs entry must be an array of finding numbers")
+            }
+            return try numbers.map { number in
+                guard let n = number.numberValue ?? number.stringValue.flatMap(Double.init) else {
+                    throw ToolError("finding_refs holds finding numbers only")
+                }
+                return Int(n)
+            }
+        }
     }
 
     static func grades(in arguments: JSONValue) throws -> [GradedFinding] {

@@ -55,4 +55,35 @@ final class ReviewRoundTests: XCTestCase {
         )
         XCTAssertEqual(round.grades.map(\.finding), [1, 3])
     }
+
+    /// SPEC §15.7: with `finding_refs`, a rephrased re-raise of an overruled finding is still refused,
+    /// and a reopen that also raises something new goes through.
+    func testFindingRefsRefuseARephrasedReRaiseOfAnOverruledFinding() throws {
+        let f = try Fixture.make()
+        let task = try f.task("write the parser", column: .review)
+        try f.sessions.insert(f.session("rev-1", taskId: task.id))
+        try f.board.reviewReopen(
+            taskId: task.id, sessionId: "rev-1", reviewerName: "Rowan",
+            findings: ["Empty input throws.", "Rename Parser to Reader."]
+        )
+        try RulingStore(f.db).record(
+            .reviewFinding(taskId: task.id, ref: ReviewRound.findingRef(round: 1, finding: 2)),
+            question: "Rename Parser to Reader.", questionAt: 1, verdict: .overrule, note: "Parser is the public name."
+        )
+        try f.tasks.move(task.id, to: .review)
+        try f.sessions.insert(f.session("rev-2", taskId: task.id))
+        let grades = [GradedFinding(finding: 1, grade: .fixed, evidence: "Parser.swift:1")]
+        let rephrased = "The type is still called Parser; Reader reads better."
+
+        XCTAssertThrowsError(try f.board.reviewReopen(
+            taskId: task.id, sessionId: "rev-2", reviewerName: "Rowan",
+            findings: [rephrased], grades: grades, findingRefs: [[2]]
+        )) { XCTAssertTrue(($0 as? ReviewReopenRejection)?.reason.contains("overruled") == true, "\($0)") }
+
+        let reopen = try f.board.reviewReopen(
+            taskId: task.id, sessionId: "rev-2", reviewerName: "Rowan",
+            findings: [rephrased, "Trailing commas are not handled."], grades: grades, findingRefs: [[2], []]
+        )
+        XCTAssertEqual(reopen.round.number, 2)
+    }
 }

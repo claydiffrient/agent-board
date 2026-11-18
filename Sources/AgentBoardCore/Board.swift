@@ -766,13 +766,13 @@ public struct Board: Sendable {
     }
 
     @discardableResult
-    public func block(taskId: String, sessionId: String, reason: String) throws -> Report {
+    public func block(taskId: String, sessionId: String, reason: String, source: BlockedSource) throws -> Report {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
             let report = try ReportStore.insert(
                 db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .blocked, body: reason
             )
-            try TaskStore.setBlocked(db, taskId, true, reason: reason)
+            try TaskStore.setBlocked(db, taskId, true, reason: reason, source: source)
             try SessionStore.setState(db, sessionId, .blocked, endedAt: nil)
             return report
         }
@@ -789,7 +789,7 @@ public struct Board: Sendable {
                 db, projectId: task.projectId, taskId: taskId, sessionId: sessionId, kind: .blocked,
                 body: reason + "\n\nThe task is back in ready; dispatch it again once the file is free."
             )
-            try TaskStore.setBlocked(db, taskId, true, reason: reason)
+            try TaskStore.setBlocked(db, taskId, true, reason: reason, source: .worker)
             if task.column == .running {
                 try TaskStore.move(db, taskId, to: .ready, before: nil)
             }
@@ -923,7 +923,8 @@ public struct Board: Sendable {
     /// `reviewRoundCap`-th round leaves the task in `review` for a person instead (SPEC §5).
     @discardableResult
     public func reviewReopen(
-        taskId: String, sessionId: String?, reviewerName: String, findings: [String], grades: [GradedFinding] = []
+        taskId: String, sessionId: String?, reviewerName: String, findings: [String], grades: [GradedFinding] = [],
+        findingRefs: [[Int]]? = nil
     ) throws -> ReviewReopen {
         try db.writer.write { db in
             let task = try Self.requireTask(db, taskId)
@@ -932,11 +933,10 @@ public struct Board: Sendable {
             }
             let previous = try ReviewRound.latest(db, taskId: taskId)
             let graded = try ReviewRound.checkGrades(db, grades, against: previous)
-            if let previous {
-                try ReviewRound.checkReopen(
-                    findings, overruled: try ReviewRound.overruled(db, round: previous), round: previous.number
-                )
-            }
+            try ReviewRound.checkReopen(
+                findings, refs: findingRefs, overruled: try previous.map { try ReviewRound.overruled(db, round: $0) } ?? [:],
+                round: previous?.number ?? 0, previousCount: previous?.findings.count ?? 0
+            )
             let cap = max(try Project.fetchOne(db, key: task.projectId)?.settings.reviewRoundCap ?? 3, 1)
             let number = (previous?.number ?? 0) + 1
             let capped = number >= cap

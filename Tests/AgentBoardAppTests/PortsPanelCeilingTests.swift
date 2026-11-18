@@ -85,11 +85,13 @@ final class PortsPanelCeilingTests: XCTestCase {
         return (0..<count).map { ListeningPort(port: first + $0, pid: Int32(600 + $0), command: "node", sessionId: owner) }
     }
 
+    /// Tall enough that the room under the list's reserve never caps the panel below its ceiling.
     private func sidebar(_ db: AppDatabase, ports: ListeningPortModel?, usage: AccountUsageModel) -> OffscreenMount {
         OffscreenMount(
             MainWindow(collapseState: collapse.state).environment(
                 AppEnvironment(db: db, supervisor: StubSupervisor(), accountUsage: usage, listeningPorts: ports)
-            )
+            ),
+            size: CGSize(width: 1100, height: 760)
         )
     }
 

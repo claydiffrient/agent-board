@@ -17,7 +17,7 @@ final class ProjectAttentionStoreTests: XCTestCase {
     private func blockAWorker(_ f: Fixture, reason: String = "need a decision") throws -> BoardTask {
         let task = try f.task("Wire the thing", column: .running)
         try f.sessions.insert(f.session("w-block", state: .running, taskId: task.id))
-        _ = try f.board.block(taskId: task.id, sessionId: "w-block", reason: reason)
+        _ = try f.board.block(taskId: task.id, sessionId: "w-block", reason: reason, source: .worker)
         return task
     }
 
@@ -149,7 +149,7 @@ final class ProjectAttentionStoreTests: XCTestCase {
         let first = try blockAWorker(f)
         let second = try f.task("Later problem", column: .running)
         try f.sessions.insert(f.session("w-block-2", state: .running, taskId: second.id))
-        _ = try f.board.block(taskId: second.id, sessionId: "w-block-2", reason: "also stuck")
+        _ = try f.board.block(taskId: second.id, sessionId: "w-block-2", reason: "also stuck", source: .worker)
         try f.db.writer.write { db in
             try db.execute(sql: "UPDATE task SET updated_at = ? WHERE id = ?", arguments: [now, first.id])
             try db.execute(sql: "UPDATE task SET updated_at = ? WHERE id = ?", arguments: [now + 5_000, second.id])
@@ -360,7 +360,7 @@ final class ProjectAttentionStoreTests: XCTestCase {
                 AgentSession(sessionId: "w-block", projectId: project.id, taskId: task.id,
                              role: .worker, cwd: "/tmp", state: .running)
             )
-            _ = try Board(first).block(taskId: task.id, sessionId: "w-block", reason: "need a decision")
+            _ = try Board(first).block(taskId: task.id, sessionId: "w-block", reason: "need a decision", source: .worker)
         }
 
         let reopened = try AppDatabase.open(at: url)
@@ -392,7 +392,7 @@ final class ProjectAttentionStoreTests: XCTestCase {
         try f.sessions.insert(f.session("w-block", state: .running, taskId: task.id))
 
         let values = try observe(f.db, changes: 1) {
-            _ = try f.board.block(taskId: task.id, sessionId: "w-block", reason: "need a decision")
+            _ = try f.board.block(taskId: task.id, sessionId: "w-block", reason: "need a decision", source: .worker)
         }
 
         XCTAssertEqual(values.first?.first?.reasons, [])

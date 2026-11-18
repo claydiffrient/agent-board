@@ -156,10 +156,26 @@ public struct ReviewRound: Codable, FetchableRecord, MutablePersistableRecord, S
         })
     }
 
-    /// SPEC §15.7: a reopen whose every finding cites only overruled findings rests on nothing a person left open.
-    static func checkReopen(_ findings: [String], overruled: [Int: Ruling], round: Int) throws {
+    /// SPEC §15.7: a reopen whose every finding re-raises only overruled findings rests on nothing a person
+    /// left open. `refs`, one entry per finding, says which previous findings each re-raises; without it, the
+    /// "finding N" citations in the text stand in.
+    static func checkReopen(
+        _ findings: [String], refs: [[Int]]? = nil, overruled: [Int: Ruling], round: Int, previousCount: Int
+    ) throws {
+        if let refs {
+            guard refs.count == findings.count else {
+                throw ReviewReopenRejection(reason: "finding_refs has \(refs.count) entr\(refs.count == 1 ? "y" : "ies") "
+                    + "for \(findings.count) finding\(findings.count == 1 ? "" : "s"); give one list per finding, "
+                    + "empty for a new one.")
+            }
+            if let unknown = refs.joined().first(where: { $0 < 1 || $0 > previousCount }) {
+                throw ReviewReopenRejection(reason: previousCount == 0
+                    ? "There is no earlier finding to re-raise, but finding_refs names \(unknown). Leave it out."
+                    : "Finding \(unknown) does not exist; round \(round) had findings 1 to \(previousCount).")
+            }
+        }
         guard !overruled.isEmpty else { return }
-        let cited = findings.map(citedFindings)
+        let cited = refs.map { $0.map(Set.init) } ?? findings.map(citedFindings)
         guard cited.allSatisfy({ !$0.isEmpty && $0.isSubset(of: overruled.keys) }) else { return }
         let numbers = cited.reduce(into: Set<Int>()) { $0.formUnion($1) }.sorted().map(String.init)
         throw ReviewReopenRejection(reason: "Every finding names round \(round)'s finding"

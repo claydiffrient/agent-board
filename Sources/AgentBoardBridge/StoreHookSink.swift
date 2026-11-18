@@ -546,7 +546,7 @@ public final class StoreHookSink: HookSink {
             if Self.blockingNotificationTypes.contains(type) || type.hasPrefix("elicitation") {
                 let reason = event.notificationMessage ?? type
                 var followUps: [FollowUp] = []
-                if let taskId, (try? board.block(taskId: taskId, sessionId: sessionId, reason: reason)) != nil {
+                if let taskId, (try? board.block(taskId: taskId, sessionId: sessionId, reason: reason, source: .prompt)) != nil {
                     followUps.append(.reportQueued(projectId: session.projectId))
                 } else {
                     // Nothing was marked blocked, so the project's attention signal cannot see this

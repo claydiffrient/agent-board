@@ -242,7 +242,7 @@ public final class WorkerToolHandler: ToolHandler {
                     reason: "\(reason)\n\nAgent Board gave up waiting for \(lockedPath), held by another agent in this shared checkout."
                 )
             } else {
-                try board.block(taskId: task.id, sessionId: sessionId, reason: reason)
+                try board.block(taskId: task.id, sessionId: sessionId, reason: reason, source: .worker)
             }
             await events.reportQueued(projectId: identity.projectId)
             guard let lockedPath else {
@@ -366,7 +366,7 @@ public final class WorkerToolHandler: ToolHandler {
         case "working":
             break
         case "blocked":
-            try tasks.setBlocked(task.id, true, reason: detail)
+            try tasks.setBlocked(task.id, true, reason: detail, source: .worker)
             if let sessionId { try sessions.setState(sessionId, .blocked) }
         case "unblocked":
             if let sessionId {

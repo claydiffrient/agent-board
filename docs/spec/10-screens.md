@@ -15,6 +15,11 @@ ever touching the first. In projects with PR follow-through on (§13), the
 headline also carries "N PRs ready to verify" after the review count — "Nothing
 running, nothing awaiting your review, 1 PR ready to verify." — and at zero the
 clause is absent rather than reassuring, so the resting sentence is unchanged.
+While the Inbox holds any question, the headline leads with "N questions for
+you" beside the projects-needing-you clause — "2 projects need you, 3 questions
+for you. 1 agent working, …" — counted by the same `InboxStore.observeCount`
+the Inbox row's badge shows, and the clause links to the Inbox. At zero it is
+absent.
 Each project's card shows its own count as a link under its name, and a card
 with one is not **Idle**. Clicking the card's count opens the Pull Requests page
 filtered to that project; clicking the headline's clause does the same when one
@@ -472,6 +477,55 @@ Archived: the summary counts ended matches instead — "No sessions match “idl
 · 1 ended match hidden · 1 of 2 ports". Filtering reads the rows the sidebar
 panel's sweep already holds, so a query starts no sweep.
 
+**Inbox** — the second pinned sidebar row, directly below At a Glance
+(`SidebarSelection.inbox`), with a count badge from `InboxStore.observeCount`
+(§15.5). Its page lists every question waiting on the human, across projects,
+from `InboxStore.observe`: one section per project in sidebar order, a project
+filter, and the rows of each section oldest asking first. A row shows its
+subject (the task title, what the approval would do, or the pull request), its
+kind, who asked and when, the asker's text, and every standing ruling on the
+subject as a "Ruled: …" chip. Agent-written text — a block reason, an approval's
+reason, triage's `decision_question`, a reviewer's finding — is shown as quoted
+data: italic, behind a rule, never styled as the app's own words.
+
+Each row has two separate zones, which VoiceOver hears as two groups named
+**Answer** and **Actions**.
+
+- **Answer** holds the verdicts, a note field, and the fixed caption
+  "Recorded as your ruling. Nothing is pushed, posted, merged, accepted or
+  closed." A verdict writes one ruling (§15.2) answering the row's current
+  episode and nothing else, with two exceptions that are themselves rulings
+  paths: **Deny** goes through `Board.denyApproval`, which resolves the approval
+  as denied in the same write (§15.6), and a decision's option or **Reply with
+  my note** goes through `Board.answerDecision`, which leaves the reply owed
+  (§13.4). Verdicts that need a note stay disabled until it has one. No verdict
+  is ever a default or prominent button.
+
+  | Row | Verdicts |
+  |---|---|
+  | Blocked by `report_blocked` (`blocked_source = worker`) | Proceed, Do this instead (note), Hold (note) |
+  | Blocked by a Claude Code prompt (`blocked_source = prompt`) | none: only the terminal can answer it (D15) |
+  | Approval | Deny (note) |
+  | PR decision | one button per option, Reply with my note |
+  | Parked watch | Keep parked |
+  | Held for a person in review | **Overrule** (note) and **Uphold** on each finding of the latest `review_round` (§15.7), each a `review_finding` ruling with `finding_ref` `"<round>:<n>"` |
+  | Reviewer stopped, proposal | none |
+
+- **Actions** holds the actions that were already on the board, each labeled
+  with its effect and confirmed against its concrete target before it runs:
+  "Approve and push `<branch>` at `<short sha>` to origin…", "Accept into done —
+  lands `<branch>`…", "Reopen with my note…" (`Board.reopen` with the note as a
+  `reopen` ruling, §15.6), "Re-run review — starts a new reviewer…", "Resume —
+  follow-through may push fix rounds…", "Stop watching #n…", "Dismiss the item
+  with my note…", "Stop the worker…", "Promote onto the board…" and "Dismiss —
+  deletes the proposal…". **Attach to `<session>`** opens the session's terminal
+  and needs no confirmation, since it changes nothing.
+
+The surfaces the same questions already appear on — Pending approvals, Blocked
+and Pending reviews in the Orchestrator sidebar, and Needs you and Parked on the
+Pull Requests page — stay, and each shows the newest standing ruling that
+answers the row's current episode as the same "Ruled: hold — <note>" chip.
+
 **Roster** — the cross-project register of archetypes (§4), and the one screen
 not scoped to a project: a `Roster` row in the sidebar beside `At a Glance` and
 above the workspace sections, so it does not join Task Board and Status inside a
@@ -500,7 +554,7 @@ by id so the order is stable. "Working" means a live `agent_session` carrying
 that agent's `roster_agent_id` (`RosterStore.assignments`); a session that has
 ended does not count, or a finished pass would strand its agent undeletable.
 
-**Coordinator** — the Coordinator's page (§8.2), and the third pinned sidebar
+**Coordinator** — the Coordinator's page (§8.2), and the fourth pinned sidebar
 row, directly below `Roster` (`SidebarSelection.pinned`). The row carries a gear
 for the **Coordinator settings** sheet — one `ModelPicker`, defaulting to
 **Claude Code default**, saved through `CoordinatorStore.setModel` — and the
@@ -520,7 +574,7 @@ three sections:
 - **Sessions** — **New Session**, the active session, and the history; clicking
   a history entry resumes it. Each shows its start and its spend.
 
-**Pull Requests** — the fourth pinned sidebar row, directly below Coordinator
+**Pull Requests** — the fifth pinned sidebar row, directly below Coordinator
 (`SidebarSelection.pullRequests`), opening a cross-project page rather than a
 project tab, for the pull requests a project with PR follow-through turned on is
 watching (§13). The row's count badge is PRs in Ready to verify plus open
@@ -560,7 +614,7 @@ open it already filtered; the banner's route
 filtered page has loaded. See §13 for the state machine, verdicts, and settings
 behind all of it.
 
-**Reviews** — the fifth pinned sidebar row, directly below Pull Requests
+**Reviews** — the sixth pinned sidebar row, directly below Pull Requests
 (`SidebarSelection.reviews`), shown only while CDR, the review watcher, is
 installed: its home directory (`$CD_REVIEW_HOME`, else `~/.cd-review`) exists.
 The app checks at launch and each time it comes forward, so installing or
@@ -921,10 +975,10 @@ guaranteed to agree with this table across macOS versions.
 | Detail pane width | 761pt | The Orchestrator and Coordinator screens are the widest fixed layouts: a 480pt console, the split's 1pt divider and a 280pt approvals or requests sidebar. At 760 the sidebar's trailing point is cut off. |
 | Sidebar width | 180pt, 220pt ideal | Unchanged. The bottom stack holds its measured heights at 180 (the usage footer is 143pt at both widths). |
 | Window width | 981pt | The sidebar's 220pt ideal plus the 761pt detail minimum, so the default sidebar never pushes a screen below its own minimum. It also holds the 780pt project settings sheet. |
-| Window height | 600pt | The tallest fixed stack a screen needs is the sidebar's: the project list's reserve plus Add Project, the notifications-off notice and the usage footer. Measured at the 180pt sidebar: 44 + 86 + 143 = 273pt, plus 224 for the list, is 497pt of the 548 a 600pt window leaves under a 52pt toolbar (the unified toolbar's usual height, assumed: an offscreen test window has no toolbar). The remainder goes to the Ports panel's header and rows. 600 also holds the settings sheet's 480pt minimum under the toolbar. |
+| Window height | 600pt | The tallest fixed stack a screen needs is the sidebar's: the project list's reserve plus Add Project, the notifications-off notice and the usage footer. Measured at the 180pt sidebar: 44 + 86 + 143 = 273pt, plus 256 for the list, is 529pt of the 548 a 600pt window leaves under a 52pt toolbar (the unified toolbar's usual height, assumed: an offscreen test window has no toolbar). The remainder goes to the Ports panel's header and rows. 600 also holds the settings sheet's 480pt minimum under the toolbar. |
 
-**The sidebar list always keeps seven rows' worth of height** (224pt, at the
-sidebar's 32pt row pitch: the four pinned rows, a section header and two
+**The sidebar list always keeps eight rows' worth of height** (256pt, at the
+sidebar's 32pt row pitch: the five pinned rows, a section header and two
 projects), and scrolls within it. The bottom stack — Ports panel, Add Project…,
 the notifications-off notice and the usage footer — sits *below* the list, not
 in a `safeAreaInset` over it: an inset lets the list scroll beneath it, so any

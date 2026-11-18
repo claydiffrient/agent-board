@@ -4,7 +4,7 @@ import GRDB
 /// The surfaces whose open question waits on the human (SPEC §15.5).
 public enum InboxItemKind: String, Codable, Sendable, CaseIterable, Equatable {
     case approval
-    /// Blocked by `report_blocked` or by a Claude Code prompt; both go through `Board.block`.
+    /// Blocked by `report_blocked` or by a Claude Code prompt; `InboxItem.blockedSource` tells them apart.
     case blockedTask = "blocked_task"
     /// In `review` with no rostered reviewer: human routing, protected paths, or a reviewer that refused it.
     case humanReview = "human_review"
@@ -26,6 +26,8 @@ public struct InboxItem: Sendable, Equatable, Identifiable {
     /// The episode stamp a ruling on this row records as `question_at` (SPEC §15.1); 0 for a row from before
     /// the stamp existed.
     public var questionAt: Int64
+    /// A blocked task's source; a `prompt` block takes no verdict, since only the terminal can answer it.
+    public var blockedSource: BlockedSource? = nil
 
     public var id: String { "\(kind.rawValue):\(subjectId)" }
 
@@ -74,7 +76,8 @@ public struct InboxStore: Sendable {
                 subjectId: row["subject_id"],
                 title: row["title"],
                 question: row["question"],
-                questionAt: row["question_at"]
+                questionAt: row["question_at"],
+                blockedSource: row["blocked_source"]
             )
         }
     }
@@ -85,6 +88,20 @@ public struct InboxStore: Sendable {
                     AND r.question_at >= \(episode))
         """
     }
+
+    /// A capped review is answered once the human has ruled on every finding of its latest round for this
+    /// episode, overruling at least one (SPEC §15.5).
+    private static let findingsOverruled = """
+        EXISTS (SELECT 1 FROM review_round rr
+                WHERE rr.task_id = t.id AND rr.number = (SELECT MAX(number) FROM review_round WHERE task_id = t.id)
+                  AND EXISTS (SELECT 1 FROM ruling r WHERE r.subject_kind = 'review_finding' AND r.task_id = t.id
+                              AND r.verdict = 'overrule' AND r.finding_ref LIKE rr.number || ':%'
+                              AND r.question_at >= COALESCE(t.review_entered_at, 0))
+                  AND (SELECT COUNT(DISTINCT r.finding_ref) FROM ruling r
+                       WHERE r.subject_kind = 'review_finding' AND r.task_id = t.id
+                         AND r.finding_ref LIKE rr.number || ':%'
+                         AND r.question_at >= COALESCE(t.review_entered_at, 0)) >= json_array_length(rr.findings))
+        """
 
     /// A reviewer counts as stopped once it is the task's newest session and its turn has ended, the line
     /// `ReviewHold` draws; before the reviewer starts, the newest session is still the completed worker.
@@ -99,30 +116,31 @@ public struct InboxStore: Sendable {
     static let sql = """
         SELECT * FROM (
           SELECT '\(InboxItemKind.approval.rawValue)' AS kind, a.project_id, a.id AS subject_id,
-                 a.kind AS title, a.reason AS question, a.created_at AS question_at
+                 a.kind AS title, a.reason AS question, a.created_at AS question_at, NULL AS blocked_source
           FROM approval a
           WHERE a.resolved_at IS NULL
             AND NOT EXISTS (SELECT 1 FROM ruling r WHERE r.subject_kind = 'approval' AND r.approval_id = a.id)
 
           UNION ALL
           SELECT '\(InboxItemKind.blockedTask.rawValue)', t.project_id, t.id, t.title, t.blocked_reason,
-                 COALESCE(t.blocked_at, 0)
+                 COALESCE(t.blocked_at, 0), COALESCE(t.blocked_source, '\(BlockedSource.worker.rawValue)')
           FROM task t
           WHERE t.blocked = 1 AND t.archived_at IS NULL
             AND \(unruled(.task, "task_id", "t.id", "COALESCE(t.blocked_at, 0)"))
 
           UNION ALL
           SELECT '\(InboxItemKind.humanReview.rawValue)', t.project_id, t.id, t.title, t.human_review_reason,
-                 COALESCE(t.review_entered_at, 0)
+                 COALESCE(t.review_entered_at, 0), NULL
           FROM task t
           WHERE t.column_name = '\(TaskColumn.review.rawValue)' AND t.reviewer_agent_id IS NULL
             AND t.blocked = 0 AND t.archived_at IS NULL
             AND \(unruled(.task, "task_id", "t.id", "COALESCE(t.review_entered_at, 0)"))
+            AND NOT \(findingsOverruled)
 
           UNION ALL
           SELECT * FROM (
             SELECT '\(InboxItemKind.reviewerStopped.rawValue)' AS kind, t.project_id, t.id AS subject_id, t.title,
-                   NULL AS question, \(stoppedReviewerAt) AS question_at
+                   NULL AS question, \(stoppedReviewerAt) AS question_at, NULL AS blocked_source
             FROM task t
             WHERE t.column_name = '\(TaskColumn.review.rawValue)' AND t.reviewer_agent_id IS NOT NULL
               AND t.blocked = 0 AND t.archived_at IS NULL
@@ -131,7 +149,7 @@ public struct InboxStore: Sendable {
             AND \(unruled(.task, "task_id", "st.subject_id", "st.question_at"))
 
           UNION ALL
-          SELECT '\(InboxItemKind.proposal.rawValue)', t.project_id, t.id, t.title, NULL, t.created_at
+          SELECT '\(InboxItemKind.proposal.rawValue)', t.project_id, t.id, t.title, NULL, t.created_at, NULL
           FROM task t JOIN project p ON p.id = t.project_id
           WHERE t.column_name = '\(TaskColumn.proposed.rawValue)' AND t.archived_at IS NULL
             AND COALESCE(json_extract(p.settings_json, '$.autonomyEnabled'), 0) = 0
@@ -139,7 +157,7 @@ public struct InboxStore: Sendable {
           UNION ALL
           SELECT '\(InboxItemKind.prDecision.rawValue)', w.project_id, CAST(i.id AS TEXT),
                  '#' || w.number || ' ' || w.title, i.decision_question,
-                 COALESCE(i.decision_notified_at, i.created_at)
+                 COALESCE(i.decision_notified_at, i.created_at), NULL
           FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id JOIN project p ON p.id = w.project_id
           WHERE i.state = 'open' AND i.verdict = 'decision' AND w.state NOT IN ('merged', 'closed', 'stopped')
             AND \(PRWatchStore.countsTowardAttention)
@@ -147,7 +165,7 @@ public struct InboxStore: Sendable {
 
           UNION ALL
           SELECT '\(InboxItemKind.parkedWatch.rawValue)', w.project_id, w.id, '#' || w.number || ' ' || w.title,
-                 w.parked_reason, COALESCE(w.parked_at, 0)
+                 w.parked_reason, COALESCE(w.parked_at, 0), NULL
           FROM pr_watch w JOIN project p ON p.id = w.project_id
           WHERE w.state = 'parked' AND json_extract(p.settings_json, '$.prFollowThrough.enabled') = 1
             AND \(unruled(.prWatch, "pr_watch_id", "w.id", "COALESCE(w.parked_at, 0)"))

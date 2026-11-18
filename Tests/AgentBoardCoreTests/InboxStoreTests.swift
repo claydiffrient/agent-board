@@ -9,7 +9,7 @@ final class InboxStoreTests: XCTestCase {
         let inbox = InboxStore(f.db)
         let task = try f.task("Wire the thing", column: .running)
         try f.sessions.insert(f.session("w-block", state: .running, taskId: task.id))
-        _ = try f.board.block(taskId: task.id, sessionId: "w-block", reason: "May I drop the cache?")
+        _ = try f.board.block(taskId: task.id, sessionId: "w-block", reason: "May I drop the cache?", source: .worker)
 
         let asked = try XCTUnwrap(try inbox.items().first)
         XCTAssertEqual(asked.kind, .blockedTask)
@@ -23,9 +23,42 @@ final class InboxStoreTests: XCTestCase {
         XCTAssertEqual(try inbox.count(), 0)
         XCTAssertEqual(try f.tasks.get(task.id)?.blocked, true)
 
-        _ = try f.board.block(taskId: task.id, sessionId: "w-block", reason: "And now?")
+        _ = try f.board.block(taskId: task.id, sessionId: "w-block", reason: "And now?", source: .worker)
         XCTAssertEqual(try inbox.items().map(\.question), ["And now?"])
         XCTAssertEqual(try inbox.count(), 1)
+    }
+
+    /// SPEC §15.5: a capped review stays in the inbox until every finding of its latest round is ruled,
+    /// and leaves once one of those rulings is an overrule.
+    func testOverrulingACappedTasksFindingsAnswersItsReviewEpisode() throws {
+        let f = try Fixture.make()
+        var settings = f.project.settings
+        settings.reviewRoundCap = 1
+        try f.projects.updateSettings(f.project.id, settings)
+        let inbox = InboxStore(f.db)
+        let task = try f.task("Wire the thing", column: .review)
+        try f.sessions.insert(f.session("rev-1", taskId: task.id))
+        let reopen = try f.board.reviewReopen(
+            taskId: task.id, sessionId: "rev-1", reviewerName: "Rowan", findings: ["Empty input throws.", "Rename it."]
+        )
+        XCTAssertTrue(reopen.capped)
+        let row = try XCTUnwrap(try inbox.items().first)
+        XCTAssertEqual(row.kind, .humanReview)
+        let rulings = RulingStore(f.db)
+        func rule(_ n: Int, _ verdict: RulingVerdict) throws {
+            try rulings.record(
+                .reviewFinding(taskId: task.id, ref: ReviewRound.findingRef(round: 1, finding: n)),
+                question: "finding \(n)", questionAt: row.questionAt, verdict: verdict,
+                note: verdict == .overrule ? "Not needed." : nil
+            )
+        }
+
+        try rule(1, .overrule)
+        XCTAssertEqual(try inbox.items().map(\.id), [row.id], "one finding is still unruled")
+
+        try rule(2, .uphold)
+        XCTAssertEqual(try inbox.items(), [])
+        XCTAssertEqual(try f.tasks.get(task.id)?.column, .review)
     }
 
     func testAReviewHeldByAnAgentAndACoordinatorRequestNeverAppear() throws {

@@ -36,10 +36,10 @@ final class RulingTests: XCTestCase {
         let task = try f.task("Wire the thing", column: .running)
         try f.sessions.insert(f.session("w-block", state: .running, taskId: task.id))
 
-        _ = try f.board.block(taskId: task.id, sessionId: "w-block", reason: "first")
+        _ = try f.board.block(taskId: task.id, sessionId: "w-block", reason: "first", source: .worker)
         let first = try XCTUnwrap(try f.tasks.get(task.id)?.blockedAt)
         try f.board.unblock(taskId: task.id, sessionId: "w-block")
-        _ = try f.board.block(taskId: task.id, sessionId: "w-block", reason: "second")
+        _ = try f.board.block(taskId: task.id, sessionId: "w-block", reason: "second", source: .worker)
 
         XCTAssertGreaterThan(try XCTUnwrap(try f.tasks.get(task.id)?.blockedAt), first)
     }

@@ -95,6 +95,13 @@ public enum SessionRole: String, Codable, Sendable, CaseIterable, Equatable, Dat
     case coordinator
 }
 
+/// Who put a task in `blocked`: the worker's own `report_blocked`, or a Claude Code prompt the
+/// Notification hook saw, which only the terminal can answer (SPEC §15.5).
+public enum BlockedSource: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case worker
+    case prompt
+}
+
 public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
     case human
     case orchestrator

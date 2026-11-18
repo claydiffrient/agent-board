@@ -202,6 +202,8 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     /// Why the task waits in `review` for a person, written with `reviewEnteredAt` (SPEC §15.1).
     public var humanReviewReason: String? = nil
     public var reviewEnteredAt: Int64? = nil
+    /// Set with every block, cleared with it.
+    public var blockedSource: BlockedSource? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -237,6 +239,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case blockedAt = "blocked_at"
         case humanReviewReason = "human_review_reason"
         case reviewEnteredAt = "review_entered_at"
+        case blockedSource = "blocked_source"
     }
 
     public init(

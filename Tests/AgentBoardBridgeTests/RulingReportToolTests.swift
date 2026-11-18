@@ -20,7 +20,7 @@ final class RulingReportToolTests: XCTestCase {
     private func blockedTask(_ title: String = "stuck") throws -> BoardTask {
         let task = try f.task(title, column: .running)
         try f.session("w-\(task.id)", taskId: task.id)
-        try f.board.block(taskId: task.id, sessionId: "w-\(task.id)", reason: "which schema?")
+        try f.board.block(taskId: task.id, sessionId: "w-\(task.id)", reason: "which schema?", source: .worker)
         return try XCTUnwrap(f.tasks.get(task.id))
     }
 

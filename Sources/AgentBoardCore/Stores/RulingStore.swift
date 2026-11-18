@@ -74,8 +74,12 @@ public struct RulingStore: Sendable {
         try db.reader.read { db in try Self.standing(db, subject: subject) }
     }
 
-    static func standing(_ db: Database, subject: RulingSubject) throws -> [Ruling] {
+    public static func standing(_ db: Database, subject: RulingSubject) throws -> [Ruling] {
         try rulings(db, subject: subject, extra: "AND NOT EXISTS (SELECT 1 FROM ruling s WHERE s.supersedes = r.id)")
+    }
+
+    public func observeStanding(_ subject: RulingSubject) -> ValueObservation<ValueReducers.Fetch<[Ruling]>> {
+        ValueObservation.tracking { db in try Self.standing(db, subject: subject) }
     }
 
     /// Every ruling on the subject, superseded or not, newest first.

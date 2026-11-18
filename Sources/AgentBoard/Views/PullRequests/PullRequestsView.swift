@@ -232,6 +232,9 @@ struct PullRequestsView: View {
                 resume: { perform { try actions.resume(listing.watch) } },
                 stopWatching: { perform { try actions.stopWatching(listing.watch) } }
             )
+            if listing.watch.state == .parked {
+                StandingRulingChip(subject: .prWatch(listing.watch.id), since: listing.watch.parkedAt ?? 0)
+            }
             ForEach(listing.decisions) { decision in
                 PRDecisionRow(decision: decision) { choice in
                     await answer(decision, choice: choice)
@@ -466,6 +469,9 @@ struct PRDecisionRow: View {
                 .lineLimit(2)
             Text(decision.decisionQuestion ?? "Triage asked for a decision.")
                 .fontWeight(.semibold)
+            if let id = decision.id {
+                StandingRulingChip(subject: .prItem(id), since: decision.decisionNotifiedAt ?? decision.createdAt)
+            }
             ViewThatFits(in: .horizontal) {
                 HStack { options }
                 VStack(alignment: .leading) { options }

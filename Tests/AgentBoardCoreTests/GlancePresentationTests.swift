@@ -25,6 +25,21 @@ final class GlanceHeadlineTests: XCTestCase {
         XCTAssertFalse(text.contains("0"), "zero must never be rendered as a digit in the headline")
     }
 
+    func testInboxQuestionsLeadBesideProjectsNeedingYouAndVanishAtZero() {
+        XCTAssertEqual(
+            GlanceHeadline.text(workingSessions: 1, tasksInReview: 0, projectsNeedingYou: 2, questionsForYou: 3),
+            "2 projects need you, 3 questions for you. 1 agent working, nothing awaiting your review."
+        )
+        XCTAssertEqual(
+            GlanceHeadline.text(workingSessions: 0, tasksInReview: 0, projectsNeedingYou: 0, questionsForYou: 1),
+            "1 question for you. Nothing running, nothing awaiting your review."
+        )
+        XCTAssertEqual(
+            GlanceHeadline.text(workingSessions: 0, tasksInReview: 0, projectsNeedingYou: 0, questionsForYou: 0),
+            "Nothing running, and nothing is waiting on you."
+        )
+    }
+
     func testOneOfEachIsSingular() {
         XCTAssertEqual(
             GlanceHeadline.text(workingSessions: 1, tasksInReview: 1, projectsNeedingYou: 0),

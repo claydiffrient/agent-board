@@ -294,23 +294,25 @@ public struct TaskStore: Sendable {
         return toReady + toBacklog
     }
 
-    public func setBlocked(_ id: String, _ blocked: Bool, reason: String?) throws {
+    public func setBlocked(_ id: String, _ blocked: Bool, reason: String?, source: BlockedSource = .worker) throws {
         try db.writer.write { db in
-            try Self.setBlocked(db, id, blocked, reason: reason)
+            try Self.setBlocked(db, id, blocked, reason: reason, source: source)
         }
     }
 
     /// A block stamps a new `blocked_at`, strictly later than the last, so each block is its own
     /// question episode (SPEC §15.1).
-    static func setBlocked(_ db: Database, _ id: String, _ blocked: Bool, reason: String?) throws {
+    static func setBlocked(
+        _ db: Database, _ id: String, _ blocked: Bool, reason: String?, source: BlockedSource = .worker
+    ) throws {
         let now = Int64.nowMillis
         try db.execute(
             sql: """
-            UPDATE task SET blocked = ?, blocked_reason = ?, updated_at = ?,
+            UPDATE task SET blocked = ?, blocked_reason = ?, blocked_source = ?, updated_at = ?,
               blocked_at = CASE WHEN ? THEN MAX(?, COALESCE(blocked_at, 0) + 1) ELSE blocked_at END
             WHERE id = ?
             """,
-            arguments: [blocked, blocked ? reason : nil, now, blocked, now, id]
+            arguments: [blocked, blocked ? reason : nil, blocked ? source : nil, now, blocked, now, id]
         )
     }
 

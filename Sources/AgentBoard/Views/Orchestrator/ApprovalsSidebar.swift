@@ -186,6 +186,9 @@ struct ApprovalsSidebar: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
+            if item.kind == .blocked {
+                StandingRulingChip(subject: .task(item.task.id), since: item.task.blockedAt ?? 0)
+            }
             HStack {
                 Button("Attach") {
                     if let session = item.session { openWindow(id: "terminal", value: session.sessionId) }
@@ -240,6 +243,7 @@ struct ApprovalsSidebar: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+            StandingRulingChip(subject: .approval(approval.id))
             HStack {
                 Button("Approve") { run { try await env.supervisor.approve(approvalId: approval.id) } }
                     .buttonStyle(.borderedProminent)
@@ -419,6 +423,7 @@ private struct ReviewRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
             }
+            StandingRulingChip(subject: .task(task.id), since: task.reviewEnteredAt ?? 0)
             Label(session?.branch ?? "agentboard/\(task.id)", systemImage: "arrow.triangle.branch")
                 .font(.caption)
                 .foregroundStyle(.secondary)

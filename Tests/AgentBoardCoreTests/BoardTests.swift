@@ -107,7 +107,7 @@ final class BoardTests: XCTestCase {
         try f.board.assign(taskId: t.id, session: f.session("s1"))
         try f.sessions.setState("s1", .running)
 
-        let report = try f.board.block(taskId: t.id, sessionId: "s1", reason: "needs permission")
+        let report = try f.board.block(taskId: t.id, sessionId: "s1", reason: "needs permission", source: .worker)
         XCTAssertEqual(report.kind, .blocked)
         let blocked = try XCTUnwrap(f.tasks.get(t.id))
         XCTAssertTrue(blocked.blocked)

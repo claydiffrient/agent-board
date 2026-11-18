@@ -171,8 +171,26 @@ final class SidebarAttentionLiveTests: XCTestCase {
         OffscreenMount(MainWindow(collapseState: collapse.state).environment(renderEnvironment(db: db)))
     }
 
+    /// Below the pinned rows: the condition that raises a project's badge also puts a question in the
+    /// Inbox, whose row badge is not what these tests measure.
+    private var belowPinned: CGFloat = 0
+
     private func diff(_ a: Capture, _ b: Capture) -> PixelDiff {
-        a.diff(b, columns: a.columns(Self.sidebar))
+        a.diff(b, columns: a.columns(Self.sidebar), rows: a.rows(below: belowPinned))
+    }
+
+    /// The bottom of the last pinned row, in points from the window's top.
+    private func pinnedBottom(_ mount: OffscreenMount) throws -> CGFloat {
+        var cells: [CGRect] = []
+        var queue: [NSView] = [mount.host]
+        while let view = queue.popLast() {
+            if String(describing: type(of: view)) == "ListTableCellView" { cells.append(view.convert(view.bounds, to: nil)) }
+            queue.append(contentsOf: view.subviews)
+        }
+        let height = mount.window.frame.height
+        let bottoms = cells.map { height - $0.minY }.sorted()
+        XCTAssertGreaterThanOrEqual(bottoms.count, Self.pinnedRows)
+        return bottoms.count >= Self.pinnedRows ? bottoms[Self.pinnedRows - 1] : 0
     }
 
     private func register(_ db: AppDatabase, _ name: String) throws -> Project {
@@ -210,6 +228,7 @@ final class SidebarAttentionLiveTests: XCTestCase {
         let board = mount(db)
         defer { board.close() }
         let quiet = try board.capture(points: Self.sidebar, showing: Self.twoUngroupedProjects)
+        belowPinned = try pinnedBottom(board)
 
         let approval = try ApprovalStore(db).create(
             projectId: alpha.id, kind: .spawn, taskId: nil, epicId: nil,
@@ -264,6 +283,7 @@ final class SidebarAttentionLiveTests: XCTestCase {
         let quietMount = mount(quietDb)
         defer { quietMount.close() }
         let quiet = try quietMount.capture(points: Self.sidebar, showing: Self.oneCollapsedSection)
+        belowPinned = try pinnedBottom(quietMount)
         XCTAssertEqual(
             quietMount.viewCount(ofClassNamed: "ListTableCellView"), Self.pinnedRows,
             "only the pinned rows may be drawn"
@@ -296,6 +316,7 @@ final class SidebarAttentionLiveTests: XCTestCase {
         let board = mount(db)
         defer { board.close() }
         let quiet = try board.capture(points: Self.sidebar, showing: Self.oneExpandedSection)
+        belowPinned = try pinnedBottom(board)
         _ = try ApprovalStore(db).create(
             projectId: shown.id, kind: .spawn, taskId: nil, epicId: nil,
             requestedBy: "orchestrator", reason: nil
