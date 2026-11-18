@@ -160,6 +160,8 @@ public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, Data
     case refresh
     /// PR follow-through reached a milestone on one of the project's pull requests (SPEC §13.6).
     case prFollowThrough = "pr_follow_through"
+    /// The human recorded a ruling; `list_reports` carries it as a structured object (SPEC §9.1, §15).
+    case ruling
 }
 
 /// Where a Coordinator request stands in the ledger (SPEC §9.4). `sent` and `accepted` are open;

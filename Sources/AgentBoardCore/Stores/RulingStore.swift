@@ -65,6 +65,7 @@ public struct RulingStore: Sendable {
             ruling.findingRef = ref
         }
         try ruling.insert(db)
+        try RulingReport.queue(db, ruling)
         return ruling
     }
 
@@ -84,6 +85,27 @@ public struct RulingStore: Sendable {
 
     static func history(_ db: Database, subject: RulingSubject) throws -> [Ruling] {
         try rulings(db, subject: subject, extra: "")
+    }
+
+    public func get(_ id: String) throws -> Ruling? {
+        try db.reader.read { db in try Ruling.fetchOne(db, key: id) }
+    }
+
+    /// Every ruling about the task — on it, on one of its review findings, or on one of its approvals — newest
+    /// first, each with whether it still stands.
+    public func onTask(_ taskId: String) throws -> [(ruling: Ruling, standing: Bool)] {
+        try db.reader.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                SELECT r.*, NOT EXISTS (SELECT 1 FROM ruling s WHERE s.supersedes = r.id) AS standing
+                FROM ruling r
+                WHERE r.task_id = ? OR r.approval_id IN (SELECT id FROM approval WHERE task_id = ?)
+                ORDER BY r.answered_at DESC, r.rowid DESC
+                """,
+                arguments: [taskId, taskId]
+            ).map { (try Ruling(row: $0), $0["standing"] as Bool) }
+        }
     }
 
     /// The standing `hold` that covers the task's current block, nil when none does (SPEC §15.6).

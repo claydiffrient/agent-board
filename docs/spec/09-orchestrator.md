@@ -107,6 +107,7 @@ became ready.
 | Human promotes a proposal | `decision` | Proposal, and the ids that became `ready` |
 | Human approves or denies an approval | `decision` | Approval, outcome, reason |
 | Human comments on a task | `comment` | Task id and title, the comment quoted; the human speaking. An agent's comment queues nothing |
+| Human records a ruling (§15) | `ruling` | A first line naming the ruling id, its verdict and its subject, and the human's note between `--- note begins ---` and `--- note ends ---`. `list_reports` adds the ruling itself as a structured `ruling` object (§6). Queued in the transaction that writes the ruling; it binds the orchestrator, and the board enforces it whether or not the report is read (§15.6) |
 | A `refresh_epic` that answered before its check finishes | `refresh` | The verdict `refresh_epic` would have answered with: merged, conflicted, failed or timed out, or not finished for a reason the board caused (§5.2) |
 | Cap or idle kill | `failed` | Task, session, `failure_reason` |
 | Human stops a worker, or Pause All | `failed` | Task, session, that a human stopped it |
