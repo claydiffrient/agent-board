@@ -705,6 +705,19 @@ enum Schema {
     END;
     """
 
+    /// One standing ruling owed to one live session (SPEC §15.8). `delivered_at` is the claim: set once,
+    /// by the `PostToolUse` hook or by the resume, whichever reaches the session first.
+    static let rulingDelivery = """
+    CREATE TABLE ruling_delivery (
+      ruling_id     TEXT NOT NULL REFERENCES ruling(id) ON DELETE CASCADE,
+      session_id    TEXT NOT NULL REFERENCES agent_session(session_id) ON DELETE CASCADE,
+      delivered_at  INTEGER,
+      delivered_via TEXT,
+      PRIMARY KEY (ruling_id, session_id)
+    );
+    CREATE INDEX ruling_delivery_session ON ruling_delivery(session_id);
+    """
+
     /// The human's existing answers on PR items, carried into `ruling` (SPEC §15.4): a decision answer as
     /// `choose` when it names one of the item's options and `reply` otherwise, and a human dismissal as
     /// `dismiss` with its reason. A dismissal an orchestrator requested is skipped; its reason is not the human's.
@@ -781,6 +794,6 @@ enum Schema {
         "task_commit",
         "roster_agent", "project_roster_agent", "task_comment", "comment_delivery", "coordinator",
         "coordinator_request", "request_event", "request_epic", "pr_watch", "pr_item", "pr_round",
-        "pr_poll_problem", "pr_triage", "worktree_slot", "takeover", "ruling",
+        "pr_poll_problem", "pr_triage", "worktree_slot", "takeover", "ruling", "ruling_delivery",
     ]
 }

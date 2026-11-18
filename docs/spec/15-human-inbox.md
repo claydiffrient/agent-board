@@ -201,3 +201,33 @@ enforces it in code:
 
 An overrule moves nothing: the task stays where it is, and accepting it is
 still a separate action.
+
+### 15.8 Delivery to a live worker
+
+A `proceed`, `instead` or `hold` ruling on a task is queued, in the same
+transaction that writes it, for each of the task's live worker sessions
+(`starting`, `running`, `idle`, `blocked` or `waiting_on_lock`) as a
+`ruling_delivery` row. A session in `setup` gets none: its opening prompt reads
+the standing rulings when it launches. A stopped, failed or completed session
+gets none either; the ruling reaches the next run through its prompt (§15.6).
+
+Each row is claimed once, by whichever path reaches the session first, and the
+claim (`delivered_at`, `delivered_via`) is kept:
+
+- **Busy.** The session's next `PostToolUse` claims every ruling still owed to
+  it and returns them as `additionalContext`, the path comment delivery uses
+  (§7). It fits the hook's 10,000-character limit by dropping the quoted
+  questions first, then cutting the text short.
+- **Idle or blocked.** Such a session may make no further tool call, so the
+  metering tick (`WorkerSupervisor.deliverOwedRulings`) claims its rulings and
+  resumes it with an app-authored prompt carrying them, the path the shutdown
+  order uses for idle workers (§8.1). A failed resume releases the claim for
+  the next tick or hook. The resume ignores a `hold` in force, because the
+  `hold` is what it carries: the prompt tells the worker to stop and end its
+  turn, and the task stays blocked (§15.6).
+
+Every delivery appends a `status` progress row naming the verdicts and the
+path. A human's own Resume claims whatever the session was still owed, since
+its prompt lists every standing ruling. `SessionEnd` drops unclaimed rows, and
+a `/clear` fork takes them over as it takes over queued comments. Delivery
+never starts a session that is not live.

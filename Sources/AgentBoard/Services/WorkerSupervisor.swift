@@ -182,6 +182,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let approvals: ApprovalStore
     @ObservationIgnored private let shutdowns: ShutdownOrderStore
     @ObservationIgnored private let deliveries: ShutdownDeliveryStore
+    @ObservationIgnored private let rulingDeliveries: RulingDeliveryStore
     @ObservationIgnored private let epics: EpicStore
     @ObservationIgnored private let notes: NoteStore
     @ObservationIgnored private let roster: RosterStore
@@ -367,6 +368,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         approvals = ApprovalStore(db)
         shutdowns = ShutdownOrderStore(db)
         deliveries = ShutdownDeliveryStore(db)
+        rulingDeliveries = RulingDeliveryStore(db)
         epics = EpicStore(db)
         notes = NoteStore(db)
         roster = RosterStore(db, definitions: AgentDefinitionDirectories(home: home))
@@ -2175,10 +2177,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 WorkerStanding.recorded(session: session, project: $0, taskId: session.taskId ?? "").placement
             } ?? .worktree
             let rulings = try session.taskId.map { try RulingStore(db).standing(.task($0)) } ?? []
-            try await resume(session, mergingEpic: true) { merge in
-                Self.resumePrompt(
-                    previousStop: session.stopReason, placement: placement, merge: merge, rulings: rulings
-                )
+            // The prompt carries every standing ruling, so none is still owed to this session afterwards.
+            let owed = try rulingDeliveries.claim(sessionId: sessionId, via: .resume)
+            do {
+                try await resume(session, mergingEpic: true) { merge in
+                    Self.resumePrompt(
+                        previousStop: session.stopReason, placement: placement, merge: merge, rulings: rulings
+                    )
+                }
+            } catch {
+                try? rulingDeliveries.release(sessionId: sessionId, rulingIds: owed.map(\.id))
+                throw error
             }
         }
     }
@@ -5341,6 +5350,28 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    /// SPEC §15.8: an idle or blocked session makes no tool call for the hook to ride, so a ruling owed
+    /// to it goes in as a resume prompt. Claimed before the resume runs, released if the resume fails.
+    func deliverOwedRulings() async {
+        guard let owed = try? rulingDeliveries.owedByResume() else { return }
+        for (session, _) in owed {
+            guard let rulings = try? rulingDeliveries.claim(sessionId: session.sessionId, via: .resume),
+                  !rulings.isEmpty
+            else { continue }
+            do {
+                try await resume(session, honoringHold: false) { _ in RulingDelivery.resumePrompt(rulings) }
+                if let taskId = session.taskId {
+                    _ = try? ProgressStore(db).append(
+                        taskId: taskId, sessionId: session.sessionId, kind: .status,
+                        text: RulingDelivery.progressText(rulings, via: .resume)
+                    )
+                }
+            } catch {
+                try? rulingDeliveries.release(sessionId: session.sessionId, rulingIds: rulings.map(\.id))
+            }
+        }
+    }
+
     @discardableResult
     private func refreshShutdownProgress(projectId: String, order: ShutdownOrder) -> ShutdownProgress {
         let grace = (try? projects.get(projectId))??.settings.caps.shutdownGraceSeconds
@@ -5782,6 +5813,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         pollDueTakeovers(all, now: now)
         checkDiskSpace(all)
+        await deliverOwedRulings()
         if now - lastOrphanReap >= Self.orphanReapIntervalMillis {
             lastOrphanReap = now
             reapOrphanedWorktreesOnTick(all)
