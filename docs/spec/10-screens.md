@@ -144,6 +144,19 @@ with a sidebar of everything waiting on the human, in the order it is urgent:
    (`WorkerSupervising.rerunReview`). Reopen stays, but it sends finished work
    back to `ready` as a redo, so it is no longer the only way out of a stalled
    review.
+   A pull request fix round's row (origin `fix_round`) offers neither Accept
+   nor Reopen: its branch is pushed onto its pull request once its check
+   passes, never merged, so Accept can only fail, and Reopen would move the
+   task to `ready` behind its round's back, so Resume could no longer reopen
+   that round (§13.1). In their place it names the pull request (its number
+   links to GitHub), the watch's state, and the watch's `parked_reason` while
+   it is parked, with **Show pull request**, which opens the Pull Requests page
+   at that pull request's row, where Resume moves a parked one. It drops
+   `Waiting on you`, since no person decides it here; a live or stopped
+   reviewer still shows, and Re-run review stays. On the Task Board, the same
+   task's review card says Agent Board pushes it once its check passes in
+   place of Accept and Reopen, and
+   neither dragging it onto Done nor **Move to** offers to accept it.
 4. **Proposals** — worker-proposed tasks awaiting promotion.
 5. **Messages** — every §9.3 message this project sent or received, newest
    first, bold until the receiving orchestrator pulls it. Each row deletes on

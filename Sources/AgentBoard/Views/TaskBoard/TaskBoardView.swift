@@ -528,7 +528,7 @@ struct TaskBoardView: View {
                         Button("Reopen") { reopen(task.id) }
                     } else {
                         Menu("Move to") {
-                            ForEach(TaskColumn.allCases.filter { $0 != task.column && $0 != .closed }, id: \.self) { target in
+                            ForEach(TaskColumn.allCases.filter { TaskDrop.allowed(task, onto: $0) }, id: \.self) { target in
                                 Button(target.title) { _ = drop(taskId: task.id, onto: target) }
                             }
                         }
@@ -561,8 +561,8 @@ struct TaskBoardView: View {
 
     /// Closed is entered only by `close_task`, which records a reason, and left only by Reopen (SPEC §10).
     private func drop(taskId: String, onto column: TaskColumn) -> Bool {
-        guard let task = visibleTasks.first(where: { $0.id == taskId }), task.column != column,
-              column != .closed, !task.isClosed
+        guard let task = visibleTasks.first(where: { $0.id == taskId }), TaskDrop.allowed(task, onto: column),
+              !task.isClosed
         else {
             return false
         }
@@ -766,4 +766,12 @@ struct TaskBoardView: View {
 private struct PendingAcceptance {
     var taskId: String
     var warning: String
+}
+
+enum TaskDrop {
+    /// Dropping a review card on Done accepts it, which a fix round refuses (SPEC §13.1).
+    static func allowed(_ task: BoardTask, onto column: TaskColumn) -> Bool {
+        guard column != task.column, column != .closed else { return false }
+        return !(column == .done && task.column == .review && task.origin == .fixRound)
+    }
 }

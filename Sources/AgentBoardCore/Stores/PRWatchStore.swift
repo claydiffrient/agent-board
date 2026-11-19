@@ -565,6 +565,29 @@ public struct PRWatchStore: Sendable {
         }
     }
 
+    /// The watch each of the project's fix-round tasks belongs to, keyed by task id (SPEC §10, Pending reviews).
+    public func observeWatchesByFixTask(
+        projectId: String
+    ) -> ValueObservation<ValueReducers.RemoveDuplicates<ValueReducers.Fetch<[String: PRWatch]>>> {
+        ValueObservation.tracking { try Self.watchesByFixTask($0, projectId: projectId) }.removeDuplicates()
+    }
+
+    static func watchesByFixTask(_ db: Database, projectId: String) throws -> [String: PRWatch] {
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+            SELECT r.fix_task_id AS round_fix_task_id, w.*
+            FROM pr_round r JOIN pr_watch w ON w.id = r.watch_id
+            WHERE w.project_id = ? AND r.fix_task_id IS NOT NULL
+            """,
+            arguments: [projectId]
+        )
+        return try Dictionary(
+            rows.map { ($0["round_fix_task_id"] as String, try PRWatch(row: $0)) },
+            uniquingKeysWith: { first, _ in first }
+        )
+    }
+
     /// Per project, for the sidebar badge and At a Glance. A project with nothing to count is absent,
     /// and so is every project with follow-through off and every paused watch (SPEC §13.4).
     public func badgeCounts() throws -> [String: PRBadgeCount] {
