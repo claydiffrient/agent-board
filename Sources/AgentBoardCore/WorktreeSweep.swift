@@ -43,7 +43,7 @@ public struct WorktreeSweepResult: Sendable, Equatable {
             lines.append("Kept:\n" + kept.map { "- \($0.text)" }.joined(separator: "\n"))
         }
         if !teardownFailures.isEmpty {
-            lines.append("Teardown hook problems:\n" + teardownFailures.map { "- \($0.text)" }.joined(separator: "\n"))
+            lines.append("Stopped processes and teardown hook problems:\n" + teardownFailures.map { "- \($0.text)" }.joined(separator: "\n"))
         }
         if !unknown.isEmpty {
             lines.append("Left alone, since no session records them:\n" + unknown.map { "- \($0)" }.joined(separator: "\n"))

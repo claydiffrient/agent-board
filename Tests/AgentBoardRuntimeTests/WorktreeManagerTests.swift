@@ -124,6 +124,55 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertTrue(try manager.branchExists("agentboard/task-1"))
     }
 
+    func testRemoveStopsATerminalLessProcessWorkingInTheWorktree() throws {
+        let path = try manager.create(name: "task-busy", branch: "agentboard/task-busy", base: "main")
+        let inside = path.appendingPathComponent("out")
+        try FileManager.default.createDirectory(at: inside, withIntermediateDirectories: true)
+        let pid = try Self.spawnDetachedSleep(cwd: inside)
+        defer {
+            kill(pid, SIGKILL)
+            var status: Int32 = 0
+            waitpid(pid, &status, 0)
+        }
+
+        let report = try manager.remove(path: path)
+
+        var status: Int32 = 0
+        XCTAssertEqual(waitpid(pid, &status, WNOHANG), pid, "the process is still running")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        XCTAssertEqual(report.processes.stopped.map(\.pid), [pid])
+        XCTAssertTrue(report.notice?.contains("pid \(pid)") == true, report.notice ?? "no notice")
+    }
+
+    /// Its own session, so no controlling terminal: what a worker's Bash command looks like.
+    private static func spawnDetachedSleep(cwd: URL) throws -> pid_t {
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        for fd: Int32 in [0, 1, 2] {
+            posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", fd == 0 ? O_RDONLY : O_WRONLY, 0)
+        }
+        posix_spawn_file_actions_addchdir_np(&actions, cwd.path)
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        var noSignals = sigset_t()
+        sigemptyset(&noSignals)
+        posix_spawnattr_setsigmask(&attributes, &noSignals)
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGMASK))
+        let argv: [UnsafeMutablePointer<CChar>?] = [strdup("/bin/sleep"), strdup("600"), nil]
+        defer { argv.forEach { free($0) } }
+        var pid: pid_t = 0
+        let result = posix_spawn(&pid, "/bin/sleep", &actions, &attributes, argv, environ)
+        guard result == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(result)) }
+        let deadline = Date().addingTimeInterval(5)
+        while LibProc.cwd(pid).map({ URL(fileURLWithPath: $0).resolvingSymlinksInPath() })
+            != cwd.resolvingSymlinksInPath(), Date() < deadline {
+            usleep(10_000)
+        }
+        return pid
+    }
+
     func testRetryReusesExistingBranch() throws {
         let first = try manager.create(name: "attempt-1", branch: "agentboard/task-2", base: "main")
         try "wip\n".write(to: first.appendingPathComponent("wip.txt"), atomically: true, encoding: .utf8)

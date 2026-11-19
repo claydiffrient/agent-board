@@ -325,6 +325,30 @@ stops `--expunge` wiping the main checkout's output base if it ever ran there.
 With no hook set, removal is exactly what it was. Claude Code's own
 `WorktreeRemove` hooks from `~/.claude/settings.json` still run after it.
 
+Before the hook — and with no hook set, before Claude Code's `WorktreeRemove`
+hooks and `git worktree remove` — `remove` stops the processes still working in
+the worktree (`WorktreeProcessStopper`). An agent, often a reviewer, can leave a
+background build or test command running there after its session ends. Left
+alone it defeats both later steps: a build tool's clean in the hook waits on the
+lock that command holds until the hook's timeout kills it, leaving the build
+output behind, and the command keeps writing files while git deletes the
+directory, so `git worktree remove` fails with "Directory not empty". The
+candidates are this user's processes whose current working directory, read
+through libproc and with symlinks resolved, is the worktree or inside it,
+excluding Agent Board itself and its ancestors. Only a candidate with no
+controlling terminal is stopped: a worker's Bash commands, `run_in_background`
+ones included, each lead their own session with none, while an interactive
+shell or editor the human opened there has one and is never signaled. A
+`claude --bg` host holds its pty host's terminal, so a worker still running in
+the worktree is kept too. Each stopped process gets `SIGTERM`, then `SIGKILL`
+if it is still alive five seconds later on `CLOCK_UPTIME_RAW`, off the main
+thread. Stopping never decides whether the worktree goes and never throws: the
+removal report lists each stopped and each kept process by command and pid,
+with any failure to list or signal them, and that goes on the task's progress
+and into the removal's decision report beside a hook failure. It runs wherever
+`remove` does and nowhere else, so not on the rollback of a failed `git
+worktree add` nor in the project's own checkout.
+
 A hook never decides whether the worktree goes. One that exits non-zero, or
 cannot start, is recorded and removal continues; one that outlives
 `worktreeTeardownTimeoutSeconds` (default 600, clamped to 1 second through 24
@@ -349,7 +373,7 @@ start a second hook beside the accept's, and two `git worktree remove` calls
 would race, the loser reporting a removal that never failed.
 
 The hook never runs in the project's own checkout, which git refuses to
-remove anyway. It does not run where `remove` does not: on a worktree kept for
+remove anyway. Neither it nor the process stop runs where `remove` does not: on a worktree kept for
 uncommitted changes (§5), and on the rollback of a failed `git worktree add`
 (step 2), which removes with `git worktree remove --force` directly. That
 worktree's setup never finished, so the hook has nothing reliable to read —

@@ -4530,9 +4530,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 continue
             }
             switch removeIfClean(manager, at: path) {
-            case .removed(let diagnostics, let teardownFailure):
+            case .removed(let diagnostics, let notice):
                 retired.append(slot)
-                notices.append(contentsOf: diagnostics + [teardownFailure].compactMap { $0 })
+                notices.append(contentsOf: diagnostics + [notice].compactMap { $0 })
             case .kept(let reason):
                 notices.append(reason)
             }
@@ -4588,9 +4588,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
             guard FileManager.default.fileExists(atPath: path) else { continue }
             switch removeIfClean(manager, at: URL(fileURLWithPath: path)) {
-            case .removed(let diagnostics, let teardownFailure):
+            case .removed(let diagnostics, let notice):
                 cleanup.notices.append(contentsOf: diagnostics)
-                if let teardownFailure { cleanup.add(teardownFailure, at: path) }
+                if let notice { cleanup.add(notice, at: path) }
             case .kept(let reason):
                 cleanup.add(reason, at: path)
                 removedEvery = false
@@ -4644,9 +4644,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var notices: [String] = []
         for orphan in orphans {
             switch removeIfClean(manager, at: orphan.url) {
-            case .removed(let diagnostics, let teardownFailure):
+            case .removed(let diagnostics, let notice):
                 notices.append(contentsOf: diagnostics)
-                if let teardownFailure { cleanup.add(teardownFailure, at: orphan.path) }
+                if let notice { cleanup.add(notice, at: orphan.path) }
                 if let branch = orphan.branch {
                     notices.append(contentsOf: deleteBranch(manager, branch, bases: bases))
                 }
@@ -4703,7 +4703,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     private enum WorktreeTeardown {
-        case removed([String], teardownFailure: String?)
+        case removed([String], notice: String?)
         case kept(String)
     }
 
@@ -4719,7 +4719,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 return .kept("kept worktree \(path.path): it has uncommitted changes in \(listed)\(more)")
             }
             let removal = try manager.remove(path: path)
-            return .removed(removal.hookDiagnostics, teardownFailure: removal.teardownFailure)
+            return .removed(removal.hookDiagnostics, notice: removal.notice)
         } catch {
             return .kept("could not remove worktree \(path.path): \(error)")
         }
@@ -5181,11 +5181,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         for (worktree, removal) in removals {
             switch removal {
-            case .removed(let diagnostics, let teardownFailure):
+            case .removed(let diagnostics, let notice):
                 outcome.removed.append(worktree.path)
                 outcome.notices.append(contentsOf: diagnostics)
-                if let teardownFailure {
-                    outcome.teardownFailures.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: teardownFailure))
+                if let notice {
+                    outcome.teardownFailures.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: notice))
                 }
             case .kept(let reason):
                 outcome.kept.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: reason))
