@@ -1163,7 +1163,7 @@ task branches that resume from the refreshed epic, so the build is all that
 stops a worker resuming on a branch that does not compile. If the project
 configures a command its policy runs, the commit is checked out detached in a
 scratch worktree (`<worktree-root>/refresh-<epic-id>-<random>`, removed
-afterwards) and those commands run there, build first; the epic branch moves,
+afterwards, after the teardown hook runs in it, §3.1 "Removing a worktree") and those commands run there, build first; the epic branch moves,
 by an `update-ref` guarded by its old head and serialized with accepts' merges,
 only once every one of them passes. A command the policy runs but the project
 does not configure is never guessed at: the refresh applies and its answer says

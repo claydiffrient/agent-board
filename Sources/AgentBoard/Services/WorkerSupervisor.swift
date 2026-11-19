@@ -929,6 +929,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
     }
 
+    nonisolated private static func logTeardownFailure(_ failure: String?) {
+        if let failure { NSLog("Removing a scratch checkout: %@", failure) }
+    }
+
     /// SPEC §3.1 step 1: an epic built on a pull request starts from its freshly fetched head, and
     /// never from the base branch when that head cannot be read.
     nonisolated private static func fetchUpstreamHead(_ upstream: EpicUpstream, manager: WorktreeManager) throws -> String {
@@ -963,13 +967,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         do {
             verification = try await offMain {
                 for leftover in try manager.scratchCheckouts(prefix: "refresh-\(epicId)") {
-                    manager.removeScratch(path: leftover)
+                    Self.logTeardownFailure(manager.removeScratch(path: leftover))
                 }
                 let scratch = try manager.createDetached(
                     name: scratchName, commit: candidate,
                     timeout: TimeInterval(commands.timeoutSeconds), isCancelled: isCancelled
                 )
-                defer { manager.removeScratch(path: scratch) }
+                defer { Self.logTeardownFailure(manager.removeScratch(path: scratch)) }
                 return RefreshVerifier.run(commands, in: scratch, isCancelled: isCancelled)
             }
         } catch {

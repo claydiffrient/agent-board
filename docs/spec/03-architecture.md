@@ -106,7 +106,8 @@ For a task `T` in project `P`:
      with the `post-checkout` hook's status and leaves the new worktree on
      disk when it fails, while a spawn adopts any worktree already at its
      path; so a failed `git worktree add` removes the worktree it created
-     (keeping the branch), and the retry runs the hook afresh instead of
+     (keeping the branch), running the teardown hook in it first ("Removing a
+     worktree" below), and the retry runs the hook afresh instead of
      starting a worker in a checkout whose setup never finished.
    - **Worktree slots.** With `worktreeSlots` above 0 (§4), a worker is
      leased a pooled worktree at `<worktrees>/slot-<n>` instead, and only
@@ -324,6 +325,15 @@ worktree. Agent Board knows nothing about Bazel; that project's setup sets
 stops `--expunge` wiping the main checkout's output base if it ever ran there.
 With no hook set, removal is exactly what it was. Claude Code's own
 `WorktreeRemove` hooks from `~/.claude/settings.json` still run after it.
+
+Two forced removals skip `remove` but still run the teardown hook first, the
+same way: the rollback of a failed `git worktree add` (step 2), whose
+`post-checkout` setup may already have built, and every scratch checkout — the
+epic-refresh check's (§5) and its leftovers. Both hold nobody's work, so a hook
+failure never keeps them: it is appended to the setup error, or logged.
+Neither stops processes nor runs `WorktreeRemove` hooks. No other path deletes
+a git worktree, apart from the project's own checkout, which the hook never
+runs in, and a leftover directory with no `.git` in it.
 
 Before the hook — and with no hook set, before Claude Code's `WorktreeRemove`
 hooks and `git worktree remove` — `remove` stops the processes still working in
