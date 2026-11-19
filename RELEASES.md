@@ -9,6 +9,112 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.12.0 — 2026-11-18
+
+- **Review.** Agent review now stops after a set number of rounds. In the
+  project's Settings, on the Agents tab under Review, **Review round cap**
+  (1 to 20, default 3, enabled only when Review level is Agent) sets the
+  round whose reopen stops the loop: the task stays in Review for you, with
+  an "Agent review round cap reached" row quoting the last findings and a
+  notification, instead of going back to a worker. Your own Accept or
+  Reopen is never refused, and the count never resets. Each re-review also
+  builds on the last: the reviewer reads the diff since the previous round
+  first and must grade every earlier finding as fixed, partly fixed, not
+  fixed or moot, with evidence. A verdict that skips, repeats or invents a
+  finding, or leaves evidence blank, is refused. The grades show in the
+  task's progress log.
+- **Review.** A task that changes the rules that judge it now goes to you
+  at any review level, and a progress row names the paths. Protected by
+  default are `CLAUDE.md` and `CLAUDE.local.md`, anything under `.claude/`,
+  the root `.mcp.json` and anything under `.github/workflows/`. Add your
+  own in **Protected paths** (same section, comma-separated globs such as
+  `scripts/hooks/**`, empty by default). If Agent Board cannot list the
+  task's changes, the task also goes to you.
+- **Review.** A task held in Review after its round cap shows **Overrule**
+  (with a note) and **Uphold** for each finding. Overruled findings are
+  dropped from what the next review must grade, and a reviewer that reopens
+  citing only overruled findings is refused.
+- **Review.** A pull request fix round waiting in Review no longer offers
+  Accept or Reopen, and dragging it to Done or choosing Done from **Move
+  to** is refused. Accept always failed for these. Its row now shows the
+  pull request and why follow-through parked, with **Show pull request** to
+  open it on the Pull Requests page, where **Resume** moves it on. Re-run
+  review is still offered.
+- **Verification.** Agent Board now runs its own check when a worker
+  reports complete. Under Workflow › Verification, **Check at completion**
+  takes one command per line (empty by default). They run one at a time in
+  the task's worktree, stop at the first failure, use the project's
+  timeout, and queue behind any other check running in the app. The result
+  appears in a **Completion check** section of the task inspector, in the
+  progress log and in an agent reviewer's prompt. A failure does not reopen
+  the task: it goes to review with the failure attached and stays there
+  for you even where review would be skipped. With no commands, the task
+  is recorded as not verified by the board. The Test command is never run
+  here.
+- **Approvals.** A push or pull request approval now applies to the commit
+  you saw. Pending Approvals shows the short commit beside the branch, and
+  granting pushes exactly that commit. If the branch has moved, nothing is
+  pushed and the failed-publish report names both commits; request the
+  publish again and approve the new tip. Approvals made before this
+  release publish the current tip, as before.
+- **Disk space.** Agent Board now watches free space on every volume that
+  holds a project's checkout or worktrees. Below 25 GB it posts a "Low
+  disk space" notification and cleans up: it removes the worktrees of
+  finished tasks and epics, runs each project's cleanup command, then
+  posts "Disk cleanup finished" with the space recovered per volume and
+  anything kept or failed. Worktrees in use, with uncommitted changes, or
+  unknown to Agent Board are left alone, and branches are never removed.
+  Each project gets a decision report. The volume stays quiet until it
+  rises above 35 GB. In Settings, **Disk Space** sets whether to notify,
+  the low threshold, the rearm threshold and the check interval (every 5
+  minutes by default).
+- **Disk space.** Each project's Settings, Workflow tab, has a **Disk
+  cleanup** section with a **Cleanup command** (empty by default, so
+  nothing runs) and a **Cleanup timeout (seconds)**, 1800 by default. It
+  runs in the project's checkout after the worktree sweep, for things like
+  a build cache. A failure or timeout is reported and never stops the rest.
+  To clean up on demand, right-click a project and choose **Clean up
+  worktrees** for that project's finished worktrees, or choose **Clean up
+  now** in the app menu to run the full cleanup for every project.
+- **Consoles.** Orchestrator consoles are now named
+  `<project name>-orchestrator` and the Coordinator's console
+  `coordinator`, so other sessions can address them by name, including
+  after a restart or resume.
+- **Inbox.** A new **Inbox** row in the sidebar, with a count badge, lists
+  every question waiting on you across all projects: pending approvals,
+  blocked workers, tasks in Review waiting on a person, pull request
+  decisions and parked pull request watches. At a Glance links to it
+  ("N questions for you"). Each row has an **Answer** zone (Proceed, Do this
+  instead, Hold, Deny, Keep parked, a decision's options, Reply with my note)
+  and an **Actions** zone (Approve, Accept, Resume, Attach and so on). An
+  answer is recorded as your ruling and nothing else: nothing is pushed,
+  posted, merged, accepted or closed. A worker stopped on a Claude Code
+  permission prompt shows Attach only.
+- **Rulings.** Agents cannot write a ruling, and a later one supersedes an
+  earlier one. Workers see your rulings at the top of their spawn and resume
+  prompts, above the task body, and a running worker gets a new one on its
+  next tool call or when it is resumed. A held task is not spawned or
+  resumed, and an agent that repeats a denied push, pull request, spawn or
+  integration request is refused with your words quoted. A pull request
+  triager can only ask you again, never overwrite your answer. Deny… on
+  Pending approvals now requires a reason, which is stored with the denial.
+  Cards on Pending approvals, Blocked, Pending reviews, Needs you and Parked
+  show a "Ruled:" chip.
+- **Pull requests.** Answering a pull request decision with a reply now
+  records the reply instead of posting it. **Post reply to #n…** on the
+  Pull Requests page posts it, after a confirmation.
+- **Notifications.** The "Approval waiting" and "Pull request decision
+  waiting" banners take **Deny…** (with a reason) and **Reply…** in place.
+  Deny appears only when the project has exactly one open approval. A
+  banner answer is written only if the question is still open.
+- **Disk space.** When Agent Board removes a worktree, it first stops
+  processes still running inside it, such as a background build an agent
+  left behind. Before, they could hold the Worktree teardown command until
+  its timeout and removal could fail with "Directory not empty". Only
+  processes without a terminal are stopped; a shell or editor you have open
+  there is left alone. What was stopped and what was kept shows in the
+  task's progress and the removal's report.
+
 ## 0.11.0 — 2026-11-12
 
 - **Epics.** An epic can now build on an open pull request in the project's
