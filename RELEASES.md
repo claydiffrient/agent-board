@@ -9,7 +9,7 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
-## 0.12.0 — 2026-11-17
+## 0.12.0 — 2026-11-18
 
 - **Review.** Agent review now stops after a set number of rounds. In the
   project's Settings, on the Agents tab under Review, **Review round cap**
@@ -637,3 +637,47 @@ First release.
   another project's queue.
 - **What's New.** This window, from the Help menu — and from now on, it opens
   itself once after an update that has notes for you.
+- **Inbox.** A new **Inbox** row in the sidebar, with a count badge, lists
+  every question waiting on you across all projects: pending approvals,
+  blocked workers, tasks in Review waiting on a person, pull request
+  decisions and parked pull request watches. At a Glance links to it
+  ("N questions for you"). Each row has an **Answer** zone (Proceed, Do this
+  instead, Hold, Deny, Keep parked, a decision's options, Reply with my note)
+  and an **Actions** zone (Approve, Accept, Resume, Attach and so on). An
+  answer is recorded as your ruling and nothing else: nothing is pushed,
+  posted, merged, accepted or closed. A worker stopped on a Claude Code
+  permission prompt shows Attach only.
+- **Rulings.** Agents cannot write a ruling, and a later one supersedes an
+  earlier one. Workers see your rulings at the top of their spawn and resume
+  prompts, above the task body, and a running worker gets a new one on its
+  next tool call or when it is resumed. A held task is not spawned or
+  resumed, and an agent that repeats a denied push, pull request, spawn or
+  integration request is refused with your words quoted. A pull request
+  triager can only ask you again, never overwrite your answer. Deny… on
+  Pending approvals now requires a reason, which is stored with the denial.
+  Cards on Pending approvals, Blocked, Pending reviews, Needs you and Parked
+  show a "Ruled:" chip.
+- **Review.** A task held in Review after its round cap shows **Overrule**
+  (with a note) and **Uphold** for each finding. Overruled findings are
+  dropped from what the next review must grade, and a reviewer that reopens
+  citing only overruled findings is refused.
+- **Pull requests.** Answering a pull request decision with a reply now
+  records the reply instead of posting it. **Post reply to #n…** on the
+  Pull Requests page posts it, after a confirmation.
+- **Notifications.** The "Approval waiting" and "Pull request decision
+  waiting" banners take **Deny…** (with a reason) and **Reply…** in place.
+  Deny appears only when the project has exactly one open approval. A
+  banner answer is written only if the question is still open.
+- **Review.** A pull request fix round waiting in Review no longer offers
+  Accept or Reopen, and dragging it to Done or choosing Done from **Move
+  to** is refused. Accept always failed for these. Its row now shows the
+  pull request and why follow-through parked, with **Show pull request** to
+  open it on the Pull Requests page, where **Resume** moves it on. Re-run
+  review is still offered.
+- **Disk space.** When Agent Board removes a worktree, it first stops
+  processes still running inside it, such as a background build an agent
+  left behind. Before, they could hold the Worktree teardown command until
+  its timeout and removal could fail with "Directory not empty". Only
+  processes without a terminal are stopped; a shell or editor you have open
+  there is left alone. What was stopped and what was kept shows in the
+  task's progress and the removal's report.
