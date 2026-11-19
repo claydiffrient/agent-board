@@ -4749,8 +4749,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     nonisolated static let dirtyPathsListed = 20
 
     /// SPEC §5: a worktree with uncommitted changes is kept, and the teardown hook does not run in it.
+    /// A directory without `.git` holding only `.claude` is a leftover and is deleted.
     private nonisolated static func removeIfClean(_ manager: WorktreeManager, at path: URL) -> WorktreeTeardown {
         do {
+            switch try manager.removeLeftoverDirectory(at: path) {
+            case .removed:
+                return .removed([], notice: nil)
+            case .notAWorktree(let entries):
+                let listed = entries.prefix(dirtyPathsListed).joined(separator: ", ")
+                let more = entries.count > dirtyPathsListed ? " and \(entries.count - dirtyPathsListed) more" : ""
+                return .kept("kept \(path.path): it is not a git worktree, and it holds \(listed)\(more)")
+            case nil:
+                break
+            }
             let dirty = try manager.uncommittedPaths(worktree: path)
             if !dirty.isEmpty {
                 let listed = dirty.prefix(dirtyPathsListed).joined(separator: ", ")

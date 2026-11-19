@@ -167,7 +167,15 @@ person at every level (§5.1).
   report says so under **Worktree cleanup:**, naming the worktree and, for a
   dirty one, its uncommitted paths (the first 20, then a count), so the
   orchestrator can act on a leftover like a `yarn.lock` its setup wrote. The
-  same lines go on the task's progress. An accept that answers an MCP call
+  same lines go on the task's progress. A worktree path with no `.git` is not
+  asked about uncommitted changes, since git cannot answer there. One holding
+  only `.claude` (and `.DS_Store`) is deleted without the teardown hook: a
+  Claude Code session can write `.claude/settings.local.json` back into the path
+  after the worktree is gone, and there is nothing to tear down. One holding
+  anything else is kept and reported as not a git worktree, naming its entries;
+  its content is never deleted. Every sweep that removes worktrees — accept,
+  discard, the orphan reaper, slot retirement, the low-disk cleanup — decides
+  this the same way. An accept that answers an MCP call
   (`report_complete` under a no-review level, a rostered reviewer's
   `accept_task`) returns once the task is in `done` and its grants are
   revoked; the landing and the removal run after it (§6). Landing a shared

@@ -107,6 +107,12 @@ public enum SlotRelease: Sendable, Equatable {
     case dirty([String])
 }
 
+public enum LeftoverDirectory: Sendable, Equatable {
+    case removed
+    /// No `.git`, and entries other than `.claude`; nothing was deleted.
+    case notAWorktree([String])
+}
+
 /// Where a branch cut from the project base starts (SPEC §3.1 step 1).
 public struct BaseStartPoint: Sendable, Equatable {
     /// The remote's base commit when local `base` is behind or equal to it, otherwise `base` itself.
@@ -641,6 +647,19 @@ public struct WorktreeManager: Sendable {
             if entry.prefix(2).contains(where: { $0 == "R" || $0 == "C" }) { index += 1 }
         }
         return paths
+    }
+
+    /// Entries a Claude Code session or Finder can write into a worktree path after git removed it.
+    static let leftoverEntries: Set<String> = [".claude", ".DS_Store"]
+
+    /// SPEC §5: nil when `path` has `.git`. Otherwise deletes the directory if it holds nothing but
+    /// `leftoverEntries`, and never runs the teardown hook for it.
+    public func removeLeftoverDirectory(at path: URL) throws -> LeftoverDirectory? {
+        guard try !Self.exists(path.appendingPathComponent(".git"), admin: path) else { return nil }
+        let entries = try FileManager.default.contentsOfDirectory(atPath: path.path).sorted()
+        guard entries.allSatisfy(Self.leftoverEntries.contains) else { return .notAWorktree(entries) }
+        try FileManager.default.removeItem(at: path)
+        return .removed
     }
 
     /// `git branch -d` measures merged against the current checkout's HEAD, which is rarely one of

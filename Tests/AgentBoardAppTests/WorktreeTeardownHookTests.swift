@@ -137,6 +137,41 @@ final class WorktreeTeardownHookTests: XCTestCase {
         XCTAssertTrue(report.body.contains("kept worktree \(worktree): it has uncommitted changes in yarn.lock"), report.body)
     }
 
+    /// A session can write `.claude/settings.local.json` back into a worktree path git already removed.
+    func testAcceptRemovesALeftoverClaudeDirectoryWithoutRunningTheHook() async throws {
+        let marker = fixture.supportDir.appendingPathComponent("teardown-marker")
+        try setTeardown("touch '\(marker.path)'")
+        let task = try makeTask()
+        let worktree = try XCTUnwrap(try fixture.worktreeWorker(task: task).worktreePath)
+        _ = try fixture.git(["worktree", "remove", "--force", worktree])
+        let claude = URL(fileURLWithPath: worktree).appendingPathComponent(".claude")
+        try FileManager.default.createDirectory(at: claude, withIntermediateDirectories: true)
+        try "{}\n".write(to: claude.appendingPathComponent("settings.local.json"), atomically: true, encoding: .utf8)
+
+        try await fixture.supervisor.accept(taskId: task.id)
+        await fixture.supervisor.waitForTeardowns()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), "the hook ran on a directory with no worktree")
+        let report = try acceptanceReport(task)
+        XCTAssertFalse(report.body.contains(worktree), report.body)
+    }
+
+    func testAcceptKeepsANonGitDirectoryHoldingAnythingElse() async throws {
+        let task = try makeTask()
+        let worktree = try XCTUnwrap(try fixture.worktreeWorker(task: task).worktreePath)
+        _ = try fixture.git(["worktree", "remove", "--force", worktree])
+        try FileManager.default.createDirectory(atPath: worktree, withIntermediateDirectories: true)
+        try "x\n".write(to: URL(fileURLWithPath: worktree).appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+
+        try await fixture.supervisor.accept(taskId: task.id)
+        await fixture.supervisor.waitForTeardowns()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree))
+        let report = try acceptanceReport(task)
+        XCTAssertTrue(report.body.contains("kept \(worktree): it is not a git worktree, and it holds notes.txt"), report.body)
+    }
+
     private func acceptanceReport(_ task: BoardTask) throws -> Report {
         try XCTUnwrap(
             try ReportStore(fixture.db).unconsumed(projectId: fixture.project.id)
