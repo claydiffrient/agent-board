@@ -10,7 +10,8 @@ public struct PRWatchStore: Sendable {
 
     /// Records one poll (SPEC §4). Idempotent by node id: an unchanged snapshot moves only
     /// `last_polled_at`, and a new head oid stamps `head_changed_at`. An open item that resolved or left the snapshot becomes handled,
-    /// except a verify failure, which GitHub never reports; a check item does once its run is no longer a failed check.
+    /// except a verify failure, which GitHub never reports; a check item does once its run is no longer a failed check,
+    /// and a conflict item once its head is `MERGEABLE` or moved, reopening if it returns between rounds (SPEC §13.1).
     /// An outdated or viewer-latest thread leaves an owed item untouched and counts as gone for any other (SPEC §13.1).
     /// An item whose body changed (a new reply) is open and untriaged again, owing a fresh reply; one that
     /// reopens also drops its task. A fork parks from any state the poll moves (SPEC §13.1), and a stopped
@@ -104,7 +105,9 @@ public struct PRWatchStore: Sendable {
                         item.state = .handled
                         item.handledAt = now
                     }
-                } else if bodyChanged {
+                } else if bodyChanged || (item.kind == .conflict && item.state == .handled
+                    && Self.conflictReopensIn.contains(watch.state)) {
+                    // SPEC §13.1: a conflict that returns on the same head reopens its item between rounds.
                     if item.state != .open {
                         item.state = .open
                         item.fixTaskId = nil
@@ -132,7 +135,9 @@ public struct PRWatchStore: Sendable {
                 }
             }
             let failing = Set(snapshot.failedChecks.map(\.githubNodeId))
-            for var gone in stored.values where gone.state == .open
+            // SPEC §13.1: only MERGEABLE or a moved head retires a conflict; UNKNOWN keeps it open.
+            let heldConflict = snapshot.mergeable == "MERGEABLE" ? nil : PRItem.conflictNodeId(head: snapshot.headOid)
+            for var gone in stored.values where gone.state == .open && gone.githubNodeId != heldConflict
             && (gone.kind == .check ? !failing.contains(gone.githubNodeId) : gone.kind != .verifyFailure) {
                 gone.state = .handled
                 gone.handledAt = now
@@ -159,6 +164,8 @@ public struct PRWatchStore: Sendable {
             return watch
         }
     }
+
+    static let conflictReopensIn: Set<PRWatchState> = [.watching, .settling, .readyToVerify, .verified]
 
     /// The takeover's `created_at`, or a manual adoption's `adopted_at`, while an adopted watch's takeover round
     /// has not started; nil otherwise. Feedback the viewer wrote after it, the acknowledgment comment included,
