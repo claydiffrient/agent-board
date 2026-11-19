@@ -13,6 +13,7 @@ struct ApprovalsSidebar: View {
     @State private var reports = Observed<[Report]>([])
     @State private var messages = Observed<[MessageEntry]>([])
     @State private var roster = Observed<[RosterAgent]>([])
+    @State private var fixRoundWatches = Observed<[String: PRWatch]>([:])
     @State private var now = Date.now
     @State private var denying: Approval?
     @State private var denyReason = ""
@@ -81,6 +82,10 @@ struct ApprovalsSidebar: View {
                             sessions: sessions.value,
                             roster: roster.value,
                             now: now,
+                            watch: fixRoundWatches.value[task.id],
+                            showPullRequest: { watch in
+                                env.router.open(NotificationRoute(projectId: watch.projectId, subject: .pullRequest(watch.id)))
+                            },
                             accept: { run { try await env.supervisor.accept(taskId: task.id) } },
                             reopen: { run { try await env.supervisor.reopen(taskId: task.id) } },
                             rerunReview: { run { try await env.supervisor.rerunReview(taskId: task.id) } }
@@ -137,6 +142,9 @@ struct ApprovalsSidebar: View {
         .task(id: project.id) {
             await reports.run(ReportStore(env.db).observeUnconsumed(projectId: project.id), in: env.db.reader)
         }
+        .task(id: project.id) {
+            await fixRoundWatches.run(PRWatchStore(env.db).observeWatchesByFixTask(projectId: project.id), in: env.db.reader)
+        }
         .task {
             await roster.run(RosterStore(env.db).observe(), in: env.db.reader)
         }
@@ -150,14 +158,15 @@ struct ApprovalsSidebar: View {
             }
         }
         .alert("Deny request?", isPresented: denyPresented, presenting: denying) { approval in
-            TextField("Reason (optional)", text: $denyReason)
+            TextField("Reason", text: $denyReason)
             Button("Deny", role: .destructive) {
                 let reason = denyReason
                 run { try await env.supervisor.deny(approvalId: approval.id, reason: reason) }
             }
+            .disabled(denyReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             Button("Cancel", role: .cancel) {}
         } message: { approval in
-            Text("The orchestrator is told the decision, and the reason if you give one, through list_reports.\n\n\(describe(approval))")
+            Text("Your reason is recorded as a ruling. The orchestrator reads it through list_reports, and the same request is refused from now on.\n\n\(describe(approval))")
         }
         .errorAlert($errorMessage)
     }
@@ -185,6 +194,9 @@ struct ApprovalsSidebar: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
+            if item.kind == .blocked {
+                StandingRulingChip(subject: .task(item.task.id), since: item.task.blockedAt ?? 0)
+            }
             HStack {
                 Button("Attach") {
                     if let session = item.session { openWindow(id: "terminal", value: session.sessionId) }
@@ -239,6 +251,7 @@ struct ApprovalsSidebar: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+            StandingRulingChip(subject: .approval(approval.id))
             HStack {
                 Button("Approve") { run { try await env.supervisor.approve(approvalId: approval.id) } }
                     .buttonStyle(.borderedProminent)
@@ -382,6 +395,8 @@ private struct ReviewRow: View {
     let sessions: [AgentSession]
     let roster: [RosterAgent]
     let now: Date
+    let watch: PRWatch?
+    let showPullRequest: (PRWatch) -> Void
     let accept: () -> Void
     let reopen: () -> Void
     let rerunReview: () -> Void
@@ -401,23 +416,37 @@ private struct ReviewRow: View {
         ReviewHold.of(task: task, sessions: sessions, roster: roster, progress: progress.value)
     }
 
+    /// SPEC §10, §13.1: a round's branch is pushed onto its pull request, never accepted or reopened here.
+    private var isFixRound: Bool { task.origin == .fixRound }
+
+    /// A fix round never waits on a person here, so "Waiting on you" would mislead.
+    private var showsHold: Bool {
+        guard isFixRound, case .waitingOnYou = hold else { return true }
+        return false
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(task.title)
                 .fontWeight(.medium)
                 .lineLimit(2)
             HStack(spacing: 6) {
-                Label(hold.label(now: now), systemImage: "person.crop.circle.badge.checkmark")
-                    .font(.caption)
-                    .foregroundStyle(hold.endedWithoutVerdict ? .orange : .secondary)
+                if showsHold {
+                    Label(hold.label(now: now), systemImage: "person.crop.circle.badge.checkmark")
+                        .font(.caption)
+                        .foregroundStyle(hold.endedWithoutVerdict ? .orange : .secondary)
+                }
                 if let type = task.type { TaskTypeChip(type: type) }
             }
-            if let reason = hold.reason {
+            if isFixRound {
+                pullRequestDetail
+            } else if let reason = hold.reason {
                 Text(reason)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
             }
+            StandingRulingChip(subject: .task(task.id), since: task.reviewEnteredAt ?? 0)
             Label(session?.branch ?? "agentboard/\(task.id)", systemImage: "arrow.triangle.branch")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -433,12 +462,21 @@ private struct ReviewRow: View {
                     .lineLimit(3)
             }
             HStack {
-                Button("Accept") { decide(.accept) }
-                    .buttonStyle(.borderedProminent)
+                if isFixRound {
+                    if let watch {
+                        Button("Show pull request") { showPullRequest(watch) }
+                            .buttonStyle(.borderedProminent)
+                    }
+                } else {
+                    Button("Accept") { decide(.accept) }
+                        .buttonStyle(.borderedProminent)
+                }
                 if hold.endedWithoutVerdict {
                     Button("Re-run review", action: rerunReview)
                 }
-                Button("Reopen") { decide(.reopen) }
+                if !isFixRound {
+                    Button("Reopen") { decide(.reopen) }
+                }
             }
             .controlSize(.small)
         }
@@ -486,6 +524,39 @@ private struct ReviewRow: View {
             }
             interrupting = decision
         }
+    }
+
+    @ViewBuilder
+    private var pullRequestDetail: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let watch {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    if let url = URL(string: watch.url), !watch.url.isEmpty {
+                        Link(destination: url) { Text(verbatim: issueNumberLabel(watch.number)) }
+                            .help(String("Open pull request \(issueNumberLabel(watch.number)) on GitHub"))
+                    } else {
+                        Text(verbatim: issueNumberLabel(watch.number))
+                    }
+                    Text(verbatim: watch.title)
+                }
+                .lineLimit(2)
+                Text("Pull request fix round · watch \(watch.state.title)")
+                if watch.state == .parked, let reason = watch.parkedReason, !reason.isEmpty {
+                    Text(reason)
+                        .lineLimit(4)
+                }
+                Text(
+                    watch.state == .parked
+                        ? "Resume it on the Pull Requests page to check this round again."
+                        : "Agent Board pushes this round to its pull request once its check passes."
+                )
+                .lineLimit(3)
+            } else {
+                Text("Pull request fix round. Its pull request is no longer watched.")
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 
     private func changeSize(_ changes: DiffSummary) -> some View {

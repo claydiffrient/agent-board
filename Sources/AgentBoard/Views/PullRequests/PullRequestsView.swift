@@ -232,9 +232,17 @@ struct PullRequestsView: View {
                 resume: { perform { try actions.resume(listing.watch) } },
                 stopWatching: { perform { try actions.stopWatching(listing.watch) } }
             )
+            if listing.watch.state == .parked {
+                StandingRulingChip(subject: .prWatch(listing.watch.id), since: listing.watch.parkedAt ?? 0)
+            }
             ForEach(listing.decisions) { decision in
                 PRDecisionRow(decision: decision) { choice in
                     await answer(decision, choice: choice)
+                }
+            }
+            ForEach(listing.owedReplies) { item in
+                PROwedReplyRow(item: item, number: listing.watch.number) {
+                    await postReply(item)
                 }
             }
             if !listing.items.isEmpty {
@@ -264,6 +272,15 @@ struct PullRequestsView: View {
         } catch {
             errorMessage = errorText(error)
             return false
+        }
+    }
+
+    private func postReply(_ item: PRItem) async {
+        guard let id = item.id else { return }
+        do {
+            try await env.supervisor.postPRReply(itemId: id)
+        } catch {
+            errorMessage = errorText(error)
         }
     }
 
@@ -452,6 +469,9 @@ struct PRDecisionRow: View {
                 .lineLimit(2)
             Text(decision.decisionQuestion ?? "Triage asked for a decision.")
                 .fontWeight(.semibold)
+            if let id = decision.id {
+                StandingRulingChip(subject: .prItem(id), since: decision.decisionNotifiedAt ?? decision.createdAt)
+            }
             ViewThatFits(in: .horizontal) {
                 HStack { options }
                 VStack(alignment: .leading) { options }
@@ -494,6 +514,50 @@ struct PRDecisionRow: View {
         _Concurrency.Task {
             defer { answering = false }
             if await answer(choice) { onRecorded() }
+        }
+    }
+}
+
+/// An answered decision whose reply is owed (SPEC §13.4): answering posted nothing, and this posts it,
+/// after confirming the pull request it goes to.
+struct PROwedReplyRow: View {
+    let item: PRItem
+    let number: Int
+    let post: () async -> Void
+
+    @State private var confirming = false
+    @State private var posting = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Your reply, not yet posted")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(item.replyBody ?? "")
+                .lineLimit(3)
+            if let error = item.replyError {
+                Text("Last attempt failed: \(error)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            Button("Post reply to #\(number)…") { confirming = true }
+                .disabled(posting)
+                .help("Posts this reply on GitHub under your account")
+        }
+        .padding(.leading, 16)
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
+        .confirmationDialog("Post this reply to #\(number) on GitHub?", isPresented: $confirming) {
+            Button("Post reply") {
+                posting = true
+                _Concurrency.Task {
+                    defer { posting = false }
+                    await post()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(item.replyBody ?? "")
         }
     }
 }

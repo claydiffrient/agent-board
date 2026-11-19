@@ -118,10 +118,12 @@ final class NotificationAuthorizationTests: XCTestCase {
 
     /// Posting and starting under `xctest` must both fall through. If the guard broke, this traps
     /// rather than failing.
-    func testPostingAndStartingAreInertWithoutAnAppBundle() {
+    func testPostingAndStartingAreInertWithoutAnAppBundle() throws {
         let notifier = MacNotifier()
         let router = NotificationRouter()
-        notifier.start(router: router)
+        notifier.start(
+            router: router, answering: BannerAnswering(db: try AppDatabase.inMemory(), supervisor: StubSupervisor())
+        )
         notifier.post(title: "Approval waiting", body: "1 approval waiting")
         notifier.post(
             title: "Worker blocked", body: "needs input",

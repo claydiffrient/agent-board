@@ -74,7 +74,8 @@ extension PRWatchStore {
     }
 
     /// Writes every verdict or none. Each item must be an open item of `watchId`, so a triager can
-    /// reach no other watch. Returns the ids of the watch's open items still without a verdict.
+    /// reach no other watch, and an item with a standing ruling takes only `decision` (SPEC §13.2).
+    /// Returns the ids of the watch's open items still without a verdict.
     @discardableResult
     public func setVerdicts(_ verdicts: [PRVerdictInput], watchId: String, now: Int64 = .nowMillis) throws -> [Int64] {
         try db.writer.write { db in
@@ -85,6 +86,14 @@ extension PRWatchStore {
                 }
                 guard item.state == .open else {
                     throw PRVerdictRejection("Item \(input.itemId) is \(item.state.rawValue), not open.")
+                }
+                if input.verdict != .decision,
+                   let ruling = try RulingStore.standing(db, subject: .prItem(input.itemId)).first {
+                    throw PRVerdictRejection(
+                        "Item \(input.itemId) carries the pull request author's standing ruling on "
+                            + "\"\(ruling.question)\": \(ruling.quoted). Only `decision` may be set on it, "
+                            + "asking the author again and citing that ruling."
+                    )
                 }
                 try Self.validate(input)
                 item.verdict = input.verdict

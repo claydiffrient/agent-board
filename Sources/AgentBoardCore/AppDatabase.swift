@@ -305,6 +305,19 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("session_ignored_baseline") { db in
             try db.execute(sql: "ALTER TABLE agent_session ADD COLUMN ignored_baseline TEXT")
         }
+        migrator.registerMigration("ruling") { db in
+            try db.execute(sql: Schema.ruling)
+            try db.execute(sql: Schema.rulingBackfill)
+        }
+        migrator.registerMigration("task_changed_at") { db in
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN changed_at INTEGER")
+        }
+        migrator.registerMigration("ruling_delivery") { db in
+            try db.execute(sql: Schema.rulingDelivery)
+        }
+        migrator.registerMigration("task_blocked_source") { db in
+            try db.execute(sql: "ALTER TABLE task ADD COLUMN blocked_source TEXT")
+        }
         return migrator
     }
 }

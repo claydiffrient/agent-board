@@ -55,9 +55,11 @@ extension PRWatchStore {
             arguments: [watch.id, watch.resumedAt ?? 0]
         ) ?? 0
         guard rounds >= cap else { return false }
-        watch.state = .parked
-        watch.parkedReason = "#\(watch.number) has run its round cap of \(cap) round\(cap == 1 ? "" : "s") without the "
-            + "feedback settling. Resume it to allow \(cap) more."
+        watch.park(
+            reason: "#\(watch.number) has run its round cap of \(cap) round\(cap == 1 ? "" : "s") without the "
+                + "feedback settling. Resume it to allow \(cap) more.",
+            at: now
+        )
         watch.updatedAt = now
         try watch.update(db)
         try report(db, watch: watch, .parked(reason: watch.parkedReason))
@@ -149,8 +151,7 @@ extension PRWatchStore {
             )
             let failures = outcomes.prefix { $0 == .triageFailed }.count
             if let failure, failures >= Self.failedSessionsBeforePark {
-                watch.state = .parked
-                watch.parkedReason = "Triage failed \(failures) times in a row. The last failure: \(failure)"
+                watch.park(reason: "Triage failed \(failures) times in a row. The last failure: \(failure)", at: now)
             } else {
                 watch.state = .settling
             }
@@ -248,9 +249,11 @@ extension Board {
     static func fixUnlessStacked(_ db: Database, watch: inout PRWatch) throws {
         let base = try Project.fetchOne(db, key: watch.projectId)?.baseBranch
         if let base, watch.baseRef != base {
-            watch.state = .parked
-            watch.parkedReason = "#\(watch.number) is stacked on `\(watch.baseRef)`, not `\(base)`, so a fix "
-                + "round would leave the layers above it to restack, which is yours to do."
+            watch.park(
+                reason: "#\(watch.number) is stacked on `\(watch.baseRef)`, not `\(base)`, so a fix "
+                    + "round would leave the layers above it to restack, which is yours to do.",
+                at: .nowMillis
+            )
             try PRWatchStore.report(db, watch: watch, .parked(reason: watch.parkedReason))
         } else {
             watch.state = .fixing
@@ -268,7 +271,7 @@ extension Board {
                 item.fixTaskId = try TaskStore.insert(
                     db, projectId: watch.projectId,
                     title: Self.itemTaskTitle("Follow-up", item: item, watch: watch),
-                    body: Self.itemTaskBody(item: item, watch: watch), acceptance: nil, priority: nil,
+                    body: try Self.itemTaskBody(db, item: item, watch: watch), acceptance: nil, priority: nil,
                     column: .backlog, origin: .followThrough, epicId: nil
                 ).id
             }
@@ -299,7 +302,7 @@ extension Board {
             let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
             let task = try TaskStore.insert(
                 db, projectId: watch.projectId, title: "Fix round \(round.number) of #\(watch.number): \(watch.title)",
-                body: Self.fixRoundBody(items: items, watch: watch, branch: branch), acceptance: nil, priority: nil,
+                body: try Self.fixRoundBody(db, items: items, watch: watch, branch: branch), acceptance: nil, priority: nil,
                 column: .ready, origin: .fixRound, epicId: nil, model: model, type: .code
             )
             let stale = try Task.fetchAll(
@@ -337,16 +340,19 @@ extension Board {
         return "\(lead) from #\(watch.number): \(snippet)"
     }
 
-    static func itemTaskBody(item: PRItem, watch: PRWatch) -> String {
+    static func itemTaskBody(_ db: Database, item: PRItem, watch: PRWatch) throws -> String {
         """
         From review feedback on pull request #\(watch.number) "\(watch.title)": \(watch.url)
 
-        \(itemSection(item, watch: watch))
+        \(itemSection(item, answer: try PRWatchStore.authorAnswer(db, item: item), watch: watch))
         """
     }
 
-    static func fixRoundBody(items: [PRItem], watch: PRWatch, branch: String) -> String {
-        let sections = items.enumerated().map { "## Item \($0.offset + 1)\n\n\(itemSection($0.element, watch: watch))" }
+    static func fixRoundBody(_ db: Database, items: [PRItem], watch: PRWatch, branch: String) throws -> String {
+        let sections = try items.enumerated().map { offset, item in
+            "## Item \(offset + 1)\n\n"
+                + itemSection(item, answer: try PRWatchStore.authorAnswer(db, item: item), watch: watch)
+        }
         return """
         Fix the review feedback below on pull request #\(watch.number) "\(watch.title)": \(watch.url)
 
@@ -358,11 +364,19 @@ extension Board {
     }
 
     /// A conflict is resolved by a merge, never a rebase, since publishing only fast-forwards (SPEC §13.1).
-    private static func itemSection(_ item: PRItem, watch: PRWatch) -> String {
-        let answer = """
-        \(item.decisionAnswer == nil ? "Triage's approach:" : "The pull request author's answer to \"\(item.decisionQuestion ?? "")\":")
-        \(item.approach ?? "")
-        """
+    /// The author's answer is read from their ruling, never from `approach`, which triage also writes (SPEC §13.4).
+    private static func itemSection(_ item: PRItem, answer ruling: Ruling?, watch: PRWatch) -> String {
+        let answer = if let ruling {
+            """
+            The pull request author's answer to "\(ruling.question)":
+            \(ruling.choice ?? ruling.note ?? "")
+            """
+        } else {
+            """
+            Triage's approach:
+            \(item.approach ?? "")
+            """
+        }
         if item.kind == .conflict {
             return """
             GitHub reports that `\(watch.headRef)` conflicts with `\(watch.baseRef)`. Resolve it by merging the base \

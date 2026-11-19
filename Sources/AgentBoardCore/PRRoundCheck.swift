@@ -48,12 +48,25 @@ extension PRWatchStore {
         try PRRound.filter(Column("watch_id") == watchId && Column("number") == number).fetchOne(db)
     }
 
+    /// An item whose author's answer is a reply is theirs, so the check never grades it (SPEC §13.1).
     static func checkItems(_ db: Database, round: PRRound) throws -> [PRItem] {
         guard let taskId = round.fixTaskId else { return [] }
         return try PRItem.filter(
             Column("watch_id") == round.watchId && Column("fix_task_id") == taskId
                 && Column("state") == PRItemState.open && Column("verdict") == PRItemVerdict.fix
-        ).order(Column("id")).fetchAll(db)
+        ).order(Column("id")).fetchAll(db).filter { item in
+            try authorAnswer(db, item: item).map { !answersByFix($0, item: item) } != true
+        }
+    }
+
+    /// The author's newest standing answer to one of the item's decisions (SPEC §13.4), nil when they gave none.
+    static func authorAnswer(_ db: Database, item: PRItem) throws -> Ruling? {
+        guard let id = item.id else { return nil }
+        return try RulingStore.standing(db, subject: .prItem(id)).first { [.choose, .reply].contains($0.verdict) }
+    }
+
+    private static func answersByFix(_ ruling: Ruling, item: PRItem) -> Bool {
+        ruling.verdict == .choose && item.decisionOptions.first { $0.label == ruling.choice }?.verdict != .answer
     }
 
     /// Writes every grade or none. Each item must be one its round's check grades, so a checker reaches
@@ -463,8 +476,7 @@ extension Board {
             else { continue }
             try TaskStore.close(db, taskId, reason: "Pull request #\(watch.number) parked: \(reason)", by: "follow-through", at: now)
         }
-        watch.state = .parked
-        watch.parkedReason = reason
+        watch.park(reason: reason, at: now)
         watch.updatedAt = now
         try watch.update(db)
         try PRWatchStore.report(db, watch: watch, .parked(reason: reason))

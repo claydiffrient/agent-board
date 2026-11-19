@@ -658,6 +658,98 @@ enum Schema {
     ALTER TABLE token_grant ADD COLUMN pr_watch_id TEXT REFERENCES pr_watch(id) ON DELETE SET NULL;
     """
 
+    /// The human's append-only answers, one subject per row, and the question-episode stamps they answer
+    /// (SPEC §4, §15). Changing a ruling is a new row that `supersedes` it; the trigger refuses an UPDATE.
+    static let ruling = """
+    ALTER TABLE task ADD COLUMN blocked_at INTEGER;
+    ALTER TABLE task ADD COLUMN human_review_reason TEXT;
+    ALTER TABLE task ADD COLUMN review_entered_at INTEGER;
+    ALTER TABLE pr_watch ADD COLUMN parked_at INTEGER;
+
+    CREATE TABLE ruling (
+      id           TEXT PRIMARY KEY,
+      project_id   TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+      subject_kind TEXT NOT NULL,
+      task_id      TEXT REFERENCES task(id) ON DELETE CASCADE,
+      approval_id  TEXT REFERENCES approval(id) ON DELETE CASCADE,
+      pr_item_id   INTEGER REFERENCES pr_item(id) ON DELETE CASCADE,
+      pr_watch_id  TEXT REFERENCES pr_watch(id) ON DELETE CASCADE,
+      finding_ref  TEXT,
+      question     TEXT NOT NULL,
+      question_at  INTEGER NOT NULL,
+      verdict      TEXT NOT NULL,
+      choice       TEXT,
+      note         TEXT CHECK (note IS NULL OR length(note) BETWEEN 1 AND 10000),
+      supersedes   TEXT REFERENCES ruling(id),
+      answered_at  INTEGER NOT NULL,
+      CHECK (
+        (subject_kind = 'task' AND task_id IS NOT NULL AND finding_ref IS NULL
+          AND approval_id IS NULL AND pr_item_id IS NULL AND pr_watch_id IS NULL)
+        OR (subject_kind = 'approval' AND approval_id IS NOT NULL AND task_id IS NULL AND finding_ref IS NULL
+          AND pr_item_id IS NULL AND pr_watch_id IS NULL)
+        OR (subject_kind = 'pr_item' AND pr_item_id IS NOT NULL AND task_id IS NULL AND finding_ref IS NULL
+          AND approval_id IS NULL AND pr_watch_id IS NULL)
+        OR (subject_kind = 'pr_watch' AND pr_watch_id IS NOT NULL AND task_id IS NULL AND finding_ref IS NULL
+          AND approval_id IS NULL AND pr_item_id IS NULL)
+        OR (subject_kind = 'review_finding' AND task_id IS NOT NULL AND finding_ref IS NOT NULL
+          AND approval_id IS NULL AND pr_item_id IS NULL AND pr_watch_id IS NULL)
+      )
+    );
+    CREATE INDEX ruling_task ON ruling(task_id, answered_at);
+    CREATE INDEX ruling_pr_item ON ruling(pr_item_id, answered_at);
+    CREATE INDEX ruling_pr_watch ON ruling(pr_watch_id, answered_at);
+    CREATE INDEX ruling_approval ON ruling(approval_id);
+    CREATE INDEX ruling_supersedes ON ruling(supersedes);
+    CREATE TRIGGER ruling_immutable BEFORE UPDATE ON ruling BEGIN
+      SELECT RAISE(ABORT, 'rulings are append-only');
+    END;
+    """
+
+    /// One standing ruling owed to one live session (SPEC §15.8). `delivered_at` is the claim: set once,
+    /// by the `PostToolUse` hook or by the resume, whichever reaches the session first.
+    static let rulingDelivery = """
+    CREATE TABLE ruling_delivery (
+      ruling_id     TEXT NOT NULL REFERENCES ruling(id) ON DELETE CASCADE,
+      session_id    TEXT NOT NULL REFERENCES agent_session(session_id) ON DELETE CASCADE,
+      delivered_at  INTEGER,
+      delivered_via TEXT,
+      PRIMARY KEY (ruling_id, session_id)
+    );
+    CREATE INDEX ruling_delivery_session ON ruling_delivery(session_id);
+    """
+
+    /// The human's existing answers on PR items, carried into `ruling` (SPEC §15.4): a decision answer as
+    /// `choose` when it names one of the item's options and `reply` otherwise, and a human dismissal as
+    /// `dismiss` with its reason. A dismissal an orchestrator requested is skipped; its reason is not the human's.
+    static let rulingBackfill = """
+    INSERT INTO ruling (id, project_id, subject_kind, pr_item_id, question, question_at, verdict, choice, note, answered_at)
+    SELECT lower(hex(randomblob(16))), w.project_id, 'pr_item', i.id,
+           COALESCE(i.decision_question, i.body), COALESCE(i.decision_notified_at, i.created_at),
+           CASE WHEN EXISTS (
+             SELECT 1 FROM json_each(COALESCE(i.decision_options_json, '[]')) o
+             WHERE json_extract(o.value, '$.label') = i.decision_answer
+           ) THEN 'choose' ELSE 'reply' END,
+           CASE WHEN EXISTS (
+             SELECT 1 FROM json_each(COALESCE(i.decision_options_json, '[]')) o
+             WHERE json_extract(o.value, '$.label') = i.decision_answer
+           ) THEN i.decision_answer END,
+           CASE WHEN NOT EXISTS (
+             SELECT 1 FROM json_each(COALESCE(i.decision_options_json, '[]')) o
+             WHERE json_extract(o.value, '$.label') = i.decision_answer
+           ) THEN substr(i.decision_answer, 1, 10000) END,
+           COALESCE(i.handled_at, i.updated_at)
+    FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id
+    WHERE i.decision_answer IS NOT NULL AND trim(i.decision_answer) != '';
+
+    INSERT INTO ruling (id, project_id, subject_kind, pr_item_id, question, question_at, verdict, note, answered_at)
+    SELECT lower(hex(randomblob(16))), w.project_id, 'pr_item', i.id,
+           i.body, COALESCE(i.decision_notified_at, i.created_at), 'dismiss',
+           substr(i.dismiss_reason, 1, 10000), COALESCE(i.dismissed_at, i.updated_at)
+    FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id
+    WHERE i.state = 'dismissed' AND i.dismissed_by = 'human'
+      AND i.dismiss_reason IS NOT NULL AND trim(i.dismiss_reason) != '';
+    """
+
     /// One row per pooled worktree slot that has ever been leased (SPEC §3.1 step 2, §4).
     static let worktreeSlot = """
     CREATE TABLE worktree_slot (
@@ -702,6 +794,6 @@ enum Schema {
         "task_commit",
         "roster_agent", "project_roster_agent", "task_comment", "comment_delivery", "coordinator",
         "coordinator_request", "request_event", "request_epic", "pr_watch", "pr_item", "pr_round",
-        "pr_poll_problem", "pr_triage", "worktree_slot", "takeover",
+        "pr_poll_problem", "pr_triage", "worktree_slot", "takeover", "ruling", "ruling_delivery",
     ]
 }

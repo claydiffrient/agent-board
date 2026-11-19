@@ -326,7 +326,11 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertEqual(
             banners.map(\.title), Array(repeating: "Pull request decision waiting — \(fixture.project.name)", count: 2)
         )
-        XCTAssertEqual(banners.first?.route, NotificationRoute(projectId: fixture.project.id, subject: .pullRequest(watch.id)))
+        XCTAssertEqual(banners.map { $0.route?.subject }, Array(repeating: .pullRequest(watch.id), count: 2))
+        XCTAssertEqual(
+            Set(banners.compactMap { $0.route?.question }.filter { $0.kind == .prDecision }.map(\.subjectId)).count, 2,
+            "each decision's banner has to answer its own item"
+        )
     }
 
     /// SPEC §13.1: a paused watch keeps following its pull request, and raises no banner, badge count

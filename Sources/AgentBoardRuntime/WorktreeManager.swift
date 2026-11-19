@@ -22,6 +22,10 @@ public struct WorktreeRemovalReport: Sendable, Equatable {
     public var hookDiagnostics: [String]
     /// The project's teardown hook failed, timed out or could not start. Removal went ahead regardless.
     public var teardownFailure: String? = nil
+    /// SPEC §3.1: processes still working in the worktree, stopped or kept before the hook ran.
+    public var processes = WorktreeProcessStop()
+    /// What the progress and decision report record: the stopped processes, then the hook failure.
+    public var notice: String? = nil
 }
 
 public struct DiffSummary: Sendable, Equatable {
@@ -568,21 +572,30 @@ public struct WorktreeManager: Sendable {
         try git(["worktree", "move", worktree.path, destination.path])
     }
 
-    /// Git refuses the removal rather than destroy uncommitted work. The teardown hook runs first
-    /// (SPEC §3.1 "Removing a worktree"), and whatever it leaves in a worktree that was clean before
-    /// it is forced past, so a hook can never be what keeps a worktree.
+    /// Git refuses the removal rather than destroy uncommitted work. Processes left running in the
+    /// worktree are stopped, then the teardown hook runs (SPEC §3.1 "Removing a worktree"), and
+    /// whatever it leaves in a worktree that was clean before it is forced past, so a hook can never
+    /// be what keeps a worktree.
     @discardableResult
     public func remove(path: URL) throws -> WorktreeRemovalReport {
         var cleanBeforeTeardown = false
         var teardownFailure: String?
+        var processes = WorktreeProcessStop()
         // Git refuses to remove the main checkout, but only after the hook would have run in it.
-        if let teardown, !Self.samePath(path, repoPath) {
-            cleanBeforeTeardown = (try? hasUncommittedChanges(worktree: path)) == false
-            teardownFailure = runTeardown(teardown, in: path)
+        if !Self.samePath(path, repoPath) {
+            processes = WorktreeProcessStopper.stop(in: path)
+            if let teardown {
+                cleanBeforeTeardown = (try? hasUncommittedChanges(worktree: path)) == false
+                teardownFailure = runTeardown(teardown, in: path)
+            }
         }
         let diagnostics = runWorktreeRemoveHooks(worktreePath: path)
         try git(["worktree", "remove"] + (cleanBeforeTeardown ? ["--force"] : []) + [path.path])
-        return WorktreeRemovalReport(hookDiagnostics: diagnostics, teardownFailure: teardownFailure)
+        let notice = [processes.notice(for: path), teardownFailure].compactMap { $0 }.joined(separator: "\n")
+        return WorktreeRemovalReport(
+            hookDiagnostics: diagnostics, teardownFailure: teardownFailure, processes: processes,
+            notice: notice.isEmpty ? nil : notice
+        )
     }
 
     static let teardownOutputKept = 2_000

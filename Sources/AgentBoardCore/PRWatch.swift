@@ -97,6 +97,8 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
     /// The head whose Ready to verify banner has fired, so a PR announces itself once per head.
     public var readyNotifiedOid: String? = nil
     public var parkedReason: String? = nil
+    /// When it last parked: the parked watch's question episode (SPEC §15.1).
+    public var parkedAt: Int64? = nil
     /// When the human last resumed it from parked, which bounds the round cap and the failure streak.
     public var resumedAt: Int64? = nil
     public var createdAt: Int64
@@ -138,6 +140,7 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
         case estCostUSD = "est_cost_usd"
         case readyNotifiedOid = "ready_notified_oid"
         case parkedReason = "parked_reason"
+        case parkedAt = "parked_at"
         case resumedAt = "resumed_at"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -149,6 +152,13 @@ public struct PRWatch: Codable, FetchableRecord, PersistableRecord, Identifiable
     }
 
     public static func newId() -> String { BoardId.new() }
+
+    /// Every park goes through here, so each one stamps a new `parkedAt` (SPEC §15.1).
+    mutating func park(reason: String?, at now: Int64) {
+        state = .parked
+        parkedReason = reason
+        parkedAt = max(now, (parkedAt ?? 0) + 1)
+    }
 
     /// SPEC D8 as amended (§13.5): publishing may fast-forward only a pull request the human authored or a takeover adopted.
     public var acceptsFastForward: Bool { authored || adopted }
@@ -576,17 +586,20 @@ public struct PRWatchListing: Sendable, Equatable, Identifiable {
     public var decisions: [PRItem]
     /// Every open item, oldest first, which the row offers to dismiss (SPEC §13.4).
     public var items: [PRItem]
+    /// Answered decisions whose reply waits for Post reply (SPEC §13.4), oldest answer first.
+    public var owedReplies: [PRItem]
     /// Oldest first.
     public var sessions: [PRListingSession]
 
     public init(
         watch: PRWatch, openItems: Int, decisions: [PRItem] = [], items: [PRItem] = [],
-        sessions: [PRListingSession] = []
+        owedReplies: [PRItem] = [], sessions: [PRListingSession] = []
     ) {
         self.watch = watch
         self.openItems = openItems
         self.decisions = decisions
         self.items = items
+        self.owedReplies = owedReplies
         self.sessions = sessions
     }
 

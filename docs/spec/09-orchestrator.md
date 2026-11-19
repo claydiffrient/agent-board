@@ -42,6 +42,12 @@
 - **Restart** signals the child with SIGTERM and relaunches on its exit. It
   does not call SwiftTerm's `terminate()`, which cancels the exit monitor, so
   the relaunch would never fire.
+- **Rulings bind the orchestrator.** A human's Deny records a `deny` ruling
+  with its reason (§15). Asking again for the same push or pull request at the
+  same commit, the same spawn, or the same integration is refused with the
+  ruling quoted, as are `spawn_worker` on a task under a `hold` and
+  `resume_pr_watch` on a watch ruled `keep_parked` (§15.6). The refusal is
+  final until the human acts; a new commit on the branch is a new request.
 - Resume sends a fixed app-authored first turn ("Agent Board resumed this
   session; continue from where you left off") because a resumed background
   session otherwise waits for input until the idle cap stops it.
@@ -101,6 +107,7 @@ became ready.
 | Human promotes a proposal | `decision` | Proposal, and the ids that became `ready` |
 | Human approves or denies an approval | `decision` | Approval, outcome, reason |
 | Human comments on a task | `comment` | Task id and title, the comment quoted; the human speaking. An agent's comment queues nothing |
+| Human records a ruling (§15) | `ruling` | A first line naming the ruling id, its verdict and its subject, and the human's note between `--- note begins ---` and `--- note ends ---`. `list_reports` adds the ruling itself as a structured `ruling` object (§6). Queued in the transaction that writes the ruling; it binds the orchestrator, and the board enforces it whether or not the report is read (§15.6) |
 | A `refresh_epic` that answered before its check finishes | `refresh` | The verdict `refresh_epic` would have answered with: merged, conflicted, failed or timed out, or not finished for a reason the board caused (§5.2) |
 | Cap or idle kill | `failed` | Task, session, `failure_reason` |
 | Human stops a worker, or Pause All | `failed` | Task, session, that a human stopped it |

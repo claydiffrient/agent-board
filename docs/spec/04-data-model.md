@@ -77,7 +77,12 @@ CREATE TABLE task (
   closed_at      INTEGER,          -- entered closed (§5); cleared on leaving. afterDays reads it for a closed task
   closed_reason  TEXT,             -- why it was retired; required to enter closed
   closed_by      TEXT,             -- who closed it, e.g. "orchestrator (<session id>)"
-  completion_check TEXT            -- JSON CompletionCheck from the latest report_complete (§5.1); NULL before one
+  completion_check TEXT,           -- JSON CompletionCheck from the latest report_complete (§5.1); NULL before one
+  blocked_at     INTEGER,          -- the current block's question episode (§15.1); advances on every block, kept on unblock
+  human_review_reason TEXT,        -- why it waits in review for a person; NULL for routing that gives none (§15.1)
+  review_entered_at INTEGER,       -- the human-review episode, stamped with human_review_reason (§15.1)
+  changed_at     INTEGER,          -- last edit to what a worker is asked to do, human comment, or reopen; lifts a spawn deny (§15.6)
+  blocked_source TEXT              -- worker (report_blocked, update_status) | prompt (the Notification hook); set with blocked, cleared with it (§15.5)
 );
 CREATE INDEX task_project_archived ON task(project_id, archived_at);
 CREATE INDEX task_project_done_at ON task(project_id, done_at);
@@ -381,6 +386,7 @@ CREATE TABLE pr_watch (
   est_cost_usd     REAL NOT NULL DEFAULT 0,
   ready_notified_oid TEXT,            -- the head whose Ready to verify banner fired (§13.4)
   parked_reason    TEXT,              -- why follow-through parked it, e.g. the last of three failed triages (§13.1)
+  parked_at        INTEGER,           -- when it last parked: the parked watch's question episode (§15.1)
   resumed_at       INTEGER,           -- the last Resume from parked or Watch again from stopped; bounds the round cap and failure streak (§13.4)
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,  -- moves only when something other than last_polled_at changes
@@ -502,6 +508,46 @@ CREATE TABLE pr_triage (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX pr_triage_watch ON pr_triage(watch_id);
+
+-- One answer the human gave to one asking (§15). Append-only and human-only: the app's UI is the
+-- only writer, no token scope has a tool that writes one, and a change of mind is a new row that
+-- supersedes the old. Deleted only by the cascade from its subject or project.
+CREATE TABLE ruling (
+  id           TEXT PRIMARY KEY,
+  project_id   TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  subject_kind TEXT NOT NULL,     -- task | approval | pr_item | pr_watch | review_finding
+  task_id      TEXT REFERENCES task(id) ON DELETE CASCADE,
+  approval_id  TEXT REFERENCES approval(id) ON DELETE CASCADE,
+  pr_item_id   INTEGER REFERENCES pr_item(id) ON DELETE CASCADE,
+  pr_watch_id  TEXT REFERENCES pr_watch(id) ON DELETE CASCADE,
+  finding_ref  TEXT,              -- review_finding only: "<review_round.number>:<index>" on task_id
+  question     TEXT NOT NULL,     -- what the row showed, snapshotted at answer time
+  question_at  INTEGER NOT NULL,  -- the episode it answers (§15.1)
+  verdict      TEXT NOT NULL,     -- proceed | instead | hold | deny | reopen | overrule | uphold |
+                                  -- choose | reply | keep_parked | dismiss
+  choice       TEXT,              -- choose only: the option label
+  note         TEXT CHECK (note IS NULL OR length(note) BETWEEN 1 AND 10000),
+  supersedes   TEXT REFERENCES ruling(id),  -- an earlier ruling on the same subject
+  answered_at  INTEGER NOT NULL,
+  CHECK (...)                     -- exactly one subject column per subject_kind; review_finding is task_id plus finding_ref
+);
+CREATE INDEX ruling_task ON ruling(task_id, answered_at);
+CREATE INDEX ruling_pr_item ON ruling(pr_item_id, answered_at);
+CREATE INDEX ruling_pr_watch ON ruling(pr_watch_id, answered_at);
+CREATE INDEX ruling_approval ON ruling(approval_id);
+CREATE INDEX ruling_supersedes ON ruling(supersedes);
+CREATE TRIGGER ruling_immutable BEFORE UPDATE ON ruling BEGIN SELECT RAISE(ABORT, 'rulings are append-only'); END;
+
+-- A proceed, instead or hold ruling owed to one live session (§15.8). delivered_at is the claim, set
+-- once by the PostToolUse hook or by a resume, whichever reaches the session first.
+CREATE TABLE ruling_delivery (
+  ruling_id     TEXT NOT NULL REFERENCES ruling(id) ON DELETE CASCADE,
+  session_id    TEXT NOT NULL REFERENCES agent_session(session_id) ON DELETE CASCADE,
+  delivered_at  INTEGER,
+  delivered_via TEXT,             -- hook | resume
+  PRIMARY KEY (ruling_id, session_id)
+);
+CREATE INDEX ruling_delivery_session ON ruling_delivery(session_id);
 ```
 
 Every `epic.state` value is written by exactly one place, and nothing writes one

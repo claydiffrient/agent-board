@@ -90,6 +90,8 @@ struct SidebarCollapseState {
 /// `atAGlance`, which is the app's landing view, so the detail pane is never empty.
 enum SidebarSelection: Hashable {
     case atAGlance
+    /// Every question waiting on the human, across projects (SPEC §10, Inbox).
+    case inbox
     /// The roster is cross-project, so it sits beside At a Glance rather than inside a project.
     case roster
     /// The Coordinator belongs to no project (SPEC §8.2), so it sits with the pinned rows.
@@ -101,7 +103,7 @@ enum SidebarSelection: Hashable {
     case project(String)
 
     /// The rows above every workspace section that always show, in sidebar order.
-    static let pinned: [SidebarSelection] = [.atAGlance, .roster, .coordinator, .pullRequests]
+    static let pinned: [SidebarSelection] = [.atAGlance, .inbox, .roster, .coordinator, .pullRequests]
 
     static func pinned(showingReviews: Bool) -> [SidebarSelection] {
         showingReviews ? pinned + [.reviews] : pinned

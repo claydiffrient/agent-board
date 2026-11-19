@@ -146,6 +146,28 @@ final class OrchestratorToolHandlerTests: XCTestCase {
         XCTAssertEqual(try f.approvals.pending(projectId: f.project.id).count, 0)
     }
 
+    func testWithAutonomyOnASpawnAfterALapsedDenyWaitsForTheHumanUntilTheyRuleAgain() async throws {
+        let task = try f.task("t", column: .ready)
+        _ = try await f.call("spawn_worker", ["task_id": .string(task.id)])
+        let denied = try XCTUnwrap(f.approvals.pending(projectId: f.project.id).first)
+        try f.board.denyApproval(denied.id, reason: "Not until the schema lands.")
+        try f.setAutonomy(true)
+        _ = try await f.call("update_task", ["id": .string(task.id), "body": .string("The schema landed.")])
+
+        let result = try await f.call("spawn_worker", ["task_id": .string(task.id)])
+
+        XCTAssertTrue(result.text.contains("pending; the human must approve"), result.text)
+        let spawnedBeforeApproval = await f.control.spawned
+        XCTAssertEqual(spawnedBeforeApproval, [])
+        let asked = try XCTUnwrap(f.approvals.pending(projectId: f.project.id).first)
+        XCTAssertTrue(asked.reason?.contains("Not until the schema lands.") == true, asked.reason ?? "nil")
+
+        _ = try f.board.resolveApproval(asked.id, approved: true, by: "human")
+        _ = try await f.call("spawn_worker", ["task_id": .string(task.id)])
+        let spawned = await f.control.spawned
+        XCTAssertEqual(spawned, [task.id])
+    }
+
     func testSpawnWorkerOnNonReadyTaskIsRefused() async throws {
         try f.setAutonomy(true)
         let task = try f.task("t", column: .backlog)

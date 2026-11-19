@@ -17,14 +17,20 @@ extension ProjectGlance {
 /// attention total would silently change what it means.
 ///
 /// Pull requests ready to verify (SPEC §13.4) follow the review clause and add nothing at zero.
+/// Inbox questions (SPEC §15.5) lead beside the projects needing you, and add nothing at zero.
 public enum GlanceHeadline {
     public static func text(
-        workingSessions: Int, tasksInReview: Int, projectsNeedingYou: Int, prsReadyToVerify: Int = 0
+        workingSessions: Int, tasksInReview: Int, projectsNeedingYou: Int, prsReadyToVerify: Int = 0,
+        questionsForYou: Int = 0
     ) -> String {
         let counts = [agents(workingSessions), review(tasksInReview), Self.prsReadyToVerify(prsReadyToVerify)]
             .compactMap { $0 }.joined(separator: ", ")
-        if projectsNeedingYou > 0 {
-            return "\(Self.projectsNeedingYou(projectsNeedingYou)). \(counts)."
+        let lead = [
+            projectsNeedingYou > 0 ? Self.projectsNeedingYou(projectsNeedingYou) : nil,
+            Self.questionsForYou(questionsForYou),
+        ].compactMap { $0 }
+        if !lead.isEmpty {
+            return "\(lead.joined(separator: ", ")). \(counts)."
         }
         if workingSessions == 0 && tasksInReview == 0 && prsReadyToVerify == 0 {
             return "Nothing running, and nothing is waiting on you."
@@ -38,6 +44,15 @@ public enum GlanceHeadline {
         case ...0: nil
         case 1: "1 PR ready to verify"
         default: "\(count) PRs ready to verify"
+        }
+    }
+
+    /// Nil at zero, like the PR clause.
+    public static func questionsForYou(_ count: Int) -> String? {
+        switch count {
+        case ...0: nil
+        case 1: "1 question for you"
+        default: "\(count) questions for you"
         }
     }
 

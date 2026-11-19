@@ -258,3 +258,28 @@ public enum IntegrationPlan {
         return sections.joined(separator: "\n\n")
     }
 }
+
+/// An `integration` approval's payload: the epic branch's tip when it was requested, so a deny
+/// lapses once the branch moves (SPEC §15.6). Nil when the tip could not be read.
+public struct IntegrationRequest: Codable, Sendable, Equatable {
+    public var epicTip: String?
+
+    public init(epicTip: String?) {
+        self.epicTip = epicTip
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case epicTip = "epic_tip"
+    }
+
+    public func encoded() throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: try encoder.encode(self), as: UTF8.self)
+    }
+
+    public static func decode(_ json: String?) -> IntegrationRequest? {
+        guard let data = json?.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(IntegrationRequest.self, from: data)
+    }
+}

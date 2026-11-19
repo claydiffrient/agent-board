@@ -29,7 +29,9 @@ enum AppComposition {
                 terminalProcesses: terminals,
                 cdr: LiveCDRService()
             )
-            MacNotifier.shared.start(router: environment.router)
+            MacNotifier.shared.start(
+                router: environment.router, answering: BannerAnswering(db: db, supervisor: supervisor)
+            )
             return environment
         } catch let refusal as AppDatabaseError {
             switch refusal {

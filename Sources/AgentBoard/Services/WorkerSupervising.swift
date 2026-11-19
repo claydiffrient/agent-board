@@ -23,6 +23,8 @@ protocol WorkerSupervising: AnyObject {
     /// What the Accept confirmation must say first, or nil when nothing needs confirming (SPEC §5, `done`).
     func acceptWarning(taskId: String) async -> String?
     func reopen(taskId: String) async throws
+    /// Reopen with the human's note recorded as a `reopen` ruling (SPEC §15.6).
+    func reopen(taskId: String, ruling note: String) async throws
     /// Stops the task's reviewer session and starts a fresh one from the same roster agent; the task
     /// stays in `review` (SPEC §10, Pending reviews).
     func rerunReview(taskId: String) async throws
@@ -105,8 +107,10 @@ protocol WorkerSupervising: AnyObject {
     /// The human's dismissal of one open item (SPEC §13.1 dismissed items), after stopping any session
     /// still working the round it ends.
     func dismissPRItem(itemId: Int64, reason: String) async throws
-    /// The human's answer to an open decision (SPEC §13.4), posting the reply it chose.
+    /// The human's answer to an open decision (SPEC §13.4). It posts nothing; a reply it chose is owed.
     func answerPRDecision(itemId: Int64, choice: PRDecisionChoice) async throws
+    /// The human's Post reply on an owed reply (SPEC §13.4), throwing the failure to show inline.
+    func postPRReply(itemId: Int64) async throws
     /// The page's Watch pull request (SPEC §13.8 manual adoption); throws the refusal to show inline.
     func watchPullRequest(number: Int, projectId: String) async throws
 }
@@ -116,6 +120,8 @@ extension WorkerSupervising {
     func pollPRWatches(watchIds: Set<String>) async throws {}
     func dismissPRItem(itemId: Int64, reason: String) async throws {}
     func answerPRDecision(itemId: Int64, choice: PRDecisionChoice) async throws {}
+    func postPRReply(itemId: Int64) async throws {}
+    func reopen(taskId: String, ruling note: String) async throws {}
     func watchPullRequest(number: Int, projectId: String) async throws {}
     func focusChanged(projectId: String?) {}
     func reportQueued(projectId: String) async {}

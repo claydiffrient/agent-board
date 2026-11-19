@@ -96,15 +96,42 @@ public struct ReviewRound: Codable, FetchableRecord, MutablePersistableRecord, S
             .joined(separator: "\n")
     }
 
+    /// A `review_finding` ruling's `finding_ref`: the round's number and the finding's 1-based number (SPEC §15.2).
+    public static func findingRef(round: Int, finding: Int) -> String { "\(round):\(finding)" }
+
+    /// The findings of `round` whose newest standing ruling is `overrule`, keyed by finding number (SPEC §15.7).
+    public static func overruled(_ db: Database, round: ReviewRound) throws -> [Int: Ruling] {
+        var result: [Int: Ruling] = [:]
+        for number in round.findings.indices.map({ $0 + 1 }) {
+            let subject = RulingSubject.reviewFinding(
+                taskId: round.taskId, ref: findingRef(round: round.number, finding: number)
+            )
+            if let newest = try RulingStore.standing(db, subject: subject).first, newest.verdict == .overrule {
+                result[number] = newest
+            }
+        }
+        return result
+    }
+
+    public static func overruled(in db: AppDatabase, round: ReviewRound) throws -> [Int: Ruling] {
+        try db.reader.read { try overruled($0, round: round) }
+    }
+
     /// SPEC §5.1: a verdict after an earlier round grades each of that round's findings exactly once,
-    /// with evidence. Returns the grades in finding order.
-    static func checkGrades(_ grades: [GradedFinding], against previous: ReviewRound?) throws -> [GradedFinding] {
+    /// with evidence, except the ones a person overruled (§15.7), which it must leave out. Returns the
+    /// grades in finding order.
+    static func checkGrades(_ db: Database, _ grades: [GradedFinding], against previous: ReviewRound?) throws -> [GradedFinding] {
         let count = previous?.findings.count ?? 0
+        let settled = try previous.map { try overruled(db, round: $0) } ?? [:]
         let numbers = grades.map(\.finding)
         if let unknown = numbers.first(where: { $0 < 1 || $0 > count }) {
             throw ReviewGradingRejection(reason: count == 0
                 ? "There is no earlier finding to grade, but the verdict graded finding \(unknown). Leave grades out."
                 : "Finding \(unknown) does not exist; the previous round had findings 1 to \(count).")
+        }
+        if let ruled = numbers.first(where: { settled[$0] != nil }) {
+            throw ReviewGradingRejection(reason: "Finding \(ruled) was overruled by a person, so it is settled. "
+                + "Leave it out of grades.")
         }
         if let repeated = Dictionary(grouping: numbers, by: { $0 }).first(where: { $0.value.count > 1 })?.key {
             throw ReviewGradingRejection(reason: "Finding \(repeated) is graded more than once.")
@@ -112,12 +139,54 @@ public struct ReviewRound: Codable, FetchableRecord, MutablePersistableRecord, S
         if let blank = grades.first(where: { $0.evidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
             throw ReviewGradingRejection(reason: "Finding \(blank.finding)'s grade has no evidence.")
         }
-        let missing = (0..<count).map { $0 + 1 }.filter { !numbers.contains($0) }
+        let missing = (0..<count).map { $0 + 1 }.filter { !numbers.contains($0) && settled[$0] == nil }
         guard let previous, !missing.isEmpty else { return grades.sorted { $0.finding < $1.finding } }
         throw ReviewGradingRejection(reason: "Round \(previous.number) left \(count) finding\(count == 1 ? "" : "s"), "
             + "and the verdict does not grade finding\(missing.count == 1 ? "" : "s") "
-            + missing.map(String.init).joined(separator: ", ") + ". Grade every one of them.")
+            + missing.map(String.init).joined(separator: ", ") + ". Grade every one that is not overruled.")
     }
+
+    /// The previous-round finding numbers a reopen's finding cites as "finding N".
+    static func citedFindings(_ finding: String) -> Set<Int> {
+        guard let citation = try? NSRegularExpression(pattern: #"\bfinding\s+#?(\d+)\b"#, options: .caseInsensitive)
+        else { return [] }
+        let range = NSRange(finding.startIndex..., in: finding)
+        return Set(citation.matches(in: finding, range: range).compactMap { match in
+            Range(match.range(at: 1), in: finding).flatMap { Int(finding[$0]) }
+        })
+    }
+
+    /// SPEC §15.7: a reopen whose every finding re-raises only overruled findings rests on nothing a person
+    /// left open. `refs`, one entry per finding, says which previous findings each re-raises; without it, the
+    /// "finding N" citations in the text stand in.
+    static func checkReopen(
+        _ findings: [String], refs: [[Int]]? = nil, overruled: [Int: Ruling], round: Int, previousCount: Int
+    ) throws {
+        if let refs {
+            guard refs.count == findings.count else {
+                throw ReviewReopenRejection(reason: "finding_refs has \(refs.count) entr\(refs.count == 1 ? "y" : "ies") "
+                    + "for \(findings.count) finding\(findings.count == 1 ? "" : "s"); give one list per finding, "
+                    + "empty for a new one.")
+            }
+            if let unknown = refs.joined().first(where: { $0 < 1 || $0 > previousCount }) {
+                throw ReviewReopenRejection(reason: previousCount == 0
+                    ? "There is no earlier finding to re-raise, but finding_refs names \(unknown). Leave it out."
+                    : "Finding \(unknown) does not exist; round \(round) had findings 1 to \(previousCount).")
+            }
+        }
+        guard !overruled.isEmpty else { return }
+        let cited = refs.map { $0.map(Set.init) } ?? findings.map(citedFindings)
+        guard cited.allSatisfy({ !$0.isEmpty && $0.isSubset(of: overruled.keys) }) else { return }
+        let numbers = cited.reduce(into: Set<Int>()) { $0.formUnion($1) }.sorted().map(String.init)
+        throw ReviewReopenRejection(reason: "Every finding names round \(round)'s finding"
+            + "\(numbers.count == 1 ? "" : "s") \(numbers.joined(separator: ", ")), which a person overruled, so "
+            + "\(numbers.count == 1 ? "it is" : "they are") settled and cannot reopen the task.")
+    }
+}
+
+/// A reopen refused because its findings rest only on findings a person overruled (SPEC §15.7).
+public struct ReviewReopenRejection: Error, Sendable, Equatable {
+    public var reason: String
 }
 
 /// A verdict refused because it does not grade the previous round's findings as SPEC §5.1 requires.

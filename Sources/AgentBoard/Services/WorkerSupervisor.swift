@@ -52,6 +52,7 @@ enum SupervisorError: LocalizedError {
     case watchNotFound(String)
     case triageTaskNotAssignable(title: String)
     case triageNotResumable(title: String)
+    case rulingRefused(String)
     case pullRequestNotFetched(String)
     case fixRoundNotFound(title: String)
     case fixRoundNotAcceptable(title: String)
@@ -67,6 +68,7 @@ enum SupervisorError: LocalizedError {
         case .triageNotResumable(let title):
             return "\"\(title)\" is a pull request triage or follow-up check, which is not resumed; follow-through "
                 + "starts a fresh one"
+        case .rulingRefused(let reason): return reason
         case .pullRequestNotFetched(let reason): return "the pull request could not be fetched: \(reason)"
         case .fixRoundNotFound(let title): return "\"\(title)\" is not a pull request round's fix task"
         case .fixRoundNotAcceptable(let title):
@@ -180,6 +182,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private let approvals: ApprovalStore
     @ObservationIgnored private let shutdowns: ShutdownOrderStore
     @ObservationIgnored private let deliveries: ShutdownDeliveryStore
+    @ObservationIgnored private let rulingDeliveries: RulingDeliveryStore
     @ObservationIgnored private let epics: EpicStore
     @ObservationIgnored private let notes: NoteStore
     @ObservationIgnored private let roster: RosterStore
@@ -365,6 +368,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         approvals = ApprovalStore(db)
         shutdowns = ShutdownOrderStore(db)
         deliveries = ShutdownDeliveryStore(db)
+        rulingDeliveries = RulingDeliveryStore(db)
         epics = EpicStore(db)
         notes = NoteStore(db)
         roster = RosterStore(db, definitions: AgentDefinitionDirectories(home: home))
@@ -688,6 +692,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     taskId: taskId, sessionId: nil, kind: .status, text: "Escalation: \(escalation)."
                 )
             }
+            let previousRound = scope == .reviewer ? try ReviewPrompt.previousRound(db: db, taskId: taskId) : nil
             beginSetup(
                 LaunchPlan(
                     project: project,
@@ -704,7 +709,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             workingDirectory: site.cwd.path,
                             agent: agent?.identity,
                             comments: try CommentStore(db).list(taskId: taskId),
-                            previousRound: try ReviewPrompt.previousRound(db: db, taskId: taskId)
+                            previousRound: previousRound,
+                            overruled: try previousRound.map { try ReviewRound.overruled(in: db, round: $0) } ?? [:]
                         )
                         : Self.openingPrompt(
                             task: task, branch: branch, attempt: placeholder.attempt, epicGoal: epic?.goal,
@@ -716,7 +722,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                             workingDirectory: site.cwd.path,
                             agent: agent?.identity,
                             reviewFindings: try ProgressStore(db).openReviewFindings(taskId: taskId),
-                            comments: try CommentStore(db).list(taskId: taskId)
+                            comments: try CommentStore(db).list(taskId: taskId),
+                            rulings: try RulingStore(db).standing(.task(taskId))
                         ),
                     models: models,
                     attempt: placeholder.attempt,
@@ -1744,7 +1751,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                         workingDirectory: worktree.path,
                         agent: agent?.identity,
                         reviewFindings: try ProgressStore(db).openReviewFindings(taskId: task.id),
-                        comments: try CommentStore(db).list(taskId: task.id)
+                        comments: try CommentStore(db).list(taskId: task.id),
+                        rulings: try RulingStore(db).standing(.task(task.id))
                     ),
                     models: models,
                     attempt: placeholder.attempt,
@@ -2168,17 +2176,33 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             let placement = try projects.get(session.projectId).map {
                 WorkerStanding.recorded(session: session, project: $0, taskId: session.taskId ?? "").placement
             } ?? .worktree
-            try await resume(session, mergingEpic: true) { merge in
-                Self.resumePrompt(previousStop: session.stopReason, placement: placement, merge: merge)
+            let rulings = try session.taskId.map { try RulingStore(db).standing(.task($0)) } ?? []
+            // The prompt carries every standing ruling, so none is still owed to this session afterwards.
+            let owed = try rulingDeliveries.claim(sessionId: sessionId, via: .resume)
+            do {
+                try await resume(session, mergingEpic: true) { merge in
+                    Self.resumePrompt(
+                        previousStop: session.stopReason, placement: placement, merge: merge, rulings: rulings
+                    )
+                }
+            } catch {
+                try? rulingDeliveries.release(sessionId: sessionId, rulingIds: owed.map(\.id))
+                throw error
             }
         }
     }
 
+    /// `honoringHold` is false only for the shutdown wind-down, which tells a worker to stop rather than work.
     private func resume(
-        _ session: AgentSession, mergingEpic: Bool = false, prompt: (ResumeMerge?) -> String
+        _ session: AgentSession, mergingEpic: Bool = false, honoringHold: Bool = true,
+        prompt: (ResumeMerge?) -> String
     ) async throws {
         do {
             let sessionId = session.sessionId
+            if honoringHold, let taskId = session.taskId, let task = try tasks.get(taskId),
+               let hold = try RulingStore(db).holdInForce(taskId: taskId) {
+                throw SupervisorError.rulingRefused(Board.holdRefusal(task: task, hold: hold))
+            }
             // SPEC §5: until the row is active again only this mark keeps a reap out of the worktree.
             if let path = session.worktreePath {
                 if tearingDown.contains(Self.resolved(path)) { throw SupervisorError.worktreeBeingRemoved(path: path) }
@@ -3230,9 +3254,15 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
               let watch = try? prWatches.get(watchId), !watch.paused
         else { return }
         for decision in decisions {
+            let question = decision.id.map {
+                BannerQuestion(
+                    kind: .prDecision, subjectId: String($0),
+                    questionAt: decision.decisionNotifiedAt ?? decision.createdAt
+                )
+            }
             post(
                 "Pull request decision waiting", body: "#\(watch.number): \(decision.decisionQuestion ?? watch.title)",
-                projectId: project.id, category: .prDecisions, subject: .pullRequest(watch.id)
+                projectId: project.id, category: .prDecisions, subject: .pullRequest(watch.id), question: question
             )
         }
     }
@@ -3976,9 +4006,18 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     func reopen(taskId: String) async throws {
+        try await reopen(taskId: taskId, note: nil)
+    }
+
+    /// The inbox's Reopen (SPEC §15.6): the note is recorded as a `reopen` ruling the next worker is spawned with.
+    func reopen(taskId: String, ruling note: String) async throws {
+        try await reopen(taskId: taskId, note: Optional(note))
+    }
+
+    private func reopen(taskId: String, note: String?) async throws {
         try await recording {
             try await stopLiveSessions(onTask: taskId, by: .human)
-            let report = try board.reopen(taskId: taskId)
+            let report = try board.reopen(taskId: taskId, ruling: note)
             report.projectId.map { announceReports(projectId: $0) }
         }
     }
@@ -4530,9 +4569,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 continue
             }
             switch removeIfClean(manager, at: path) {
-            case .removed(let diagnostics, let teardownFailure):
+            case .removed(let diagnostics, let notice):
                 retired.append(slot)
-                notices.append(contentsOf: diagnostics + [teardownFailure].compactMap { $0 })
+                notices.append(contentsOf: diagnostics + [notice].compactMap { $0 })
             case .kept(let reason):
                 notices.append(reason)
             }
@@ -4588,9 +4627,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             }
             guard FileManager.default.fileExists(atPath: path) else { continue }
             switch removeIfClean(manager, at: URL(fileURLWithPath: path)) {
-            case .removed(let diagnostics, let teardownFailure):
+            case .removed(let diagnostics, let notice):
                 cleanup.notices.append(contentsOf: diagnostics)
-                if let teardownFailure { cleanup.add(teardownFailure, at: path) }
+                if let notice { cleanup.add(notice, at: path) }
             case .kept(let reason):
                 cleanup.add(reason, at: path)
                 removedEvery = false
@@ -4644,9 +4683,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         var notices: [String] = []
         for orphan in orphans {
             switch removeIfClean(manager, at: orphan.url) {
-            case .removed(let diagnostics, let teardownFailure):
+            case .removed(let diagnostics, let notice):
                 notices.append(contentsOf: diagnostics)
-                if let teardownFailure { cleanup.add(teardownFailure, at: orphan.path) }
+                if let notice { cleanup.add(notice, at: orphan.path) }
                 if let branch = orphan.branch {
                     notices.append(contentsOf: deleteBranch(manager, branch, bases: bases))
                 }
@@ -4703,7 +4742,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     private enum WorktreeTeardown {
-        case removed([String], teardownFailure: String?)
+        case removed([String], notice: String?)
         case kept(String)
     }
 
@@ -4719,7 +4758,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 return .kept("kept worktree \(path.path): it has uncommitted changes in \(listed)\(more)")
             }
             let removal = try manager.remove(path: path)
-            return .removed(removal.hookDiagnostics, teardownFailure: removal.teardownFailure)
+            return .removed(removal.hookDiagnostics, notice: removal.notice)
         } catch {
             return .kept("could not remove worktree \(path.path): \(error)")
         }
@@ -4938,13 +4977,24 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return watch
     }
 
-    /// SPEC §13.4: a reply the human chose posts now, with no round and whatever `postFactualReplies` says.
+    /// SPEC §13.4: answering records the human's ruling and posts nothing; a reply it chose is owed to Post reply.
     func answerPRDecision(itemId: Int64, choice: PRDecisionChoice) async throws {
-        let item = try await recording { try board.answerDecision(itemId: itemId, choice: choice) }
-        guard item.state == .handled, let watch = try? prWatches.get(item.watchId),
-              let project = try? projects.get(watch.projectId)
-        else { return }
+        try await recording { _ = try board.answerDecision(itemId: itemId, choice: choice) }
+    }
+
+    /// SPEC §13.4 Post reply: posts one owed reply now, whatever `postFactualReplies` says, and throws the
+    /// failure so the row can show it.
+    func postPRReply(itemId: Int64) async throws {
+        guard let item = try prWatches.owedReply(itemId: itemId) else {
+            throw PRVerdictRejection("Item \(itemId) has no reply waiting to be posted.")
+        }
+        guard let watch = try prWatches.get(item.watchId), let project = try projects.get(watch.projectId) else {
+            throw PRVerdictRejection("Item \(itemId)'s pull request is no longer watched.")
+        }
         await postReplies([item], watchId: watch.id, project: project)
+        if let after = try prWatches.item(itemId), after.replyURL == nil {
+            throw PRVerdictRejection("The reply was not posted: \(after.replyError ?? "another post of it is in flight.")")
+        }
     }
 
     func dismissPRItem(itemId: Int64, reason: String) async throws {
@@ -5036,12 +5086,10 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         announceReports(projectId: approval.projectId)
     }
 
+    /// SPEC §15.6: the reason is required, because it becomes the note on the `deny` ruling.
     func deny(approvalId: String, reason: String?) async throws {
         try await recording {
-            let trimmed = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let approval = try board.resolveApproval(
-                approvalId, approved: false, by: "human", reason: trimmed?.isEmpty == false ? trimmed : nil
-            )
+            let (approval, _) = try board.denyApproval(approvalId, reason: reason ?? "")
             announceReports(projectId: approval.projectId)
         }
     }
@@ -5181,11 +5229,11 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         for (worktree, removal) in removals {
             switch removal {
-            case .removed(let diagnostics, let teardownFailure):
+            case .removed(let diagnostics, let notice):
                 outcome.removed.append(worktree.path)
                 outcome.notices.append(contentsOf: diagnostics)
-                if let teardownFailure {
-                    outcome.teardownFailures.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: teardownFailure))
+                if let notice {
+                    outcome.teardownFailures.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: notice))
                 }
             case .kept(let reason):
                 outcome.kept.append(WorktreeCleanupFinding(taskId: worktree.taskId, text: reason))
@@ -5300,9 +5348,33 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         )) ?? false
         guard claimed else { return }
         do {
-            try await resume(session) { _ in ShutdownOrder.windDownOrder(reason: order.reason, via: .resume) }
+            try await resume(session, honoringHold: false) { _ in
+                ShutdownOrder.windDownOrder(reason: order.reason, via: .resume)
+            }
         } catch {
             try? deliveries.releaseDelivery(orderId: order.id, sessionId: session.sessionId)
+        }
+    }
+
+    /// SPEC §15.8: an idle or blocked session makes no tool call for the hook to ride, so a ruling owed
+    /// to it goes in as a resume prompt. Claimed before the resume runs, released if the resume fails.
+    func deliverOwedRulings() async {
+        guard let owed = try? rulingDeliveries.owedByResume() else { return }
+        for (session, _) in owed {
+            guard let rulings = try? rulingDeliveries.claim(sessionId: session.sessionId, via: .resume),
+                  !rulings.isEmpty
+            else { continue }
+            do {
+                try await resume(session, honoringHold: false) { _ in RulingDelivery.resumePrompt(rulings) }
+                if let taskId = session.taskId {
+                    _ = try? ProgressStore(db).append(
+                        taskId: taskId, sessionId: session.sessionId, kind: .status,
+                        text: RulingDelivery.progressText(rulings, via: .resume)
+                    )
+                }
+            } catch {
+                try? rulingDeliveries.release(sessionId: session.sessionId, rulingIds: rulings.map(\.id))
+            }
         }
     }
 
@@ -5424,13 +5496,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// to it, or against that project's notification preferences.
     private func post(
         _ title: String, body: String, projectId: String?, category: NotificationCategory,
-        subject: NotificationRoute.Subject = .project
+        subject: NotificationRoute.Subject = .project, question: BannerQuestion? = nil
     ) {
         guard shouldNotify(projectId: projectId, category: category) else { return }
         postBanner(
             notificationTitle(title, projectId: projectId),
             body,
-            projectId.map { NotificationRoute(projectId: $0, subject: subject) }
+            projectId.map { NotificationRoute(projectId: $0, subject: subject, question: question) }
         )
     }
 
@@ -5747,6 +5819,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         }
         pollDueTakeovers(all, now: now)
         checkDiskSpace(all)
+        await deliverOwedRulings()
         if now - lastOrphanReap >= Self.orphanReapIntervalMillis {
             lastOrphanReap = now
             reapOrphanedWorktreesOnTick(all)
@@ -5820,9 +5893,19 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             preferences: { preferences[$0] ?? NotificationPreferences() }
         )
         for notice in raised {
-            postBanner(notice.title, notice.body, NotificationRoute(notice))
+            postBanner(notice.title, notice.body, NotificationRoute(notice, question: soleOpenApproval(notice)))
         }
         return raised
+    }
+
+    /// An "Approval waiting" banner offers Deny only while its project has exactly one open approval,
+    /// so the banner's text and the request it denies cannot disagree (SPEC §15.6).
+    private func soleOpenApproval(_ notice: AttentionNotice) -> BannerQuestion? {
+        guard notice.reason == .pendingApproval,
+              let open = try? InboxStore(db).items(projectId: notice.projectId).filter({ $0.kind == .approval }),
+              open.count == 1
+        else { return nil }
+        return BannerQuestion(open[0])
     }
 
     private func notificationPreferencesByProject() -> [String: NotificationPreferences] {
@@ -6054,7 +6137,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     /// The commit step differs by placement: `git commit` is refused in a shared checkout, so a
     /// resumed co-resident worker told to "commit on this branch" is sent at a command that fails.
     static func resumePrompt(
-        previousStop: String?, placement: WorkerPlacement = .worktree, merge: ResumeMerge? = nil
+        previousStop: String?, placement: WorkerPlacement = .worktree, merge: ResumeMerge? = nil,
+        rulings: [Ruling] = []
     ) -> String {
         var lines = ["Agent Board resumed this session."]
         if let merge { lines += mergeNotice(merge) }
@@ -6070,7 +6154,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             + "If a resume or a compaction has left you without the instructions you were spawned with, "
             + "read the MCP resource `\(BriefingResourceURI.worker)` — it returns them in full."
         )
-        return lines.joined(separator: " ")
+        let text = lines.joined(separator: " ")
+        return OpeningPrompt.rulingsSection(rulings).map { "\($0)\n\n\(text)" } ?? text
     }
 
     /// SPEC §5 "Resumed": a conflict comes first, so a worker waking into conflict markers
@@ -6166,12 +6251,13 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         workingDirectory: String? = nil,
         agent: AgentIdentity? = nil,
         reviewFindings: String? = nil,
-        comments: [TaskComment] = []
+        comments: [TaskComment] = [],
+        rulings: [Ruling] = []
     ) -> String {
         OpeningPrompt.compose(
             task: task, branch: branch, attempt: attempt, epicGoal: epicGoal, notes: notes,
             verification: verification, placement: placement, workingDirectory: workingDirectory,
-            agent: agent, reviewFindings: reviewFindings, comments: comments
+            agent: agent, reviewFindings: reviewFindings, comments: comments, rulings: rulings
         )
     }
 

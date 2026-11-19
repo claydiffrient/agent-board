@@ -13,6 +13,7 @@ public enum ReviewPrompt {
         agent: AgentIdentity? = nil,
         comments: [TaskComment] = [],
         previousRound: ReviewRound? = nil,
+        overruled: [Int: Ruling] = [:],
         fenceId: String = InjectedNote.newFenceId()
     ) -> String {
         var sections = agent.map { [OpeningPrompt.renderIdentity($0)] } ?? []
@@ -27,7 +28,7 @@ public enum ReviewPrompt {
             branch: branch, base: base, verification: verification, workingDirectory: workingDirectory
         ))
         if let previousRound, task.origin != .fixRound {
-            sections.append(reReview(previous: previousRound, base: base, fenceId: fenceId))
+            sections.append(reReview(previous: previousRound, overruled: overruled, base: base, fenceId: fenceId))
         }
         if task.origin == .fixRound { sections.append(fixRound(verification: verification)) }
         sections.append(verdict)
@@ -46,6 +47,7 @@ public enum ReviewPrompt {
         let agent = try session.rosterAgentId.flatMap {
             try RosterStore(db).resolved($0, forProject: session.projectId)
         }?.identity
+        let previous = try previousRound(db: db, taskId: taskId, reviewer: session.sessionId)
         return compose(
             task: task,
             branch: session.branch ?? TaskStore.branchName(for: taskId),
@@ -54,7 +56,8 @@ public enum ReviewPrompt {
             workingDirectory: session.cwd,
             agent: agent,
             comments: try CommentStore(db).list(taskId: taskId),
-            previousRound: try previousRound(db: db, taskId: taskId, reviewer: session.sessionId)
+            previousRound: previous,
+            overruled: try previous.map { try ReviewRound.overruled(in: db, round: $0) } ?? [:]
         )
     }
 
@@ -144,7 +147,7 @@ public enum ReviewPrompt {
     public static let findingsCloseMarker = "<<<END PREVIOUS REVIEW FINDING"
 
     /// SPEC §5.1: a re-review starts from the last round's findings and what changed since it.
-    static func reReview(previous: ReviewRound, base: String, fenceId: String) -> String {
+    static func reReview(previous: ReviewRound, overruled: [Int: Ruling], base: String, fenceId: String) -> String {
         let since = previous.reviewedHead
         var lines = ["## This is a re-review"]
         let what = previous.outcome == .accepted
@@ -166,9 +169,10 @@ public enum ReviewPrompt {
             let label = "\(index + 1) id=\(fenceId)>>>"
             lines += ["\(findingsOpenMarker) \(label)", finding, "\(findingsCloseMarker) \(label)"]
         }
+        if !overruled.isEmpty { lines.append(settled(overruled)) }
         let range = since.map { "`git diff \($0)..HEAD`" } ?? "this round's diff"
         lines += [
-            "- Grade every finding above in the `grades` argument of your verdict, whichever verdict it is: its "
+            "- Grade every finding above that is not settled in the `grades` argument of your verdict, whichever verdict it is: its "
                 + "number, one of `fixed`, `partly_fixed`, `not_fixed` or `moot`, and the evidence, the file and line "
                 + "or the command that shows it. `moot` means the code it was about is gone or changed so the point "
                 + "no longer holds; say what made it moot. A verdict that leaves a finding ungraded is refused.",
@@ -178,6 +182,17 @@ public enum ReviewPrompt {
                 + "something round \(previous.number) could not have seen. Say which in the finding. Do not "
                 + "raise against unchanged code what round \(previous.number) could have raised and did not.",
         ]
+        return lines.joined(separator: "\n")
+    }
+
+    /// SPEC §15.7: a person's overrule outranks the reviewer, so the finding is neither graded nor raised again.
+    static func settled(_ overruled: [Int: Ruling]) -> String {
+        var lines = ["### Settled by your human",
+            "A person overruled the findings below. They are settled: do not grade them, and do not raise them "
+                + "again in `reopen_task`. A reopen whose findings name only settled findings is refused."]
+        for (number, ruling) in overruled.sorted(by: { $0.key < $1.key }) {
+            lines.append("- Finding \(number) overruled: " + (ruling.note ?? "no note given."))
+        }
         return lines.joined(separator: "\n")
     }
 
@@ -200,7 +215,8 @@ public enum ReviewPrompt {
     verbatim, and the next reviewer grades each one, so make each actionable on its own: what is wrong, the \
     file and line or the command that shows it, and what would make it acceptable.
     If a tool refuses your verdict because of its grades, correct the grades and call it again. If it refuses \
-    for any other reason, stop there. The task stays in Review for a person.
+    a reopen because its findings name only settled findings, accept the task or reopen it with a finding that \
+    is not settled. If it refuses for any other reason, stop there. The task stays in Review for a person.
     """
 
     static let turnEnding = """

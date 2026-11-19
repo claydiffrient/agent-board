@@ -9,8 +9,8 @@ enum MainWindowLayout {
     static let minimumDetailWidth: CGFloat = 761
     static let sidebarMinimumWidth: CGFloat = 180
     static let sidebarIdealWidth: CGFloat = 220
-    /// Seven 32pt sidebar rows: the four pinned rows, a section header and two projects.
-    static let sidebarListReserve: CGFloat = 224
+    /// Eight 32pt sidebar rows: the five pinned rows, a section header and two projects.
+    static let sidebarListReserve: CGFloat = 256
     static let minimumSize = CGSize(width: sidebarIdealWidth + minimumDetailWidth, height: 600)
 }
 
@@ -22,6 +22,7 @@ struct MainWindow: View {
     @State private var attention = Observed<[ProjectAttention]>([])
     @State private var coordinatorQueue = Observed<[Report]>([])
     @State private var pullRequestCounts = Observed<[String: PRBadgeCount]>([:])
+    @State private var inboxCount = Observed<Int>(0)
     @State private var showCoordinatorSettings = false
     @State private var selection: SidebarSelection = .atAGlance
     @State private var pullRequestFilter: String?
@@ -71,6 +72,9 @@ struct MainWindow: View {
         .task {
             await pullRequestCounts.run(PRWatchStore(env.db).observeBadgeCounts(), in: env.db.reader)
         }
+        .task {
+            await inboxCount.run(InboxStore(env.db).observeCount(), in: env.db.reader)
+        }
         .task { await announceReleaseNotes() }
         .task { checkCDRInstalled() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -113,6 +117,8 @@ struct MainWindow: View {
     @ViewBuilder
     private var detail: some View {
         switch selection {
+        case .inbox:
+            InboxView(projects: projects.value, workspaces: workspaces.value)
         case .roster:
             RosterView(activity: LiveRosterActivity(db: env.db))
         case .coordinator:
@@ -129,7 +135,7 @@ struct MainWindow: View {
                 AtAGlanceView(
                     projects: projects.value, workspaces: workspaces.value,
                     attention: attention.value, unreadReplies: CoordinatorRow.unreadReplies(coordinatorQueue.value),
-                    pullRequestCounts: pullRequestCounts.value,
+                    pullRequestCounts: pullRequestCounts.value, questionsForYou: inboxCount.value,
                     select: select, showPullRequests: showPullRequests
                 )
             }
@@ -244,6 +250,7 @@ struct MainWindow: View {
     private func pinnedRow(_ item: SidebarSelection) -> some View {
         switch item {
         case .atAGlance: Label("At a Glance", systemImage: "square.grid.2x2")
+        case .inbox: Label("Inbox", systemImage: "tray").badge(inboxCount.value)
         case .roster: Label("Roster", systemImage: "person.2")
         case .coordinator:
             CoordinatorRow(
