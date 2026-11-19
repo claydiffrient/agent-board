@@ -12,7 +12,7 @@ public struct SessionStore: Sendable {
         try db.writer.write { db in try session.insert(db) }
     }
 
-    /// Inserts the row a `/clear` fork runs under and hands it the human comments still queued for
+    /// Inserts the row a `/clear` fork runs under and hands it the human comments and rulings still queued for
     /// the session it forked from, which will never make another tool call (SPEC §7).
     public func insertFork(_ fork: AgentSession, from priorId: String) throws {
         try db.writer.write { db in
@@ -21,6 +21,7 @@ public struct SessionStore: Sendable {
                 sql: "UPDATE comment_delivery SET session_id = ? WHERE session_id = ?",
                 arguments: [fork.sessionId, priorId]
             )
+            try RulingDeliveryStore.moveOwed(db, from: priorId, to: fork.sessionId)
         }
     }
 

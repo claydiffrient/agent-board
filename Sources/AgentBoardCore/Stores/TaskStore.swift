@@ -112,7 +112,27 @@ public struct TaskStore: Sendable {
     public func update(_ task: Task) throws {
         var task = task
         task.updatedAt = .nowMillis
-        try db.writer.write { db in try task.update(db) }
+        try db.writer.write { db in
+            let stored = try Task.fetchOne(db, key: task.id)
+            try task.update(db)
+            if let stored, stored.title != task.title || stored.body != task.body || stored.acceptance != task.acceptance
+                || stored.model != task.model || stored.effort != task.effort {
+                try Self.markChanged(db, task.id)
+            }
+        }
+    }
+
+    /// `task.changed_at`, which only an edit to what a worker is asked to do moves (SPEC §15.6).
+    /// Kept off `Task` so that saving a stale record cannot roll it back.
+    static func markChanged(_ db: Database, _ id: String) throws {
+        try db.execute(
+            sql: "UPDATE task SET changed_at = MAX(?, COALESCE(changed_at, 0) + 1) WHERE id = ?",
+            arguments: [Int64.nowMillis, id]
+        )
+    }
+
+    static func changedAt(_ db: Database, _ id: String) throws -> Int64? {
+        try Int64.fetchOne(db, sql: "SELECT changed_at FROM task WHERE id = ?", arguments: [id])
     }
 
     public func move(_ id: String, to column: TaskColumn, before: String? = nil) throws {
@@ -209,10 +229,15 @@ public struct TaskStore: Sendable {
 
     public func setDeps(_ id: String, dependsOn: [String]) throws {
         try db.writer.write { db in
+            let before = Set(try String.fetchAll(
+                db, sql: "SELECT depends_on FROM task_dep WHERE task_id = ?", arguments: [id]
+            ))
+            let after = Set(dependsOn).subtracting([id])
             try db.execute(sql: "DELETE FROM task_dep WHERE task_id = ?", arguments: [id])
-            for dep in Set(dependsOn) where dep != id {
+            for dep in after {
                 try TaskDep(taskId: id, dependsOn: dep).insert(db)
             }
+            if before != after { try Self.markChanged(db, id) }
         }
     }
 
@@ -269,16 +294,37 @@ public struct TaskStore: Sendable {
         return toReady + toBacklog
     }
 
-    public func setBlocked(_ id: String, _ blocked: Bool, reason: String?) throws {
+    public func setBlocked(_ id: String, _ blocked: Bool, reason: String?, source: BlockedSource = .worker) throws {
         try db.writer.write { db in
-            try Self.setBlocked(db, id, blocked, reason: reason)
+            try Self.setBlocked(db, id, blocked, reason: reason, source: source)
         }
     }
 
-    static func setBlocked(_ db: Database, _ id: String, _ blocked: Bool, reason: String?) throws {
+    /// A block stamps a new `blocked_at`, strictly later than the last, so each block is its own
+    /// question episode (SPEC §15.1).
+    static func setBlocked(
+        _ db: Database, _ id: String, _ blocked: Bool, reason: String?, source: BlockedSource = .worker
+    ) throws {
+        let now = Int64.nowMillis
         try db.execute(
-            sql: "UPDATE task SET blocked = ?, blocked_reason = ?, updated_at = ? WHERE id = ?",
-            arguments: [blocked, blocked ? reason : nil, Int64.nowMillis, id]
+            sql: """
+            UPDATE task SET blocked = ?, blocked_reason = ?, blocked_source = ?, updated_at = ?,
+              blocked_at = CASE WHEN ? THEN MAX(?, COALESCE(blocked_at, 0) + 1) ELSE blocked_at END
+            WHERE id = ?
+            """,
+            arguments: [blocked, blocked ? reason : nil, blocked ? source : nil, now, blocked, now, id]
+        )
+    }
+
+    /// Stamps a new human-review episode, strictly later than the last (SPEC §15.1).
+    static func enterHumanReview(_ db: Database, _ id: String, reason: String?) throws {
+        let now = Int64.nowMillis
+        try db.execute(
+            sql: """
+            UPDATE task SET human_review_reason = ?, review_entered_at = MAX(?, COALESCE(review_entered_at, 0) + 1)
+            WHERE id = ?
+            """,
+            arguments: [reason, now, id]
         )
     }
 

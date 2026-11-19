@@ -147,9 +147,11 @@ public struct PRWatchStore: Sendable {
             }
             if snapshot.isCrossRepository, [.watching, .settling, .readyToVerify, .verified].contains(watch.state) {
                 let fork = snapshot.headRepository.map { "the fork `\($0)`" } ?? "a fork GitHub no longer has"
-                watch.state = .parked
-                watch.parkedReason = "#\(watch.number) comes from \(fork), and Agent Board pushes only to "
-                    + "`\(watch.repoOwner)/\(watch.repoName)`, so follow-through does not run on it."
+                watch.park(
+                    reason: "#\(watch.number) comes from \(fork), and Agent Board pushes only to "
+                        + "`\(watch.repoOwner)/\(watch.repoName)`, so follow-through does not run on it.",
+                    at: now
+                )
                 watch.updatedAt = now
                 try watch.update(db)
                 try Self.report(db, watch: watch, .parked(reason: watch.parkedReason))
@@ -521,17 +523,28 @@ public struct PRWatchStore: Sendable {
             ),
             by: \.watchId
         )
+        let owed = Dictionary(
+            grouping: try PRItem.fetchAll(
+                db,
+                sql: """
+                SELECT i.* FROM pr_item i JOIN pr_watch w ON w.id = i.watch_id
+                WHERE w.state NOT IN ('merged', 'closed') AND \(owedReplySQL)
+                ORDER BY i.handled_at, i.id
+                """
+            ),
+            by: \.watchId
+        )
         let sessions = try activeSessions(db)
         let listings = try rows.map { row in
             let watch = try PRWatch(row: row)
             let items = open[watch.id] ?? []
             return PRWatchListing(
                 watch: watch, openItems: row["open_items"], decisions: items.filter(\.isOpenDecision),
-                items: items, sessions: sessions[watch.id] ?? []
+                items: items, owedReplies: owed[watch.id] ?? [], sessions: sessions[watch.id] ?? []
             )
         }
         let grouped = Dictionary(grouping: listings) {
-            PRPageGroup.of($0.watch.state, openDecisions: $0.openDecisions)
+            PRPageGroup.of($0.watch.state, openDecisions: $0.openDecisions + $0.owedReplies.count)
         }
         return PRPageGroup.allCases.compactMap { group in
             grouped[group].map { PRWatchGroup(group: group, listings: $0) }
@@ -648,12 +661,13 @@ public struct PRWatchStore: Sendable {
                 arguments: [watchId]
             )
             let watch = try PRWatch.fetchOne(db, key: watchId)
-            for var item in unannounced {
+            return try unannounced.map { item in
+                var item = item
                 item.decisionNotifiedAt = now
                 try item.update(db)
                 if let watch { try Self.report(db, watch: watch, .decision(question: item.decisionQuestion)) }
+                return item
             }
-            return unannounced
         }
     }
 }

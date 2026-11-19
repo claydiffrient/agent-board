@@ -41,6 +41,7 @@ public struct CommentStore: Sendable {
                 body: reportBody(task: task, comment: body)
             )
             try queueForLiveSessions(db, comment: comment)
+            try TaskStore.markChanged(db, task.id)
         }
         return comment
     }

@@ -108,7 +108,7 @@ final class HookAndWorkerEventTests: XCTestCase {
     func testPostToolUseClearsTheTaskOutOfTheBlockedSection() async throws {
         let task = try f.task("Add the sidebar", column: .running)
         try f.session("f9047594", taskId: task.id)
-        _ = try f.board.block(taskId: task.id, sessionId: "f9047594", reason: "Claude needs your permission")
+        _ = try f.board.block(taskId: task.id, sessionId: "f9047594", reason: "Claude needs your permission", source: .worker)
 
         let event = HookEvent(name: "PostToolUse", sessionId: "f9047594", toolName: "Bash", rawJSON: "{}")
         _ = await f.hooks.handle(event, identity: f.workerIdentity(sessionId: "f9047594", taskId: task.id))
@@ -120,6 +120,21 @@ final class HookAndWorkerEventTests: XCTestCase {
             stallThreshold: TimeInterval(f.project.settings.caps.stallSeconds)
         )
         XCTAssertTrue(items.isEmpty)
+    }
+
+    func testPostToolUseLeavesABlockTheHumanHeld() async throws {
+        let task = try f.task("Add the sidebar", column: .running)
+        try f.session("w-held", taskId: task.id)
+        _ = try f.board.block(taskId: task.id, sessionId: "w-held", reason: "Should I drop the cache?", source: .worker)
+        try RulingStore(f.db).record(
+            .task(task.id), question: "Should I drop the cache?",
+            questionAt: try XCTUnwrap(f.tasks.get(task.id)?.blockedAt), verdict: .hold, note: "Not until Friday."
+        )
+
+        let event = HookEvent(name: "PostToolUse", sessionId: "w-held", toolName: "Bash", rawJSON: "{}")
+        _ = await f.hooks.handle(event, identity: f.workerIdentity(sessionId: "w-held", taskId: task.id))
+
+        XCTAssertEqual(try f.tasks.get(task.id)?.blocked, true)
     }
 
     /// `workerCompleted` runs `claude stop` on the session waiting on this very call, so the answer
@@ -233,6 +248,27 @@ final class HookAndWorkerEventTests: XCTestCase {
 
         let attention = try XCTUnwrap(ProjectAttentionStore(f.db).attention(projectId: f.project.id))
         XCTAssertEqual(attention.cause(.blockedWorker)?.detail, "t")
+    }
+
+    /// SPEC §15.5: the inbox tells a Claude Code prompt block, which only the terminal answers, from a
+    /// worker's own `report_blocked`.
+    func testTheInboxRowCarriesWhichPathBlockedTheTask() async throws {
+        let task = try f.task("t", column: .running)
+        try f.session("w1", taskId: task.id)
+        let identity = f.workerIdentity(sessionId: "w1", taskId: task.id)
+        let prompt = HookEvent(
+            name: "Notification", sessionId: "w1", notificationType: "permission_prompt",
+            notificationMessage: "May I run rm?", rawJSON: "{}"
+        )
+
+        _ = await f.hooks.handle(prompt, identity: identity)
+        XCTAssertEqual(try InboxStore(f.db).items().map(\.blockedSource), [.prompt])
+
+        try f.board.unblock(taskId: task.id, sessionId: "w1")
+        XCTAssertNil(try f.tasks.get(task.id)?.blockedSource)
+
+        _ = try await f.scoped.call("report_blocked", arguments: .object(["reason": .string("need creds")]), identity: identity)
+        XCTAssertEqual(try InboxStore(f.db).items().map(\.blockedSource), [.worker])
     }
 
     func testProposeTaskQueuesReport() async throws {

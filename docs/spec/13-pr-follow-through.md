@@ -294,7 +294,9 @@ the verdicts are applied in one transaction:
 
 A follow-up task's body holds the PR's number, title and URL, the comment's
 author, path and line, and URL, the comment quoted and labeled as data rather
-than instructions, and triage's approach. An item gets no second follow-up
+than instructions, and triage's approach, or, for an item the author answered,
+their ruling's question and answer (§13.4) instead, read from `ruling` and
+never from `approach`. An item gets no second follow-up
 task while `fix_task_id` names a `follow_through` task that is not of type
 `code`. Then the watch goes to settling when an item arrived during triage,
 else to fixing while an open item's verdict is `fix`, else to watching. The
@@ -403,7 +405,9 @@ holds:
   and the prompt says so when it is, so the prompt still fits a
   post-compaction brief. An item asking for a change to the title or
   description is graded against that text rather than the diff: `fixed` when
-  the text shows the change, quoting it, and `needs_author` when it does not. Once
+  the text shows the change, quoting it, and `needs_author` when it does not. An
+  item whose author's newest standing answer is an `answer` (a `reply` ruling,
+  or a `choose` of an `answer` option) is the author's and is never graded. Once
   every item has a grade its task goes to `done` and its checkout is removed,
   as a finished triage's is. It is never assigned by hand or resumed, and one
   that ends any other way closes its task and parks the watch, unless its setup
@@ -567,7 +571,10 @@ settling until the order lifts.
 
 Items are keyed by the GitHub node id of the thread, review, comment or check they came from,
 so each is handled once per round; a new reply on a thread reopens it for
-triage (§4), whether it was handled or still open with a verdict. The human's own comments, resolved threads, and outdated threads
+triage (§4), whether it was handled or still open with a verdict. That reset
+clears only the item's own per-run columns: a ruling the author gave on it
+(§15) is in its own table and stands, so triage can only ask them again
+(§13.2), and a fixer prompt built for the item still quotes their answer. The human's own comments, resolved threads, and outdated threads
 are never turned into items, though an outdated or viewer-latest thread keeps an
 owed item open (phase 1 above).
 
@@ -643,18 +650,27 @@ A reply triage wrote posts automatically only when the project's
 `postFactualReplies` setting is on, and only for a factual verdict — fix,
 answer, already_done, or follow_up. A decision is never auto-replied, since it
 is, by definition, something argued rather than settled. A reply the human
-chose by answering a decision (§13.4) is theirs, not triage's, so it posts
-whatever the setting says.
+chose by answering a decision (§13.4) is theirs, not triage's: no posting
+point ever sends it, whatever the setting says, and it waits, owed, for the
+human's **Post reply**.
+
+**The author's rulings.** Answering a decision writes the author's ruling
+(§15), which no later run can overwrite. `get_pr_items` lists each open item's
+standing rulings, newest first, as `rulings` (`verdict`, `choice`, `note`,
+`question`, `answered_at`), and `set_verdicts` refuses any verdict but
+`decision` on an item that has one: `PRTriageStore.setVerdicts` reads
+`RulingStore.standing` in the same transaction, and the refusal names the
+ruling and writes nothing. Asking the author again is the only move left to
+triage, so a reset by a new reply (§13.1) can never turn their answer into
+triage's.
 
 **Posting replies (phase 3).** Replies go out after a round's push, when a
 publishing round goes stale or parks, or, for a round with no fix item, once its
-verdicts are applied; an answered decision's reply also goes out the moment the
-human answers it (§13.4), with no round. Each time, every handled thread, review or comment item whose
+verdicts are applied. Each time, every handled thread, review or comment item whose
 `reply_url` is empty gets one, whatever round handled it, so an answer from a
 round that never pushed is still replied to at the next of those points. An
-`answer` item with a `decision_answer` and a `reply_body` always qualifies, so
-a chosen reply whose first post failed is retried at the next point with
-replies off. Any other item qualifies only when its `handled_at` is at or after
+`answer` item with a standing `choose` or `reply` ruling never qualifies; its
+reply is owed to Post reply (§13.4). Any other item qualifies only when its `handled_at` is at or after
 `postFactualRepliesSince`:
 `ProjectStore.updateSettings` stamps that time when `postFactualReplies` turns
 on and clears it when it turns off, so turning replies on never posts the
@@ -736,7 +752,8 @@ reserved for a choice a reasonable engineer could make either way, so a clear
 in-scope change is `fix` however large; that a request only the author can
 carry out on GitHub is never `fix`; that an item asking for nothing is
 `answer` with no `reply_body`; that each decision option is `{label,
-verdict}`, an `answer` option with its `reply_body`; and that triage ends only
+verdict}`, an `answer` option with its `reply_body`; that an item with
+`rulings` takes only `decision`, quoting the standing ruling; and that triage ends only
 when every open item has a verdict. A roster agent chosen for the triage role replaces the opening
 identity line and nothing after it. After a compaction the same prompt is
 handed back, rebuilt from the `pr_triage` row.
@@ -918,23 +935,35 @@ on at all.
 - **Needs you (phase 2).** Each open decision is listed under its PR's row:
   the comment's author and text, triage's `decision_question`, one button per
   `decision_options` entry, and a free-text **Reply instead** field.
-  `Board.answerDecision` stores the answer in `decision_answer` and moves the
-  item to the next round (`round` one past the watch's) with the answer as its
-  `approach`. An option button applies that option's verdict. A `fix` option
-  leaves the item open, with no task, for the next round's fixer (§13.1),
-  whose section for it quotes the question the answer was given to. An
-  `answer` option handles the item with the option's `reply_body` and makes no
-  task; the app's own decisions (the verified freeze, §13.1)
-  carry `answer` options with no reply, which handle it with nothing to post. A typed reply answers it as an `answer`: the item is handled, with the
-  reply as its `reply_body`. Either way it is no longer a decision. The page
-  answers through `WorkerSupervisor.answerPRDecision`, which posts a handled
-  item's reply right away through the same posting code as §13.2 "Posting
-  replies", mark included, and records its `reply_url` or `reply_error`. It
-  needs no round and starts none, and `postFactualReplies` does not gate it:
-  the human chose that reply. A post that fails stays owed for the next
-  posting point. The `pr_item_answered_replies` migration marks abandoned
-  every answered reply still unposted when it ran that the setting did not
-  already owe, since some of those were posted by hand.
+  `Board.answerDecision` records the answer as the human's ruling (§15) in the
+  same transaction: `choose` with the option's label as its `choice`, or
+  `reply` with the typed text as its `note`, its question the item's
+  `decision_question` and its `question_at` the item's
+  `COALESCE(decision_notified_at, created_at)`. It also mirrors the answer into
+  `decision_answer` and moves the item to the next round (`round` one past the
+  watch's) with the answer as its `approach`. An option button applies that
+  option's verdict. A `fix` option leaves the item open, with no task, for the
+  next round's fixer (§13.1), whose section for it quotes the ruling's question
+  and answer, never `approach`. An `answer` option handles the item with the
+  option's `reply_body` and makes no task; the app's own decisions (the
+  verified freeze, §13.1) carry `answer` options with no reply, which handle it
+  with nothing to post. A typed reply answers it as an `answer`: the item is
+  handled, with the reply as its `reply_body`. Either way it is no longer a
+  decision.
+  Answering posts nothing. An answered `answer` item whose `reply_body` is set
+  and whose `reply_url` and `reply_abandoned_at` are empty owes its reply
+  (`PRWatchStore.owedReply`); no new column marks it. Each owed reply is listed
+  under its PR's row, which counts it toward Needs you, with the reply's text,
+  the last `reply_error` if a post failed, and **Post reply to #n…**, which
+  confirms the reply text and the PR before
+  `WorkerSupervisor.postPRReply` posts it through the same posting code as
+  §13.2 "Posting replies", mark included, and records its `reply_url` or
+  `reply_error`. It needs no round and starts none, and `postFactualReplies`
+  does not gate it: the human chose that reply. A post that fails stays owed
+  and is shown on the row; nothing retries it but Post reply. The
+  `pr_item_answered_replies` migration marks abandoned every answered reply
+  still unposted when it ran that the setting did not already owe, since some
+  of those were posted by hand.
 - The row's badge counts Ready to verify plus open decision items, both only in
   projects with follow-through on and only on watches that are not paused —
   one rule, read by the badge and At a Glance alike from
@@ -953,7 +982,8 @@ on at all.
   decision announces itself once, and a new reply on its thread, which clears
   the verdict, clears the stamp too. It reads "Pull request decision waiting —
   <project>", with `#n: <question>` as its body, routes like the Ready to
-  verify banner, and is the **Pull request decisions** category, on by
+  verify banner, offers a typed **Reply…** that records the reply owed
+  (§10, Inbox), and is the **Pull request decisions** category, on by
   default. The Ready to verify banner (phase 1)
   is decided after each poll's transition: `PRWatchStore.claimReadyNotification`
   records the watch's head in `ready_notified_oid` and fires only when that head

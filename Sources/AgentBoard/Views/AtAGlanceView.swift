@@ -18,6 +18,8 @@ struct AtAGlanceView: View {
     let attention: [ProjectAttention]
     var unreadReplies = 0
     var pullRequestCounts: [String: PRBadgeCount] = [:]
+    /// `InboxStore.observeCount`, the sidebar badge's own observation (SPEC §10).
+    var questionsForYou = 0
     let select: (SidebarSelection) -> Void
     /// Opens the Pull Requests page filtered to a project, or to every project for nil.
     var showPullRequests: (String?) -> Void = { _ in }
@@ -55,6 +57,7 @@ struct AtAGlanceView: View {
     }
 
     private static let pullRequestsLink = URL(string: "agentboard-glance:pull-requests")!
+    private static let inboxLink = URL(string: "agentboard-glance:inbox")!
 
     private var headlineText: AttributedString {
         let ready = readyToVerify.values.reduce(0, +)
@@ -62,10 +65,14 @@ struct AtAGlanceView: View {
             workingSessions: summary.value.workingSessions,
             tasksInReview: summary.value.tasksInReview,
             projectsNeedingYou: attention.filter(\.needsAttention).count,
-            prsReadyToVerify: ready
+            prsReadyToVerify: ready,
+            questionsForYou: questionsForYou
         ))
         if let clause = GlanceHeadline.prsReadyToVerify(ready), let range = text.range(of: clause) {
             text[range].link = Self.pullRequestsLink
+        }
+        if let clause = GlanceHeadline.questionsForYou(questionsForYou), let range = text.range(of: clause) {
+            text[range].link = Self.inboxLink
         }
         return text
     }
@@ -146,6 +153,10 @@ struct AtAGlanceView: View {
                 .font(.title2)
                 .fontWeight(.medium)
                 .environment(\.openURL, OpenURLAction { url in
+                    if url == Self.inboxLink {
+                        select(.inbox)
+                        return .handled
+                    }
                     guard url == Self.pullRequestsLink else { return .systemAction }
                     showPullRequests(Self.headlineFilter(readyToVerify))
                     return .handled

@@ -13,6 +13,7 @@ public final class StoreHookSink: HookSink {
     private let deliveries: ShutdownDeliveryStore
     private let notes: NoteStore
     private let comments: CommentStore
+    private let rulingDeliveries: RulingDeliveryStore
     private let epics: EpicStore
     private let coordinator: CoordinatorStore
     private let locks: FileLockStore
@@ -63,6 +64,11 @@ public final class StoreHookSink: HookSink {
         static func wait(_ wait: LockWait) -> Outcome { Outcome(lockWait: wait) }
     }
 
+    /// SPEC §15.6: a tool call does not clear a block the human upheld. Fails closed on a read error.
+    private func holdCovers(_ taskId: String) -> Bool {
+        do { return try RulingStore(db).holdInForce(taskId: taskId) != nil } catch { return true }
+    }
+
     public init(db: AppDatabase, events: any BoardEventSink, lockWait: FileLockWaitPolicy = .default) {
         hookEvents = HookEventStore(db)
         grants = TokenGrantStore(db)
@@ -74,6 +80,7 @@ public final class StoreHookSink: HookSink {
         deliveries = ShutdownDeliveryStore(db)
         notes = NoteStore(db)
         comments = CommentStore(db)
+        rulingDeliveries = RulingDeliveryStore(db)
         epics = EpicStore(db)
         coordinator = CoordinatorStore(db)
         locks = FileLockStore(db)
@@ -501,7 +508,7 @@ public final class StoreHookSink: HookSink {
         case "PostToolUse":
             try? sessions.endToolCall(sessionId, at: .nowMillis, tool: event.toolName)
             if let taskId {
-                if let task = try? tasks.get(taskId), task.blocked {
+                if let task = try? tasks.get(taskId), task.blocked, !holdCovers(taskId) {
                     try? board.unblock(taskId: taskId, sessionId: sessionId)
                 }
                 if let tool = event.toolName {
@@ -516,6 +523,15 @@ public final class StoreHookSink: HookSink {
                 // The brief carries the comment thread, and its budget keeps the newest comments.
                 try? comments.dropDeliveries(sessionId: sessionId)
                 return .respond(.context(brief))
+            }
+            if let owed = try? rulingDeliveries.claim(sessionId: sessionId, via: .hook), !owed.isEmpty {
+                if let taskId {
+                    _ = try? progress.append(
+                        taskId: taskId, sessionId: sessionId, kind: .status,
+                        text: RulingDelivery.progressText(owed, via: .hook)
+                    )
+                }
+                return .respond(.context(RulingDelivery.context(owed)))
             }
             if let delivery = (try? comments.takeDelivery(sessionId: sessionId)) ?? nil {
                 if let taskId {
@@ -541,7 +557,7 @@ public final class StoreHookSink: HookSink {
             if Self.blockingNotificationTypes.contains(type) || type.hasPrefix("elicitation") {
                 let reason = event.notificationMessage ?? type
                 var followUps: [FollowUp] = []
-                if let taskId, (try? board.block(taskId: taskId, sessionId: sessionId, reason: reason)) != nil {
+                if let taskId, (try? board.block(taskId: taskId, sessionId: sessionId, reason: reason, source: .prompt)) != nil {
                     followUps.append(.reportQueued(projectId: session.projectId))
                 } else {
                     // Nothing was marked blocked, so the project's attention signal cannot see this
@@ -603,6 +619,7 @@ public final class StoreHookSink: HookSink {
             // A `/clear` fork arrives next under a new id, and `adoptFork` hands it this queue.
             if event.sessionEndReason != "clear" {
                 try? comments.dropDeliveries(sessionId: sessionId)
+                try? rulingDeliveries.dropOwed(sessionId: sessionId)
             }
 
         default:

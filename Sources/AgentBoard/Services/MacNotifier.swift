@@ -25,7 +25,7 @@ final class MacNotifier {
 
     private(set) var authorization: Authorization
     /// `UNUserNotificationCenter.delegate` is weak, so the delegate is held here.
-    @ObservationIgnored private var clicks: ClickDelegate?
+    @ObservationIgnored private var responder: NotificationResponder?
 
     init() {
         authorization = Self.isAppBundle ? .notAsked : .unavailable
@@ -35,12 +35,16 @@ final class MacNotifier {
 
     /// Called from `AppComposition` at launch. Authorization is asked for only while the answer is
     /// still outstanding: asking again would re-prompt a user who has already said no.
-    func start(router: NotificationRouter) {
+    func start(router: NotificationRouter, answering: BannerAnswering) {
         guard Self.isAppBundle else { return }
-        let clicks = ClickDelegate { [weak router] route in router?.open(route) }
-        self.clicks = clicks
+        let responder = NotificationResponder(
+            open: { [weak router] route in router?.open(route) },
+            answer: { question, text in _ = await answering.answer(question, text: text) }
+        )
+        self.responder = responder
         let center = UNUserNotificationCenter.current()
-        center.delegate = clicks
+        center.setNotificationCategories(BannerQuestion.categories)
+        center.delegate = responder
         guard Self.shouldRequest(authorization) else { return }
         center.requestAuthorization(options: [.alert, .sound]) { granted, error in
             _Concurrency.Task { @MainActor in
@@ -69,6 +73,7 @@ final class MacNotifier {
         content.body = body
         content.sound = .default
         if let route { content.userInfo = route.userInfo }
+        if let question = route?.question { content.categoryIdentifier = question.kind.categoryIdentifier }
         UNUserNotificationCenter.current()
             .add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
@@ -93,11 +98,16 @@ final class MacNotifier {
 
 /// Split out because `UNUserNotificationCenterDelegate` is an `NSObject` protocol whose callbacks
 /// arrive off the main actor.
-private final class ClickDelegate: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+final class NotificationResponder: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
     private let open: @MainActor (NotificationRoute) -> Void
+    private let answer: @MainActor (BannerQuestion, String) async -> Void
 
-    init(open: @escaping @MainActor (NotificationRoute) -> Void) {
+    init(
+        open: @escaping @MainActor (NotificationRoute) -> Void,
+        answer: @escaping @MainActor (BannerQuestion, String) async -> Void
+    ) {
         self.open = open
+        self.answer = answer
     }
 
     func userNotificationCenter(
@@ -105,14 +115,26 @@ private final class ClickDelegate: NSObject, UNUserNotificationCenterDelegate, @
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let route = NotificationRoute(userInfo: response.notification.request.content.userInfo)
         _Concurrency.Task { @MainActor in
-            if let route {
-                NSApplication.shared.activate()
-                open(route)
-            }
+            await respond(to: response)
             completionHandler()
         }
+    }
+
+    /// A typed Deny or Reply answers in the background, without bringing the app forward (SPEC §15.6);
+    /// any other response is a click that opens what the banner names.
+    @MainActor
+    func respond(to response: UNNotificationResponse) async {
+        let userInfo = response.notification.request.content.userInfo
+        if let typed = response as? UNTextInputNotificationResponse,
+           let question = BannerQuestion(userInfo: userInfo),
+           typed.actionIdentifier == question.kind.actionIdentifier {
+            await answer(question, typed.userText)
+            return
+        }
+        guard let route = NotificationRoute(userInfo: userInfo) else { return }
+        NSApplication.shared.activate()
+        open(route)
     }
 
     /// Without this macOS swallows a banner whenever Agent Board is frontmost. The supervisor

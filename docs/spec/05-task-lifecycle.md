@@ -107,8 +107,12 @@ person at every level (§5.1).
   still unresolved from an earlier resume is reported again rather than
   retried; a merge git refused tells the worker to merge the epic branch
   itself. The prompt names any commit made of the worker's uncommitted work.
+  The resume prompt, like the spawn prompt, opens with the task's standing
+  rulings (§15.6).
 - `blocked` — a flag, not a column. Set by the `Notification` hook, cleared on
-  the next `PostToolUse`. The card keeps its position and shows why.
+  the next `PostToolUse` unless a `hold` ruling covers the block (§15.6). The
+  card keeps its position and shows why. A task under a `hold` is not spawned
+  or resumed (§15.6).
 - `review` — worker has committed and called `report_complete`, and the review
   level (§5) says someone must look. Under `worktree` that means a commit on
   `agentboard/<task-id>`, and the worktree is retained; under `shared` it means
@@ -843,6 +847,17 @@ findings, any grade is refused. That refusal is the one a reviewer is told to
 answer by correcting `grades` and calling again. The grades are written under
 the verdict's `progress` note as "Grades of round N's findings:", one line per
 finding, so the human sees them in the task inspector, and on the round's row.
+
+A finding a person overruled (§15.7) leaves that set. `ReviewRound.checkGrades`
+reads the standing `review_finding` rulings on the previous round's findings
+inside the verdict's write transaction, does not require a grade for an
+overruled finding, and refuses a grade that names one. The re-review section
+lists overruled findings under "Settled by your human" with the person's note,
+and tells the reviewer not to grade them or raise them again.
+`Board.reviewReopen` refuses a reopen in which every finding cites, as
+"finding N", only overruled findings of the previous round; the refusal names
+them and says a person overruled them, and `reopen_task` tells the reviewer to
+accept or reopen with a finding that is not settled.
 
 The database is denied through the same `--disallowedTools` list as its writes,
 by `SpawnRequest.reviewerBoardDeny`: `Read(//**/agentboard.sqlite*)` and

@@ -158,14 +158,15 @@ struct ApprovalsSidebar: View {
             }
         }
         .alert("Deny request?", isPresented: denyPresented, presenting: denying) { approval in
-            TextField("Reason (optional)", text: $denyReason)
+            TextField("Reason", text: $denyReason)
             Button("Deny", role: .destructive) {
                 let reason = denyReason
                 run { try await env.supervisor.deny(approvalId: approval.id, reason: reason) }
             }
+            .disabled(denyReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             Button("Cancel", role: .cancel) {}
         } message: { approval in
-            Text("The orchestrator is told the decision, and the reason if you give one, through list_reports.\n\n\(describe(approval))")
+            Text("Your reason is recorded as a ruling. The orchestrator reads it through list_reports, and the same request is refused from now on.\n\n\(describe(approval))")
         }
         .errorAlert($errorMessage)
     }
@@ -193,6 +194,9 @@ struct ApprovalsSidebar: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
+            if item.kind == .blocked {
+                StandingRulingChip(subject: .task(item.task.id), since: item.task.blockedAt ?? 0)
+            }
             HStack {
                 Button("Attach") {
                     if let session = item.session { openWindow(id: "terminal", value: session.sessionId) }
@@ -247,6 +251,7 @@ struct ApprovalsSidebar: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+            StandingRulingChip(subject: .approval(approval.id))
             HStack {
                 Button("Approve") { run { try await env.supervisor.approve(approvalId: approval.id) } }
                     .buttonStyle(.borderedProminent)
@@ -441,6 +446,7 @@ private struct ReviewRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
             }
+            StandingRulingChip(subject: .task(task.id), since: task.reviewEnteredAt ?? 0)
             Label(session?.branch ?? "agentboard/\(task.id)", systemImage: "arrow.triangle.branch")
                 .font(.caption)
                 .foregroundStyle(.secondary)

@@ -39,7 +39,8 @@ final class NotificationGateAndRouteTests: XCTestCase {
         try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
     }
 
-    private func pendingApproval() throws {
+    @discardableResult
+    private func pendingApproval() throws -> Approval {
         try fixture.approvals.create(
             projectId: fixture.project.id, kind: .spawn, taskId: nil, epicId: nil,
             requestedBy: "orchestrator", reason: "spawn a worker"
@@ -91,12 +92,15 @@ final class NotificationGateAndRouteTests: XCTestCase {
     // MARK: - The attention path
 
     func testAnApprovalBannerIsGatedByItsCategoryAndCarriesItsRoute() throws {
-        try pendingApproval()
+        let approval = try pendingApproval()
 
         XCTAssertEqual(supervisor.raiseAttentionBanners().map(\.reason), [.pendingApproval])
         XCTAssertEqual(
             posted.map(\.route),
-            [NotificationRoute(projectId: fixture.project.id, subject: .approvals)]
+            [NotificationRoute(
+                projectId: fixture.project.id, subject: .approvals,
+                question: BannerQuestion(kind: .approval, subjectId: approval.id, questionAt: approval.createdAt)
+            )]
         )
     }
 

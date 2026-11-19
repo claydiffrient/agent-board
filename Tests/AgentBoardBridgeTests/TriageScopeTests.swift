@@ -115,6 +115,21 @@ final class TriageScopeTests: XCTestCase {
     }
 
     /// SPEC §13.2: a blank change request shows the hand-added item that answers it, even once handled.
+    func testGetPRItemsListsTheAuthorsStandingRulingOnAnItem() async throws {
+        let pr = try watch(8, items: ["Rename this"])
+        let id = try XCTUnwrap(itemIds(pr).first)
+        try RulingStore(f.db).record(
+            .prItem(id), question: "Rename it?", questionAt: 1, verdict: .reply, note: "The old name is public API."
+        )
+
+        let result = try await f.callJSON("get_pr_items", as: try triager(on: pr))
+
+        let rulings = try XCTUnwrap(result["items"]?.arrayValue?.first?["rulings"]?.arrayValue)
+        XCTAssertEqual(rulings.map { $0["verdict"]?.stringValue }, ["reply"])
+        XCTAssertEqual(rulings.map { $0["note"]?.stringValue }, ["The old name is public API."])
+        XCTAssertEqual(rulings.map { $0["question"]?.stringValue }, ["Rename it?"])
+    }
+
     func testABlankChangeRequestListsTheHandledItemFiledToAnswerIt() async throws {
         let pr = try watches.upsert(projectId: f.project.id, snapshot: PRSnapshot(
             repoOwner: "example-org", repoName: "app", number: 7,

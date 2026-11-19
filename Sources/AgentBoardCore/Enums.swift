@@ -95,6 +95,13 @@ public enum SessionRole: String, Codable, Sendable, CaseIterable, Equatable, Dat
     case coordinator
 }
 
+/// Who put a task in `blocked`: the worker's own `report_blocked`, or a Claude Code prompt the
+/// Notification hook saw, which only the terminal can answer (SPEC §15.5).
+public enum BlockedSource: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
+    case worker
+    case prompt
+}
+
 public enum TaskOrigin: String, Codable, Sendable, CaseIterable, Equatable, DatabaseValueConvertible {
     case human
     case orchestrator
@@ -160,6 +167,8 @@ public enum ReportKind: String, Codable, Sendable, CaseIterable, Equatable, Data
     case refresh
     /// PR follow-through reached a milestone on one of the project's pull requests (SPEC §13.6).
     case prFollowThrough = "pr_follow_through"
+    /// The human recorded a ruling; `list_reports` carries it as a structured object (SPEC §9.1, §15).
+    case ruling
 }
 
 /// Where a Coordinator request stands in the ledger (SPEC §9.4). `sent` and `accepted` are open;

@@ -204,7 +204,10 @@ final class ReviewScopeTests: XCTestCase {
             as: try reviewer(round: 3)
         )
 
-        XCTAssertEqual(try f.tasks.get(task.id)?.column, .review, answer.text)
+        let held = try XCTUnwrap(f.tasks.get(task.id))
+        XCTAssertEqual(held.column, .review, answer.text)
+        XCTAssertNotNil(held.reviewEnteredAt, "the cap opens a human-review episode (SPEC §15.1)")
+        XCTAssertEqual(held.humanReviewReason?.hasPrefix(Board.reviewRoundCapLead), true)
         let progress = try f.progress.list(taskId: task.id)
         XCTAssertTrue(progress.contains {
             $0.text.hasPrefix(Board.reviewRoundCapLead) && $0.text.contains("Round three: the empty query throws.")

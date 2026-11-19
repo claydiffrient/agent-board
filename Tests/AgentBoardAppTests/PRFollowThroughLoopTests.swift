@@ -882,12 +882,19 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try milestones(), reported, "an answered decision and its fix round report nothing new")
     }
 
-    /// SPEC §13.4: a reply the human chose is theirs, so it posts at once, with replies off and no round.
-    func testADecisionAnsweredWithAReplyPostsItWithRepliesOffAndNoRound() async throws {
+    /// SPEC §13.4: answering posts nothing; the reply is owed until Post reply, which posts it with replies off and no round.
+    func testAnAnsweredReplyPostsNothingUntilPostReply() async throws {
         let item = try await openDecision()
+        let id = try XCTUnwrap(item.id)
         fixture.gh.answerReplies(url: "\(url)#discussion_r9")
 
-        try await fixture.supervisor.answerPRDecision(itemId: try XCTUnwrap(item.id), choice: .option("No"))
+        try await fixture.supervisor.answerPRDecision(itemId: id, choice: .option("No"))
+        await poll()
+
+        XCTAssertEqual(replyCalls, [])
+        XCTAssertEqual(try watches.page().flatMap(\.listings).flatMap(\.owedReplies).map(\.id), [id])
+
+        try await fixture.supervisor.postPRReply(itemId: id)
 
         XCTAssertEqual(replyCalls.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_choice"])
         XCTAssertEqual(replyCalls.map(\.last), ["body=It stays sync.\(mark)"])

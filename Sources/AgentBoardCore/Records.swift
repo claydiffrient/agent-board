@@ -197,6 +197,13 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var closedBy: String?
     /// Agent Board's own check from the latest `report_complete` (SPEC §5.1); nil before the first one.
     public var completionCheck: CompletionCheck?
+    /// The current block's episode stamp (SPEC §15.1); advances on every block, kept on unblock.
+    public var blockedAt: Int64? = nil
+    /// Why the task waits in `review` for a person, written with `reviewEnteredAt` (SPEC §15.1).
+    public var humanReviewReason: String? = nil
+    public var reviewEnteredAt: Int64? = nil
+    /// Set with every block, cleared with it.
+    public var blockedSource: BlockedSource? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -229,6 +236,10 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
         case closedReason = "closed_reason"
         case closedBy = "closed_by"
         case completionCheck = "completion_check"
+        case blockedAt = "blocked_at"
+        case humanReviewReason = "human_review_reason"
+        case reviewEnteredAt = "review_entered_at"
+        case blockedSource = "blocked_source"
     }
 
     public init(
