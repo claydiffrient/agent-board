@@ -339,15 +339,34 @@ excluding Agent Board itself and its ancestors. Only a candidate with no
 controlling terminal is stopped: a worker's Bash commands, `run_in_background`
 ones included, each lead their own session with none, while an interactive
 shell or editor the human opened there has one and is never signaled. A
-`claude --bg` host holds its pty host's terminal, so a worker still running in
-the worktree is kept too. Each stopped process gets `SIGTERM`, then `SIGKILL`
+`claude --bg` host holds its pty host's terminal, and so does every child it
+spawns without a new session, such as its `caffeinate`, so the terminal rule
+alone would keep the board's own sessions too. That is how a reviewer that had
+just called `accept_task` survived its worktree's removal and went on writing
+into it after the teardown hook. So before a task's worktrees are torn down the
+supervisor stops every Agent Board session whose `worktree_path` is one of
+them — worker, reviewer, fixer or checker, of any state — whose host
+`claude agents` still lists and the process table confirms (§8.5): through
+`claude stop`, its tree's reap and the host's own signals, as any stop does,
+terminal or not. One the board has already ended is waiting on the answer to
+the tool call that ended it, whose stop runs once that answer is written (§5),
+so it gets 60 seconds to exit on its own first. Those hosts, matched by pid and
+start time, go to the stopper too, which signals a candidate with a terminal
+when it is one of them or descends from one, as a backstop for a host that
+outlived its stop. A process with a terminal that no board host started is
+kept. Paths in the project's own checkout, and paths where a live session of
+another task works, are never stopped in; a shared checkout's sessions record
+no `worktree_path`, so none is ever matched. Each stopped process gets `SIGTERM`, then `SIGKILL`
 if it is still alive five seconds later on `CLOCK_UPTIME_RAW`, off the main
 thread. Stopping never decides whether the worktree goes and never throws: the
 removal report lists each stopped and each kept process by command and pid,
 with any failure to list or signal them, and that goes on the task's progress
 and into the removal's decision report beside a hook failure. It runs wherever
 `remove` does and nowhere else, so not on the rollback of a failed `git
-worktree add` nor in the project's own checkout.
+worktree add` nor in the project's own checkout. When `git worktree remove`
+still fails with "Directory not empty", the failure that reaches the cleanup
+report names what was left: the first 10 non-directory entries, relative to the
+worktree and sorted, then a count, without following symlinks.
 
 A hook never decides whether the worktree goes. One that exits non-zero, or
 cannot start, is recorded and removal continues; one that outlives

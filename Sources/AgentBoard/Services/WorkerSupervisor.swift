@@ -4437,13 +4437,62 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         let branch = claim.leavesBranch ? nil : Self.taskBranchPrefix + task.id
         let bases = mergeTargets(for: task, project: project)
         let paths = claim.paths
+        let hosts = await stopSessions(in: paths, task: task, project: project)
         let cleanup = await offMainResult {
-            Self.tearDown(manager: manager, paths: paths, branch: branch, bases: bases)
+            Self.tearDown(manager: manager, paths: paths, branch: branch, bases: bases, agentHosts: hosts)
         }
         for slot in cleanup.releasedSlots {
             try? slots.release(projectId: project.id, slot: slot, taskId: task.id)
         }
         return cleanup
+    }
+
+    static let answeredStopBound: Duration = .seconds(60)
+
+    /// SPEC §3.1, §5: every session the board ran in a task worktree is stopped and its host gone
+    /// before the teardown hook runs, terminal or not. One the board already ended is being stopped
+    /// after the answer to the call that ended it (`workerCompleted`), so that stop gets
+    /// `answeredStopBound` first. A shared checkout and the project's own are never touched.
+    /// Returns each path's hosts for `WorktreeProcessStopper`, keyed as `paths` spells them.
+    private func stopSessions(
+        in paths: [String], task: BoardTask, project: Project
+    ) async -> [String: Set<PIDIdentity>] {
+        let main = Self.resolved(project.repoPath)
+        let wanted = Dictionary(paths.map { (Self.resolved($0), $0) }, uniquingKeysWith: { first, _ in first })
+            .filter { $0.key != main }
+        let rows = ((try? sessions.all(projectId: project.id)) ?? []).compactMap { session in
+            session.worktreePath.flatMap { wanted[Self.resolved($0)] }.map { (path: $0, session: session) }
+        }
+        let shared = Set(rows.filter { $0.session.taskId != task.id && $0.session.state.isActive }.map(\.path))
+        let ours = rows.filter { !shared.contains($0.path) }
+        guard !ours.isEmpty else { return [:] }
+
+        var listed = await agentListing(nil)
+        let hostOf = { (session: AgentSession, listing: AgentListing) in
+            self.verifiedHost(Self.hostPID(of: session, in: listing.agents), in: listing)
+        }
+        let answering = ours.compactMap { row in
+            row.session.state.isActive ? nil : hostOf(row.session, listed)
+        }
+        if !answering.isEmpty {
+            let deadline = ContinuousClock.now + Self.answeredStopBound
+            for host in answering {
+                _ = await SessionProcessReaper.awaitExit(of: host, within: max(.zero, deadline - ContinuousClock.now))
+            }
+            listed = await agentListing(nil)
+        }
+        var hosts: [String: Set<PIDIdentity>] = [:]
+        for (path, session) in ours {
+            guard let host = hostOf(session, listed) else { continue }
+            hosts[path, default: []].insert(host)
+            let listedId = listed.agents.first { $0.sessionId == session.sessionId }?.id
+            if let shortId = session.shortId ?? listedId {
+                try? await stopAgent(session, shortId: shortId, listing: listed)
+            } else {
+                await endHost(host, of: session, listed: listed.agents, stopError: nil)
+            }
+        }
+        return hosts
     }
 
     /// The metering tick's reap, so orphans go without the Status view open. It starts each project's
@@ -4611,7 +4660,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     }
 
     private nonisolated static func tearDown(
-        manager: WorktreeManager, paths: [String], branch: String?, bases: [String]
+        manager: WorktreeManager, paths: [String], branch: String?, bases: [String],
+        agentHosts: [String: Set<PIDIdentity>] = [:]
     ) -> WorktreeCleanup {
         var cleanup = WorktreeCleanup()
         var removedEvery = true
@@ -4626,7 +4676,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 continue
             }
             guard FileManager.default.fileExists(atPath: path) else { continue }
-            switch removeIfClean(manager, at: URL(fileURLWithPath: path)) {
+            switch removeIfClean(manager, at: URL(fileURLWithPath: path), agentHosts: agentHosts[path] ?? []) {
             case .removed(let diagnostics, let notice):
                 cleanup.notices.append(contentsOf: diagnostics)
                 if let notice { cleanup.add(notice, at: path) }
@@ -4749,7 +4799,9 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     nonisolated static let dirtyPathsListed = 20
 
     /// SPEC §5: a worktree with uncommitted changes is kept, and the teardown hook does not run in it.
-    private nonisolated static func removeIfClean(_ manager: WorktreeManager, at path: URL) -> WorktreeTeardown {
+    private nonisolated static func removeIfClean(
+        _ manager: WorktreeManager, at path: URL, agentHosts: Set<PIDIdentity> = []
+    ) -> WorktreeTeardown {
         do {
             let dirty = try manager.uncommittedPaths(worktree: path)
             if !dirty.isEmpty {
@@ -4757,7 +4809,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 let more = dirty.count > dirtyPathsListed ? " and \(dirty.count - dirtyPathsListed) more" : ""
                 return .kept("kept worktree \(path.path): it has uncommitted changes in \(listed)\(more)")
             }
-            let removal = try manager.remove(path: path)
+            let removal = try manager.remove(path: path, agentHosts: agentHosts)
             return .removed(removal.hookDiagnostics, notice: removal.notice)
         } catch {
             return .kept("could not remove worktree \(path.path): \(error)")

@@ -176,7 +176,12 @@ person at every level (§5.1).
   hooks, so neither has a bound the answer could wait out. The worktrees are
   claimed before the answer, so no reap takes one for an orphan while the
   landing runs, and a landing that goes wrong still arrives as its `decision`
-  report. A human's Accept lands inline. With a teardown hook set, the
+  report. The session that made the call works in the worktree being removed
+  — a rostered reviewer runs in the worker's — and its own stop runs only once
+  its answer is written. So the removal never cuts it off: the landing goes
+  ahead, and before the teardown hook the removal waits up to 60 seconds for
+  that session's host to exit, then stops it and every other board session
+  still in the worktree (§3.1). A human's Accept lands inline. With a teardown hook set, the
   removal runs after the accept returns in every case, on a shared branch too,
   because the hook may run for minutes. Its findings are appended to the acceptance
   report while the orchestrator has not read it, and otherwise queued as a
