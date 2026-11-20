@@ -302,7 +302,7 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable, S
     public var landingLabel: String {
         guard let landing else { return TaskLanding.pending.label }
         if landing == .pullRequestOpen, let pr = landingDetail.flatMap(PullRequestReference.init(in:)) {
-            return "PR #\(pr.number) open"
+            return "PR \(IssueReference.short(pr.number)) open"
         }
         return landing.label
     }

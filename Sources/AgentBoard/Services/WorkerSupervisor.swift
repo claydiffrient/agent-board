@@ -78,7 +78,7 @@ enum SupervisorError: LocalizedError {
             return "roster agent \(id) is not in \(projectName)'s usable set; enable it for this project first"
         case .epicCloseRefused(let reason): return reason
         case .upstreamHeadUnavailable(let upstream, let underlying):
-            return "could not fetch `\(upstream.headRef)`, the head of pull request #\(upstream.pullRequest.number) "
+            return "could not fetch `\(upstream.headRef)`, the head of pull request \(IssueReference.short(upstream.pullRequest.number)) "
                 + "(\(upstream.pullRequest.url)), from origin, so the epic was not built on it: \(underlying)"
         case .upstreamPushRefused(let reason): return reason
         case .epicStillOpen(let id):
@@ -3132,7 +3132,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             _ = try? ReportStore(db).insert(
                 projectId: project.id, taskId: taskId, sessionId: nil, kind: .decision,
                 body: """
-                Takeover created task \(taskId) from issue #\(row.number) — \(row.url)
+                Takeover created task \(taskId) from issue \(IssueReference.short(row.number)) — \(row.url)
                 The issue was assigned to the human with the project's trigger labels, so Agent Board took it over \
                 and acknowledged it on GitHub. \(outcome) Do not create another task for this issue.
                 """
@@ -3145,7 +3145,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         "Adopting this pull request needs PR follow-through. Turn it on in the project's PR Follow-Through settings."
 
     static func adoptionStopped(_ row: Takeover) -> String {
-        "Follow-through is stopped for #\(row.number). Choose Watch again on the Pull Requests page to adopt it, "
+        "Follow-through is stopped for \(IssueReference.short(row.number)). Choose Watch again on the Pull Requests page to adopt it, "
             + "or remove a trigger label to release it."
     }
 
@@ -3159,7 +3159,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 if row.isCrossRepository {
                     try? takeovers.fail(
                         row.id,
-                        reason: "#\(row.number) comes from a fork. Follow-through pushes only to the project's own "
+                        reason: "\(IssueReference.short(row.number)) comes from a fork. Follow-through pushes only to the project's own "
                             + "`origin`, so a fork's pull request cannot be adopted."
                     )
                     continue
@@ -3219,7 +3219,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             // SPEC §13.4: a paused watch claims its banner without showing it, so resuming replays nothing.
             if let ready = try prWatches.claimReadyNotification(watchId: watch.id), !ready.paused {
                 post(
-                    "Pull request ready to verify", body: "#\(ready.number) \(ready.title)",
+                    "Pull request ready to verify", body: "\(IssueReference.short(ready.number)) \(ready.title)",
                     projectId: project.id, category: .prReadyToVerify, subject: .pullRequest(ready.id)
                 )
             }
@@ -3265,7 +3265,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 )
             }
             post(
-                "Pull request decision waiting", body: "#\(watch.number): \(decision.decisionQuestion ?? watch.title)",
+                "Pull request decision waiting", body: "\(IssueReference.short(watch.number)): \(decision.decisionQuestion ?? watch.title)",
                 projectId: project.id, category: .prDecisions, subject: .pullRequest(watch.id), question: question
             )
         }
@@ -3529,7 +3529,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                 guard watch.acceptsFastForward else {
                     try board.parkPublishing(
                         watchId: watch.id,
-                        reason: "Round \(round.number) was not pushed: #\(watch.number) is neither yours nor adopted by "
+                        reason: "Round \(round.number) was not pushed: \(IssueReference.short(watch.number)) is neither yours nor adopted by "
                             + "a takeover, and Agent Board pushes only to those (SPEC D8)."
                     )
                     await postFactualReplies(watchId: watch.id, project: project)
@@ -3657,7 +3657,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             prReplyReadFailures[watch.id] = nil
             return true
         } catch {
-            let detail = "replies to #\(watch.number) are held because the pull request could not be read: \(describe(error))"
+            let detail = "replies to \(IssueReference.short(watch.number)) are held because the pull request could not be read: \(describe(error))"
             prReplyReadFailures[watch.id] = (project.id, detail)
             try? prWatches.addPollProblem(projectId: project.id, detail: detail)
             return false
@@ -3703,7 +3703,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     break
                 }
             } catch {
-                report(["could not check pull request #\(check.pullRequest.number) for epic \(check.epic.id): \(describe(error))"])
+                report(["could not check pull request \(IssueReference.short(check.pullRequest.number)) for epic \(check.epic.id): \(describe(error))"])
             }
         }
         return touched

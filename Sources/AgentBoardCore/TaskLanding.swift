@@ -70,17 +70,17 @@ public enum PullRequestLanding {
     }
 
     public static func openDetail(_ pr: PullRequestReference, uncheckedBecause reason: String? = nil) -> String {
-        let open = "\(pr.url) — pull request #\(pr.number) is open."
+        let open = "\(pr.url) — pull request \(IssueReference.short(pr.number)) is open."
         guard let reason else { return open }
         return open + "\nIts state could not be checked, so this may be stale: \(reason)"
     }
 
     public static func mergedDetail(_ pr: PullRequestReference, commit: String?) -> String {
-        "\(pr.url) — pull request #\(pr.number) merged" + (commit.map { " as \($0)." } ?? ".")
+        "\(pr.url) — pull request \(IssueReference.short(pr.number)) merged" + (commit.map { " as \($0)." } ?? ".")
     }
 
     public static func closedDetail(_ pr: PullRequestReference, branch: String) -> String {
-        "`\(branch)` did not land: pull request #\(pr.number) was closed without merging (\(pr.url))."
+        "`\(branch)` did not land: pull request \(IssueReference.short(pr.number)) was closed without merging (\(pr.url))."
     }
 
     public static func closedAdvice(branch: String) -> String {

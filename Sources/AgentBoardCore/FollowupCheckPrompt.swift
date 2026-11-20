@@ -43,7 +43,7 @@ public enum FollowupCheckPrompt {
     static func pullRequest(watch: PRWatch, round: PRRound, headOid: String, workingDirectory: String) -> String {
         """
         ## The round
-        \(watch.repoOwner)/\(watch.repoName)#\(watch.number), titled as below
+        \(IssueReference.full(owner: watch.repoOwner, repo: watch.repoName, watch.number)), titled as below
         \(watch.url)
         - Round \(round.number) started from the pull request's head at `\(round.baseHeadOid)`, and its fixer \
         committed on top of it up to `\(headOid)`.

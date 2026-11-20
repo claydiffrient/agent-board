@@ -129,7 +129,7 @@ public final class VerifierToolHandler: ToolHandler {
             throw ToolError("This session's pull request is no longer watched. Nothing was recorded.")
         }
         guard !watch.state.isTerminal else {
-            throw ToolError("\(watch.repoOwner)/\(watch.repoName)#\(watch.number) is \(watch.state.rawValue). "
+            throw ToolError("\(IssueReference.full(owner: watch.repoOwner, repo: watch.repoName, watch.number)) is \(watch.state.rawValue). "
                 + "Nothing was recorded.")
         }
         return try OrchestratorToolHandler.recordVerifyFailure(

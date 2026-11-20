@@ -27,7 +27,7 @@ public struct PullRequestAdopter: Sendable {
         do {
             remote = try BranchPublisher(repoPath: URL(fileURLWithPath: project.repoPath)).requireRemote()
         } catch PublishFailure.noRemote {
-            throw PRVerdictRejection("\(project.name) has no `origin`, so there is no pull request #\(number) to watch.")
+            throw PRVerdictRejection("\(project.name) has no `origin`, so there is no pull request \(IssueReference.short(number)) to watch.")
         }
         guard let repository = PullRequestLaunch.githubSlug(remoteURL: remote),
               let (owner, name) = Self.split(repository)
@@ -44,11 +44,11 @@ public struct PullRequestAdopter: Sendable {
             throw PullRequestCheckFailure("`gh pr view \(number)` printed no pull request: \(result.stdout)")
         }
         guard pr.state == "OPEN" else {
-            throw PRVerdictRejection("#\(number) is \(pr.state.lowercased()), not open, so there is nothing to watch.")
+            throw PRVerdictRejection("\(IssueReference.short(number)) is \(pr.state.lowercased()), not open, so there is nothing to watch.")
         }
         guard !pr.isCrossRepository else {
             throw PRVerdictRejection(
-                "#\(number) comes from a fork. Follow-through pushes only to `\(repository)`, so a fork's pull request "
+                "\(IssueReference.short(number)) comes from a fork. Follow-through pushes only to `\(repository)`, so a fork's pull request "
                     + "cannot be adopted."
             )
         }

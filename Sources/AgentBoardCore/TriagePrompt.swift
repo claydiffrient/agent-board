@@ -41,7 +41,7 @@ public enum TriagePrompt {
     static func pullRequest(watch: PRWatch, triage: PRTriage, workingDirectory: String) -> String {
         """
         ## The pull request
-        \(watch.repoOwner)/\(watch.repoName)#\(watch.number), titled as below
+        \(IssueReference.full(owner: watch.repoOwner, repo: watch.repoName, watch.number)), titled as below
         \(watch.url)
         - Base `\(watch.baseRef)` at `\(triage.baseOid)`; head `\(watch.headRef)` at `\(triage.headOid)`.
         - You are in `\(workingDirectory)`, a detached checkout of the head. The change under review is \

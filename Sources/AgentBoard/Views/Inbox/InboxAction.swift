@@ -77,7 +77,7 @@ struct InboxAction: Identifiable {
             ]
         case .prDecision:
             guard let id = context.prItem?.id else { return [] }
-            let number = context.watch.map { "#\($0.number)" } ?? "the pull request"
+            let number = context.watch.map { "\(IssueReference.short($0.number))" } ?? "the pull request"
             return [InboxAction(
                 id: "dismiss-item", label: "Dismiss the item with my note…",
                 confirmation: "Dismiss this item on \(number)?", confirmButton: "Dismiss",
@@ -91,14 +91,14 @@ struct InboxAction: Identifiable {
             return [
                 InboxAction(
                     id: "resume", label: "Resume — follow-through may push fix rounds…",
-                    confirmation: "Resume follow-through on #\(watch.number)?", confirmButton: "Resume",
+                    confirmation: "Resume follow-through on \(IssueReference.short(watch.number))?", confirmButton: "Resume",
                     detail: "Follow-through starts again with a fresh round cap and may push fix rounds to "
                         + "\(watch.headRef) and reply on GitHub.",
                     run: { _ = try watches.resume(watchId: watch.id) }
                 ),
                 InboxAction(
-                    id: "stop-watching", label: "Stop watching #\(watch.number)…",
-                    confirmation: "Stop watching #\(watch.number)?", confirmButton: "Stop watching",
+                    id: "stop-watching", label: "Stop watching \(IssueReference.short(watch.number))…",
+                    confirmation: "Stop watching \(IssueReference.short(watch.number))?", confirmButton: "Stop watching",
                     detail: "Its open items are dismissed and it moves to Stopped until you choose Watch again.",
                     destructive: true,
                     run: { try watches.stopWatching(watchId: watch.id) }
@@ -115,10 +115,10 @@ struct InboxAction: Identifiable {
         case .pullRequest: "Open a pull request from \(branch(approval))"
         case .prItemDismissal: "Dismiss a pull request item"
         case .prWatchResume:
-            (try? PRWatchResumeRequest.decode(approval.payload)).map { "Resume pull request #\($0.number)" }
+            (try? PRWatchResumeRequest.decode(approval.payload)).map { "Resume pull request \(IssueReference.short($0.number))" }
                 ?? "Resume a parked pull request"
         case .prWatchAdopt:
-            (try? PRWatchAdoptionRequest.decode(approval.payload)).map { "Watch pull request #\($0.number)" }
+            (try? PRWatchAdoptionRequest.decode(approval.payload)).map { "Watch pull request \(IssueReference.short($0.number))" }
                 ?? "Watch a pull request taken over by hand"
         }
     }

@@ -77,7 +77,7 @@ extension Board {
             else { throw PRVerdictRejection("Pull request watch \(watchId) not found in this project.") }
             guard watch.state.isResumable else {
                 throw PRVerdictRejection(
-                    "#\(watch.number) is \(watch.state.rawValue), not parked or stopped, so there is nothing to resume."
+                    "\(IssueReference.short(watch.number)) is \(watch.state.rawValue), not parked or stopped, so there is nothing to resume."
                 )
             }
             guard let reason = PRWatchStore.nonBlank(reason)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
@@ -87,7 +87,7 @@ extension Board {
             }
             if let kept = try RulingStore.keepParkedInForce(db, watch: watch) {
                 throw PRVerdictRejection(
-                    "The human ruled that #\(watch.number) stays parked: \(kept.quoted). A resume request is refused "
+                    "The human ruled that \(IssueReference.short(watch.number)) stays parked: \(kept.quoted). A resume request is refused "
                         + "until the human resumes it themselves."
                 )
             }
@@ -100,7 +100,7 @@ extension Board {
             )
             return try ApprovalStore.insert(
                 db, projectId: projectId, kind: .prWatchResume, taskId: nil, epicId: nil, requestedBy: requestedBy,
-                reason: "#\(watch.number) \(watch.title)\n\(request.parkedLine)\nReason: \(reason)",
+                reason: "\(IssueReference.short(watch.number)) \(watch.title)\n\(request.parkedLine)\nReason: \(reason)",
                 payload: try request.encoded()
             )
         }
@@ -119,10 +119,10 @@ extension Board {
                 let body: String
                 if let resumed {
                     let verb = request.stopped ? "watched again" : "resumed"
-                    body = "#\(request.number) \(verb), now \(resumed.state.rawValue): \(request.reason)"
+                    body = "\(IssueReference.short(request.number)) \(verb), now \(resumed.state.rawValue): \(request.reason)"
                 } else {
                     let state = try PRWatch.fetchOne(db, key: request.watchId)?.state.rawValue ?? "gone"
-                    body = "#\(request.number) was not resumed: it is no longer \(request.stopped ? "stopped" : "parked") (it is \(state))."
+                    body = "\(IssueReference.short(request.number)) was not resumed: it is no longer \(request.stopped ? "stopped" : "parked") (it is \(state))."
                 }
                 _ = try ReportStore.insert(
                     db, projectId: approval.projectId, taskId: nil, sessionId: nil, kind: .decision, body: body
@@ -140,7 +140,7 @@ extension Board {
         try db.writer.write { db in
             _ = try ReportStore.insert(
                 db, projectId: projectId, taskId: nil, sessionId: nil, kind: .decision,
-                body: "#\(request.number) was not resumed: \(cause)"
+                body: "\(IssueReference.short(request.number)) was not resumed: \(cause)"
             )
         }
     }
