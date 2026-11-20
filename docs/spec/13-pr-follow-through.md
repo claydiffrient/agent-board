@@ -52,7 +52,8 @@ triage.
 - **checking** *(phase 3)* — the `reviewer` role reviews the round's diff, and
   the `followupCheck` role grades each item `fixed`, `partly`, `not_fixed`, or
   `moot`. A reopen or anything other than fixed or moot reopens fixing, at
-  most twice a round; the third failed check parks the PR instead.
+  most twice a round; the third failed check parks the PR instead. A pass
+  first folds in feedback that arrived during the round, once (below).
 - **publishing** *(phase 3)* — re-reads the remote head and goes to **stale**
   if it moved. Otherwise fast-forward pushes the round branch to the PR's head
   ref, then posts factual replies when `postFactualReplies` is on and
@@ -146,6 +147,15 @@ triage.
   closed.
 - **merged** / **closed** *(phase 1)* — terminal states. The round tasks are
   archived.
+
+**Batched reviewers.** An untriaged item authored by a login in
+`batchedReviewers` (§13.3, case-insensitive) never moves a watch from watching
+or readyToVerify to settling, restarts the settle wait, or keeps a PR out of
+readyToVerify, and no round's end goes to settling for it alone. A round that
+something else starts triages and fixes it with the rest, the fold-in included.
+The row lists it as an open item marked batched. Until a round has started
+since the watch was created or last resumed, batched items count like any
+other, so a PR only a bot reviews still gets that first pass.
 
 **The poll (phase 1).** At most every 60s, on the metering tick beside the
 pull-request landing check (§5), `WorkerSupervisor.pollPRWatches` runs only
@@ -264,7 +274,7 @@ them.
 **Settling and triaging (phase 2).** The same poll, after reading GitHub,
 advances each watch of an enabled project; a failed search does not stop it.
 The poll's own move puts a watch in settling while any open item has no
-verdict or is a `fix` answer to a decision whose `round` is past the watch's
+verdict (a batched reviewer's aside, above) or is a `fix` answer to a decision whose `round` is past the watch's
 (§13.4), so any other open decision or fix item keeps a PR from being ready
 without sending it back to triage. A settling watch leaves for triaging only when it is
 not paused, at least `settleMinutes` have passed since `last_feedback_at` (so an
@@ -303,10 +313,13 @@ than instructions, and triage's approach, or, for an item the author answered,
 their ruling's question and answer (§13.4) instead, read from `ruling` and
 never from `approach`. An item gets no second follow-up
 task while `fix_task_id` names a `follow_through` task that is not of type
-`code`. Then the watch goes to settling when an item arrived during triage,
-else to fixing while an open item's verdict is `fix`, else to watching. The
-round's outcome becomes `triaged` unless it goes on to fixing, which leaves the
-round open.
+`code`. An item that arrived after the triage finished is folded in first: the
+watch stays triaging and one more triage of the same round, seeing only the
+items with no verdict, gives it one, then the verdicts are applied again
+(**Folding in late feedback**, below). Then the watch goes to fixing while an
+open item's verdict is `fix`, else to settling when an item still awaits
+triage, else to watching. The round's outcome becomes `triaged` unless it goes
+on to fixing, which leaves the round open.
 
 **Fixing (phase 3).** A PR whose base is not the project's base branch is
 stacked: rather than fixing, the watch parks with a `parked_reason` naming
@@ -327,7 +340,9 @@ naming the round.
 
 The fixer is spawned only while its task is `ready` and its fixer sessions
 (those with no `review_head`) that reported do not outnumber the round's
-`check_failures`: one that reported starts again only after a failed check. A
+reopens — its `check_failures`, plus one once it has folded in late feedback:
+one that reported starts again only after a failed check or the fold-in. Its
+reviewer sessions are held to the same count. A
 fixer that ends without a report puts its task back in `ready` (never `review`,
 since the next fixer reuses the worktree and branch) and is retried; the third
 in a row, not counting one wound down for a shutdown order, ends the round
@@ -479,6 +494,30 @@ Resume (§13.4) sends a `check_unavailable` round whose fix task is still in
 review back to checking with its count cleared, rather than moving its items
 on to a new round.
 
+**Folding in late feedback (phase 3).** Feedback that arrives while a round
+runs joins that round instead of waiting for the next one, at two points.
+Before the fixer is created, items that arrived after the round's triage
+finished get one more triage, as above. When a check passes and the round has
+not folded anything in yet (`pr_round.folded_in_at` is null), the round takes
+in what arrived since: open items with no verdict, and open `fix` items outside
+its fix set, such as a decision the author answered `fix` mid-round (§13.4).
+Untriaged items send the watch to triaging with the fix task still in review;
+one triage of the same round, seeing only those items, gives them verdicts,
+and if none is `fix` the task goes to `done` and the watch to publishing as
+the pass would have. Otherwise every late `fix` item joins the round's fix set
+(`fix_task_id`, and the round's number as `round`), the task body is rebuilt
+listing every item with the new ones marked "(new)" and a line saying the
+round's other items are already fixed on the branch, and the task goes back to
+`ready` and the watch to fixing, as after a failed check. It is no failed check:
+`check_failures` is unchanged, the round number, the round cap and the daily
+budget count it as the same round, and the reopened fixer and its check run
+as any others. `folded_in_at` is set when it happens, so each round folds in
+once; anything arriving after it waits for the next round. A fold-in triage
+that fails or never starts costs the round nothing: its late items wait for the
+next round and the round goes on as if none had arrived. `answer`,
+`already_done` and `follow_up` verdicts from a fold-in triage are handled at
+once, and their replies post at this round's publish (§13.2).
+
 **Publishing (phase 3).** The one push Agent Board makes without an approval
 (§13.5). The next poll re-reads the PR with
 `gh pr view <url> --json state,headRefOid,labels`, and does nothing while that
@@ -529,8 +568,21 @@ wait, under the same holds and the same round cap, so a red, fix, push, red
 loop parks once `roundCap` rounds have run. Red with no new failed check to
 record goes to watching. A check item becomes handled once its run is no longer
 a failed check on the head the poll reads (a rerun, or a new head); the
-triager is told it is usually `fix`, or `decision` when the failure looks
-unrelated to the change. Phase 3's single decision item per red head, keyed
+triager is told it is usually `fix`, `decision` when the failure looks
+unrelated to the change, and `answer` with no `reply_body`, never `decision`,
+when it is clearly CI infrastructure (no test or compile failure in the log).
+A failed check whose log tail or summary matches one of `infraFailurePatterns`
+(§13.3) is an infrastructure failure instead: its item is recorded already
+`answer`, with its approach the note the Pull Requests row shows linked to the
+run, so it is never triaged and settles nothing. A GitHub Actions run gets
+`gh run rerun <run id> --failed`, once per run on a head, its note reads "CI
+infrastructure failure, rerun requested", and the watch stays in awaitingCI
+while that item is open, up to 30 minutes, so the rerun's own result is read
+as above. Any other check, or a run already rerun on this head or whose rerun
+`gh` refused, reads "CI infrastructure failure, needs a rerun", and the watch
+goes to watching. Either item is handled like any check item, by a passing
+rerun or a new head. A rerun publishes nothing and pushes nothing, so D8 (§1,
+§13.5) does not gate it. Phase 3's single decision item per red head, keyed
 `checks:<head oid>`, is gone: migration `pr_item_failed_checks` dismisses any
 still open.
 
@@ -561,8 +613,8 @@ on GitHub and so never marks it handled for leaving the snapshot. On a
 verified watch it becomes a frozen decision at once, as above, and the watch
 stays verified until the human removes the label. From watching, settling or
 readyToVerify the watch goes to settling, with the settle wait restarted; in
-any later state it waits, like any feedback that arrives mid-round, for the
-next round. No reply is ever posted for it (§13.2).
+any later state it is mid-round feedback, folded into the round in progress
+or left for the next one as **Folding in late feedback** says. No reply is ever posted for it (§13.2).
 
 A round's triage that never starts, or whose task is closed (§13.2), fails
 the round: its outcome becomes `triage_failed` and the watch returns to
@@ -578,8 +630,8 @@ Items are keyed by the GitHub node id of the thread, review, comment or check th
 so each is handled once per round; a new reply on a thread reopens it for
 triage (§4), whether it was handled or still open with a verdict. That reset
 clears only the item's own per-run columns: a ruling the author gave on it
-(§15) is in its own table and stands, so triage can only ask them again
-(§13.2), and a fixer prompt built for the item still quotes their answer. The human's own comments, resolved threads, and outdated threads
+(§15) is in its own table and stands, so triage may apply that ruling or ask
+them again (§13.2), and a fixer prompt built for the item still quotes their answer. The human's own comments, resolved threads, and outdated threads
 are never turned into items, though an outdated or viewer-latest thread keeps an
 owed item open (phase 1 above).
 
@@ -662,12 +714,27 @@ human's **Post reply**.
 **The author's rulings.** Answering a decision writes the author's ruling
 (§15), which no later run can overwrite. `get_pr_items` lists each open item's
 standing rulings, newest first, as `rulings` (`verdict`, `choice`, `note`,
-`question`, `answered_at`), and `set_verdicts` refuses any verdict but
-`decision` on an item that has one: `PRTriageStore.setVerdicts` reads
-`RulingStore.standing` in the same transaction, and the refusal names the
-ruling and writes nothing. Asking the author again is the only move left to
-triage, so a reset by a new reply (§13.1) can never turn their answer into
-triage's.
+`question`, `answered_at`), and, when the newest one resolves, what it settled
+as `ruled_verdict` (`verdict`, `reply_body`). A `reply` ruling settles `answer`
+with its note as the reply. A `choose` ruling settles the chosen option's
+verdict and reply, and resolves only while the item still holds the decision it
+answered, its question equal to the ruling's: a reset by a new reply (§13.1)
+keeps an answered item's decision question, options and answer for that.
+`set_verdicts` accepts two verdicts on an item with a standing ruling:
+`decision`, asking the author again, or exactly the ruling's own verdict and
+reply, which applies the ruling. Applying it sets the item as
+`Board.answerDecision` did, its approach and `decision_answer` the author's
+answer, so the round's check grades it, and Post reply owes its reply, as
+though the author had answered again, unless that reply is already posted: a
+reset keeps a ruled item's `reply_body` and `reply_url` once its reply is
+posted, and `reply_url` is cleared whenever `reply_body` changes
+(`PRItem.setReply`), so re-applying the ruling owes nothing while a new answer
+with a different reply is owed. Anything else is refused:
+`PRTriageStore.setVerdicts` reads `RulingStore.standing` in the same
+transaction, and the refusal names the ruling and what it settled and writes
+nothing. So a reset never turns the author's answer into triage's, and an
+automated reviewer re-editing a comment the author already ruled on is not
+asked again.
 
 **Posting replies (phase 3).** Replies go out after a round's push, when a
 publishing round goes stale or parks, or, for a round with no fix item, once its
@@ -707,7 +774,8 @@ keeps only its `reply_error` and stays owed, and the project gets a
 `pr_poll_problem` row naming the PR, which stays through later polls until one
 reads that PR again (or its watch ends). An item reopened by a new reply loses `reply_url`,
 `reply_error` and `reply_abandoned_at`, so once it is handled again it gets a
-fresh reply. No thread is ever resolved: resolving is the reviewer's call.
+fresh reply; one with a standing ruling whose reply was posted keeps
+`reply_url` and `reply_body` (**The author's rulings**, above). No thread is ever resolved: resolving is the reviewer's call.
 
 **Re-requesting review.** When the project's `reRequestReviews` setting is on,
 a round whose push was recorded asks for review again, right after its replies.
@@ -758,7 +826,10 @@ in-scope change is `fix` however large; that a request only the author can
 carry out on GitHub is never `fix`; that an item asking for nothing is
 `answer` with no `reply_body`; that each decision option is `{label,
 verdict}`, an `answer` option with its `reply_body`; that an item with
-`rulings` takes only `decision`, quoting the standing ruling; and that triage ends only
+`rulings` takes its `ruled_verdict` when the text asks for nothing the ruling
+did not already settle, such as a bot re-summarizing or an edit that keeps the
+request, and `decision`, quoting the standing ruling, only when the request
+changed; and that triage ends only
 when every open item has a verdict. A roster agent chosen for the triage role replaces the opening
 identity line and nothing after it. After a compaction the same prompt is
 handed back, rebuilt from the `pr_triage` row.
@@ -802,6 +873,8 @@ battery minimum aside, so a project that never opts in pays nothing:
 | `roles.triage` / `roles.fixer` / `roles.reviewer` / `roles.followupCheck` | each `{rosterAgentId?, model?}`, unset | 2 (`triage`), 3 (the rest) |
 | `privateTerms` | `[]` | 1 |
 | `checksAwaitingVerification` | `[]` — check-run names or status contexts, matched exactly, ignored when deciding whether CI has passed (§13.1) | 4 |
+| `infraFailurePatterns` | Bazel's remote, local-environment, BES-upload and cache-eviction exit codes (`exit code (3[4689]\|45)\b`), `Build Event Protocol upload failed`, and BuildBuddy reported unavailable — regexes matched against a failed check's log tail or summary; a match is rerun or noted on the row instead of triaged (§13.1). Edited one per line on the PR Follow-Through tab under the checks that wait on verification | 4 |
+| `batchedReviewers` | `[]` — GitHub logins, matched case-insensitively, whose new items wait for a round something else starts instead of starting one (§13.1). Edited comma-separated on the PR Follow-Through tab under the CI infrastructure failures | 4 |
 
 `roles` names a roster agent (§4) for each of the four model-driven jobs; a
 work-specific lens for a role — a follow-up grading rubric, a house style for
@@ -947,9 +1020,12 @@ on at all.
   `COALESCE(decision_notified_at, created_at)`. It also mirrors the answer into
   `decision_answer` and moves the item to the next round (`round` one past the
   watch's) with the answer as its `approach`. An option button applies that
-  option's verdict. A `fix` option leaves the item open, with no task, for the
-  next round's fixer (§13.1), whose section for it quotes the ruling's question
-  and answer, never `approach`. An `answer` option handles the item with the
+  option's verdict. A `fix` option leaves the item open, with no task, for a
+  fixer: answered while a round runs and before that round has folded anything
+  in, it joins that round's fix set once, at the fold-in before publishing
+  (§13.1 "Folding in late feedback"); otherwise it goes to the next round's
+  fixer. The fixer's section for it quotes the ruling's question and answer,
+  never `approach`. An `answer` option handles the item with the
   option's `reply_body` and makes no task; the app's own decisions (the
   verified freeze, §13.1) carry `answer` options with no reply, which handle it
   with nothing to post. A typed reply answers it as an `answer`: the item is

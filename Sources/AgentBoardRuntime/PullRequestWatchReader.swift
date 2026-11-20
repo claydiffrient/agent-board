@@ -91,6 +91,16 @@ public struct PullRequestWatchReader: Sendable {
         return lines.isEmpty ? nil : lines.suffix(Self.logTailLines).joined(separator: "\n")
     }
 
+    public static func rerunFailedArguments(owner: String, name: String, runId: Int64) -> [String] {
+        ["run", "rerun", "\(runId)", "--failed", "--repo", "\(owner)/\(name)"]
+    }
+
+    /// Reruns a GitHub Actions run's failed jobs; false when `gh` could not.
+    public func rerunFailedJobs(owner: String, name: String, runId: Int64, cwd: URL) -> Bool {
+        let arguments = Self.rerunFailedArguments(owner: owner, name: name, runId: runId)
+        return (try? gh.run(arguments, cwd: cwd))?.status == 0
+    }
+
     func run(_ arguments: [String], cwd: URL, what: String) throws -> String {
         let result = try launch(arguments, cwd: cwd)
         guard result.status == 0 else { throw Self.failure(result, what: what) }

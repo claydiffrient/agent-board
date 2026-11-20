@@ -455,6 +455,7 @@ CREATE TABLE pr_round (
   review_requests_at   INTEGER,      -- when the pushed round claimed its review re-request (§13.2)
   review_requests_json TEXT,         -- the logins it re-requested, a JSON array
   review_request_error TEXT,         -- why the re-request failed
+  folded_in_at    INTEGER,           -- when the round folded in late feedback, at most once (§13.1)
   UNIQUE (watch_id, number)
 );
 

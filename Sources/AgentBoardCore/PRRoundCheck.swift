@@ -243,7 +243,9 @@ extension Board {
 
     /// Checking's decision (SPEC §13.1), once the review is in and every item is graded. Items graded
     /// `needs_author` become decisions first and count toward neither outcome. A pass sends the task to
-    /// `done` and the watch to publishing. Anything else is a failed check: the first two put the findings on
+    /// `done` and the watch to publishing, unless feedback arrived during the round and the round has not
+    /// folded any in yet: untriaged items send it to triaging, with the task still in review, and late
+    /// fixes send it straight back to fixing (`foldIn`). Anything else is a failed check: the first two put the findings on
     /// the task, where the next fixer's opening prompt reads them, and send it back to fixing; the third
     /// parks the watch. A reopened round whose every item went to the author ends instead, since no fixer
     /// has anything left to do. Nil while either half is still out.
@@ -273,8 +275,20 @@ extension Board {
                     text: "\(Self.reviewPassedLead) Round \(round.number) passed its check: the reviewer accepted it "
                         + "and every item is fixed or moot.\(handedOver)"
                 )
-                try TaskStore.move(db, taskId, to: .done, before: nil)
-                watch.state = .publishing
+                if round.foldedInAt == nil {
+                    let late = try Self.lateFixes(db, round: round, taskId: taskId)
+                    if try PRWatchStore.untriagedItemCount(db, watchId: watchId) > 0 {
+                        round.foldedInAt = now
+                        try round.update(db)
+                        watch.state = .triaging
+                    } else if !late.isEmpty {
+                        try Self.foldIn(db, late, watch: &watch, round: &round, taskId: taskId, now: now)
+                    }
+                }
+                if watch.state == .checking {
+                    try TaskStore.move(db, taskId, to: .done, before: nil)
+                    watch.state = .publishing
+                }
                 watch.updatedAt = now
                 try watch.update(db)
                 return watch.state
@@ -285,7 +299,7 @@ extension Board {
                     db, taskId, reason: "Round \(round.number) has nothing left to fix.\(handedOver)",
                     by: "follow-through", at: now
                 )
-                watch.state = try PRWatchStore.untriagedItemCount(db, watchId: watchId) > 0 ? .settling : .watching
+                watch.state = try PRWatchStore.roundStartingItemCount(db, watchId: watchId) > 0 ? .settling : .watching
                 watch.updatedAt = now
                 try watch.update(db)
                 try PRWatchStore.report(db, watch: watch, .round(number: round.number, outcome: .triaged))
@@ -495,7 +509,7 @@ extension Board {
                   ).fetchCount(db) == 0
             else { return nil }
             try PRWatchStore.endRound(db, watchId: watchId, number: round.number, outcome: .triaged, now: now)
-            watch.state = try PRWatchStore.untriagedItemCount(db, watchId: watchId) > 0 ? .settling : .watching
+            watch.state = try PRWatchStore.roundStartingItemCount(db, watchId: watchId) > 0 ? .settling : .watching
             watch.updatedAt = now
             try watch.update(db)
             try PRWatchStore.report(db, watch: watch, .round(number: round.number, outcome: .triaged))

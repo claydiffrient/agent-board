@@ -116,7 +116,9 @@ public enum TriagePrompt {
     into the branch.
     A `check` item is a required check that failed after Agent Board pushed a fix round, with the end of its \
     log. It is `fix` when the pull request's code broke it, and `decision` when the failure looks unrelated, \
-    such as a flaky test or a CI outage.
+    such as a flaky test. A failure that is clearly CI infrastructure, such as an upload, cache or service \
+    outage with no test or compile failure in the log, is `answer` with no `reply_body`, never `decision`: \
+    a rerun fixes it, and the author has nothing to decide.
     An item that asks for nothing, such as a status banner, a verdict line, a pointer to feedback posted \
     elsewhere, or a plain approval note, is `answer` with no `reply_body`, and nothing is posted for it.
     A `review` item saying its author requested changes without a comment carries no requests itself; look \
@@ -125,9 +127,12 @@ public enum TriagePrompt {
     `already_done` with no `reply_body`. When another open item carries them, it is `answer` with no \
     `reply_body`, or `already_done` when a commit already addresses them. When no item carries them, it is \
     `decision`.
-    An item with `rulings` is one the author already answered, and their rulings bind. It takes only \
-    `decision`, whose question quotes the standing ruling and asks the author whether it still holds; \
-    `set_verdicts` refuses any other verdict for it.
+    An item with `rulings` is one the author already answered, and their rulings bind. When its text asks \
+    for nothing the newest ruling did not already settle, such as a bot re-summarizing or an edit that \
+    leaves the request as it was, give it the newest ruling's own verdict, which `ruled_verdict` spells \
+    out as a `verdict` and `reply_body` to send unchanged. Only when the request changed, or the item has \
+    no `ruled_verdict`, is it `decision`, whose question quotes the standing ruling and asks the author \
+    whether it still holds. `set_verdicts` refuses any other verdict for it.
     Reserve `decision` for a choice a reasonable engineer could make either way. A change that is clearly \
     right and in scope is `fix`, however large; do not pass a judgment up because it is hard.
     """

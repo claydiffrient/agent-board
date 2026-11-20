@@ -318,6 +318,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("task_blocked_source") { db in
             try db.execute(sql: "ALTER TABLE task ADD COLUMN blocked_source TEXT")
         }
+        migrator.registerMigration("pr_round_folded_in_at") { db in
+            try db.execute(sql: "ALTER TABLE pr_round ADD COLUMN folded_in_at INTEGER")
+        }
         return migrator
     }
 }

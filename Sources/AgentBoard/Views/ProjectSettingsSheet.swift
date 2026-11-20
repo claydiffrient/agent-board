@@ -85,6 +85,8 @@ struct ProjectSettingsSheet: View {
     @State private var protectedPathGlobs: String
     @State private var completionCheckCommands: String
     @State private var checksAwaitingVerification: String
+    @State private var infraFailurePatterns: String
+    @State private var batchedReviewers: String
     @State private var triggerLabels: String
     @State private var archiveMode: ArchivePolicyMode
     @State private var archiveDays: Int
@@ -121,6 +123,8 @@ struct ProjectSettingsSheet: View {
         _checksAwaitingVerification = State(
             initialValue: settings.prFollowThrough.checksAwaitingVerification.joined(separator: ", ")
         )
+        _infraFailurePatterns = State(initialValue: settings.prFollowThrough.infraFailurePatterns.joined(separator: "\n"))
+        _batchedReviewers = State(initialValue: settings.prFollowThrough.batchedReviewers.joined(separator: ", "))
         _triggerLabels = State(initialValue: settings.takeover.triggerLabels.joined(separator: ", "))
         _archiveMode = State(initialValue: settings.archivePolicy.mode)
         _archiveDays = State(initialValue: settings.archivePolicy.days ?? ArchivePolicy.defaultDays)
@@ -465,6 +469,20 @@ struct ProjectSettingsSheet: View {
             Text("Checks or statuses that only pass once you have verified the pull request. They are ignored when deciding whether CI has passed, both after a pushed round and for Ready to verify, and a failing one never becomes a failed-check item. Names match exactly.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("CI infrastructure failures")
+                TextEditor(text: $infraFailurePatterns)
+                    .font(.body.monospaced())
+                    .frame(minHeight: 60)
+                    .accessibilityLabel("CI infrastructure failures")
+            }
+            Text("One regular expression per line, matched against a failed check's log or summary after a pushed round. A match is an outage, not the change: a GitHub Actions run gets its failed jobs rerun once, and any other check shows on the pull request's row as needing a rerun. Neither goes to triage.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("Batched reviewers", text: $batchedReviewers, prompt: Text("Comma-separated GitHub logins"))
+            Text("Reviewers, typically automated ones that re-review every push, whose new feedback never starts a round on its own or keeps a pull request from Ready to verify. It waits on the row, marked batched, and is triaged and fixed with the next round something else starts. The first round after a pull request is watched or resumed still takes it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .prReplies:
             Toggle("Post factual replies", isOn: $settings.prFollowThrough.postFactualReplies)
             Text("Factual replies are \"Fixed in <sha>\", an answer to a factual question, a pointer to the commit that already did it, and a note that out-of-scope work is tracked separately. Anything argued waits for you as a decision.")
@@ -574,6 +592,15 @@ struct ProjectSettingsSheet: View {
         if saved.verifyCommand?.isEmpty == true { saved.verifyCommand = nil }
         saved.privateTerms = privateTerms(draft.privateTerms, adding: pendingTerm)
         return saved
+    }
+
+    static func lines(_ text: String) -> [String] {
+        var lines: [String] = []
+        for line in text.components(separatedBy: .newlines).map({ $0.trimmingCharacters(in: .whitespaces) })
+        where !line.isEmpty && !lines.contains(line) {
+            lines.append(line)
+        }
+        return lines
     }
 
     static func checkNames(_ text: String) -> [String] {
@@ -732,6 +759,8 @@ struct ProjectSettingsSheet: View {
         updated.notifications.mute = muteChoice.mute(existing: settings.notifications.mute)
         updated.prFollowThrough = Self.savedFollowThrough(settings.prFollowThrough, pendingTerm: newPrivateTerm)
         updated.prFollowThrough.checksAwaitingVerification = Self.checkNames(checksAwaitingVerification)
+        updated.prFollowThrough.infraFailurePatterns = Self.lines(infraFailurePatterns)
+        updated.prFollowThrough.batchedReviewers = Self.checkNames(batchedReviewers)
         updated.protectedPathGlobs = Self.checkNames(protectedPathGlobs)
         updated.completionCheckCommands = ProjectSettings.normalizedCommands(
             completionCheckCommands.components(separatedBy: .newlines)

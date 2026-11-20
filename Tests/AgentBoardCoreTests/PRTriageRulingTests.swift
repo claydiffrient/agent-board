@@ -5,35 +5,81 @@ import XCTest
 
 /// SPEC §13.2: the author's ruling on an item outranks triage's verdict.
 final class PRTriageRulingTests: XCTestCase {
-    func testSetVerdictsRefusesAnythingButDecisionOnARuledItemAndWritesNothing() throws {
+    func testSetVerdictsAppliesARulingAcrossAResetAndRefusesAnyOtherVerdict() throws {
         let f = try Fixture.make()
         let store = PRWatchStore(f.db)
         let (watch, items) = try PRRulingFixtures.watch(f, threads: ["ASK", "NEW"])
         let (asked, untriaged) = (try XCTUnwrap(items[0].id), try XCTUnwrap(items[1].id))
         try PRRulingFixtures.ask(f, itemId: asked)
-        try f.board.answerDecision(itemId: asked, choice: .option("Rename it everywhere"))
+        try f.board.answerDecision(itemId: asked, choice: .option("Keep the name"))
+        try store.upsert(
+            projectId: f.project.id,
+            snapshot: PRRulingFixtures.snapshot([
+                PRRulingFixtures.thread("ASK", body: "Rename this, edited"), PRRulingFixtures.thread("NEW"),
+            ]),
+            now: 2_000
+        )
 
-        XCTAssertThrowsError(try store.setVerdicts([
-            PRVerdictInput(itemId: asked, verdict: .fix, approach: "Delete the alias instead."),
-            PRVerdictInput(itemId: untriaged, verdict: .answer, approach: "Factual.", replyBody: "Yes."),
-        ], watchId: watch.id)) {
-            let reason = ($0 as? PRVerdictRejection)?.reason ?? "\($0)"
-            XCTAssertTrue(reason.contains("Rename it everywhere"), reason)
+        for wrong in [
+            PRVerdictInput(
+                itemId: asked, verdict: .alreadyDone, approach: "Done.", replyBody: "The old name is public API."
+            ),
+            PRVerdictInput(itemId: asked, verdict: .answer, approach: "Factual.", replyBody: "Renaming later."),
+        ] {
+            XCTAssertThrowsError(try store.setVerdicts([
+                wrong, PRVerdictInput(itemId: untriaged, verdict: .answer, approach: "Factual.", replyBody: "Yes."),
+            ], watchId: watch.id)) {
+                let reason = ($0 as? PRVerdictRejection)?.reason ?? "\($0)"
+                XCTAssertTrue(reason.contains("The old name is public API."), reason)
+            }
+        }
+        XCTAssertEqual(try store.items(watchId: watch.id).map(\.verdict), [nil, nil])
+
+        try store.setVerdicts([
+            PRVerdictInput(
+                itemId: asked, verdict: .answer, approach: "Same request.", replyBody: "The old name is public API."
+            ),
+        ], watchId: watch.id)
+        let applied = try XCTUnwrap(store.items(watchId: watch.id).first)
+        XCTAssertEqual(applied.verdict, .answer)
+        XCTAssertEqual(applied.replyBody, "The old name is public API.")
+        XCTAssertEqual(applied.approach, "Keep the name")
+    }
+
+    func testAPostedRulingReplyIsOwedAgainOnlyWhenTheReplyChanges() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let (watch, items) = try PRRulingFixtures.watch(f, threads: ["ASK"])
+        let id = try XCTUnwrap(items[0].id)
+        try PRRulingFixtures.ask(f, itemId: id)
+        try f.board.answerDecision(itemId: id, choice: .option("Keep the name"))
+        try store.recordReply(itemId: id, url: "https://github.com/octo/example/pull/7#discussion_r1")
+        func edit(_ body: String, now: Int64) throws {
+            try store.upsert(
+                projectId: f.project.id, snapshot: PRRulingFixtures.snapshot([PRRulingFixtures.thread("ASK", body: body)]),
+                now: now
+            )
         }
 
-        let after = try store.items(watchId: watch.id)
-        XCTAssertEqual(after.map(\.verdict), [.fix, nil])
-        XCTAssertEqual(after.first?.approach, "Rename it everywhere")
-        XCTAssertNoThrow(try store.setVerdicts([
+        try edit("Rename this, edited", now: 2_000)
+        try store.setVerdicts([
+            PRVerdictInput(itemId: id, verdict: .answer, approach: "Same.", replyBody: "The old name is public API."),
+        ], watchId: watch.id)
+        try f.db.writer.write { try $0.execute(sql: "UPDATE pr_item SET state = 'handled' WHERE id = ?", arguments: [id]) }
+        XCTAssertNil(try store.owedReply(itemId: id))
+
+        try edit("Rename this, and the file too", now: 3_000)
+        try store.setVerdicts([
             PRVerdictInput(
-                itemId: asked, verdict: .decision, approach: "The reviewer pushed back.",
-                decisionQuestion: "You chose to rename it everywhere; does that still hold?",
+                itemId: id, verdict: .decision, approach: "Changed.", decisionQuestion: "Rename the file?",
                 decisionOptions: [
-                    PRDecisionOption(label: "Yes", verdict: .fix),
-                    PRDecisionOption(label: "No", verdict: .answer, replyBody: "Keeping it."),
+                    PRDecisionOption(label: "Rename it", verdict: .fix),
+                    PRDecisionOption(label: "Keep it", verdict: .answer, replyBody: "The file name stays."),
                 ]
             ),
-        ], watchId: watch.id))
+        ], watchId: watch.id)
+        try f.board.answerDecision(itemId: id, choice: .reply("The file is generated; renaming it breaks the build."))
+        XCTAssertNotNil(try store.owedReply(itemId: id))
     }
 }
 

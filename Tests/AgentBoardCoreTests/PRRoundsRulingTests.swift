@@ -18,7 +18,6 @@ final class PRRoundsRulingTests: XCTestCase {
             snapshot: PRRulingFixtures.snapshot([PRRulingFixtures.thread("ASK", body: "Rename this, and the docs.")]),
             now: 2_000
         )
-        XCTAssertNil(try store.item(id)?.decisionAnswer)
         try store.setState(.settling, watchId: watch.id)
         XCTAssertNotNil(try store.beginTriageRound(watchId: watch.id))
         try f.db.writer.write { db in

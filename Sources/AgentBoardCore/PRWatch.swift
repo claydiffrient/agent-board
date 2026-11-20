@@ -264,6 +264,24 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
 
     public var isOpenDecision: Bool { state == .open && verdict == .decision }
 
+    /// Sets the reply to post. `replyURL` is the post of the current `replyBody`, so a different reply is owed again.
+    mutating func setReply(_ body: String?) {
+        if body != replyBody { replyURL = nil }
+        replyBody = body
+    }
+
+    /// An untriaged item authored by one of `reviewers`, lowercased logins, so it waits for a round something
+    /// else starts (SPEC §13.1).
+    public func isBatched(among reviewers: Set<String>) -> Bool {
+        guard state == .open, verdict == nil, let author else { return false }
+        return reviewers.contains(author.lowercased())
+    }
+
+    public var infraFailure: PRInfraFailure? {
+        guard kind == .check, verdict == .answer, let approach else { return nil }
+        return PRInfraFailure(rawValue: approach)
+    }
+
     /// SPEC §13.1: an open fix or decision outlives an outdated or viewer-latest thread; an untriaged item
     /// outlives only an outdated one, since the viewer's own reply retires it.
     func staysOpen(under incoming: PRSnapshotItem) -> Bool {
@@ -350,6 +368,8 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
     public var reviewRequestsAt: Int64? = nil
     public var reviewRequestsJSON: String? = nil
     public var reviewRequestError: String? = nil
+    /// When the round's one fold-in of late feedback happened (SPEC §13.1 checking).
+    public var foldedInAt: Int64? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -370,7 +390,11 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
         case reviewRequestsAt = "review_requests_at"
         case reviewRequestsJSON = "review_requests_json"
         case reviewRequestError = "review_request_error"
+        case foldedInAt = "folded_in_at"
     }
+
+    /// Times the round's fixer was sent back: each failed check, and its fold-in, which is no failed check.
+    public var reopens: Int { checkFailures + (foldedInAt == nil ? 0 : 1) }
 
     /// The logins this round re-requested review from (SPEC §13.2).
     public var reviewRequests: [String] {
@@ -458,6 +482,8 @@ public struct PRFailedCheck: Sendable, Equatable {
     public var jobId: Int64?
     /// The end of the job's failed-step log, once the poller has read it.
     public var logTail: String?
+    /// Set by the poller when the log or summary matches `infraFailurePatterns` (SPEC §13.1).
+    public var infraFailure: PRInfraFailure?
 
     public init(
         githubNodeId: String, name: String, url: String? = nil, summary: String, jobId: Int64? = nil,
@@ -471,11 +497,29 @@ public struct PRFailedCheck: Sendable, Equatable {
         self.logTail = logTail
     }
 
+    /// The workflow run of a GitHub Actions job.
+    public var actionsRunId: Int64? { jobId == nil ? nil : Self.actionsRunId(in: url) }
+
+    /// The run id in a GitHub Actions `/actions/runs/<id>/` details URL.
+    public static func actionsRunId(in url: String?) -> Int64? {
+        guard let url, let range = url.range(of: #"/actions/runs/\d+"#, options: .regularExpression) else { return nil }
+        return Int64(url[range].dropFirst("/actions/runs/".count))
+    }
+
     func itemBody(head: String) -> String {
         let lead = "`\(name)` failed on \(head.prefix(7))" + (url.map { ": \($0)" } ?? ".")
         guard let logTail else { return "\(lead)\n\n\(summary)" }
         return "\(lead)\n\nThe end of its failed steps' log:\n\(logTail)"
     }
+}
+
+/// A failed check no change could cause. Its item carries an `answer` verdict from the start, so triage never
+/// sees it, and `note` as its approach, which the Pull Requests row shows (SPEC §13.1).
+public enum PRInfraFailure: String, Sendable, Equatable, CaseIterable {
+    case needsRerun = "CI infrastructure failure, needs a rerun"
+    case rerunRequested = "CI infrastructure failure, rerun requested"
+
+    public var note: String { rawValue }
 }
 
 public struct PRSnapshotItem: Sendable, Equatable {
@@ -590,10 +634,12 @@ public struct PRWatchListing: Sendable, Equatable, Identifiable {
     public var owedReplies: [PRItem]
     /// Oldest first.
     public var sessions: [PRListingSession]
+    /// The `items` waiting for a round something else starts (SPEC §13.1).
+    public var batchedItemIds: Set<Int64>
 
     public init(
         watch: PRWatch, openItems: Int, decisions: [PRItem] = [], items: [PRItem] = [],
-        owedReplies: [PRItem] = [], sessions: [PRListingSession] = []
+        owedReplies: [PRItem] = [], sessions: [PRListingSession] = [], batchedItemIds: Set<Int64> = []
     ) {
         self.watch = watch
         self.openItems = openItems
@@ -601,6 +647,7 @@ public struct PRWatchListing: Sendable, Equatable, Identifiable {
         self.items = items
         self.owedReplies = owedReplies
         self.sessions = sessions
+        self.batchedItemIds = batchedItemIds
     }
 
     public var id: String { watch.id }

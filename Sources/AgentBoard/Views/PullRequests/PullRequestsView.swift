@@ -250,7 +250,7 @@ struct PullRequestsView: View {
                 }
             }
             if !listing.items.isEmpty {
-                PRItemList(items: listing.items) { item, reason in
+                PRItemList(items: listing.items, batchedItemIds: listing.batchedItemIds) { item, reason in
                     await dismiss(item, reason: reason)
                 }
             }
@@ -370,6 +370,7 @@ struct PullRequestActions {
 /// A row's open items, collapsed under it, each with **Dismiss…** (SPEC §13.4).
 struct PRItemList: View {
     let items: [PRItem]
+    var batchedItemIds: Set<Int64> = []
     /// Returns whether the dismissal was recorded.
     let dismiss: (PRItem, String) async -> Bool
 
@@ -378,7 +379,7 @@ struct PRItemList: View {
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
             ForEach(items) { item in
-                PRItemRow(item: item) { await dismiss(item, $0) }
+                PRItemRow(item: item, batched: item.id.map(batchedItemIds.contains) ?? false) { await dismiss(item, $0) }
             }
         } label: {
             Text(items.count == 1 ? "1 open item" : "\(items.count) open items")
@@ -392,6 +393,7 @@ struct PRItemList: View {
 /// One open item: its author, kind and first line, so the right one gets dismissed.
 struct PRItemRow: View {
     let item: PRItem
+    var batched = false
     let dismiss: (String) async -> Bool
 
     @State private var dismissing = false
@@ -418,6 +420,7 @@ struct PRItemRow: View {
 
     var summary: String {
         var parts = [item.author, item.kind.rawValue.replacingOccurrences(of: "_", with: " ")].compactMap { $0 }
+        if batched { parts.append("batched for the next round") }
         if let grade = item.followupGrade, grade == .partly || grade == .notFixed {
             parts.append("graded \(grade.rawValue.replacingOccurrences(of: "_", with: " "))")
         }
@@ -613,6 +616,9 @@ struct PullRequestRow: View {
                         .font(.caption)
                         .lineLimit(4)
                 }
+                ForEach(listing.items.filter { $0.infraFailure != nil }) { item in
+                    infraFailureNote(item)
+                }
             }
             Spacer(minLength: 8)
             ForEach(listing.sessions) { session in
@@ -652,6 +658,20 @@ struct PullRequestRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// SPEC §13.1: a failed check no change could cause, shown here instead of asking for a decision.
+    @ViewBuilder private func infraFailureNote(_ item: PRItem) -> some View {
+        let note = item.infraFailure?.note ?? ""
+        if let url = item.url.flatMap(URL.init(string:)) {
+            Link(note, destination: url)
+                .font(.caption)
+                .help(item.body)
+        } else {
+            Text(note)
+                .font(.caption)
+                .help(item.body)
+        }
     }
 
     /// SPEC §13.4: opens the session's terminal window, as the Status page's attach button does.

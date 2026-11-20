@@ -72,9 +72,14 @@ extension PRWatchStore {
         )
     }
 
+    /// How long awaitingCI waits for GitHub to replace a run whose rerun was requested.
+    public static let infraRerunWaitMillis: Int64 = 30 * 60 * 1000
+
     /// SPEC §13.1 awaitingCI, once GitHub reports the pushed head: green goes to watching, and red to
     /// settling with an untriaged `check` item for each of `failedChecks` not yet recorded, which triage takes
-    /// up without the settle wait. Red with no new failed check goes to watching. A head GitHub has not
+    /// up without the settle wait. An infrastructure failure's item is recorded already answered and settles
+    /// nothing; while a requested rerun has not yet replaced its run, the watch waits. Red with no new failed
+    /// check goes to watching. A head GitHub has not
     /// caught up to yet waits; any other head means someone pushed over the round, and the watch goes back
     /// to watching.
     @discardableResult
@@ -97,9 +102,17 @@ extension PRWatchStore {
                             body: check.itemBody(head: watch.headOid), path: nil, line: nil, url: check.url,
                             state: .open, round: watch.round, createdAt: now, updatedAt: now
                         )
+                        if let infra = check.infraFailure {
+                            item.verdict = .answer
+                            item.approach = infra.note
+                        } else {
+                            watch.state = .settling
+                            watch.lastFeedbackAt = now
+                        }
                         try item.insert(db)
-                        watch.state = .settling
-                        watch.lastFeedbackAt = now
+                    }
+                    if watch.state == .watching, try Self.awaitsInfraRerun(db, watchId: watchId, now: now) {
+                        return nil
                     }
                 } else if !PRWatchTransition.checksGreen(
                     watch.checksState, headSeenAt: watch.headChangedAt ?? watch.createdAt, now: now
@@ -113,6 +126,15 @@ extension PRWatchStore {
             try watch.update(db)
             return watch.state
         }
+    }
+
+    static func awaitsInfraRerun(_ db: Database, watchId: String, now: Int64) throws -> Bool {
+        try PRItem.filter(
+            Column("watch_id") == watchId && Column("state") == PRItemState.open
+                && Column("kind") == PRItemKind.check && Column("verdict") == PRItemVerdict.answer
+                && Column("approach") == PRInfraFailure.rerunRequested.note
+                && Column("created_at") > now - infraRerunWaitMillis
+        ).fetchCount(db) > 0
     }
 
     /// Every handled thread, review and comment item, from any round, with a factual reply not yet posted and

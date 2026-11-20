@@ -615,7 +615,8 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
                     triage: .init(model: "example-triage"), fixer: .init(model: "example-fixer"),
                     reviewer: .init(model: "example-reviewer"), followupCheck: .init(model: "example-check")
                 ),
-                privateTerms: ["Globex"], checksAwaitingVerification: ["example-verification", "example-sign-off"]
+                privateTerms: ["Globex"], checksAwaitingVerification: ["example-verification", "example-sign-off"],
+                batchedReviewers: ["review-bot", "lint-bot"]
             )
         }
         let mounted = try mount(tab: .prFollowThrough, configure: configure)
@@ -623,14 +624,14 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let roleModels = ["example-triage", "example-fixer", "example-reviewer", "example-check"]
         XCTAssertEqual(
             mounted.fields.map(\.stringValue),
-            ["15", "2", "", "50", "verified-example", "example-verify {url}", "example-verification, example-sign-off", ""]
+            ["15", "2", "", "50", "verified-example", "example-verify {url}", "example-verification, example-sign-off", "review-bot, lint-bot", ""]
                 + roleModels + ["@me", "", "", "", "5"]
         )
         XCTAssertEqual(
             mounted.fields.map(\.placeholderString),
             [
                 nil, nil, "Spawn caps", "Any", "e.g. verified", #"e.g. claude "/review:verify {url}" --mcp-config {mcp_config}"#, "Comma-separated check names",
-                "Press Return to add",
+                "Comma-separated GitHub logins", "Press Return to add",
             ]
                 + Array(repeating: "Model id", count: roleModels.count)
                 + ["@me", "Comma-separated; every one must be present", "Required", "Optional", nil]
@@ -644,7 +645,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
             .environment(renderEnvironment(db: db))
         // Publish guard sits further down this tab than the 900pt mounts elsewhere in this file hold.
-        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 1100))
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 1350))
         defer { mount.close() }
         let wanted = ["Watch", "Verification", "Replies", "Publish guard", "Globex"]
         var lines: [String] = []

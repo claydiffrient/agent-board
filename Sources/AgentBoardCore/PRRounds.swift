@@ -46,14 +46,7 @@ extension PRWatchStore {
     /// resumed (SPEC §13.1). Interrupted and failed triages do not count. Returns whether it parked.
     static func parkAtRoundCap(_ db: Database, watch: inout PRWatch, now: Int64) throws -> Bool {
         let cap = max(try Project.fetchOne(db, key: watch.projectId)?.settings.prFollowThrough.roundCap ?? 3, 1)
-        let rounds = try Int.fetchOne(
-            db,
-            sql: """
-            SELECT COUNT(*) FROM pr_round WHERE watch_id = ? AND started_at >= ?
-            AND (outcome IS NULL OR outcome NOT IN ('interrupted', 'triage_failed'))
-            """,
-            arguments: [watch.id, watch.resumedAt ?? 0]
-        ) ?? 0
+        let rounds = try roundsSinceResume(db, watch: watch)
         guard rounds >= cap else { return false }
         watch.park(
             reason: "#\(watch.number) has run its round cap of \(cap) round\(cap == 1 ? "" : "s") without the "
@@ -64,6 +57,18 @@ extension PRWatchStore {
         try watch.update(db)
         try report(db, watch: watch, .parked(reason: watch.parkedReason))
         return true
+    }
+
+    /// Rounds started since the watch was last resumed, or ever, interrupted and failed triages aside.
+    static func roundsSinceResume(_ db: Database, watch: PRWatch) throws -> Int {
+        try Int.fetchOne(
+            db,
+            sql: """
+            SELECT COUNT(*) FROM pr_round WHERE watch_id = ? AND started_at >= ?
+            AND (outcome IS NULL OR outcome NOT IN ('interrupted', 'triage_failed'))
+            """,
+            arguments: [watch.id, watch.resumedAt ?? 0]
+        ) ?? 0
     }
 
     /// Moves `watch` to its next round, writing the watch in whatever state the caller set.
@@ -96,6 +101,19 @@ extension PRWatchStore {
         }
     }
 
+    /// A triage that folds late items into a round another triage or an answered decision already started
+    /// (SPEC §13.1). It sees only the items with no verdict, and its failure costs the round nothing.
+    public func isFoldIn(_ triage: PRTriage) throws -> Bool {
+        try db.reader.read { db in
+            let foldedInAt = try Self.round(db, watchId: triage.watchId, number: triage.round)?.foldedInAt
+            if let foldedInAt, triage.createdAt >= foldedInAt { return true }
+            return try PRTriage.filter(
+                Column("watch_id") == triage.watchId && Column("round") == triage.round
+                    && Column("task_id") != triage.taskId && Column("created_at") <= triage.createdAt
+            ).fetchCount(db) > 0
+        }
+    }
+
     public func untriagedItemCount(watchId: String) throws -> Int {
         try db.reader.read { try Self.untriagedItemCount($0, watchId: watchId) }
     }
@@ -116,6 +134,31 @@ extension PRWatchStore {
             sql: "SELECT COUNT(*) FROM pr_item WHERE watch_id = ? AND state = 'open' AND verdict IS NULL",
             arguments: [watchId]
         ) ?? 0
+    }
+
+    public func batchedReviewers(watchId: String) throws -> Set<String> {
+        try db.reader.read { db in
+            guard let watch = try PRWatch.fetchOne(db, key: watchId) else { return [] }
+            return try Self.batchedReviewers(db, watch: watch)
+        }
+    }
+
+    /// The project's `batchedReviewers`, lowercased, or none until a round has started since the watch was
+    /// created or last resumed, so that first round still takes their items (SPEC §13.1).
+    static func batchedReviewers(_ db: Database, watch: PRWatch) throws -> Set<String> {
+        let logins = try Project.fetchOne(db, key: watch.projectId)?.settings.prFollowThrough.batchedReviewers ?? []
+        guard !logins.isEmpty else { return [] }
+        return try roundsSinceResume(db, watch: watch) == 0 ? [] : Set(logins.map { $0.lowercased() })
+    }
+
+    /// Untriaged items that send a watch to settling: every one but a batched reviewer's (SPEC §13.1).
+    static func roundStartingItemCount(_ db: Database, watchId: String) throws -> Int {
+        guard let watch = try PRWatch.fetchOne(db, key: watchId) else { return 0 }
+        let batched = try batchedReviewers(db, watch: watch)
+        guard !batched.isEmpty else { return try untriagedItemCount(db, watchId: watchId) }
+        return try PRItem.filter(
+            Column("watch_id") == watchId && Column("state") == PRItemState.open && Column("verdict") == nil
+        ).fetchAll(db).filter { !$0.isBatched(among: batched) }.count
     }
 
     /// Open `fix` items an answered decision or a resume moved past the watch's round (SPEC §13.4),
@@ -187,13 +230,18 @@ extension PRWatchStore {
 extension Board {
     /// Triaging → fixing once the round's triage is done (SPEC §13.1): a `follow_up` becomes a backlog
     /// task and is handled, `answer` and `already_done` are handled with their reply kept, and `fix`
-    /// and `decision` stay open. The watch goes to settling when an item arrived during triage, else
-    /// to fixing while a fix item is open, parked instead when the PR is stacked, else to watching.
-    /// A round that goes on to fixing is not ended here.
+    /// and `decision` stay open. Items that arrived after the triage finished are folded in: the watch
+    /// stays triaging, returned as `.triaging`, for the caller to start one more triage of the same round,
+    /// once before the fixer and once for the fold-in at the check. `foldIn` false skips that triage.
+    /// Otherwise the watch goes to fixing while a fix item is open, parked instead when the PR is stacked,
+    /// to settling when an item still awaits triage, else to watching; a round whose check already passed
+    /// goes back to fixing with its late fixes, or on to publishing. A round that goes on is not ended here.
     @discardableResult
-    public func applyVerdicts(watchId: String, now: Int64 = .nowMillis) throws -> PRWatchState? {
+    public func applyVerdicts(watchId: String, foldIn: Bool = true, now: Int64 = .nowMillis) throws -> PRWatchState? {
         try db.writer.write { db in
-            guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .triaging else { return nil }
+            guard var watch = try PRWatch.fetchOne(db, key: watchId), watch.state == .triaging,
+                  var round = try PRWatchStore.round(db, watchId: watchId, number: watch.round)
+            else { return nil }
             let items = try PRItem
                 .filter(Column("watch_id") == watchId && Column("state") == PRItemState.open && Column("verdict") != nil)
                 .order(Column("id"))
@@ -204,15 +252,27 @@ extension Board {
                 item.updatedAt = now
                 try item.update(db)
             }
+            let untriaged = try PRWatchStore.untriagedItemCount(db, watchId: watchId)
+            if foldIn, untriaged > 0, try Self.foldInTriageDue(db, round: round) { return watch.state }
+            if let taskId = round.fixTaskId {
+                let late = try Self.lateFixes(db, round: round, taskId: taskId)
+                if late.isEmpty {
+                    try TaskStore.move(db, taskId, to: .done, before: nil)
+                    watch.state = .publishing
+                } else {
+                    try Self.foldIn(db, late, watch: &watch, round: &round, taskId: taskId, now: now)
+                }
+                watch.updatedAt = now
+                try watch.update(db)
+                return watch.state
+            }
             let fixes = try PRItem.filter(
                 Column("watch_id") == watchId && Column("state") == PRItemState.open && Column("verdict") == PRItemVerdict.fix
             ).fetchCount(db)
-            if try PRWatchStore.untriagedItemCount(db, watchId: watchId) > 0 {
-                watch.state = .settling
-            } else if fixes > 0 {
+            if fixes > 0 {
                 try Self.fixUnlessStacked(db, watch: &watch)
             } else {
-                watch.state = .watching
+                watch.state = try PRWatchStore.roundStartingItemCount(db, watchId: watchId) > 0 ? .settling : .watching
             }
             if watch.state != .fixing {
                 try PRWatchStore.endRound(db, watchId: watchId, number: watch.round, outcome: .triaged, now: now)
@@ -222,6 +282,67 @@ extension Board {
             if fixes == 0 { try PRWatchStore.report(db, watch: watch, .round(number: watch.round, outcome: .triaged)) }
             return watch.state
         }
+    }
+
+    /// Whether late items get one more triage in this round (SPEC §13.1): before the fixer, when only the
+    /// round's own triage has run; after the check, when none has run since the fold-in.
+    static func foldInTriageDue(_ db: Database, round: PRRound) throws -> Bool {
+        guard round.fixTaskId != nil else {
+            return try PRTriage.filter(Column("watch_id") == round.watchId && Column("round") == round.number)
+                .fetchCount(db) == 1
+        }
+        guard let foldedInAt = round.foldedInAt else { return false }
+        return try PRTriage.filter(
+            Column("watch_id") == round.watchId && Column("round") == round.number && Column("created_at") >= foldedInAt
+        ).fetchCount(db) == 0
+    }
+
+    /// Open `fix` items outside the round's fix set: a decision the author answered `fix`, or a late item
+    /// triaged `fix`, while the round was fixing or checking.
+    static func lateFixes(_ db: Database, round: PRRound, taskId: String) throws -> [PRItem] {
+        try PRItem.fetchAll(
+            db,
+            sql: """
+            SELECT * FROM pr_item WHERE watch_id = ? AND state = 'open' AND verdict = 'fix' AND fix_task_id IS NOT ?
+            ORDER BY id
+            """,
+            arguments: [round.watchId, taskId]
+        )
+    }
+
+    /// SPEC §13.1 checking: sends a round whose check passed back to fixing once with `late` added to its
+    /// fix set, through the same reopen a failed check takes but counted as no failure. The task body is
+    /// rebuilt to list every item, the new ones marked, since that is what the reopened fixer reads.
+    static func foldIn(
+        _ db: Database, _ late: [PRItem], watch: inout PRWatch, round: inout PRRound, taskId: String, now: Int64
+    ) throws {
+        for var item in late {
+            item.fixTaskId = taskId
+            item.round = round.number
+            item.updatedAt = now
+            try item.update(db)
+        }
+        let items = try PRItem.filter(
+            Column("watch_id") == watch.id && Column("state") == PRItemState.open
+                && Column("verdict") == PRItemVerdict.fix && Column("fix_task_id") == taskId
+        ).order(Column("id")).fetchAll(db)
+        let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
+        let body = try fixRoundBody(db, items: items, watch: watch, branch: branch, newItemIds: Set(late.compactMap(\.id)))
+        try db.execute(sql: "UPDATE task SET body = ?, updated_at = ? WHERE id = ?", arguments: [body, now, taskId])
+        try TaskStore.markChanged(db, taskId)
+        if round.foldedInAt == nil {
+            round.foldedInAt = now
+            try round.update(db)
+        }
+        _ = try ProgressStore.append(
+            db, taskId: taskId, sessionId: nil, kind: .note,
+            text: "Round \(round.number) passed its check, and feedback that arrived meanwhile is folded in: "
+                + late.map { "item \($0.id ?? 0)" }.joined(separator: ", ") + ". It goes back to its fixer once."
+        )
+        try TaskStore.setReviewer(db, taskId, nil)
+        try TaskStore.setFailed(db, taskId, false, reason: nil)
+        try TaskStore.move(db, taskId, to: .ready, before: nil)
+        watch.state = .fixing
     }
 
     /// Settling → fixing with no triage, for a watch whose only waiting items are `fix` answers to
@@ -348,16 +469,26 @@ extension Board {
         """
     }
 
-    static func fixRoundBody(_ db: Database, items: [PRItem], watch: PRWatch, branch: String) throws -> String {
+    static func fixRoundBody(
+        _ db: Database, items: [PRItem], watch: PRWatch, branch: String, newItemIds: Set<Int64> = []
+    ) throws -> String {
         let sections = try items.enumerated().map { offset, item in
-            "## Item \(offset + 1)\n\n"
+            let new = item.id.map(newItemIds.contains) == true ? " (new)" : ""
+            return "## Item \(offset + 1)\(new)\n\n"
                 + itemSection(item, answer: try PRWatchStore.authorAnswer(db, item: item), watch: watch)
         }
+        let foldedIn = newItemIds.isEmpty ? "" : """
+
+
+        This round's check passed, and the items marked (new) arrived while it ran. The commits already on \
+        this branch cover the rest; fix the new items on top of them, and change the others only if a new \
+        item requires it.
+        """
         return """
         Fix the review feedback below on pull request #\(watch.number) "\(watch.title)": \(watch.url)
 
         You are on `\(branch)`, cut from the pull request's head. Make new commits only: no amend, no \
-        rebase, no push. Agent Board pushes the round once it has been checked.
+        rebase, no push. Agent Board pushes the round once it has been checked.\(foldedIn)
 
         \(sections.joined(separator: "\n\n"))
         """
