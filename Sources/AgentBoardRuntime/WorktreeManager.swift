@@ -487,8 +487,11 @@ public struct WorktreeManager: Sendable {
         case .timedOut: failure = "git \(args.joined(separator: " ")) timed out after \(Int(timeout))s and was stopped"
         case .canceled: failure = "git \(args.joined(separator: " ")) was canceled"
         }
-        removeScratch(path: path)
-        throw AgentRuntimeError(failure + (result.output.isEmpty ? "" : "\n\(RefreshVerifier.tail(result.output))"))
+        let teardownFailure = removeScratch(path: path)
+        throw AgentRuntimeError(
+            failure + (result.output.isEmpty ? "" : "\n\(RefreshVerifier.tail(result.output))")
+                + (teardownFailure.map { "\n\n\($0)" } ?? "")
+        )
     }
 
     /// Scratch checkouts under `worktreeRoot` whose directory name starts with `prefix`.
@@ -496,13 +499,25 @@ public struct WorktreeManager: Sendable {
         try list().map(\.path).filter { $0.lastPathComponent.hasPrefix(prefix) }
     }
 
-    /// Forced: a scratch checkout holds build output and nobody's work.
-    public func removeScratch(path: URL) {
+    /// Forced: a scratch checkout holds build output and nobody's work. Returns the teardown hook's
+    /// failure, which never stops the removal (SPEC §3.1 "Removing a worktree").
+    @discardableResult
+    public func removeScratch(path: URL) -> String? {
+        let teardownFailure = teardownBeforeForcedRemoval(of: path)
         _ = try? gitRaw(["worktree", "remove", "--force", path.path], cwd: repoPath)
         if FileManager.default.fileExists(atPath: path.path) {
             try? FileManager.default.removeItem(at: path)
             _ = try? gitRaw(["worktree", "prune"], cwd: repoPath)
         }
+        return teardownFailure
+    }
+
+    /// SPEC §3.1 "Removing a worktree": a forced removal of a failed setup or scratch checkout runs
+    /// the teardown hook first too, so what a build cached outside the worktree is not orphaned.
+    private func teardownBeforeForcedRemoval(of path: URL) -> String? {
+        guard let teardown, !Self.samePath(path, repoPath), FileManager.default.fileExists(atPath: path.path)
+        else { return nil }
+        return runTeardown(teardown, in: path)
     }
 
     private enum TreeMerge {
@@ -1113,7 +1128,8 @@ public struct WorktreeManager: Sendable {
     /// as this command's output — including the failure a shell-unsafe worktree path causes.
     ///
     /// Git leaves the worktree on disk when the hook fails, and a retry adopts any worktree it finds,
-    /// so a worktree this call created is removed again (the branch is kept) — SPEC §3.1 step 2.
+    /// so a worktree this call created is torn down and removed again (the branch is kept) — SPEC
+    /// §3.1 step 2 and "Removing a worktree".
     private func addWorktree(_ args: [String], at path: URL) throws {
         pruneDeadRegistration(at: path)
         let existed = FileManager.default.fileExists(atPath: path.path)
@@ -1121,6 +1137,9 @@ public struct WorktreeManager: Sendable {
         guard result.status != 0 else { return }
         var message = WorktreePathDiagnosis.explain(Self.failure(args, result), worktreePath: path.path)
         if !existed, (try? list())?.contains(where: { Self.samePath($0.path, path) }) == true {
+            if let teardownFailure = teardownBeforeForcedRemoval(of: path) {
+                message += "\n\n" + teardownFailure
+            }
             let removal = try gitRaw(["worktree", "remove", "--force", path.path], cwd: repoPath)
             if removal.status != 0 {
                 message += "\n\nThe half-set-up worktree could not be removed, so a retry will adopt it: "

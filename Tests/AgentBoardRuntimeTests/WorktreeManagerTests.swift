@@ -786,6 +786,26 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertTrue(message.contains("No such file or directory"), message)
     }
 
+    /// SPEC §3.1 "Removing a worktree": a setup that already built must not orphan what it built
+    /// outside the worktree when the half-set-up checkout is rolled back.
+    func testAFailedSetupRunsTheTeardownHookBeforeRemovingTheWorktree() throws {
+        try installPostCheckoutSetup("exit 1")
+        let marker = sandbox.appendingPathComponent("teardown-marker")
+        manager.teardown = WorktreeTeardownCommand(command: "{ pwd -P; git rev-parse --show-toplevel; } > '\(marker.path)'; exit 3")
+        let path = worktrees.appendingPathComponent("task-1").path
+
+        let error = try XCTUnwrapError {
+            _ = try manager.create(name: "task-1", branch: "agentboard/task-1", base: "main")
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path), "the half-set-up worktree was kept")
+        let root = try XCTUnwrap(realpath(worktrees.path, nil).map { String(cString: $0) })
+        let resolved = root + "/task-1"
+        let lines = try String(contentsOf: marker, encoding: .utf8).split(separator: "\n").map(String.init)
+        XCTAssertEqual(lines, [resolved, resolved], "the hook did not run in the worktree while git still had it")
+        XCTAssertTrue(String(describing: error).contains("exited 3"), "\(error)")
+    }
+
     func testAPostCheckoutSetupThatFailsForAnotherReasonIsNotExplained() throws {
         try installPostCheckoutSetup("""
         echo "setup: no such target //:lint-staged" >&2
