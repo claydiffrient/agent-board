@@ -65,6 +65,7 @@ public struct PRWatchStore: Sendable {
                     .map { ($0.githubNodeId, $0) }
             )
             let viewerCutoff = try Self.viewerFeedbackCutoff(db, watch: watch)
+            let batched = try Self.batchedReviewers(db, watch: watch)
             for var incoming in snapshot.items {
                 if incoming.viewerLatest, let viewerCutoff, let createdAt = incoming.createdAt,
                    createdAt < viewerCutoff {
@@ -78,7 +79,7 @@ public struct PRWatchStore: Sendable {
                         url: incoming.url, state: .open, round: watch.round, createdAt: now, updatedAt: now
                     )
                     try item.insert(db)
-                    feedbackArrived = true
+                    feedbackArrived = feedbackArrived || !item.isBatched(among: batched)
                     continue
                 }
                 if !incoming.isResolved, incoming.viewerLatest, item.body == incoming.body,
@@ -131,7 +132,7 @@ public struct PRWatchStore: Sendable {
                     item.replyError = nil
                     item.replyAbandonedAt = nil
                     item.followupGrade = nil
-                    feedbackArrived = true
+                    feedbackArrived = feedbackArrived || !item.isBatched(among: batched)
                 }
                 if item != before {
                     item.updatedAt = now
@@ -545,9 +546,11 @@ public struct PRWatchStore: Sendable {
         let listings = try rows.map { row in
             let watch = try PRWatch(row: row)
             let items = open[watch.id] ?? []
+            let batched = try batchedReviewers(db, watch: watch)
             return PRWatchListing(
                 watch: watch, openItems: row["open_items"], decisions: items.filter(\.isOpenDecision),
-                items: items, owedReplies: owed[watch.id] ?? [], sessions: sessions[watch.id] ?? []
+                items: items, owedReplies: owed[watch.id] ?? [], sessions: sessions[watch.id] ?? [],
+                batchedItemIds: Set(items.filter { $0.isBatched(among: batched) }.compactMap(\.id))
             )
         }
         let grouped = Dictionary(grouping: listings) {

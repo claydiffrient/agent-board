@@ -148,6 +148,15 @@ triage.
 - **merged** / **closed** *(phase 1)* — terminal states. The round tasks are
   archived.
 
+**Batched reviewers.** An untriaged item authored by a login in
+`batchedReviewers` (§13.3, case-insensitive) never moves a watch from watching
+or readyToVerify to settling, restarts the settle wait, or keeps a PR out of
+readyToVerify, and no round's end goes to settling for it alone. A round that
+something else starts triages and fixes it with the rest, the fold-in included.
+The row lists it as an open item marked batched. Until a round has started
+since the watch was created or last resumed, batched items count like any
+other, so a PR only a bot reviews still gets that first pass.
+
 **The poll (phase 1).** At most every 60s, on the metering tick beside the
 pull-request landing check (§5), `WorkerSupervisor.pollPRWatches` runs only
 when some project has `enabled` on; otherwise no `gh` command runs at all. It
@@ -260,7 +269,7 @@ them.
 **Settling and triaging (phase 2).** The same poll, after reading GitHub,
 advances each watch of an enabled project; a failed search does not stop it.
 The poll's own move puts a watch in settling while any open item has no
-verdict or is a `fix` answer to a decision whose `round` is past the watch's
+verdict (a batched reviewer's aside, above) or is a `fix` answer to a decision whose `round` is past the watch's
 (§13.4), so any other open decision or fix item keeps a PR from being ready
 without sending it back to triage. A settling watch leaves for triaging only when it is
 not paused, at least `settleMinutes` have passed since `last_feedback_at` (so an
@@ -860,6 +869,7 @@ battery minimum aside, so a project that never opts in pays nothing:
 | `privateTerms` | `[]` | 1 |
 | `checksAwaitingVerification` | `[]` — check-run names or status contexts, matched exactly, ignored when deciding whether CI has passed (§13.1) | 4 |
 | `infraFailurePatterns` | Bazel's remote, local-environment, BES-upload and cache-eviction exit codes (`exit code (3[4689]\|45)\b`), `Build Event Protocol upload failed`, and BuildBuddy reported unavailable — regexes matched against a failed check's log tail or summary; a match is rerun or noted on the row instead of triaged (§13.1). Edited one per line on the PR Follow-Through tab under the checks that wait on verification | 4 |
+| `batchedReviewers` | `[]` — GitHub logins, matched case-insensitively, whose new items wait for a round something else starts instead of starting one (§13.1). Edited comma-separated on the PR Follow-Through tab under the CI infrastructure failures | 4 |
 
 `roles` names a roster agent (§4) for each of the four model-driven jobs; a
 work-specific lens for a role — a follow-up grading rubric, a house style for

@@ -1121,6 +1121,35 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try triageTasks().count, 1, "only round 1's triager")
     }
 
+    func testABatchedReviewersNewThreadLeavesTheWatchWhereAnyoneElsesSendsItToSettling() async throws {
+        let (tip, _) = try await passedRound()
+        await poll()
+        var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
+        settings.prFollowThrough.batchedReviewers = ["Review-Bot"]
+        try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
+        head = tip
+        answer(threads: [])
+        await poll()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+
+        answer(threads: [thread("T_bot1", author: "review-bot")])
+        await poll()
+        XCTAssertEqual(try onlyWatch().state, .readyToVerify)
+
+        answer(threads: [thread("T_bot1", author: "review-bot")], pendingStatus: "deploy")
+        await poll()
+        XCTAssertEqual(try onlyWatch().state, .watching)
+        answer(threads: [thread("T_bot1", author: "review-bot"), thread("T_bot2", author: "review-bot")], pendingStatus: "deploy")
+        await poll()
+        XCTAssertEqual(try onlyWatch().state, .watching)
+
+        answer(threads: [thread("T_bot1", author: "review-bot"), thread("T_human")], pendingStatus: "deploy")
+        await poll()
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .triaging, "settling, then round 2 at once with no settle wait")
+        XCTAssertEqual(watch.round, 2)
+    }
+
     private var checkItems: [PRItem] {
         get throws { try watches.items(watchId: try onlyWatch().id).filter { $0.kind == .check } }
     }

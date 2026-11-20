@@ -58,6 +58,8 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
     /// Regexes matched against a failed check's log tail or summary; a match is an infrastructure failure that
     /// gets a rerun instead of triage (SPEC §13.1).
     public var infraFailurePatterns: [String] = Self.defaultInfraFailurePatterns
+    /// GitHub logins whose untriaged items wait for a round something else starts (SPEC §13.1).
+    public var batchedReviewers: [String] = []
 
     /// Bazel's remote, local-environment, BES-upload and cache-eviction exit codes, and BuildBuddy's endpoint
     /// refusing a connection, none of which a change can cause.
@@ -81,7 +83,8 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         roles: PRFollowThroughRoles = PRFollowThroughRoles(),
         privateTerms: [String] = [],
         checksAwaitingVerification: [String] = [],
-        infraFailurePatterns: [String] = Self.defaultInfraFailurePatterns
+        infraFailurePatterns: [String] = Self.defaultInfraFailurePatterns,
+        batchedReviewers: [String] = []
     ) {
         self.enabled = enabled
         self.verificationLabel = verificationLabel
@@ -97,6 +100,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         self.privateTerms = privateTerms
         self.checksAwaitingVerification = checksAwaitingVerification
         self.infraFailurePatterns = infraFailurePatterns
+        self.batchedReviewers = batchedReviewers
     }
 
     /// Whether any of `infraFailurePatterns` matches `text`; a pattern that does not compile matches nothing.
@@ -166,7 +170,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case enabled, verificationLabel, requireApproval, settleMinutes, roundCap, dailyBudgetUSD, minBatteryPercent
         case verifyCommand, postFactualReplies, postFactualRepliesSince, reRequestReviews, roles, privateTerms
-        case checksAwaitingVerification, infraFailurePatterns
+        case checksAwaitingVerification, infraFailurePatterns, batchedReviewers
     }
 
     public init(from decoder: Decoder) throws {
@@ -190,6 +194,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
             ?? defaults.checksAwaitingVerification
         infraFailurePatterns = try c.decodeIfPresent([String].self, forKey: .infraFailurePatterns)
             ?? defaults.infraFailurePatterns
+        batchedReviewers = try c.decodeIfPresent([String].self, forKey: .batchedReviewers) ?? defaults.batchedReviewers
     }
 
     /// Writes a nil `minBatteryPercent` as null: an absent key decodes as the default, 50.
@@ -210,5 +215,6 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         try c.encode(privateTerms, forKey: .privateTerms)
         try c.encode(checksAwaitingVerification, forKey: .checksAwaitingVerification)
         try c.encode(infraFailurePatterns, forKey: .infraFailurePatterns)
+        try c.encode(batchedReviewers, forKey: .batchedReviewers)
     }
 }
