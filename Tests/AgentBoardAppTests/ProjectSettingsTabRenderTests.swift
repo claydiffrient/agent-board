@@ -610,7 +610,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
             $0.prFollowThrough = PRFollowThroughSettings(
                 enabled: true, verificationLabel: "verified-example", requireApproval: false,
                 settleMinutes: 15, roundCap: 2, verifyCommand: "example-verify {url}",
-                postFactualReplies: true,
+                postFactualReplies: true, resolveFixedThreads: true,
                 roles: PRFollowThroughRoles(
                     triage: .init(model: "example-triage"), fixer: .init(model: "example-fixer"),
                     reviewer: .init(model: "example-reviewer"), followupCheck: .init(model: "example-check")
@@ -636,7 +636,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
                 + Array(repeating: "Model id", count: roleModels.count)
                 + ["@me", "Comma-separated; every one must be present", "Required", "Optional", nil]
         )
-        XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off, .on, .off, .off])
+        XCTAssertEqual(mounted.collect(NSSwitch.self).map(\.state), [.on, .off, .on, .on, .off, .off])
         if !mounted.collect(NSPopUpButton.self).isEmpty {
             XCTAssertEqual(popUpButtons(titled: "Default", in: mounted.host).count, 4, "one agent picker per role")
         }
@@ -644,22 +644,31 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let (db, project) = try storedProject(configure)
         let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
             .environment(renderEnvironment(db: db))
-        // Publish guard sits further down this tab than the 900pt mounts elsewhere in this file hold.
-        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 1350))
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 900))
         defer { mount.close() }
-        let wanted = ["Watch", "Verification", "Replies", "Publish guard", "Globex"]
-        var lines: [String] = []
-        _ = try mount.capture(until: { _ in
-            guard let image = CGWindowListCreateImage(
-                .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
-                [.boundsIgnoreFraming, .bestResolution]
-            ), let recognized = try? self.recognizedRoutingLines(in: image) else { return false }
-            lines = recognized.map(\.text)
-            return wanted.allSatisfy { word in lines.contains { $0.contains(word) } }
-        })
-        for word in wanted {
-            XCTAssertTrue(lines.contains { $0.contains(word) }, "no \(word) on the tab: \(lines)")
+        func recognizedLines(showing wanted: [String]) throws -> [String] {
+            var lines: [String] = []
+            _ = try mount.capture(until: { _ in
+                guard let image = CGWindowListCreateImage(
+                    .null, .optionIncludingWindow, CGWindowID(mount.window.windowNumber),
+                    [.boundsIgnoreFraming, .bestResolution]
+                ), let recognized = try? self.recognizedRoutingLines(in: image) else { return false }
+                lines = recognized.map(\.text)
+                return wanted.allSatisfy { word in lines.contains { $0.contains(word) } }
+            })
+            for word in wanted {
+                XCTAssertTrue(lines.contains { $0.contains(word) }, "no \(word) on the tab: \(lines)")
+            }
+            return lines
         }
+
+        _ = try recognizedLines(showing: ["Watch", "Verification"])
+        // OffscreenMount can't settle a window much past 900pt, so the lower sections are scrolled to.
+        let termField = try XCTUnwrap(
+            Mounted(window: mount.window, host: mount.host).fields.first { $0.placeholderString == "Press Return to add" }
+        )
+        termField.scrollToVisible(termField.bounds)
+        _ = try recognizedLines(showing: ["Replies", "Publish guard", "Globex"])
     }
 
     func testPRFollowThroughSaveKeepsAPendingTermAndReloadsFromTheStore() throws {
