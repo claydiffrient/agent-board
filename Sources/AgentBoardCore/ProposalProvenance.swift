@@ -13,7 +13,7 @@ public enum ProposalProvenance {
     }
 
     public static func pullRequest(owner: String, repo: String, number: Int) -> String {
-        "\(owner)/\(repo)#\(number)"
+        IssueReference.full(owner: owner, repo: repo, number)
     }
 
     /// The `owner/repo#N` a proposal report's `reportLine` names. Only the third paragraph, where

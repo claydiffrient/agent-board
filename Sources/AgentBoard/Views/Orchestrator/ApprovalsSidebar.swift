@@ -328,10 +328,10 @@ struct ApprovalsSidebar: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 if let url = request.url.flatMap(URL.init(string:)) {
-                    Link(destination: url) { Text(verbatim: issueNumberLabel(request.number)) }
-                        .help(String("Open pull request \(issueNumberLabel(request.number)) on GitHub"))
+                    Link(destination: url) { Text(verbatim: IssueReference.short(request.number)) }
+                        .help(String("Open pull request \(IssueReference.short(request.number)) on GitHub"))
                 } else {
-                    Text(verbatim: issueNumberLabel(request.number))
+                    Text(verbatim: IssueReference.short(request.number))
                 }
                 Text(verbatim: request.title)
             }
@@ -532,10 +532,10 @@ private struct ReviewRow: View {
             if let watch {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     if let url = URL(string: watch.url), !watch.url.isEmpty {
-                        Link(destination: url) { Text(verbatim: issueNumberLabel(watch.number)) }
-                            .help(String("Open pull request \(issueNumberLabel(watch.number)) on GitHub"))
+                        Link(destination: url) { Text(verbatim: IssueReference.short(watch.number)) }
+                            .help(String("Open pull request \(IssueReference.short(watch.number)) on GitHub"))
                     } else {
-                        Text(verbatim: issueNumberLabel(watch.number))
+                        Text(verbatim: IssueReference.short(watch.number))
                     }
                     Text(verbatim: watch.title)
                 }

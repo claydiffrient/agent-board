@@ -540,14 +540,15 @@ struct PROwedReplyRow: View {
                     .font(.caption)
                     .foregroundStyle(.red)
             }
-            Button("Post reply to #\(number)…") { confirming = true }
+            Button("Post reply to " + IssueReference.short(number) + "…") { confirming = true }
+                .fixedSize()
                 .disabled(posting)
                 .help("Posts this reply on GitHub under your account")
         }
         .padding(.leading, 16)
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
-        .confirmationDialog("Post this reply to #\(number) on GitHub?", isPresented: $confirming) {
+        .confirmationDialog("Post this reply to " + IssueReference.short(number) + " on GitHub?", isPresented: $confirming) {
             Button("Post reply") {
                 posting = true
                 _Concurrency.Task {
@@ -683,7 +684,7 @@ struct PullRequestRow: View {
     }
 
     private var details: String {
-        var parts = ["\(watch.repoOwner)/\(watch.repoName) #\(watch.number)", watch.state.title]
+        var parts = [IssueReference.full(owner: watch.repoOwner, repo: watch.repoName, watch.number), watch.state.title]
         if watch.state == .stale { parts.append("restarted: head moved") }
         if watch.round > 0 { parts.append("round \(watch.round)") }
         parts.append(listing.openItems == 1 ? "1 open item" : "\(listing.openItems) open items")
@@ -795,7 +796,7 @@ struct TakeoverRow: View {
     }
 
     @ViewBuilder private var numberView: some View {
-        let label = issueNumberLabel(takeover.number)
+        let label = IssueReference.short(takeover.number)
         if let url = URL(string: takeover.url) {
             let noun = takeover.kind == .pr ? "pull request" : "issue"
             let help: String = "Open \(noun) \(label) on GitHub"
@@ -881,7 +882,7 @@ struct WatchPullRequestForm: View {
             defer { submitting = false }
             do {
                 try await watch(number, projectId)
-                AccessibilityNotification.Announcement("Watching pull request \(number)").post()
+                AccessibilityNotification.Announcement("Watching pull request " + IssueReference.short(number)).post()
                 close()
             } catch {
                 refusal = errorText(error)

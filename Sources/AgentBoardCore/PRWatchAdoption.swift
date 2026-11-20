@@ -44,18 +44,18 @@ extension Board {
             let watches = try PRWatch.filter(Column("project_id") == projectId && Column("number") == number).fetchAll(db)
             if let stopped = watches.first(where: { $0.state == .stopped }) {
                 throw PRVerdictRejection(
-                    "#\(number) is stopped. Ask with resume_pr_watch (watch_id \(stopped.id)) to watch it again."
+                    "\(IssueReference.short(number)) is stopped. Ask with resume_pr_watch (watch_id \(stopped.id)) to watch it again."
                 )
             }
             if let live = watches.first(where: { !$0.state.isTerminal && ($0.authored || $0.adopted) }) {
-                throw PRVerdictRejection("#\(number) is already watched (\(live.state.rawValue)); there is nothing to adopt.")
+                throw PRVerdictRejection("\(IssueReference.short(number)) is already watched (\(live.state.rawValue)); there is nothing to adopt.")
             }
             if let existing = try pendingWatchAdoption(db, projectId: projectId, number: number) {
                 return existing
             }
             return try ApprovalStore.insert(
                 db, projectId: projectId, kind: .prWatchAdopt, taskId: nil, epicId: nil, requestedBy: requestedBy,
-                reason: "#\(number)\nReason: \(reason)",
+                reason: "\(IssueReference.short(number))\nReason: \(reason)",
                 payload: try PRWatchAdoptionRequest(number: number, reason: reason).encoded()
             )
         }
@@ -65,13 +65,13 @@ extension Board {
     public func reportWatchAdopted(_ request: PRWatchAdoptionRequest, watch: PRWatch, projectId: String) throws {
         try reportAdoption(
             projectId: projectId,
-            body: "#\(request.number) \(watch.title) adopted into follow-through: \(request.reason)"
+            body: "\(IssueReference.short(request.number)) \(watch.title) adopted into follow-through: \(request.reason)"
         )
     }
 
     /// The `decision` report for a granted `watch_pr` that was refused or failed, naming why.
     public func reportWatchNotAdopted(_ request: PRWatchAdoptionRequest, projectId: String, because cause: String) throws {
-        try reportAdoption(projectId: projectId, body: "#\(request.number) was not adopted: \(cause)")
+        try reportAdoption(projectId: projectId, body: "\(IssueReference.short(request.number)) was not adopted: \(cause)")
     }
 
     private func reportAdoption(projectId: String, body: String) throws {

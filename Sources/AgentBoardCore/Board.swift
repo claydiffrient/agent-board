@@ -362,9 +362,9 @@ public struct Board: Sendable {
         } else if approval.kind == .prItemDismissal, let request = try? PRItemDismissalRequest.decode(approval.payload) {
             body += " for item \(request.itemId)"
         } else if approval.kind == .prWatchResume, let request = try? PRWatchResumeRequest.decode(approval.payload) {
-            body += " for #\(request.number)"
+            body += " for \(IssueReference.short(request.number))"
         } else if approval.kind == .prWatchAdopt, let request = try? PRWatchAdoptionRequest.decode(approval.payload) {
-            body += " for #\(request.number)"
+            body += " for \(IssueReference.short(request.number))"
         }
         if let reason, !reason.isEmpty {
             body += ": \(reason)"

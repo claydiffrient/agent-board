@@ -148,7 +148,7 @@ public struct PRWatchStore: Sendable {
             if snapshot.isCrossRepository, [.watching, .settling, .readyToVerify, .verified].contains(watch.state) {
                 let fork = snapshot.headRepository.map { "the fork `\($0)`" } ?? "a fork GitHub no longer has"
                 watch.park(
-                    reason: "#\(watch.number) comes from \(fork), and Agent Board pushes only to "
+                    reason: "\(IssueReference.short(watch.number)) comes from \(fork), and Agent Board pushes only to "
                         + "`\(watch.repoOwner)/\(watch.repoName)`, so follow-through does not run on it.",
                     at: now
                 )
@@ -226,12 +226,12 @@ public struct PRWatchStore: Sendable {
             ) {
                 if existing.state == .stopped {
                     throw PRVerdictRejection(
-                        "Follow-through is stopped for #\(number). Choose Watch again on the Pull Requests page to resume it."
+                        "Follow-through is stopped for \(IssueReference.short(number)). Choose Watch again on the Pull Requests page to resume it."
                     )
                 }
                 if !existing.state.isTerminal, existing.adopted || existing.authored {
                     throw PRVerdictRejection(
-                        "#\(number) is already watched (\(existing.state.rawValue)); there is nothing to adopt."
+                        "\(IssueReference.short(number)) is already watched (\(existing.state.rawValue)); there is nothing to adopt."
                     )
                 }
                 existing.adopted = true

@@ -1135,7 +1135,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         let outcome = item.verdict == .decision
             ? "It is verified, so the failure waits as a decision for the human; no fix round starts."
             : "It is \(state.rawValue); triage picks the failure up with the next round."
-        return ToolResult(text: "Recorded on #\(watch.number). \(outcome)")
+        return ToolResult(text: "Recorded on \(IssueReference.short(watch.number)). \(outcome)")
     }
 
     // MARK: Coordinator requests (SPEC §9.4)
@@ -1444,7 +1444,7 @@ public final class OrchestratorToolHandler: ToolHandler {
         let branchEpic = try epic ?? epics.list(projectId: project.id).first { $0.branch == branch }
         if let upstream = branchEpic?.upstream {
             throw ToolError(
-                "\(branch) builds on pull request #\(upstream.pullRequest.number) (\(upstream.pullRequest.url)), which "
+                "\(branch) builds on pull request \(IssueReference.short(upstream.pullRequest.number)) (\(upstream.pullRequest.url)), which "
                     + "already exists, so no new one is opened. Use `push_branch(branch: \"\(branch)\")` to push onto its "
                     + "head \(upstream.headRef)."
             )

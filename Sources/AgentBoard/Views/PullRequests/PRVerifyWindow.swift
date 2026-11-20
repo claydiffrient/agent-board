@@ -123,7 +123,7 @@ struct PRVerifyWindow: View {
 
     private var title: String {
         guard let watch else { return "verify" }
-        return "verify \(watch.repoOwner)/\(watch.repoName) #\(watch.number)"
+        return "verify " + IssueReference.full(owner: watch.repoOwner, repo: watch.repoName, watch.number)
     }
 
     var body: some View {

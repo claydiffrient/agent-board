@@ -72,7 +72,7 @@ extension Board {
             try EpicStore.setState(db, epicId, .done)
             let settled = try Self.settleIntegrationTasks(
                 db, epicId: epicId,
-                reason: "Epic \(epicId) is done: its pull request #\(pullRequest.number) merged.",
+                reason: "Epic \(epicId) is done: its pull request \(IssueReference.short(pullRequest.number)) merged.",
                 by: "the pull request merge check"
             )
             let detail = PullRequestLanding.mergedDetail(pullRequest, commit: commit)
@@ -83,14 +83,14 @@ extension Board {
             for taskId in carriage.late {
                 try TaskStore.setLanding(
                     db, taskId, .unlanded,
-                    detail: "Not in pull request #\(pullRequest.number) as merged (\(pullRequest.url)): \(lateAdvice)."
+                    detail: "Not in pull request \(IssueReference.short(pullRequest.number)) as merged (\(pullRequest.url)): \(lateAdvice)."
                 )
             }
             let unverifiedReason = "no branch, reaped tip, or recorded commit is left to check against the merged head"
             for taskId in carriage.unverified {
                 try TaskStore.setLanding(
                     db, taskId, .pending,
-                    detail: "Pull request #\(pullRequest.number) merged (\(pullRequest.url)), but whether it carried "
+                    detail: "Pull request \(IssueReference.short(pullRequest.number)) merged (\(pullRequest.url)), but whether it carried "
                         + "this task could not be verified: \(unverifiedReason)."
                 )
             }
@@ -100,7 +100,7 @@ extension Board {
             let unfinished = try Task.fetchAll(
                 db, sql: "SELECT * FROM task WHERE epic_id = ? AND column_name NOT IN ('done', 'closed') ORDER BY ordering", arguments: [epicId]
             )
-            var text = "Epic \(epicId) (\(epic.title)) is done: pull request #\(pullRequest.number) merged"
+            var text = "Epic \(epicId) (\(epic.title)) is done: pull request \(IssueReference.short(pullRequest.number)) merged"
                 + (commit.map { " as \($0)" } ?? "") + " (\(pullRequest.url))."
             if !unfinished.isEmpty {
                 text += " \(unfinished.count) task(s) in it were not done and did not ride that pull request: "
@@ -144,7 +144,7 @@ extension Board {
                 next = "Reopen it, or open a new one with `open_pull_request(epic_id: \"\(epicId)\")`"
             }
             try EpicStore.setState(db, epicId, .active)
-            let text = "Epic \(epicId) (\(epic.title)) is active again: pull request #\(pullRequest.number) was closed "
+            let text = "Epic \(epicId) (\(epic.title)) is active again: pull request \(IssueReference.short(pullRequest.number)) was closed "
                 + "without merging (\(pullRequest.url)). \(next); nothing reached the base branch."
             return try Self.recordOnEpic(db, epic: epic, text: text, kind: .error)
         }
@@ -173,7 +173,7 @@ extension Board {
         switch epic.state {
         case .integrated:
             if let upstream = epic.upstream {
-                return "Publish it onto pull request #\(upstream.pullRequest.number) with "
+                return "Publish it onto pull request \(IssueReference.short(upstream.pullRequest.number)) with "
                     + "`push_branch(branch: \"\(epic.branch)\")`; the epic is done when that pull request merges."
             }
             return "Open its pull request with `open_pull_request(epic_id: \"\(epic.id)\", title: …)`."
