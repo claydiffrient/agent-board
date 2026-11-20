@@ -963,8 +963,10 @@ on at all.
   confirms the reply text and the PR before
   `WorkerSupervisor.postPRReply` posts it through the same posting code as
   §13.2 "Posting replies", mark included, and records its `reply_url` or
-  `reply_error`. It needs no round and starts none, and `postFactualReplies`
-  does not gate it: the human chose that reply. A post that fails stays owed
+  `reply_error`. From the confirming click until the post returns, the row
+  shows a spinner and the button is disabled; the page holds that state per
+  item, so the page refreshing mid-post does not reset it. It needs no round
+  and starts none, and `postFactualReplies` does not gate it: the human chose that reply. A post that fails stays owed
   and is shown on the row; nothing retries it but Post reply. The
   `pr_item_answered_replies` migration marks abandoned every answered reply
   still unposted when it ran that the setting did not already owe, since some

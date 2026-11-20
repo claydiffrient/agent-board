@@ -15,6 +15,7 @@ struct PullRequestsView: View {
     @State private var page = Observed<[PRWatchGroup]>([])
     @State private var takenOver = Observed<[Takeover]>([])
     @State private var marking: Set<String> = []
+    @State private var postingReplies: Set<Int64> = []
     @State private var errorMessage: String?
     @State private var routedWatchId: String?
     @State private var refreshing: Set<PRPageGroup> = []
@@ -241,8 +242,11 @@ struct PullRequestsView: View {
                 }
             }
             ForEach(listing.owedReplies) { item in
-                PROwedReplyRow(item: item, number: listing.watch.number) {
-                    await postReply(item)
+                PROwedReplyRow(
+                    item: item, number: listing.watch.number,
+                    isPosting: item.id.map(postingReplies.contains) ?? false
+                ) {
+                    postReply(item)
                 }
             }
             if !listing.items.isEmpty {
@@ -275,12 +279,17 @@ struct PullRequestsView: View {
         }
     }
 
-    private func postReply(_ item: PRItem) async {
-        guard let id = item.id else { return }
-        do {
-            try await env.supervisor.postPRReply(itemId: id)
-        } catch {
-            errorMessage = errorText(error)
+    /// Held by the page, not the row, so the spinner survives the row being rebuilt mid-post.
+    private func postReply(_ item: PRItem) {
+        guard let id = item.id, !postingReplies.contains(id) else { return }
+        postingReplies.insert(id)
+        _Concurrency.Task {
+            defer { postingReplies.remove(id) }
+            do {
+                try await env.supervisor.postPRReply(itemId: id)
+            } catch {
+                errorMessage = errorText(error)
+            }
         }
     }
 
@@ -523,10 +532,10 @@ struct PRDecisionRow: View {
 struct PROwedReplyRow: View {
     let item: PRItem
     let number: Int
-    let post: () async -> Void
+    let isPosting: Bool
+    let post: () -> Void
 
     @State private var confirming = false
-    @State private var posting = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -540,21 +549,22 @@ struct PROwedReplyRow: View {
                     .font(.caption)
                     .foregroundStyle(.red)
             }
-            Button("Post reply to #\(number)…") { confirming = true }
-                .disabled(posting)
-                .help("Posts this reply on GitHub under your account")
+            HStack(spacing: 8) {
+                Button("Post reply to #\(number)…") { confirming = true }
+                    .disabled(isPosting)
+                    .help("Posts this reply on GitHub under your account")
+                if isPosting {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Posting reply to #\(number)")
+                }
+            }
         }
         .padding(.leading, 16)
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
         .confirmationDialog("Post this reply to #\(number) on GitHub?", isPresented: $confirming) {
-            Button("Post reply") {
-                posting = true
-                _Concurrency.Task {
-                    defer { posting = false }
-                    await post()
-                }
-            }
+            Button("Post reply", action: post)
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(item.replyBody ?? "")
