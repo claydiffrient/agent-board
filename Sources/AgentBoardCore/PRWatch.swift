@@ -355,6 +355,8 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
     public var reviewRequestsAt: Int64? = nil
     public var reviewRequestsJSON: String? = nil
     public var reviewRequestError: String? = nil
+    /// When the round's one fold-in of late feedback happened (SPEC §13.1 checking).
+    public var foldedInAt: Int64? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -375,7 +377,11 @@ public struct PRRound: Codable, FetchableRecord, MutablePersistableRecord, Ident
         case reviewRequestsAt = "review_requests_at"
         case reviewRequestsJSON = "review_requests_json"
         case reviewRequestError = "review_request_error"
+        case foldedInAt = "folded_in_at"
     }
+
+    /// Times the round's fixer was sent back: each failed check, and its fold-in, which is no failed check.
+    public var reopens: Int { checkFailures + (foldedInAt == nil ? 0 : 1) }
 
     /// The logins this round re-requested review from (SPEC §13.2).
     public var reviewRequests: [String] {

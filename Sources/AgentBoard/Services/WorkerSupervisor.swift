@@ -3321,6 +3321,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
         return false
     }
 
+    /// A fold-in triage that fails or never starts leaves its late items for the next round (SPEC §13.1).
     private func settleTriageRound(_ watch: PRWatch, project: Project) async {
         guard let triage = try? prWatches.triage(watchId: watch.id, round: watch.round),
               let task = try? tasks.get(triage.taskId)
@@ -3328,22 +3329,48 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             failTriageRound(watch, failure: "round \(watch.round)'s triage never started")
             return
         }
+        let foldIn = (try? prWatches.isFoldIn(triage)) == true
         switch task.column {
         case .done:
-            do {
-                if let next = try board.applyVerdicts(watchId: watch.id), next != .fixing {
-                    await postFactualReplies(watchId: watch.id, project: project)
-                }
-            } catch {
-                report(["could not apply the triage of \(watch.url): \(describe(error))"])
-            }
+            await applyVerdicts(watch, project: project)
         case .closed:
-            failTriageRound(watch, failure: task.closedReason ?? "the triage was closed")
+            if foldIn {
+                await applyVerdicts(watch, project: project, foldIn: false)
+            } else {
+                failTriageRound(watch, failure: task.closedReason ?? "the triage was closed")
+            }
         default:
             // Only a crash between creating the task and assigning its session leaves one with none.
             guard ((try? sessions.forTask(task.id)) ?? []).isEmpty else { return }
             try? tasks.delete(task.id)
-            failTriageRound(watch, failure: "the triage never got a session")
+            if foldIn {
+                await applyVerdicts(watch, project: project, foldIn: false)
+            } else {
+                failTriageRound(watch, failure: "the triage never got a session")
+            }
+        }
+    }
+
+    private func applyVerdicts(_ watch: PRWatch, project: Project, foldIn: Bool = true) async {
+        do {
+            switch try board.applyVerdicts(watchId: watch.id, foldIn: foldIn) {
+            case .triaging?:
+                guard !isFollowThroughHeld(project: project) else { return }
+                do {
+                    try await spawnTriager(watchId: watch.id)
+                } catch SupervisorError.capRefused, SupervisorError.shutdownOrdered {
+                    return
+                } catch {
+                    NSLog("PR follow-through: the fold-in triage of %@ did not start: %@", watch.url, describe(error))
+                    await applyVerdicts(watch, project: project, foldIn: false)
+                }
+            case nil, .fixing?, .publishing?:
+                break
+            default:
+                await postFactualReplies(watchId: watch.id, project: project)
+            }
+        } catch {
+            report(["could not apply the triage of \(watch.url): \(describe(error))"])
         }
     }
 
@@ -3362,7 +3389,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if try board.parkIfFixersFailing(watchId: watch.id) { return }
             guard try tasks.get(taskId)?.column == .ready,
                   try sessions.forTask(taskId).filter({ $0.reviewHead == nil && $0.state == .completed }).count
-                      <= round.checkFailures,
+                      <= round.reopens,
                   !isFollowThroughHeld(project: project),
                   case .proceed = try board.requestSpawn(taskId: taskId, requestedBy: "follow-through")
             else { return }
@@ -3400,7 +3427,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     return
                 }
                 let neverRan = reviewers.filter { SessionTermination.isSetupFailure($0.stopReason) }
-                if reviewers.count - neverRan.count - unconfirmed.count > round.checkFailures {
+                if reviewers.count - neverRan.count - unconfirmed.count > round.reopens {
                     try board.parkCheck(
                         watchId: watch.id, reason: "Round \(round.number)'s reviewer ended without a verdict."
                     )
