@@ -45,6 +45,42 @@ final class PRTriageRulingTests: XCTestCase {
         XCTAssertEqual(applied.replyBody, "The old name is public API.")
         XCTAssertEqual(applied.approach, "Keep the name")
     }
+
+    func testAPostedRulingReplyIsOwedAgainOnlyWhenTheReplyChanges() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let (watch, items) = try PRRulingFixtures.watch(f, threads: ["ASK"])
+        let id = try XCTUnwrap(items[0].id)
+        try PRRulingFixtures.ask(f, itemId: id)
+        try f.board.answerDecision(itemId: id, choice: .option("Keep the name"))
+        try store.recordReply(itemId: id, url: "https://github.com/octo/example/pull/7#discussion_r1")
+        func edit(_ body: String, now: Int64) throws {
+            try store.upsert(
+                projectId: f.project.id, snapshot: PRRulingFixtures.snapshot([PRRulingFixtures.thread("ASK", body: body)]),
+                now: now
+            )
+        }
+
+        try edit("Rename this, edited", now: 2_000)
+        try store.setVerdicts([
+            PRVerdictInput(itemId: id, verdict: .answer, approach: "Same.", replyBody: "The old name is public API."),
+        ], watchId: watch.id)
+        try f.db.writer.write { try $0.execute(sql: "UPDATE pr_item SET state = 'handled' WHERE id = ?", arguments: [id]) }
+        XCTAssertNil(try store.owedReply(itemId: id))
+
+        try edit("Rename this, and the file too", now: 3_000)
+        try store.setVerdicts([
+            PRVerdictInput(
+                itemId: id, verdict: .decision, approach: "Changed.", decisionQuestion: "Rename the file?",
+                decisionOptions: [
+                    PRDecisionOption(label: "Rename it", verdict: .fix),
+                    PRDecisionOption(label: "Keep it", verdict: .answer, replyBody: "The file name stays."),
+                ]
+            ),
+        ], watchId: watch.id)
+        try f.board.answerDecision(itemId: id, choice: .reply("The file is generated; renaming it breaks the build."))
+        XCTAssertNotNil(try store.owedReply(itemId: id))
+    }
 }
 
 enum PRRulingFixtures {

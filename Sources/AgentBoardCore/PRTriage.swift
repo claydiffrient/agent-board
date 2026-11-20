@@ -104,7 +104,7 @@ extension PRWatchStore {
                         )
                     }
                     item.verdict = ruled.verdict
-                    item.replyBody = ruled.replyBody
+                    item.setReply(ruled.replyBody)
                     item.decisionAnswer = ruling.choice ?? ruling.note
                     item.approach = item.decisionAnswer
                     item.updatedAt = now
@@ -113,7 +113,7 @@ extension PRWatchStore {
                 }
                 item.verdict = input.verdict
                 item.approach = input.approach
-                item.replyBody = Self.nonBlank(input.replyBody)
+                item.setReply(Self.nonBlank(input.replyBody))
                 if input.verdict == .decision {
                     item.decisionQuestion = Self.nonBlank(input.decisionQuestion)
                     item.decisionOptionsJSON = Self.encodeOptions(input.decisionOptions ?? [])

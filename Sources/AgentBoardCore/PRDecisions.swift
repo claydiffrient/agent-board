@@ -29,12 +29,12 @@ extension Board {
                 answer = option.label
                 ruled = .choose
                 item.verdict = option.verdict
-                item.replyBody = option.verdict == .answer ? option.replyBody : nil
+                item.setReply(option.verdict == .answer ? option.replyBody : nil)
             case .reply(let text):
                 answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 ruled = .reply
                 item.verdict = .answer
-                item.replyBody = answer
+                item.setReply(answer)
             }
             guard !answer.isEmpty else { throw PRVerdictRejection("The answer is empty.") }
             guard item.verdict == .fix || item.verdict == .answer else {

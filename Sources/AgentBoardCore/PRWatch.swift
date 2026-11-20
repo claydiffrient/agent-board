@@ -264,6 +264,12 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
 
     public var isOpenDecision: Bool { state == .open && verdict == .decision }
 
+    /// Sets the reply to post. `replyURL` is the post of the current `replyBody`, so a different reply is owed again.
+    mutating func setReply(_ body: String?) {
+        if body != replyBody { replyURL = nil }
+        replyBody = body
+    }
+
     public var infraFailure: PRInfraFailure? {
         guard kind == .check, verdict == .answer, let approach else { return nil }
         return PRInfraFailure(rawValue: approach)

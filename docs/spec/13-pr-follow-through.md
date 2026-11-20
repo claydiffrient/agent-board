@@ -616,8 +616,8 @@ Items are keyed by the GitHub node id of the thread, review, comment or check th
 so each is handled once per round; a new reply on a thread reopens it for
 triage (§4), whether it was handled or still open with a verdict. That reset
 clears only the item's own per-run columns: a ruling the author gave on it
-(§15) is in its own table and stands, so triage can only ask them again
-(§13.2), and a fixer prompt built for the item still quotes their answer. The human's own comments, resolved threads, and outdated threads
+(§15) is in its own table and stands, so triage may apply that ruling or ask
+them again (§13.2), and a fixer prompt built for the item still quotes their answer. The human's own comments, resolved threads, and outdated threads
 are never turned into items, though an outdated or viewer-latest thread keeps an
 owed item open (phase 1 above).
 
@@ -711,7 +711,11 @@ keeps an answered item's decision question, options and answer for that.
 reply, which applies the ruling. Applying it sets the item as
 `Board.answerDecision` did, its approach and `decision_answer` the author's
 answer, so the round's check grades it, and Post reply owes its reply, as
-though the author had answered again. Anything else is refused:
+though the author had answered again, unless that reply is already posted: a
+reset keeps a ruled item's `reply_body` and `reply_url` once its reply is
+posted, and `reply_url` is cleared whenever `reply_body` changes
+(`PRItem.setReply`), so re-applying the ruling owes nothing while a new answer
+with a different reply is owed. Anything else is refused:
 `PRTriageStore.setVerdicts` reads `RulingStore.standing` in the same
 transaction, and the refusal names the ruling and what it settled and writes
 nothing. So a reset never turns the author's answer into triage's, and an
@@ -756,7 +760,8 @@ keeps only its `reply_error` and stays owed, and the project gets a
 `pr_poll_problem` row naming the PR, which stays through later polls until one
 reads that PR again (or its watch ends). An item reopened by a new reply loses `reply_url`,
 `reply_error` and `reply_abandoned_at`, so once it is handled again it gets a
-fresh reply. No thread is ever resolved: resolving is the reviewer's call.
+fresh reply; one with a standing ruling whose reply was posted keeps
+`reply_url` and `reply_body` (**The author's rulings**, above). No thread is ever resolved: resolving is the reviewer's call.
 
 **Re-requesting review.** When the project's `reRequestReviews` setting is on,
 a round whose push was recorded asks for review again, right after its replies.
@@ -1000,9 +1005,12 @@ on at all.
   `COALESCE(decision_notified_at, created_at)`. It also mirrors the answer into
   `decision_answer` and moves the item to the next round (`round` one past the
   watch's) with the answer as its `approach`. An option button applies that
-  option's verdict. A `fix` option leaves the item open, with no task, for the
-  next round's fixer (§13.1), whose section for it quotes the ruling's question
-  and answer, never `approach`. An `answer` option handles the item with the
+  option's verdict. A `fix` option leaves the item open, with no task, for a
+  fixer: answered while a round runs and before that round has folded anything
+  in, it joins that round's fix set once, at the fold-in before publishing
+  (§13.1 "Folding in late feedback"); otherwise it goes to the next round's
+  fixer. The fixer's section for it quotes the ruling's question and answer,
+  never `approach`. An `answer` option handles the item with the
   option's `reply_body` and makes no task; the app's own decisions (the
   verified freeze, §13.1) carry `answer` options with no reply, which handle it
   with nothing to post. A typed reply answers it as an `answer`: the item is
