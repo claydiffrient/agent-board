@@ -596,22 +596,27 @@ public struct WorktreeManager: Sendable {
     /// Git refuses the removal rather than destroy uncommitted work. Processes left running in the
     /// worktree are stopped, then the teardown hook runs (SPEC §3.1 "Removing a worktree"), and
     /// whatever it leaves in a worktree that was clean before it is forced past, so a hook can never
-    /// be what keeps a worktree.
+    /// be what keeps a worktree. `agentHosts` are the board's own session hosts in it, stopped even
+    /// with a terminal.
     @discardableResult
-    public func remove(path: URL) throws -> WorktreeRemovalReport {
+    public func remove(path: URL, agentHosts: Set<PIDIdentity> = []) throws -> WorktreeRemovalReport {
         var cleanBeforeTeardown = false
         var teardownFailure: String?
         var processes = WorktreeProcessStop()
         // Git refuses to remove the main checkout, but only after the hook would have run in it.
         if !Self.samePath(path, repoPath) {
-            processes = WorktreeProcessStopper.stop(in: path)
+            processes = WorktreeProcessStopper.stop(in: path, agentHosts: agentHosts)
             if let teardown {
                 cleanBeforeTeardown = (try? hasUncommittedChanges(worktree: path)) == false
                 teardownFailure = runTeardown(teardown, in: path)
             }
         }
         let diagnostics = runWorktreeRemoveHooks(worktreePath: path)
-        try git(["worktree", "remove"] + (cleanBeforeTeardown ? ["--force"] : []) + [path.path])
+        do {
+            try git(["worktree", "remove"] + (cleanBeforeTeardown ? ["--force"] : []) + [path.path])
+        } catch {
+            throw Self.namingLeftovers(error, in: path)
+        }
         let notice = [processes.notice(for: path), teardownFailure].compactMap { $0 }.joined(separator: "\n")
         return WorktreeRemovalReport(
             hookDiagnostics: diagnostics, teardownFailure: teardownFailure, processes: processes,
@@ -620,6 +625,24 @@ public struct WorktreeManager: Sendable {
     }
 
     static let teardownOutputKept = 2_000
+    static let leftoversListed = 10
+
+    /// SPEC §3.1: what is still in a worktree git could not delete, so the leak is diagnosable after the fact.
+    static func namingLeftovers(_ error: Error, in path: URL) -> Error {
+        guard "\(error)".contains("Directory not empty"),
+              let walk = FileManager.default.enumerator(atPath: path.path)
+        else { return error }
+        var leaves: [String] = []
+        while let relative = walk.nextObject() as? String {
+            if walk.fileAttributes?[.type] as? FileAttributeType != .typeDirectory { leaves.append(relative) }
+        }
+        guard !leaves.isEmpty else { return error }
+        leaves.sort()
+        let more = leaves.count > leftoversListed ? " and \(leaves.count - leftoversListed) more" : ""
+        return AgentRuntimeError(
+            "\(error)\nLeft in \(path.path): \(leaves.prefix(leftoversListed).joined(separator: ", "))\(more)"
+        )
+    }
 
     /// Nil when the hook exited 0. Runs as the leader of its own process group, which a timeout kills whole.
     func runTeardown(_ teardown: WorktreeTeardownCommand, in worktree: URL) -> String? {
