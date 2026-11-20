@@ -221,8 +221,13 @@ The poll itself moves a watch only among watching,
 settling, readyToVerify and verified, by the rules above, and a
 watch whose PR has left the open list settles to merged or closed by
 `gh pr view`. A PR whose GitHub `mergeable` is `CONFLICTING` gets one item of
-kind `conflict`, keyed `conflict:<head oid>`, which is handled once GitHub can
-merge that head or the head moves. A PR whose head branch lives in another
+kind `conflict`, keyed `conflict:<head oid>`, which is handled once GitHub
+reports that head `MERGEABLE` or the head moves. Any other `mergeable`,
+`UNKNOWN` included (GitHub's answer while it recomputes, as after the base
+moves), leaves the item open. A conflict that returns on the same head reopens
+its handled item, untriaged and in the watch's current round, when the watch is
+watching, settling, readyToVerify or verified; mid-round it waits for the round
+to end. A dismissed conflict item stays dismissed. A PR whose head branch lives in another
 repository (`isCrossRepository`) is a fork: the poll parks its watch from
 watching, settling, readyToVerify or verified, with a `parked_reason` naming
 the fork, since publishing pushes only to the project's `origin`. Resuming a

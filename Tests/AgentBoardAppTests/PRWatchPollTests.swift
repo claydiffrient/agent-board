@@ -519,6 +519,29 @@ final class PRWatchPollTests: XCTestCase {
         XCTAssertEqual(try watches.items(watchId: watch.id).map(\.state), [.handled])
     }
 
+    func testAConflictStaysOpenThroughUnknownAndReopensWhenItReturnsOnTheSameHead() async throws {
+        try enable()
+        for mergeable in ["CONFLICTING", "UNKNOWN", "CONFLICTING"] {
+            answer(pullRequest(mergeable: mergeable))
+            await fixture.supervisor.pollPRWatches()
+            XCTAssertEqual(try watches.items(watchId: try onlyWatch().id).map(\.state), [.open], mergeable)
+        }
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .settling)
+
+        answer(pullRequest())
+        await fixture.supervisor.pollPRWatches()
+        answer(pullRequest(mergeable: "CONFLICTING"))
+        await fixture.supervisor.pollPRWatches()
+        let conflict = try XCTUnwrap(try watches.items(watchId: watch.id).first)
+        XCTAssertEqual(conflict.state, .open)
+
+        try watches.dismissItem(itemId: try XCTUnwrap(conflict.id), reason: "Merging by hand.", by: PRWatchStore.humanDismissal)
+        answer(pullRequest(mergeable: "CONFLICTING"))
+        await fixture.supervisor.pollPRWatches()
+        XCTAssertEqual(try watches.items(watchId: watch.id).map(\.state), [.dismissed])
+    }
+
     func testAForkPullRequestParksWithAReasonNamingTheFork() async throws {
         try enable()
         answer(pullRequest(threads: [thread("T_open", by: "reviewer")], fork: "someone/app"))
