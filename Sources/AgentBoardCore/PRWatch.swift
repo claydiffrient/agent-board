@@ -264,6 +264,11 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
 
     public var isOpenDecision: Bool { state == .open && verdict == .decision }
 
+    public var infraFailure: PRInfraFailure? {
+        guard kind == .check, verdict == .answer, let approach else { return nil }
+        return PRInfraFailure(rawValue: approach)
+    }
+
     /// SPEC §13.1: an open fix or decision outlives an outdated or viewer-latest thread; an untriaged item
     /// outlives only an outdated one, since the viewer's own reply retires it.
     func staysOpen(under incoming: PRSnapshotItem) -> Bool {
@@ -458,6 +463,8 @@ public struct PRFailedCheck: Sendable, Equatable {
     public var jobId: Int64?
     /// The end of the job's failed-step log, once the poller has read it.
     public var logTail: String?
+    /// Set by the poller when the log or summary matches `infraFailurePatterns` (SPEC §13.1).
+    public var infraFailure: PRInfraFailure?
 
     public init(
         githubNodeId: String, name: String, url: String? = nil, summary: String, jobId: Int64? = nil,
@@ -471,11 +478,29 @@ public struct PRFailedCheck: Sendable, Equatable {
         self.logTail = logTail
     }
 
+    /// The workflow run of a GitHub Actions job.
+    public var actionsRunId: Int64? { jobId == nil ? nil : Self.actionsRunId(in: url) }
+
+    /// The run id in a GitHub Actions `/actions/runs/<id>/` details URL.
+    public static func actionsRunId(in url: String?) -> Int64? {
+        guard let url, let range = url.range(of: #"/actions/runs/\d+"#, options: .regularExpression) else { return nil }
+        return Int64(url[range].dropFirst("/actions/runs/".count))
+    }
+
     func itemBody(head: String) -> String {
         let lead = "`\(name)` failed on \(head.prefix(7))" + (url.map { ": \($0)" } ?? ".")
         guard let logTail else { return "\(lead)\n\n\(summary)" }
         return "\(lead)\n\nThe end of its failed steps' log:\n\(logTail)"
     }
+}
+
+/// A failed check no change could cause. Its item carries an `answer` verdict from the start, so triage never
+/// sees it, and `note` as its approach, which the Pull Requests row shows (SPEC §13.1).
+public enum PRInfraFailure: String, Sendable, Equatable, CaseIterable {
+    case needsRerun = "CI infrastructure failure, needs a rerun"
+    case rerunRequested = "CI infrastructure failure, rerun requested"
+
+    public var note: String { rawValue }
 }
 
 public struct PRSnapshotItem: Sendable, Equatable {

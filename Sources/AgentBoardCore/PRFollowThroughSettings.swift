@@ -29,7 +29,7 @@ public struct PRFollowThroughRoles: Codable, Sendable, Equatable {
 }
 
 /// `settings_json.prFollowThrough` (SPEC §4). Every work-specific value lives here, never in a code
-/// default, so everything starts off or empty.
+/// default, so everything work-specific starts off or empty.
 public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
     public var enabled: Bool = false
     /// Nil makes the user's merge the verification.
@@ -55,6 +55,17 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
     /// Check-run names or status contexts, matched exactly, left out of whether CI passed (SPEC §13.1):
     /// checks that only go green once a human has verified the PR.
     public var checksAwaitingVerification: [String] = []
+    /// Regexes matched against a failed check's log tail or summary; a match is an infrastructure failure that
+    /// gets a rerun instead of triage (SPEC §13.1).
+    public var infraFailurePatterns: [String] = Self.defaultInfraFailurePatterns
+
+    /// Bazel's remote, local-environment, BES-upload and cache-eviction exit codes, and BuildBuddy's endpoint
+    /// refusing a connection, none of which a change can cause.
+    public static let defaultInfraFailurePatterns = [
+        #"exit code (3[4689]|45)\b"#,
+        "Build Event Protocol upload failed",
+        #"(?i)\bunavailable\b.*\bbuildbuddy\b"#,
+    ]
 
     public init(
         enabled: Bool = false,
@@ -69,7 +80,8 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         reRequestReviews: Bool = false,
         roles: PRFollowThroughRoles = PRFollowThroughRoles(),
         privateTerms: [String] = [],
-        checksAwaitingVerification: [String] = []
+        checksAwaitingVerification: [String] = [],
+        infraFailurePatterns: [String] = Self.defaultInfraFailurePatterns
     ) {
         self.enabled = enabled
         self.verificationLabel = verificationLabel
@@ -84,6 +96,15 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         self.roles = roles
         self.privateTerms = privateTerms
         self.checksAwaitingVerification = checksAwaitingVerification
+        self.infraFailurePatterns = infraFailurePatterns
+    }
+
+    /// Whether any of `infraFailurePatterns` matches `text`; a pattern that does not compile matches nothing.
+    public func isInfraFailure(_ text: String) -> Bool {
+        let range = NSRange(text.startIndex..., in: text)
+        return infraFailurePatterns.contains { pattern in
+            (try? NSRegularExpression(pattern: pattern))?.firstMatch(in: text, range: range) != nil
+        }
     }
 
     /// The label Mark verified adds, or nil when none is set and the merge is the verification.
@@ -145,7 +166,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case enabled, verificationLabel, requireApproval, settleMinutes, roundCap, dailyBudgetUSD, minBatteryPercent
         case verifyCommand, postFactualReplies, postFactualRepliesSince, reRequestReviews, roles, privateTerms
-        case checksAwaitingVerification
+        case checksAwaitingVerification, infraFailurePatterns
     }
 
     public init(from decoder: Decoder) throws {
@@ -167,6 +188,8 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         privateTerms = try c.decodeIfPresent([String].self, forKey: .privateTerms) ?? defaults.privateTerms
         checksAwaitingVerification = try c.decodeIfPresent([String].self, forKey: .checksAwaitingVerification)
             ?? defaults.checksAwaitingVerification
+        infraFailurePatterns = try c.decodeIfPresent([String].self, forKey: .infraFailurePatterns)
+            ?? defaults.infraFailurePatterns
     }
 
     /// Writes a nil `minBatteryPercent` as null: an absent key decodes as the default, 50.
@@ -186,5 +209,6 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         try c.encode(roles, forKey: .roles)
         try c.encode(privateTerms, forKey: .privateTerms)
         try c.encode(checksAwaitingVerification, forKey: .checksAwaitingVerification)
+        try c.encode(infraFailurePatterns, forKey: .infraFailurePatterns)
     }
 }

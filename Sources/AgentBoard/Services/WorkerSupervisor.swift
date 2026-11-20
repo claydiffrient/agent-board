@@ -2915,20 +2915,42 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// The failed checks on an awaitingCI watch's pushed head that have no item yet, each GitHub Actions
     /// run with the end of its failed-step log (SPEC §13.1). Empty in any other state, so a log is read
-    /// once per run.
+    /// once per run. One matching `infraFailurePatterns` is marked an infrastructure failure, and a GitHub
+    /// Actions run's failed jobs are rerun, once per run on a head.
     private func newFailedChecks(_ snapshot: PRSnapshot, watch: PRWatch, project: Project) async throws -> [PRFailedCheck] {
         guard watch.state == .awaitingCI, !snapshot.failedChecks.isEmpty,
               try prWatches.currentRound(watchId: watch.id)?.pushedHeadOid == watch.headOid
         else { return [] }
-        let known = Set(try prWatches.items(watchId: watch.id).map(\.githubNodeId))
+        let items = try prWatches.items(watchId: watch.id)
+        let known = Set(items.map(\.githubNodeId))
+        let headSeenAt = watch.headChangedAt ?? watch.createdAt
+        var rerun = Set(items.filter { $0.infraFailure == .rerunRequested && $0.createdAt >= headSeenAt }.compactMap {
+            PRFailedCheck.actionsRunId(in: $0.url)
+        })
+        let settings = project.settings.prFollowThrough
         let reader = pullRequestWatch
         let cwd = URL(fileURLWithPath: project.repoPath)
+        let owner = snapshot.repoOwner, name = snapshot.repoName
+        var requested: Set<Int64> = []
         var checks: [PRFailedCheck] = []
         for var check in snapshot.failedChecks where !known.contains(check.githubNodeId) {
             if let jobId = check.jobId {
-                let owner = snapshot.repoOwner, name = snapshot.repoName
                 check.logTail = await offMainResult {
                     reader.failedLogTail(owner: owner, name: name, jobId: jobId, cwd: cwd)
+                }
+            }
+            if settings.isInfraFailure(check.logTail ?? check.summary) {
+                check.infraFailure = .needsRerun
+                if let runId = check.actionsRunId {
+                    if requested.contains(runId) {
+                        check.infraFailure = .rerunRequested
+                    } else if !rerun.contains(runId) {
+                        rerun.insert(runId)
+                        if await offMainResult({ reader.rerunFailedJobs(owner: owner, name: name, runId: runId, cwd: cwd) }) {
+                            requested.insert(runId)
+                            check.infraFailure = .rerunRequested
+                        }
+                    }
                 }
             }
             checks.append(check)
