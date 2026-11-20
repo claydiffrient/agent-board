@@ -3225,7 +3225,8 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
             if let settled = try prWatches.settleAwaitingCI(watchId: watch.id, failedChecks: failed) {
                 watch.state = settled
             }
-            let open = try prWatches.openItems(watchId: watch.id)
+            let batched = try prWatches.batchedReviewers(watchId: watch.id)
+            let open = try prWatches.openItems(watchId: watch.id).filter { !$0.isBatched(among: batched) }
             if let next = PRWatchTransition.next(
                 from: watch, snapshot: snapshot, openItems: open.count,
                 itemsAwaitingRound: open.filter { $0.verdict == nil || ($0.verdict == .fix && $0.round > watch.round) }.count,

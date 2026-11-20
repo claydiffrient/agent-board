@@ -46,14 +46,7 @@ extension PRWatchStore {
     /// resumed (SPEC §13.1). Interrupted and failed triages do not count. Returns whether it parked.
     static func parkAtRoundCap(_ db: Database, watch: inout PRWatch, now: Int64) throws -> Bool {
         let cap = max(try Project.fetchOne(db, key: watch.projectId)?.settings.prFollowThrough.roundCap ?? 3, 1)
-        let rounds = try Int.fetchOne(
-            db,
-            sql: """
-            SELECT COUNT(*) FROM pr_round WHERE watch_id = ? AND started_at >= ?
-            AND (outcome IS NULL OR outcome NOT IN ('interrupted', 'triage_failed'))
-            """,
-            arguments: [watch.id, watch.resumedAt ?? 0]
-        ) ?? 0
+        let rounds = try roundsSinceResume(db, watch: watch)
         guard rounds >= cap else { return false }
         watch.park(
             reason: "#\(watch.number) has run its round cap of \(cap) round\(cap == 1 ? "" : "s") without the "
@@ -64,6 +57,18 @@ extension PRWatchStore {
         try watch.update(db)
         try report(db, watch: watch, .parked(reason: watch.parkedReason))
         return true
+    }
+
+    /// Rounds started since the watch was last resumed, or ever, interrupted and failed triages aside.
+    static func roundsSinceResume(_ db: Database, watch: PRWatch) throws -> Int {
+        try Int.fetchOne(
+            db,
+            sql: """
+            SELECT COUNT(*) FROM pr_round WHERE watch_id = ? AND started_at >= ?
+            AND (outcome IS NULL OR outcome NOT IN ('interrupted', 'triage_failed'))
+            """,
+            arguments: [watch.id, watch.resumedAt ?? 0]
+        ) ?? 0
     }
 
     /// Moves `watch` to its next round, writing the watch in whatever state the caller set.
@@ -129,6 +134,31 @@ extension PRWatchStore {
             sql: "SELECT COUNT(*) FROM pr_item WHERE watch_id = ? AND state = 'open' AND verdict IS NULL",
             arguments: [watchId]
         ) ?? 0
+    }
+
+    public func batchedReviewers(watchId: String) throws -> Set<String> {
+        try db.reader.read { db in
+            guard let watch = try PRWatch.fetchOne(db, key: watchId) else { return [] }
+            return try Self.batchedReviewers(db, watch: watch)
+        }
+    }
+
+    /// The project's `batchedReviewers`, lowercased, or none until a round has started since the watch was
+    /// created or last resumed, so that first round still takes their items (SPEC §13.1).
+    static func batchedReviewers(_ db: Database, watch: PRWatch) throws -> Set<String> {
+        let logins = try Project.fetchOne(db, key: watch.projectId)?.settings.prFollowThrough.batchedReviewers ?? []
+        guard !logins.isEmpty else { return [] }
+        return try roundsSinceResume(db, watch: watch) == 0 ? [] : Set(logins.map { $0.lowercased() })
+    }
+
+    /// Untriaged items that send a watch to settling: every one but a batched reviewer's (SPEC §13.1).
+    static func roundStartingItemCount(_ db: Database, watchId: String) throws -> Int {
+        guard let watch = try PRWatch.fetchOne(db, key: watchId) else { return 0 }
+        let batched = try batchedReviewers(db, watch: watch)
+        guard !batched.isEmpty else { return try untriagedItemCount(db, watchId: watchId) }
+        return try PRItem.filter(
+            Column("watch_id") == watchId && Column("state") == PRItemState.open && Column("verdict") == nil
+        ).fetchAll(db).filter { !$0.isBatched(among: batched) }.count
     }
 
     /// Open `fix` items an answered decision or a resume moved past the watch's round (SPEC §13.4),
@@ -242,7 +272,7 @@ extension Board {
             if fixes > 0 {
                 try Self.fixUnlessStacked(db, watch: &watch)
             } else {
-                watch.state = untriaged > 0 ? .settling : .watching
+                watch.state = try PRWatchStore.roundStartingItemCount(db, watchId: watchId) > 0 ? .settling : .watching
             }
             if watch.state != .fixing {
                 try PRWatchStore.endRound(db, watchId: watchId, number: watch.round, outcome: .triaged, now: now)

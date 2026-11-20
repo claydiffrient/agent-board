@@ -117,7 +117,7 @@ extension PRWatchStore {
                 by: "follow-through", at: now
             )
         }
-        watch.state = try untriagedItemCount(db, watchId: watch.id) > 0
+        watch.state = try roundStartingItemCount(db, watchId: watch.id) > 0
             || answeredFixCount(db, watchId: watch.id) > 0 ? .settling : .watching
         watch.updatedAt = now
         try watch.update(db)

@@ -299,7 +299,7 @@ extension Board {
                     db, taskId, reason: "Round \(round.number) has nothing left to fix.\(handedOver)",
                     by: "follow-through", at: now
                 )
-                watch.state = try PRWatchStore.untriagedItemCount(db, watchId: watchId) > 0 ? .settling : .watching
+                watch.state = try PRWatchStore.roundStartingItemCount(db, watchId: watchId) > 0 ? .settling : .watching
                 watch.updatedAt = now
                 try watch.update(db)
                 try PRWatchStore.report(db, watch: watch, .round(number: round.number, outcome: .triaged))
@@ -509,7 +509,7 @@ extension Board {
                   ).fetchCount(db) == 0
             else { return nil }
             try PRWatchStore.endRound(db, watchId: watchId, number: round.number, outcome: .triaged, now: now)
-            watch.state = try PRWatchStore.untriagedItemCount(db, watchId: watchId) > 0 ? .settling : .watching
+            watch.state = try PRWatchStore.roundStartingItemCount(db, watchId: watchId) > 0 ? .settling : .watching
             watch.updatedAt = now
             try watch.update(db)
             try PRWatchStore.report(db, watch: watch, .round(number: round.number, outcome: .triaged))

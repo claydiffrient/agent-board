@@ -264,6 +264,13 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
 
     public var isOpenDecision: Bool { state == .open && verdict == .decision }
 
+    /// An untriaged item authored by one of `reviewers`, lowercased logins, so it waits for a round something
+    /// else starts (SPEC §13.1).
+    public func isBatched(among reviewers: Set<String>) -> Bool {
+        guard state == .open, verdict == nil, let author else { return false }
+        return reviewers.contains(author.lowercased())
+    }
+
     public var infraFailure: PRInfraFailure? {
         guard kind == .check, verdict == .answer, let approach else { return nil }
         return PRInfraFailure(rawValue: approach)
@@ -621,10 +628,12 @@ public struct PRWatchListing: Sendable, Equatable, Identifiable {
     public var owedReplies: [PRItem]
     /// Oldest first.
     public var sessions: [PRListingSession]
+    /// The `items` waiting for a round something else starts (SPEC §13.1).
+    public var batchedItemIds: Set<Int64>
 
     public init(
         watch: PRWatch, openItems: Int, decisions: [PRItem] = [], items: [PRItem] = [],
-        owedReplies: [PRItem] = [], sessions: [PRListingSession] = []
+        owedReplies: [PRItem] = [], sessions: [PRListingSession] = [], batchedItemIds: Set<Int64> = []
     ) {
         self.watch = watch
         self.openItems = openItems
@@ -632,6 +641,7 @@ public struct PRWatchListing: Sendable, Equatable, Identifiable {
         self.items = items
         self.owedReplies = owedReplies
         self.sessions = sessions
+        self.batchedItemIds = batchedItemIds
     }
 
     public var id: String { watch.id }
