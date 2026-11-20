@@ -603,6 +603,9 @@ struct PullRequestRow: View {
                         .font(.caption)
                         .lineLimit(4)
                 }
+                ForEach(listing.items.filter { $0.infraFailure != nil }) { item in
+                    infraFailureNote(item)
+                }
             }
             Spacer(minLength: 8)
             ForEach(listing.sessions) { session in
@@ -642,6 +645,20 @@ struct PullRequestRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// SPEC §13.1: a failed check no change could cause, shown here instead of asking for a decision.
+    @ViewBuilder private func infraFailureNote(_ item: PRItem) -> some View {
+        let note = item.infraFailure?.note ?? ""
+        if let url = item.url.flatMap(URL.init(string:)) {
+            Link(note, destination: url)
+                .font(.caption)
+                .help(item.body)
+        } else {
+            Text(note)
+                .font(.caption)
+                .help(item.body)
+        }
     }
 
     /// SPEC §13.4: opens the session's terminal window, as the Status page's attach button does.

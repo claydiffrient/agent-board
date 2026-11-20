@@ -91,7 +91,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
     /// second failed check run, `CR_listed`.
     private func answer(
         threads: [[String: Any]], failedRun: (node: String, job: Int64)? = nil, pendingStatus: String? = nil,
-        failedListed: String? = nil
+        failedListed: String? = nil, failedApp: (node: String, summary: String)? = nil
     ) {
         var contexts: [[String: Any]] = failedRun.map { run in [[
             "id": run.node, "databaseId": run.job, "name": "build", "status": "COMPLETED", "conclusion": "FAILURE",
@@ -107,7 +107,13 @@ final class PRFollowThroughLoopTests: XCTestCase {
         if let failedListed {
             contexts.append(["id": "CR_listed", "name": failedListed, "status": "COMPLETED", "conclusion": "FAILURE"])
         }
-        let state = failedRun != nil ? "FAILURE" : pendingStatus != nil ? "PENDING" : "SUCCESS"
+        if let failedApp {
+            contexts.append([
+                "id": failedApp.node, "name": "remote-ci", "status": "COMPLETED", "conclusion": "FAILURE",
+                "summary": failedApp.summary, "detailsUrl": "https://ci.example.com/invocation/1",
+            ])
+        }
+        let state = failedRun != nil || failedApp != nil ? "FAILURE" : pendingStatus != nil ? "PENDING" : "SUCCESS"
         let rollup: [String: Any] = ["state": state, "contexts": ["nodes": contexts]]
         fixture.gh.answerSearch([AuthoredPullRequest(repository: repository, number: 12, url: url, title: "Add widgets")])
         fixture.gh.answerGraphQL(repository: repository, viewer: "me", pullRequests: [[
@@ -1081,6 +1087,38 @@ final class PRFollowThroughLoopTests: XCTestCase {
         answer(threads: [], failedRun: ("CR_1", 101), failedListed: "example-verification")
         await poll()
         XCTAssertEqual(try checkItems.map(\.githubNodeId), ["CR_1"])
+    }
+
+    func testAnInfrastructureFailureOutsideActionsWaitsOnTheRowAndNeverReachesTriage() async throws {
+        let (tip, _) = try await passedRound()
+        await poll()
+        head = tip
+        answer(threads: [], failedApp: ("CR_infra", "ERROR: The Build Event Protocol upload failed. Exit code 34."))
+        await poll()
+
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .watching)
+        XCTAssertEqual(try triageTasks().count, 1, "only round 1's triager")
+        let item = try XCTUnwrap(try checkItems.first)
+        XCTAssertEqual(item.infraFailure, .needsRerun)
+        XCTAssertEqual(item.state, .open)
+    }
+
+    func testAnInfrastructureFailureInActionsRerunsItsFailedJobsOnceAndWaitsForTheRerun() async throws {
+        let (tip, _) = try await passedRound()
+        await poll()
+        fixture.gh.answerFailedLog(jobId: 101, log: "bazel test //...\nError: Process completed with exit code 34.\n")
+        let rerun = PullRequestWatchReader.rerunFailedArguments(owner: "example-org", name: "app", runId: 7)
+        fixture.gh.answer(arguments: rerun, stdout: "")
+        head = tip
+        answer(threads: [], failedRun: ("CR_1", 101))
+        await poll()
+        await poll()
+
+        XCTAssertEqual(fixture.gh.calls.filter { $0 == rerun }.count, 1)
+        XCTAssertEqual(try onlyWatch().state, .awaitingCI)
+        XCTAssertEqual(try checkItems.map(\.infraFailure), [.rerunRequested])
+        XCTAssertEqual(try triageTasks().count, 1, "only round 1's triager")
     }
 
     private var checkItems: [PRItem] {

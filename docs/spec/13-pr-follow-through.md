@@ -524,8 +524,21 @@ wait, under the same holds and the same round cap, so a red, fix, push, red
 loop parks once `roundCap` rounds have run. Red with no new failed check to
 record goes to watching. A check item becomes handled once its run is no longer
 a failed check on the head the poll reads (a rerun, or a new head); the
-triager is told it is usually `fix`, or `decision` when the failure looks
-unrelated to the change. Phase 3's single decision item per red head, keyed
+triager is told it is usually `fix`, `decision` when the failure looks
+unrelated to the change, and `answer` with no `reply_body`, never `decision`,
+when it is clearly CI infrastructure (no test or compile failure in the log).
+A failed check whose log tail or summary matches one of `infraFailurePatterns`
+(§13.3) is an infrastructure failure instead: its item is recorded already
+`answer`, with its approach the note the Pull Requests row shows linked to the
+run, so it is never triaged and settles nothing. A GitHub Actions run gets
+`gh run rerun <run id> --failed`, once per run on a head, its note reads "CI
+infrastructure failure, rerun requested", and the watch stays in awaitingCI
+while that item is open, up to 30 minutes, so the rerun's own result is read
+as above. Any other check, or a run already rerun on this head or whose rerun
+`gh` refused, reads "CI infrastructure failure, needs a rerun", and the watch
+goes to watching. Either item is handled like any check item, by a passing
+rerun or a new head. A rerun publishes nothing and pushes nothing, so D8 (§1,
+§13.5) does not gate it. Phase 3's single decision item per red head, keyed
 `checks:<head oid>`, is gone: migration `pr_item_failed_checks` dismisses any
 still open.
 
@@ -811,6 +824,7 @@ battery minimum aside, so a project that never opts in pays nothing:
 | `roles.triage` / `roles.fixer` / `roles.reviewer` / `roles.followupCheck` | each `{rosterAgentId?, model?}`, unset | 2 (`triage`), 3 (the rest) |
 | `privateTerms` | `[]` | 1 |
 | `checksAwaitingVerification` | `[]` — check-run names or status contexts, matched exactly, ignored when deciding whether CI has passed (§13.1) | 4 |
+| `infraFailurePatterns` | Bazel's remote, local-environment, BES-upload and cache-eviction exit codes (`exit code (3[4689]\|45)\b`), `Build Event Protocol upload failed`, and BuildBuddy reported unavailable — regexes matched against a failed check's log tail or summary; a match is rerun or noted on the row instead of triaged (§13.1). Edited one per line on the PR Follow-Through tab under the checks that wait on verification | 4 |
 
 `roles` names a roster agent (§4) for each of the four model-driven jobs; a
 work-specific lens for a role — a follow-up grading rubric, a house style for

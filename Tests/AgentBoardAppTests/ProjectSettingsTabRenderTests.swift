@@ -644,7 +644,7 @@ final class ProjectSettingsTabRenderTests: XCTestCase {
         let view = ProjectSettingsSheet(project: project, workspaces: [], initialTab: .prFollowThrough, onDeleted: {})
             .environment(renderEnvironment(db: db))
         // Publish guard sits further down this tab than the 900pt mounts elsewhere in this file hold.
-        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 1100))
+        let mount = OffscreenMount(view, size: CGSize(width: 780, height: 1250))
         defer { mount.close() }
         let wanted = ["Watch", "Verification", "Replies", "Publish guard", "Globex"]
         var lines: [String] = []
