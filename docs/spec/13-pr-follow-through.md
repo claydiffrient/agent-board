@@ -52,7 +52,8 @@ triage.
 - **checking** *(phase 3)* — the `reviewer` role reviews the round's diff, and
   the `followupCheck` role grades each item `fixed`, `partly`, `not_fixed`, or
   `moot`. A reopen or anything other than fixed or moot reopens fixing, at
-  most twice a round; the third failed check parks the PR instead.
+  most twice a round; the third failed check parks the PR instead. A pass
+  first folds in feedback that arrived during the round, once (below).
 - **publishing** *(phase 3)* — re-reads the remote head and goes to **stale**
   if it moved. Otherwise fast-forward pushes the round branch to the PR's head
   ref, then posts factual replies when `postFactualReplies` is on and
@@ -298,10 +299,13 @@ than instructions, and triage's approach, or, for an item the author answered,
 their ruling's question and answer (§13.4) instead, read from `ruling` and
 never from `approach`. An item gets no second follow-up
 task while `fix_task_id` names a `follow_through` task that is not of type
-`code`. Then the watch goes to settling when an item arrived during triage,
-else to fixing while an open item's verdict is `fix`, else to watching. The
-round's outcome becomes `triaged` unless it goes on to fixing, which leaves the
-round open.
+`code`. An item that arrived after the triage finished is folded in first: the
+watch stays triaging and one more triage of the same round, seeing only the
+items with no verdict, gives it one, then the verdicts are applied again
+(**Folding in late feedback**, below). Then the watch goes to fixing while an
+open item's verdict is `fix`, else to settling when an item still awaits
+triage, else to watching. The round's outcome becomes `triaged` unless it goes
+on to fixing, which leaves the round open.
 
 **Fixing (phase 3).** A PR whose base is not the project's base branch is
 stacked: rather than fixing, the watch parks with a `parked_reason` naming
@@ -322,7 +326,9 @@ naming the round.
 
 The fixer is spawned only while its task is `ready` and its fixer sessions
 (those with no `review_head`) that reported do not outnumber the round's
-`check_failures`: one that reported starts again only after a failed check. A
+reopens — its `check_failures`, plus one once it has folded in late feedback:
+one that reported starts again only after a failed check or the fold-in. Its
+reviewer sessions are held to the same count. A
 fixer that ends without a report puts its task back in `ready` (never `review`,
 since the next fixer reuses the worktree and branch) and is retried; the third
 in a row, not counting one wound down for a shutdown order, ends the round
@@ -474,6 +480,30 @@ Resume (§13.4) sends a `check_unavailable` round whose fix task is still in
 review back to checking with its count cleared, rather than moving its items
 on to a new round.
 
+**Folding in late feedback (phase 3).** Feedback that arrives while a round
+runs joins that round instead of waiting for the next one, at two points.
+Before the fixer is created, items that arrived after the round's triage
+finished get one more triage, as above. When a check passes and the round has
+not folded anything in yet (`pr_round.folded_in_at` is null), the round takes
+in what arrived since: open items with no verdict, and open `fix` items outside
+its fix set, such as a decision the author answered `fix` mid-round (§13.4).
+Untriaged items send the watch to triaging with the fix task still in review;
+one triage of the same round, seeing only those items, gives them verdicts,
+and if none is `fix` the task goes to `done` and the watch to publishing as
+the pass would have. Otherwise every late `fix` item joins the round's fix set
+(`fix_task_id`, and the round's number as `round`), the task body is rebuilt
+listing every item with the new ones marked "(new)" and a line saying the
+round's other items are already fixed on the branch, and the task goes back to
+`ready` and the watch to fixing, as after a failed check. It is no failed check:
+`check_failures` is unchanged, the round number, the round cap and the daily
+budget count it as the same round, and the reopened fixer and its check run
+as any others. `folded_in_at` is set when it happens, so each round folds in
+once; anything arriving after it waits for the next round. A fold-in triage
+that fails or never starts costs the round nothing: its late items wait for the
+next round and the round goes on as if none had arrived. `answer`,
+`already_done` and `follow_up` verdicts from a fold-in triage are handled at
+once, and their replies post at this round's publish (§13.2).
+
 **Publishing (phase 3).** The one push Agent Board makes without an approval
 (§13.5). The next poll re-reads the PR with
 `gh pr view <url> --json state,headRefOid,labels`, and does nothing while that
@@ -556,8 +586,8 @@ on GitHub and so never marks it handled for leaving the snapshot. On a
 verified watch it becomes a frozen decision at once, as above, and the watch
 stays verified until the human removes the label. From watching, settling or
 readyToVerify the watch goes to settling, with the settle wait restarted; in
-any later state it waits, like any feedback that arrives mid-round, for the
-next round. No reply is ever posted for it (§13.2).
+any later state it is mid-round feedback, folded into the round in progress
+or left for the next one as **Folding in late feedback** says. No reply is ever posted for it (§13.2).
 
 A round's triage that never starts, or whose task is closed (§13.2), fails
 the round: its outcome becomes `triage_failed` and the watch returns to

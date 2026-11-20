@@ -211,6 +211,90 @@ final class PRWatchStoreTests: XCTestCase {
         return try f.board.settleCheck(watchId: watchId)
     }
 
+    /// SPEC §13.1 folding in late feedback: an item that arrives after the triage finished gets one more
+    /// triage in the same round before the fixer starts; one arriving after that waits for the next round.
+    func testAnItemArrivingAfterTriageIsTriagedIntoTheSameRoundOnceBeforeTheFixer() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try store.setState(.settling, watchId: watch.id)
+        XCTAssertNotNil(try store.beginTriageRound(watchId: watch.id))
+        func verdict(_ node: String) throws {
+            try f.db.writer.write { db in
+                try db.execute(
+                    sql: "UPDATE pr_item SET verdict = 'fix', approach = 'Rename it.' WHERE github_node_id = ?",
+                    arguments: [node]
+                )
+            }
+        }
+        _ = try f.board.createTriageTask(watchId: watch.id, baseOid: "base", headOid: "abc123")
+        try verdict("T1")
+        try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1"), thread("T2")]), now: 2_000)
+
+        XCTAssertEqual(try f.board.applyVerdicts(watchId: watch.id), .triaging, "T2 gets a triage of its own round")
+        let foldIn = try f.board.createTriageTask(watchId: watch.id, baseOid: "base", headOid: "abc123")
+        XCTAssertTrue(try store.isFoldIn(XCTUnwrap(store.triage(taskId: foldIn.id))))
+        try verdict("T2")
+        try store.upsert(
+            projectId: f.project.id, snapshot: snapshot(items: [thread("T1"), thread("T2"), thread("T3")]), now: 3_000
+        )
+
+        XCTAssertEqual(try f.board.applyVerdicts(watchId: watch.id), .fixing, "a round triages late items once")
+        let task = try XCTUnwrap(f.board.createFixRoundTask(watchId: watch.id, model: nil))
+        let fixTasks = Dictionary(uniqueKeysWithValues: try store.items(watchId: watch.id).map { ($0.githubNodeId, $0.fixTaskId) })
+        XCTAssertEqual(fixTasks, ["T1": task.id, "T2": task.id, "T3": nil])
+        XCTAssertEqual(try store.rounds(watchId: watch.id).count, 1)
+    }
+
+    /// SPEC §13.1 folding in late feedback: a decision the author answers `fix` mid-round sends the passed
+    /// round back to its fixer once, uncounted as a failed check, and it publishes once; feedback arriving
+    /// after that fold-in waits for the next round.
+    func testAFixRulingDuringTheRoundReopensItsFixerOnceAndTheRoundPublishesOnce() throws {
+        let f = try Fixture.make()
+        let store = PRWatchStore(f.db)
+        let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1")]), now: 1_000)
+        try triage(f, watchId: watch.id, as: .fix)
+        let task = try XCTUnwrap(f.board.createFixRoundTask(watchId: watch.id, model: nil))
+
+        try store.upsert(projectId: f.project.id, snapshot: snapshot(items: [thread("T1"), thread("T2")]), now: 2_000)
+        let asked = try XCTUnwrap(store.items(watchId: watch.id).first { $0.githubNodeId == "T2" }?.id)
+        try f.db.writer.write { db in
+            try db.execute(
+                sql: """
+                UPDATE pr_item SET verdict = 'decision', approach = 'Either way.', decision_question = 'Rename it?',
+                decision_options_json = ? WHERE id = ?
+                """,
+                arguments: [
+                    PRWatchStore.encodeOptions([
+                        PRDecisionOption(label: "Rename it", verdict: .fix),
+                        PRDecisionOption(label: "Keep it", verdict: .answer, replyBody: "Kept."),
+                    ]),
+                    asked,
+                ]
+            )
+        }
+        try f.board.answerDecision(itemId: asked, choice: .option("Rename it"))
+
+        XCTAssertEqual(try checkRound(f, watchId: watch.id, taskId: task.id, attempt: 1) { _ in .fixed }, .fixing)
+        XCTAssertEqual(try f.tasks.get(task.id)?.column, .ready)
+        let reopened = try XCTUnwrap(f.tasks.get(task.id)?.body)
+        XCTAssertTrue(reopened.contains("## Item 1\n") && reopened.contains("## Item 2 (new)"), reopened)
+        XCTAssertEqual(try store.item(asked)?.fixTaskId, task.id)
+        XCTAssertEqual(try store.currentRound(watchId: watch.id)?.checkFailures, 0)
+
+        try store.upsert(
+            projectId: f.project.id, snapshot: snapshot(items: [thread("T1"), thread("T2"), thread("T3")]), now: 3_000
+        )
+        XCTAssertEqual(
+            try checkRound(f, watchId: watch.id, taskId: task.id, attempt: 2) { _ in .fixed }, .publishing,
+            "a round folds in once"
+        )
+        try XCTUnwrap(f.board.recordRoundPublished(watchId: watch.id, pushedHeadOid: "tip-2"))
+        let states = Dictionary(uniqueKeysWithValues: try store.items(watchId: watch.id).map { ($0.githubNodeId, $0.state) })
+        XCTAssertEqual(states, ["T1": .handled, "T2": .handled, "T3": .open])
+        XCTAssertEqual(try store.rounds(watchId: watch.id).map(\.outcome), [PRRoundOutcome.published.rawValue])
+    }
+
     /// SPEC §13.1 parked: the Pull Requests page and the orchestrator's report show only the first line.
     func testAThirdFailedCheckParksWithTheFailingItemOnTheReasonsFirstLine() throws {
         let f = try Fixture.make()

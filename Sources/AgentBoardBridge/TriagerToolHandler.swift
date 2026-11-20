@@ -267,7 +267,8 @@ public final class TriagerToolHandler: ToolHandler {
 
     private func getItems(watch: PRWatch, triage: PRTriage) throws -> ToolResult {
         let all = try watches.items(watchId: watch.id)
-        let items = try all.filter { $0.state == .open }.map { item -> JSONValue in
+        let foldIn = try watches.isFoldIn(triage)
+        let items = try all.filter { $0.state == .open && !(foldIn && $0.verdict != nil) }.map { item -> JSONValue in
             var fields: [String: JSONValue] = [
                 "item_id": .number(Double(item.id ?? 0)),
                 "kind": .string(item.kind.rawValue),
