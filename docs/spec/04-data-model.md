@@ -429,6 +429,7 @@ CREATE TABLE pr_item (
   dismiss_reason        TEXT,            -- why it was dismissed by hand (§13.1 dismissed items); null for Stop watching
   dismissed_by          TEXT,            -- 'human', or the orchestrator session and approval that granted it
   dismissed_at          INTEGER,
+  thread_resolved_at    INTEGER,         -- when publishing resolved its thread under resolveFixedThreads (§13.2)
   round                 INTEGER NOT NULL DEFAULT 0,  -- the round it arrived in, then the round that handled it, whose replies post it
   created_at            INTEGER NOT NULL,
   updated_at            INTEGER NOT NULL,
@@ -779,8 +780,8 @@ nothing new and leaves an open item with verdict `fix` or `decision` exactly as
 it was, and an untriaged one too unless the thread is `viewerLatest`; for any
 other item it counts as left out (§13.1). An unresolved item whose body changed — a new reply — loses
 everything triage gave it: `verdict`, `approach`, the `decision_*` fields,
-`reply_body`, `reply_url`, `reply_error`, `reply_abandoned_at` and
-`followup_grade`, so the next round triages it afresh and replies anew. A
+`reply_body`, `reply_url`, `reply_error`, `reply_abandoned_at`,
+`thread_resolved_at` and `followup_grade`, so the next round triages it afresh and replies anew. A
 `handled` or `dismissed` one also reopens to `open` and drops `fix_task_id` and
 the `dismiss_*` fields; the
 task it named stays on the board as the record of the earlier round, and is

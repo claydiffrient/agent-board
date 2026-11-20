@@ -56,8 +56,8 @@ triage.
 - **publishing** *(phase 3)* — re-reads the remote head and goes to **stale**
   if it moved. Otherwise fast-forward pushes the round branch to the PR's head
   ref, then posts factual replies when `postFactualReplies` is on and
-  re-requests review when `reRequestReviews` is on (§13.2). It never
-  resolves threads.
+  re-requests review when `reRequestReviews` is on (§13.2). It resolves a
+  thread only when `resolveFixedThreads` is on and the thread was fixed (§13.2).
 - **awaitingCI** *(phase 3 reads green/red; phase 4 adds the log-tail items on
   red)* — green goes to watching; red goes straight to triaging, with each
   failed check and its log tail as an item (below).
@@ -702,7 +702,26 @@ keeps only its `reply_error` and stays owed, and the project gets a
 `pr_poll_problem` row naming the PR, which stays through later polls until one
 reads that PR again (or its watch ends). An item reopened by a new reply loses `reply_url`,
 `reply_error` and `reply_abandoned_at`, so once it is handled again it gets a
-fresh reply. No thread is ever resolved: resolving is the reviewer's call.
+fresh reply.
+
+**Resolving threads.** Resolving is the reviewer's call, so by default no
+thread is ever resolved. When the project's `resolveFixedThreads` setting is
+on, publishing resolves a thread that is factually fixed
+(`PRItem.qualifiesForResolving`): a thread item, the only kind GitHub can
+resolve, triaged `fix`, graded `fixed` by the round's follow-up check, with its
+reply posted (`reply_url` set), and with no `decision_answer`. Review bodies,
+comments, check and conflict items never qualify, nor does any other verdict
+or grade, nor anything the human ruled on as a decision. `already_done` does
+not qualify because no commit in the round proves it, and requiring the
+posted reply means the reviewer always sees why. Right after the replies at
+each posting point, and after Post reply (§13.4), every qualifying item whose
+`thread_resolved_at` is empty is resolved with `gh api graphql`'s
+`resolveReviewThread` and stamped, so one that qualified while the setting was
+off, or whose resolve failed, is resolved at the next point. A failed resolve
+is logged and tried again; it never fails the round, parks the watch, or
+changes the item's state. Nothing is resolved on a verified pull request. An
+item reopened by a new reply loses `thread_resolved_at` with its reply; a
+thread the reviewer unresolves keeps it, so it is never resolved again.
 
 **Re-requesting review.** When the project's `reRequestReviews` setting is on,
 a round whose push was recorded asks for review again, right after its replies.
@@ -793,6 +812,7 @@ battery minimum aside, so a project that never opts in pays nothing:
 | `requireApproval` | `true` | 1 |
 | `verifyCommand` | `nil` — a shell command template with `{url}`, and optionally `{mcp_config}`, that the Walk me through it row action runs in a terminal through an interactive login shell; a Claude command goes through `claude`, e.g. `claude "/review:verify {url}" --mcp-config {mcp_config}`, the flag last because `--mcp-config` is variadic. The field offers **Add board tools** for a template whose first word is `claude` and which lacks `{mcp_config}`; it appends ` --mcp-config {mcp_config}` | 1 (button shown only once a value is set) |
 | `postFactualReplies` | `false` | 3 (no replies exist before phase 3) |
+| `resolveFixedThreads` | `false` — resolves a thread once its fix passed the follow-up check and its reply was posted (§13.2) | 3 |
 | `reRequestReviews` | `false` — re-requests review after a pushed round, which notifies reviewers as the user (§13.2) | 4 |
 | `roles.triage` / `roles.fixer` / `roles.reviewer` / `roles.followupCheck` | each `{rosterAgentId?, model?}`, unset | 2 (`triage`), 3 (the rest) |
 | `privateTerms` | `[]` | 1 |
@@ -1005,7 +1025,8 @@ on at all.
   that wait on verification**, a comma-separated `checksAwaitingVerification`
   field whose save trims names and drops blanks and repeats),
   **Replies** (`postFactualReplies`, captioned with which verdicts count as
-  factual, and `reRequestReviews`, captioned that GitHub notifies reviewers as
+  factual, `resolveFixedThreads`, captioned that only a thread whose fix passed
+  the follow-up check and whose reply was posted is resolved, and `reRequestReviews`, captioned that GitHub notifies reviewers as
   the user), **Publish guard** (the `privateTerms` list: each term a row
   with a remove button, plus a field that adds one on Return), and **Roles**
   (for each of Triage, Fixer, Reviewer and Follow-up check, an agent picker of

@@ -318,6 +318,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("task_blocked_source") { db in
             try db.execute(sql: "ALTER TABLE task ADD COLUMN blocked_source TEXT")
         }
+        migrator.registerMigration("pr_item_thread_resolved") { db in
+            try db.execute(sql: Schema.prItemThreadResolved)
+        }
         return migrator
     }
 }

@@ -123,6 +123,7 @@ public struct PRWatchStore: Sendable {
                     item.replyURL = nil
                     item.replyError = nil
                     item.replyAbandonedAt = nil
+                    item.threadResolvedAt = nil
                     item.followupGrade = nil
                     feedbackArrived = true
                 }

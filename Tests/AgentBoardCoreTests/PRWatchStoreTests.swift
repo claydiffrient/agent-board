@@ -681,6 +681,7 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertEqual(absent.minBatteryPercent, 50)
         XCTAssertNil(absent.verifyCommand)
         XCTAssertFalse(absent.postFactualReplies)
+        XCTAssertFalse(absent.resolveFixedThreads)
         XCTAssertEqual(absent.roles, PRFollowThroughRoles())
         XCTAssertEqual(absent.privateTerms, [])
 
@@ -693,6 +694,7 @@ final class PRWatchStoreTests: XCTestCase {
         settings.prFollowThrough = PRFollowThroughSettings(
             enabled: true, verificationLabel: "verified-example", requireApproval: false, settleMinutes: 5,
             roundCap: 2, dailyBudgetUSD: 4.5, minBatteryPercent: nil, verifyCommand: "open {url}", postFactualReplies: true,
+            resolveFixedThreads: true,
             roles: PRFollowThroughRoles(fixer: PRFollowThroughRole(rosterAgentId: "agent-1", model: "sonnet")),
             privateTerms: ["example-org"]
         )
@@ -771,5 +773,41 @@ final class PRWatchStoreTests: XCTestCase {
             answer.postedBody(pushedHeadOid: nil),
             "In reply to \(review):\n\nThree retries.\n\n**Posted by PR follow-through agent**"
         )
+    }
+
+    func testOnlyAFixedFixThreadWithAPostedReplyQualifiesForResolving() {
+        var fixed = PRItem(
+            id: nil, watchId: "w", githubNodeId: "T_1", kind: .thread, author: "reviewer", body: "Rename this",
+            path: nil, line: nil, url: nil, state: .handled, round: 1, createdAt: 0, updatedAt: 0
+        )
+        fixed.verdict = .fix
+        fixed.followupGrade = .fixed
+        fixed.replyURL = "https://github.com/example-org/app/pull/7#discussion_r1"
+        XCTAssertTrue(fixed.qualifiesForResolving)
+
+        var changed: [PRItem] = []
+        for kind in PRItemKind.allCases where kind != .thread {
+            var item = fixed
+            item.kind = kind
+            changed.append(item)
+        }
+        for verdict in PRItemVerdict.allCases where verdict != .fix {
+            var item = fixed
+            item.verdict = verdict
+            changed.append(item)
+        }
+        for grade in PRFollowupGrade.allCases.map(Optional.some) + [nil] where grade != .fixed {
+            var item = fixed
+            item.followupGrade = grade
+            changed.append(item)
+        }
+        var unposted = fixed
+        unposted.replyURL = nil
+        var ruled = fixed
+        ruled.decisionAnswer = "Remove the label and let follow-through fix it"
+        changed += [unposted, ruled]
+        for item in changed {
+            XCTAssertFalse(item.qualifiesForResolving, "\(item)")
+        }
     }
 }

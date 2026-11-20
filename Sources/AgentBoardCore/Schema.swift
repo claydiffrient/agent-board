@@ -608,6 +608,11 @@ enum Schema {
     ALTER TABLE pr_item ADD COLUMN followup_note TEXT;
     """
 
+    /// When publishing resolved an item's review thread (SPEC §13.2).
+    static let prItemThreadResolved = """
+    ALTER TABLE pr_item ADD COLUMN thread_resolved_at INTEGER;
+    """
+
     /// When an item became handled, which bounds the replies turning `postFactualReplies` on may post,
     /// and the last failed post, with when one was given up on (SPEC §13.2).
     static let prItemReplyBounds = """

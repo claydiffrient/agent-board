@@ -1,8 +1,8 @@
 import Foundation
 
 /// Posts publishing's factual replies (SPEC §13.2): a reply on a review thread, or a comment on the
-/// pull request for a review body, which has no thread. It never resolves anything. Synchronous and
-/// blocking: call it off the main actor.
+/// pull request for a review body, which has no thread. It also resolves a thread, which publishing asks
+/// for only under `resolveFixedThreads`. Synchronous and blocking: call it off the main actor.
 public struct PullRequestReplier: Sendable {
     public var gh: any GhRunning
 
@@ -19,6 +19,16 @@ public struct PullRequestReplier: Sendable {
     /// `-f` sends each value as a raw string, so a body is never read as a file or a typed value.
     public static func threadReplyArguments(threadId: String, body: String) -> [String] {
         ["api", "graphql", "-f", "query=\(threadReplyMutation)", "-f", "thread=\(threadId)", "-f", "body=\(body)"]
+    }
+
+    static let resolveThreadMutation = """
+    mutation($thread: ID!) {
+      resolveReviewThread(input: {threadId: $thread}) { thread { isResolved } }
+    }
+    """
+
+    public static func resolveThreadArguments(threadId: String) -> [String] {
+        ["api", "graphql", "-f", "query=\(resolveThreadMutation)", "-f", "thread=\(threadId)"]
     }
 
     public static func commentArguments(owner: String, name: String, number: Int, body: String) -> [String] {
@@ -45,6 +55,26 @@ public struct PullRequestReplier: Sendable {
             throw Self.isGone(stdout) ? PullRequestReplyTargetGone(said) : PullRequestCheckFailure(said)
         }
         return url
+    }
+
+    public func resolveThread(threadId: String, cwd: URL) throws {
+        let stdout = try run(Self.resolveThreadArguments(threadId: threadId), cwd: cwd)
+        struct Response: Decodable {
+            struct Payload: Decodable {
+                struct Resolved: Decodable {
+                    struct Thread: Decodable { let isResolved: Bool }
+                    let thread: Thread
+                }
+                let resolveReviewThread: Resolved?
+            }
+            let data: Payload?
+        }
+        guard (try? JSONDecoder().decode(Response.self, from: Data(stdout.utf8)))?
+            .data?.resolveReviewThread?.thread.isResolved == true
+        else {
+            let said = "`gh api graphql` did not resolve the thread: \(stdout)"
+            throw Self.isGone(stdout) ? PullRequestReplyTargetGone(said) : PullRequestCheckFailure(said)
+        }
     }
 
     /// The comment's URL.
