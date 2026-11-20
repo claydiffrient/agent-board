@@ -471,7 +471,10 @@ blank line.
 
 A check that never ran is not a failed check and never counts in
 `check_failures`. That is a reviewer or follow-up check whose spawn throws or
-whose setup fails, or one that cannot start for a reason a later poll may
+whose setup fails; a follow-up check whose task sits short of `done` and
+`closed` with no active session, as when Agent Board stopped between creating
+the task and assigning it, which deletes that task so it cannot be spawned by
+hand; or one that cannot start for a reason a later poll may
 clear: a worktree that cannot be recreated, a git failure, a checkout still
 held or being set up. A §8 cap or a shutdown order is a hold instead. The watch
 stays checking and the next poll retries the half that never ran, counting
