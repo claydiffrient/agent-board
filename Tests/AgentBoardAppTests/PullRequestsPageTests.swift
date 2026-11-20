@@ -388,6 +388,33 @@ final class PullRequestsPageTests: XCTestCase {
         XCTAssertEqual(PullRequestsRow.count(try PRWatchStore(db).badgeCounts()), 2)
     }
 
+    /// SPEC §13.4: a reply being posted shows a spinner beside its disabled button.
+    func testAnOwedReplyBeingPostedShowsASpinner() throws {
+        let db = try AppDatabase.inMemory()
+        let asked = try decision(db, try project(db, label: label), number: 7, question: "Block?", options: [
+            PRDecisionOption(label: "Yes", verdict: .fix),
+            PRDecisionOption(label: "No", verdict: .answer, replyBody: "It stays."),
+        ])
+        let item = try Board(db).answerDecision(itemId: try XCTUnwrap(asked.id), choice: .option("No"))
+        func spinners(posting: Bool) -> Int {
+            let mount = OffscreenMount(
+                PROwedReplyRow(item: item, number: 7, isPosting: posting) {},
+                size: CGSize(width: 500, height: 160)
+            )
+            defer { mount.close() }
+            pumpBriefly(mount.window, turns: 10)
+            var count = 0
+            var queue: [NSView] = [mount.host]
+            while let view = queue.popLast() {
+                if view is NSProgressIndicator { count += 1 }
+                queue.append(contentsOf: view.subviews)
+            }
+            return count
+        }
+        XCTAssertEqual(spinners(posting: false), 0)
+        XCTAssertEqual(spinners(posting: true), 1)
+    }
+
     private func textFields(in root: NSView) -> [NSTextField] {
         var found: [NSTextField] = []
         var queue = [root]

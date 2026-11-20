@@ -559,7 +559,8 @@ final class PRWatchStoreTests: XCTestCase {
         XCTAssertEqual(try store.badgeCounts(), [f.project.id: PRBadgeCount(readyToVerify: 1, openDecisions: 1)])
     }
 
-    func testTheObservedPageListsAnActiveTriageSessionUntilItEnds() throws {
+    /// A running agent writes its session row on every hook event; none of those writes is on the page.
+    func testTheObservedPageListsAnActiveTriageSessionUntilItEndsAndIgnoresItsHookWrites() throws {
         let f = try Fixture.make()
         let store = PRWatchStore(f.db)
         let watch = try store.upsert(projectId: f.project.id, snapshot: snapshot(items: []))
@@ -578,6 +579,17 @@ final class PRWatchStoreTests: XCTestCase {
             }
         )
         defer { cancellable.cancel() }
+        for step in 1...5 {
+            try f.sessions.setState("triager", .running)
+            try f.sessions.beginToolCall("triager", at: .nowMillis, tool: "Bash")
+            try f.sessions.endToolCall("triager", at: .nowMillis, tool: "Bash")
+            try f.sessions.recordActivity("triager", at: .nowMillis, lastTool: "Bash")
+            try f.sessions.updateSpend(
+                "triager", tokensIn: step * 1_000, tokensOut: step * 100, cacheRead: 0, cacheWrite: 0,
+                estCostUSD: Double(step) / 10, model: "claude-test"
+            )
+            try f.sessions.setState("triager", .idle)
+        }
         try f.sessions.setState("triager", .completed, endedAt: .nowMillis)
         wait(for: [ended], timeout: 5)
 
