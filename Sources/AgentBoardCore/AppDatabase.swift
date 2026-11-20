@@ -321,6 +321,9 @@ public final class AppDatabase: Sendable {
         migrator.registerMigration("pr_round_folded_in_at") { db in
             try db.execute(sql: "ALTER TABLE pr_round ADD COLUMN folded_in_at INTEGER")
         }
+        migrator.registerMigration("pr_item_thread_resolved") { db in
+            try db.execute(sql: Schema.prItemThreadResolved)
+        }
         return migrator
     }
 }

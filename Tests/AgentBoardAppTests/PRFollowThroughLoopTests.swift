@@ -65,13 +65,13 @@ final class PRFollowThroughLoopTests: XCTestCase {
 
     private func enable(
         settleMinutes: Int = 0, budget: Double? = nil, label: String? = nil, replies: Bool = false,
-        reRequest: Bool = false,
+        reRequest: Bool = false, resolve: Bool = false,
         roles: PRFollowThroughRoles = PRFollowThroughRoles(fixer: PRFollowThroughRole(model: "fixer-model"))
     ) throws {
         var settings = try XCTUnwrap(ProjectStore(fixture.db).get(fixture.project.id)).settings
         settings.prFollowThrough = PRFollowThroughSettings(
             enabled: true, verificationLabel: label, settleMinutes: settleMinutes, dailyBudgetUSD: budget,
-            postFactualReplies: replies, reRequestReviews: reRequest, roles: roles
+            postFactualReplies: replies, resolveFixedThreads: resolve, reRequestReviews: reRequest, roles: roles
         )
         try ProjectStore(fixture.db).updateSettings(fixture.project.id, settings)
     }
@@ -434,7 +434,9 @@ final class PRFollowThroughLoopTests: XCTestCase {
     private let gradingPlugin = "/plugins/grading"
 
     /// A reviewer role and a follow-up check role, each a board-local roster agent.
-    private func enableChecking(label: String? = nil, replies: Bool = false, reRequest: Bool = false) throws {
+    private func enableChecking(
+        label: String? = nil, replies: Bool = false, reRequest: Bool = false, resolve: Bool = false
+    ) throws {
         let store = RosterStore(fixture.db)
         let rita = try store.create(name: "Rita", role: "reviewer", systemPrompt: "You review for correctness.")
         let gail = try store.create(
@@ -442,7 +444,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         )
         try store.enable(agentId: rita.id, forProject: fixture.project.id)
         try store.enable(agentId: gail.id, forProject: fixture.project.id)
-        try enable(label: label, replies: replies, reRequest: reRequest, roles: PRFollowThroughRoles(
+        try enable(label: label, replies: replies, reRequest: reRequest, resolve: resolve, roles: PRFollowThroughRoles(
             fixer: PRFollowThroughRole(model: "fixer-model"),
             reviewer: PRFollowThroughRole(rosterAgentId: rita.id, model: "reviewer-model"),
             followupCheck: PRFollowThroughRole(rosterAgentId: gail.id)
@@ -953,10 +955,12 @@ final class PRFollowThroughLoopTests: XCTestCase {
     /// worktree.
     private func passedRound(
         label: String? = nil, replies: Bool = false, question: Bool = false, labels: [String] = [],
-        remoteHead: String? = nil, repliesGone: Bool = false, reRequest: Bool = false, answeredBy: [String] = []
+        remoteHead: String? = nil, repliesGone: Bool = false, reRequest: Bool = false, answeredBy: [String] = [],
+        resolve: Bool = false
     ) async throws -> (tip: String, worktree: String) {
-        try enableChecking(label: label, replies: replies, reRequest: reRequest)
+        try enableChecking(label: label, replies: replies, reRequest: reRequest, resolve: resolve)
         fixture.gh.answerReviewRequests()
+        fixture.gh.answerResolves()
         fixture.gh.answer(url, state: "OPEN", head: remoteHead ?? head, labels: labels)
         if repliesGone { fixture.gh.failRepliesAsGone() } else { fixture.gh.answerReplies(url: "\(url)#discussion_r1") }
         let fixer = try await runningFixer(question: question, answeredBy: answeredBy)
@@ -1214,7 +1218,7 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try checkItems.filter { $0.state == .open }.map(\.githubNodeId), ["CR_2"])
     }
 
-    func testWithRepliesOnEachHandledThreadGetsItsFactualReplyAndNoThreadIsResolved() async throws {
+    func testWithRepliesOnAndResolvingOffEachHandledThreadGetsItsFactualReplyAndNoThreadIsResolved() async throws {
         let (tip, _) = try await passedRound(replies: true, question: true)
         await poll()
 
@@ -1223,6 +1227,30 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(replies.map(\.last), ["body=Fixed in \(tip.prefix(7)).\(mark)", "body=Three retries.\(mark)"])
         XCTAssertFalse(fixture.gh.calls.joined().contains { $0.contains("resolveReviewThread") })
         XCTAssertEqual(Set(try watches.items(watchId: try onlyWatch().id).map(\.replyURL)), ["\(url)#discussion_r1"])
+    }
+
+    /// T_question is rewritten as a second fix of the round that the check graded moot: it is replied to like
+    /// T_fix, and only T_fix is resolved.
+    func testWithResolvingOnPublishingResolvesOnlyTheFixedThread() async throws {
+        _ = try await passedRound(replies: true, question: true, resolve: true)
+        let watchId = try onlyWatch().id
+        let fix = try XCTUnwrap(try watches.items(watchId: watchId).first { $0.githubNodeId == "T_fix" })
+        try await fixture.db.writer.write {
+            try $0.execute(
+                sql: """
+                UPDATE pr_item SET verdict = 'fix', followup_grade = 'moot', reply_body = NULL, fix_task_id = ?
+                WHERE github_node_id = 'T_question'
+                """,
+                arguments: [fix.fixTaskId]
+            )
+        }
+        await poll()
+
+        let resolves = fixture.gh.calls.filter { $0.contains { $0.contains("resolveReviewThread(") } }
+        XCTAssertEqual(resolves.map { $0.first { $0.hasPrefix("thread=") } }, ["thread=T_fix"])
+        let items = try watches.items(watchId: watchId)
+        XCTAssertEqual(Set(items.map(\.replyURL)), ["\(url)#discussion_r1"])
+        XCTAssertEqual(items.filter { $0.threadResolvedAt != nil }.map(\.githubNodeId), ["T_fix"])
     }
 
     /// GitHub still reports the round's base, so the push is tried and git refuses it as a non-fast-forward.

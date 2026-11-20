@@ -47,6 +47,8 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
     /// When `postFactualReplies` was last turned on. Stamped by `ProjectStore.updateSettings`; only items
     /// handled since then are replied to (SPEC §13.2).
     public var postFactualRepliesSince: Int64? = nil
+    /// Resolves a review thread once `PRItem.qualifiesForResolving` holds (SPEC §13.2).
+    public var resolveFixedThreads: Bool = false
     /// Asks the reviewers a pushed round answered to review again, which notifies them as the user (SPEC §13.2).
     public var reRequestReviews: Bool = false
     public var roles: PRFollowThroughRoles = PRFollowThroughRoles()
@@ -79,6 +81,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         minBatteryPercent: Int? = 50,
         verifyCommand: String? = nil,
         postFactualReplies: Bool = false,
+        resolveFixedThreads: Bool = false,
         reRequestReviews: Bool = false,
         roles: PRFollowThroughRoles = PRFollowThroughRoles(),
         privateTerms: [String] = [],
@@ -95,6 +98,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         self.minBatteryPercent = minBatteryPercent
         self.verifyCommand = verifyCommand
         self.postFactualReplies = postFactualReplies
+        self.resolveFixedThreads = resolveFixedThreads
         self.reRequestReviews = reRequestReviews
         self.roles = roles
         self.privateTerms = privateTerms
@@ -170,7 +174,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case enabled, verificationLabel, requireApproval, settleMinutes, roundCap, dailyBudgetUSD, minBatteryPercent
         case verifyCommand, postFactualReplies, postFactualRepliesSince, reRequestReviews, roles, privateTerms
-        case checksAwaitingVerification, infraFailurePatterns, batchedReviewers
+        case checksAwaitingVerification, infraFailurePatterns, batchedReviewers, resolveFixedThreads
     }
 
     public init(from decoder: Decoder) throws {
@@ -187,6 +191,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         verifyCommand = try c.decodeIfPresent(String.self, forKey: .verifyCommand)
         postFactualReplies = try c.decodeIfPresent(Bool.self, forKey: .postFactualReplies) ?? defaults.postFactualReplies
         postFactualRepliesSince = try c.decodeIfPresent(Int64.self, forKey: .postFactualRepliesSince)
+        resolveFixedThreads = try c.decodeIfPresent(Bool.self, forKey: .resolveFixedThreads) ?? defaults.resolveFixedThreads
         reRequestReviews = try c.decodeIfPresent(Bool.self, forKey: .reRequestReviews) ?? defaults.reRequestReviews
         roles = try c.decodeIfPresent(PRFollowThroughRoles.self, forKey: .roles) ?? defaults.roles
         privateTerms = try c.decodeIfPresent([String].self, forKey: .privateTerms) ?? defaults.privateTerms
@@ -210,6 +215,7 @@ public struct PRFollowThroughSettings: Codable, Sendable, Equatable {
         try c.encodeIfPresent(verifyCommand, forKey: .verifyCommand)
         try c.encode(postFactualReplies, forKey: .postFactualReplies)
         try c.encodeIfPresent(postFactualRepliesSince, forKey: .postFactualRepliesSince)
+        try c.encode(resolveFixedThreads, forKey: .resolveFixedThreads)
         try c.encode(reRequestReviews, forKey: .reRequestReviews)
         try c.encode(roles, forKey: .roles)
         try c.encode(privateTerms, forKey: .privateTerms)
