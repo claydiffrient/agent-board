@@ -657,12 +657,23 @@ human's **Post reply**.
 **The author's rulings.** Answering a decision writes the author's ruling
 (§15), which no later run can overwrite. `get_pr_items` lists each open item's
 standing rulings, newest first, as `rulings` (`verdict`, `choice`, `note`,
-`question`, `answered_at`), and `set_verdicts` refuses any verdict but
-`decision` on an item that has one: `PRTriageStore.setVerdicts` reads
-`RulingStore.standing` in the same transaction, and the refusal names the
-ruling and writes nothing. Asking the author again is the only move left to
-triage, so a reset by a new reply (§13.1) can never turn their answer into
-triage's.
+`question`, `answered_at`), and, when the newest one resolves, what it settled
+as `ruled_verdict` (`verdict`, `reply_body`). A `reply` ruling settles `answer`
+with its note as the reply. A `choose` ruling settles the chosen option's
+verdict and reply, and resolves only while the item still holds the decision it
+answered, its question equal to the ruling's: a reset by a new reply (§13.1)
+keeps an answered item's decision question, options and answer for that.
+`set_verdicts` accepts two verdicts on an item with a standing ruling:
+`decision`, asking the author again, or exactly the ruling's own verdict and
+reply, which applies the ruling. Applying it sets the item as
+`Board.answerDecision` did, its approach and `decision_answer` the author's
+answer, so the round's check grades it, and Post reply owes its reply, as
+though the author had answered again. Anything else is refused:
+`PRTriageStore.setVerdicts` reads `RulingStore.standing` in the same
+transaction, and the refusal names the ruling and what it settled and writes
+nothing. So a reset never turns the author's answer into triage's, and an
+automated reviewer re-editing a comment the author already ruled on is not
+asked again.
 
 **Posting replies (phase 3).** Replies go out after a round's push, when a
 publishing round goes stale or parks, or, for a round with no fix item, once its
@@ -753,7 +764,10 @@ in-scope change is `fix` however large; that a request only the author can
 carry out on GitHub is never `fix`; that an item asking for nothing is
 `answer` with no `reply_body`; that each decision option is `{label,
 verdict}`, an `answer` option with its `reply_body`; that an item with
-`rulings` takes only `decision`, quoting the standing ruling; and that triage ends only
+`rulings` takes its `ruled_verdict` when the text asks for nothing the ruling
+did not already settle, such as a bot re-summarizing or an edit that keeps the
+request, and `decision`, quoting the standing ruling, only when the request
+changed; and that triage ends only
 when every open item has a verdict. A roster agent chosen for the triage role replaces the opening
 identity line and nothing after it. After a compaction the same prompt is
 handed back, rebuilt from the `pr_triage` row.

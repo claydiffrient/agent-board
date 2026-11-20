@@ -74,7 +74,8 @@ extension PRWatchStore {
     }
 
     /// Writes every verdict or none. Each item must be an open item of `watchId`, so a triager can
-    /// reach no other watch, and an item with a standing ruling takes only `decision` (SPEC §13.2).
+    /// reach no other watch. An item with a standing ruling takes `decision` or the ruling's own verdict,
+    /// which applies the ruling as `answerDecision` did; no run overwrites the author's answer (SPEC §13.2, §15).
     /// Returns the ids of the watch's open items still without a verdict.
     @discardableResult
     public func setVerdicts(_ verdicts: [PRVerdictInput], watchId: String, now: Int64 = .nowMillis) throws -> [Int64] {
@@ -87,21 +88,36 @@ extension PRWatchStore {
                 guard item.state == .open else {
                     throw PRVerdictRejection("Item \(input.itemId) is \(item.state.rawValue), not open.")
                 }
+                try Self.validate(input)
                 if input.verdict != .decision,
                    let ruling = try RulingStore.standing(db, subject: .prItem(input.itemId)).first {
-                    throw PRVerdictRejection(
-                        "Item \(input.itemId) carries the pull request author's standing ruling on "
-                            + "\"\(ruling.question)\": \(ruling.quoted). Only `decision` may be set on it, "
-                            + "asking the author again and citing that ruling."
-                    )
+                    let ruled = Self.ruledVerdict(ruling, item: item)
+                    guard let ruled, ruled.verdict == input.verdict,
+                          Self.trimmed(ruled.replyBody) == Self.trimmed(input.replyBody)
+                    else {
+                        throw PRVerdictRejection(
+                            "Item \(input.itemId) carries the pull request author's standing ruling on "
+                                + "\"\(ruling.question)\": \(ruling.quoted). "
+                                + (ruled.map { "Set its own verdict, \(Self.describe($0)), or `decision`, " }
+                                    ?? "Only `decision` may be set on it, ")
+                                + "asking the author again and citing that ruling."
+                        )
+                    }
+                    item.verdict = ruled.verdict
+                    item.replyBody = ruled.replyBody
+                    item.decisionAnswer = ruling.choice ?? ruling.note
+                    item.approach = item.decisionAnswer
+                    item.updatedAt = now
+                    updated.append(item)
+                    continue
                 }
-                try Self.validate(input)
                 item.verdict = input.verdict
                 item.approach = input.approach
                 item.replyBody = Self.nonBlank(input.replyBody)
                 if input.verdict == .decision {
                     item.decisionQuestion = Self.nonBlank(input.decisionQuestion)
                     item.decisionOptionsJSON = Self.encodeOptions(input.decisionOptions ?? [])
+                    item.decisionAnswer = nil
                 } else {
                     item.decisionQuestion = nil
                     item.decisionOptionsJSON = nil
@@ -116,6 +132,31 @@ extension PRWatchStore {
                 arguments: [watchId]
             )
         }
+    }
+
+    /// The verdict and reply a `choose` or `reply` ruling settled, as `answerDecision` applied it. A `choose`
+    /// resolves only against the decision it answered, which an item keeps across a reset; nil otherwise.
+    public static func ruledVerdict(_ ruling: Ruling, item: PRItem) -> (verdict: PRItemVerdict, replyBody: String?)? {
+        switch ruling.verdict {
+        case .reply:
+            return ruling.note.map { (.answer, $0) }
+        case .choose:
+            guard trimmed(item.decisionQuestion) == trimmed(ruling.question),
+                  let option = item.decisionOptions.first(where: { $0.label == ruling.choice }),
+                  option.verdict == .fix || option.verdict == .answer
+            else { return nil }
+            return (option.verdict, option.verdict == .answer ? option.replyBody : nil)
+        default:
+            return nil
+        }
+    }
+
+    private static func describe(_ ruled: (verdict: PRItemVerdict, replyBody: String?)) -> String {
+        "`\(ruled.verdict.rawValue)`" + (ruled.replyBody.map { " with reply_body \"\($0)\"" } ?? " with no reply_body")
+    }
+
+    private static func trimmed(_ text: String?) -> String? {
+        nonBlank(text)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func validate(_ input: PRVerdictInput) throws {

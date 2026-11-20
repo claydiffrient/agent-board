@@ -125,9 +125,12 @@ public enum TriagePrompt {
     `already_done` with no `reply_body`. When another open item carries them, it is `answer` with no \
     `reply_body`, or `already_done` when a commit already addresses them. When no item carries them, it is \
     `decision`.
-    An item with `rulings` is one the author already answered, and their rulings bind. It takes only \
-    `decision`, whose question quotes the standing ruling and asks the author whether it still holds; \
-    `set_verdicts` refuses any other verdict for it.
+    An item with `rulings` is one the author already answered, and their rulings bind. When its text asks \
+    for nothing the newest ruling did not already settle, such as a bot re-summarizing or an edit that \
+    leaves the request as it was, give it the newest ruling's own verdict, which `ruled_verdict` spells \
+    out as a `verdict` and `reply_body` to send unchanged. Only when the request changed, or the item has \
+    no `ruled_verdict`, is it `decision`, whose question quotes the standing ruling and asks the author \
+    whether it still holds. `set_verdicts` refuses any other verdict for it.
     Reserve `decision` for a choice a reasonable engineer could make either way. A change that is clearly \
     right and in scope is `fix`, however large; do not pass a judgment up because it is hard.
     """

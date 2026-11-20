@@ -115,9 +115,12 @@ public struct PRWatchStore: Sendable {
                     }
                     item.verdict = nil
                     item.approach = nil
-                    item.decisionQuestion = nil
-                    item.decisionOptionsJSON = nil
-                    item.decisionAnswer = nil
+                    // SPEC §13.2: the decision an author's ruling answered stays, so triage can apply it.
+                    if try Self.authorAnswer(db, item: item) == nil {
+                        item.decisionQuestion = nil
+                        item.decisionOptionsJSON = nil
+                        item.decisionAnswer = nil
+                    }
                     item.decisionNotifiedAt = nil
                     item.replyBody = nil
                     item.replyURL = nil

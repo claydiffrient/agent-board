@@ -5,35 +5,45 @@ import XCTest
 
 /// SPEC §13.2: the author's ruling on an item outranks triage's verdict.
 final class PRTriageRulingTests: XCTestCase {
-    func testSetVerdictsRefusesAnythingButDecisionOnARuledItemAndWritesNothing() throws {
+    func testSetVerdictsAppliesARulingAcrossAResetAndRefusesAnyOtherVerdict() throws {
         let f = try Fixture.make()
         let store = PRWatchStore(f.db)
         let (watch, items) = try PRRulingFixtures.watch(f, threads: ["ASK", "NEW"])
         let (asked, untriaged) = (try XCTUnwrap(items[0].id), try XCTUnwrap(items[1].id))
         try PRRulingFixtures.ask(f, itemId: asked)
-        try f.board.answerDecision(itemId: asked, choice: .option("Rename it everywhere"))
+        try f.board.answerDecision(itemId: asked, choice: .option("Keep the name"))
+        try store.upsert(
+            projectId: f.project.id,
+            snapshot: PRRulingFixtures.snapshot([
+                PRRulingFixtures.thread("ASK", body: "Rename this, edited"), PRRulingFixtures.thread("NEW"),
+            ]),
+            now: 2_000
+        )
 
-        XCTAssertThrowsError(try store.setVerdicts([
-            PRVerdictInput(itemId: asked, verdict: .fix, approach: "Delete the alias instead."),
-            PRVerdictInput(itemId: untriaged, verdict: .answer, approach: "Factual.", replyBody: "Yes."),
-        ], watchId: watch.id)) {
-            let reason = ($0 as? PRVerdictRejection)?.reason ?? "\($0)"
-            XCTAssertTrue(reason.contains("Rename it everywhere"), reason)
-        }
-
-        let after = try store.items(watchId: watch.id)
-        XCTAssertEqual(after.map(\.verdict), [.fix, nil])
-        XCTAssertEqual(after.first?.approach, "Rename it everywhere")
-        XCTAssertNoThrow(try store.setVerdicts([
+        for wrong in [
             PRVerdictInput(
-                itemId: asked, verdict: .decision, approach: "The reviewer pushed back.",
-                decisionQuestion: "You chose to rename it everywhere; does that still hold?",
-                decisionOptions: [
-                    PRDecisionOption(label: "Yes", verdict: .fix),
-                    PRDecisionOption(label: "No", verdict: .answer, replyBody: "Keeping it."),
-                ]
+                itemId: asked, verdict: .alreadyDone, approach: "Done.", replyBody: "The old name is public API."
             ),
-        ], watchId: watch.id))
+            PRVerdictInput(itemId: asked, verdict: .answer, approach: "Factual.", replyBody: "Renaming later."),
+        ] {
+            XCTAssertThrowsError(try store.setVerdicts([
+                wrong, PRVerdictInput(itemId: untriaged, verdict: .answer, approach: "Factual.", replyBody: "Yes."),
+            ], watchId: watch.id)) {
+                let reason = ($0 as? PRVerdictRejection)?.reason ?? "\($0)"
+                XCTAssertTrue(reason.contains("The old name is public API."), reason)
+            }
+        }
+        XCTAssertEqual(try store.items(watchId: watch.id).map(\.verdict), [nil, nil])
+
+        try store.setVerdicts([
+            PRVerdictInput(
+                itemId: asked, verdict: .answer, approach: "Same request.", replyBody: "The old name is public API."
+            ),
+        ], watchId: watch.id)
+        let applied = try XCTUnwrap(store.items(watchId: watch.id).first)
+        XCTAssertEqual(applied.verdict, .answer)
+        XCTAssertEqual(applied.replyBody, "The old name is public API.")
+        XCTAssertEqual(applied.approach, "Keep the name")
     }
 }
 
