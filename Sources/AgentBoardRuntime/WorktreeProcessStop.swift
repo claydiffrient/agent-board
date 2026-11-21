@@ -15,7 +15,7 @@ public struct WorktreeProcessStop: Sendable, Equatable {
     }
 
     public var stopped: [Process] = []
-    /// Has a controlling terminal, so a human may be using it; never signaled.
+    /// Has a controlling terminal and is no Agent Board host's, so a human may be using it; never signaled.
     public var kept: [Process] = []
     public var failures: [String] = []
 
@@ -45,9 +45,15 @@ enum WorktreeProcessStopper {
     static let termGrace: UInt64 = 5_000_000_000
     static let poll: useconds_t = 50_000
 
-    /// SIGTERM to every terminal-less process of this user whose cwd is `worktree` or inside it,
-    /// then SIGKILL to whatever outlives `grace` on `CLOCK_UPTIME_RAW` (SPEC §3.1).
-    static func stop(in worktree: URL, grace: UInt64 = termGrace) -> WorktreeProcessStop {
+    /// SIGTERM to every process of this user whose cwd is `worktree` or inside it, then SIGKILL to
+    /// whatever outlives `grace` on `CLOCK_UPTIME_RAW` (SPEC §3.1). One with a controlling terminal
+    /// is kept unless it is one of `agentHosts` or descends from one.
+    static func stop(
+        in worktree: URL,
+        agentHosts: Set<PIDIdentity> = [],
+        grace: UInt64 = termGrace,
+        facts: (pid_t) -> ProcessFacts? = LibProc.facts
+    ) -> WorktreeProcessStop {
         var report = WorktreeProcessStop()
         guard proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0) > 0 else {
             report.failures.append(
@@ -59,14 +65,19 @@ enum WorktreeProcessStopper {
         let root = worktree.standardizedFileURL.resolvingSymlinksInPath().path
         let protected = table.ancestors(of: getpid()).union([getpid()])
         let user = getuid()
+        var agentTree: Set<pid_t> = []
+        for host in agentHosts where table.identity(of: host.pid) == host {
+            agentTree.insert(host.pid)
+            agentTree.formUnion(table.descendants(of: host.pid))
+        }
 
         var targets: [PIDIdentity: String] = [:]
         for (pid, entry) in table.entries.sorted(by: { $0.key < $1.key })
         where !protected.contains(pid) && entry.uid == user {
-            guard let facts = LibProc.facts(pid), let cwd = facts.cwd else { continue }
+            guard let fact = facts(pid), let cwd = fact.cwd else { continue }
             let resolved = URL(fileURLWithPath: cwd).standardizedFileURL.resolvingSymlinksInPath().path
             guard resolved == root || resolved.hasPrefix(root + "/") else { continue }
-            if facts.hasControllingTerminal {
+            if fact.hasControllingTerminal, !agentTree.contains(pid) {
                 report.kept.append(.init(pid: pid, command: entry.command))
             } else {
                 targets[PIDIdentity(pid: pid, startedAtMicros: entry.startedAtMicros)] = entry.command

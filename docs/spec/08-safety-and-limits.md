@@ -468,7 +468,9 @@ Nothing outside the session's own tree is signalled:
   daemon). The session's own host is the one exception, and it is reached
   by the separate step below, never by these rules.
 - A human's terminal keeps its controlling tty. An app launched by launchd
-  runs in `/`.
+  runs in `/`. Removing a worktree is the one place a process with a
+  terminal is signaled, and only when a board session's host started it
+  (§3.1).
 
 **The host itself ends too, or the board says it did not.** The rules above
 never name the `claude` host, so the host's own end rests on `claude stop`

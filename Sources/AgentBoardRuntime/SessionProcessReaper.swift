@@ -102,6 +102,17 @@ public enum SessionProcessReaper {
         return alive([host]).isEmpty
     }
 
+    /// True once `host` has exited, without signaling it; false if it outlives `bound`.
+    public static func awaitExit(
+        of host: PIDIdentity, within bound: Duration, poll: Duration = .milliseconds(100)
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + bound
+        while ContinuousClock.now < deadline, !alive([host]).isEmpty {
+            try? await _Concurrency.Task.sleep(for: poll)
+        }
+        return alive([host]).isEmpty
+    }
+
     /// A zombie has exited; only its parent's wait is outstanding.
     private static func alive(_ identities: Set<PIDIdentity>) -> Set<PIDIdentity> {
         identities.filter { identity in
