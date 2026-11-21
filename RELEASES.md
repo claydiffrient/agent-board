@@ -9,6 +9,75 @@ paragraph included — is ignored. Headings must be versions: there is no
 `Unreleased` section, because every entry is compared against the running version
 to decide what a user has already seen.
 
+## 0.13.0 — 2026-11-20
+
+- **Pull requests.** A round now takes in feedback that arrives while it
+  runs. New review threads, and decisions you answered **fix**, no longer
+  wait a round: the round triages late arrivals before its fixer starts and
+  again when its check passes, and reopens the fix task with them marked
+  "(new)". This counts as the same round for the round cap and the daily
+  budget, and happens once per round.
+- **Pull requests.** An answered decision stays answered. Triage applies
+  your **reply** or **choose** ruling instead of asking again, so a bot that
+  edits one summary comment on every push no longer puts it back to you as a
+  new decision. It asks again only when the new request differs from what
+  you ruled on.
+- **Pull requests.** CI outages no longer become decisions. A failed check
+  whose log or summary matches a pattern is rerun instead of triaged: a
+  GitHub Actions run gets its failed jobs rerun once per head, and the row
+  shows "CI infrastructure failure, rerun requested" while follow-through
+  waits up to 30 minutes for the result. Any other check shows "CI
+  infrastructure failure, needs a rerun". In the project's Settings, under
+  PR Follow-Through, on the Verification tab, **CI infrastructure failures**
+  takes one regular expression per line. The defaults cover Bazel exit
+  codes 34, 36, 38, 39 and 45, "Build Event Protocol upload failed", and
+  log lines saying BuildBuddy is unavailable. Clearing the field turns this
+  off for the project.
+- **Pull requests.** On the same tab, **Batched reviewers** takes
+  comma-separated GitHub logins, empty by default. New feedback from a
+  listed reviewer, such as a bot that re-reviews every push, no longer
+  starts a round or keeps a pull request out of Ready to verify. It waits
+  on the row, marked "batched for the next round", and is handled with the
+  next round something else starts. The first round after a pull request is
+  watched or resumed still takes it.
+- **Pull requests.** On the Replies tab, **Resolve fixed threads** (off by
+  default) lets follow-through resolve the review threads it fixed. A
+  thread is resolved only when triage made it a fix, the follow-up check
+  graded it fixed, and its "Fixed in" reply has been posted. Answers,
+  moot or partial fixes, anything you decided yourself, review bodies,
+  comments and CI items are never resolved, and nothing is resolved on a
+  verified pull request. Turning it on also resolves threads that already
+  qualify. A failed resolve is retried and never parks the pull request.
+- **Pull requests.** A conflict no longer stalls follow-through. While
+  GitHub is recomputing mergeability, a conflict item stays open until
+  GitHub reports the pull request mergeable, and a handled conflict reopens
+  if the same head reports a conflict again. A round in progress is not
+  disturbed, and a dismissed item stays dismissed.
+- **Pull requests.** A round whose follow-up check was left waiting with no
+  session now starts a fresh check on the next poll instead of waiting
+  forever.
+- **Pull requests.** **Post reply to #n…** now shows a spinner while the
+  reply posts, instead of only going gray.
+- **Pull requests.** Pull request and issue numbers no longer show a
+  thousands separator ("#13408", not "#13,408") anywhere in the app, and
+  the Post reply button's label is no longer cut off. Rows, the verify
+  window title and Reviews rows now show the repository as
+  `owner/repo#n`.
+- **Disk space.** Removing a worktree now also stops Agent Board's own
+  sessions still running in it, such as a reviewer's session that was
+  winding down, before the Worktree teardown command runs, so a teardown
+  such as a build-cache clean is no longer left half done. When removal
+  fails with "Directory not empty", the error names the first 10 leftover
+  files.
+- **Disk space.** The Worktree teardown command also runs when a worktree
+  is removed after a failed setup and when a scratch checkout is removed,
+  such as during an epic refresh. Before, those paths skipped it.
+- **Disk space.** A leftover task worktree directory that holds only
+  `.claude` (written back by a session after its worktree was removed) is
+  now deleted by cleanup, instead of being reported as "could not remove
+  worktree" on every sweep. A folder with anything else in it is kept, with
+  its entries listed.
+
 ## 0.12.0 — 2026-11-18
 
 - **Review.** Agent review now stops after a set number of rounds. In the
