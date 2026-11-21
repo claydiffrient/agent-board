@@ -3475,6 +3475,17 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     )
                     return
                 }
+                // SPEC §13.1 "A check that never ran": polls are serial, so no setup of it is still in flight.
+                if let check = try tasks.get(checkId), check.column != .done,
+                   try sessions.activeHolder(taskId: checkId) == nil {
+                    try board.recordUnavailableCheck(
+                        watchId: watch.id, tip: await roundTip(branch, manager: manager), dropFollowupCheck: true,
+                        reason: "Round \(round.number)'s follow-up check never started: its task was left in "
+                            + "\(check.column.rawValue) with no session."
+                    )
+                    try tasks.delete(checkId)
+                    return
+                }
             } else if !held, !(try prWatches.checkItems(round: round)).isEmpty {
                 try await spawnFollowupCheck(watch, round: round, project: project)
             }

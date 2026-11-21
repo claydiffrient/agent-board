@@ -828,6 +828,28 @@ final class PRFollowThroughLoopTests: XCTestCase {
         XCTAssertEqual(try fixture.tasks.get(fixer.id)?.column, .review)
     }
 
+    /// SPEC §13.1 "A check that never ran": a follow-up check task left in ready with no session is
+    /// dropped and a fresh one spawned, rather than the round waiting on it forever.
+    func testAFollowupCheckTaskLeftInReadyWithNoSessionIsReplacedOnTheNextPoll() async throws {
+        try enableChecking()
+        let fixer = try await runningFixer()
+        try await completeFixer(fixer, file: "fix.txt")
+        let watch = try onlyWatch()
+        XCTAssertEqual(watch.state, .checking)
+        let branch = PRRound.branch(pullRequest: watch.number, round: watch.round)
+        let head = try fixture.git(["rev-parse", branch]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let orphan = try XCTUnwrap(try fixture.board.createFollowupCheckTask(watchId: watch.id, headOid: head))
+
+        await poll()
+        await poll()
+
+        XCTAssertNil(try fixture.tasks.get(orphan.id))
+        let round = try XCTUnwrap(try watches.currentRound(watchId: watch.id))
+        let check = try XCTUnwrap(round.followupTaskId)
+        XCTAssertNotEqual(check, orphan.id)
+        _ = try activeSession(on: check)
+    }
+
     func testAFixingRoundWhoseFixItemIsResolvedBeforeItsFixerStartsEndsAndReturnsToWatching() async throws {
         try enable()
         answer(threads: [thread("T_fix")])
