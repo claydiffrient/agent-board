@@ -617,7 +617,7 @@ Stopped is collapsed until its header is clicked; the other four always show,
 with a one-line placeholder when empty. A **Project** menu above the list
 narrows it to one project with follow-through on; while it shows every project,
 each row names its project. A row shows the title (a link that opens the PR in
-the browser), `owner/repo #n`, the state, the round once one has run, the open
+the browser), `owner/repo#n`, the state, the round once one has run, the open
 item count, "pushed …" from `head_changed_at` — or, for a PR whose head has
 not moved since watching began, "updated …" from `updated_at` — and "polled …"
 from `last_polled_at`, the last time a poll read it from GitHub. Each group's
@@ -661,19 +661,19 @@ while it runs, a usage-limit pause with its end, a power hold, the 24-hour
 budget used, concurrency running of its limit, and the next poll. The list
 mirrors CDR's own pages, in the Pull Requests page's row style (title as a
 link, details in caption). It opens with **Waiting on you**: CDR's open
-escalations (§13.7), each with `owner/repo #n`, the PR title, the finding,
+escalations (§13.7), each with `owner/repo#n`, the PR title, the finding,
 when CDR asked, and a line under it with the argument and CDR's verdict on it
 (`uncertain` or `rejected`); clicking one opens the PR thread CDR argued on, or
 its reply when there is no thread. The section is absent while nothing waits,
 whether the daemon runs or not, and an escalation list CDR could not read
 shows the section with the reason instead of reading as none. Then
-**Running** (`owner/repo #n`, title, started,
+**Running** (`owner/repo#n`, title, started,
 phase), then **Queued — due, not started** (due, what holds it),
 **Waiting out the delay** (due, requested), **Retrying** (attempts, next retry)
 and **Parked** (attempts), each queue row with its last error and each absent
 while empty, then **Recent reviews**: every review whose finished time, or
 started time when it has not finished, falls within the last 7 days, newest
-start first, with `owner/repo #n`, title, verdict, findings, source (`cdr` or
+start first, with `owner/repo#n`, title, verdict, findings, source (`cdr` or
 `manual`), finished time and the count still to post; a target whose only
 reviews are older drops out entirely, and the section says "No reviews in the
 last 7 days" rather than disappearing when the window leaves nothing (§13.7).

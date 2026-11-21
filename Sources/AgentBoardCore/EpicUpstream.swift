@@ -25,7 +25,7 @@ public enum EpicUpstreamError: Error, CustomStringConvertible, Equatable, Sendab
         case .headIsBaseBranch(let ref):
             return "Pull request head \"\(ref)\" is the project's base branch; an epic cannot publish onto it."
         case .alreadyAdopted(let number, let epicId, let title):
-            return "Epic \(epicId) (\(title)) already builds on pull request #\(number). Add tasks to that epic, "
+            return "Epic \(epicId) (\(title)) already builds on pull request \(IssueReference.short(number)). Add tasks to that epic, "
                 + "or close or abandon it first."
         }
     }

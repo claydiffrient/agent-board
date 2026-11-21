@@ -19,7 +19,7 @@ public struct EpicUpstreamReader: Sendable {
         let remote = try BranchPublisher(repoPath: repoPath).requireRemote()
         guard let repository = PullRequestLaunch.githubSlug(remoteURL: remote) else {
             throw PullRequestCheckFailure(
-                "This project's `origin` (\(remote)) is not a GitHub repository, so it has no pull request #\(number)."
+                "This project's `origin` (\(remote)) is not a GitHub repository, so it has no pull request \(IssueReference.short(number))."
             )
         }
         let result = try gh.run(Self.arguments(number: number, repository: repository), cwd: repoPath)
@@ -27,7 +27,7 @@ public struct EpicUpstreamReader: Sendable {
             let said = [result.stderr, result.stdout]
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .first { !$0.isEmpty } ?? "exit \(result.status)"
-            throw PullRequestCheckFailure("Could not read pull request #\(number) in \(repository): \(said)")
+            throw PullRequestCheckFailure("Could not read pull request \(IssueReference.short(number)) in \(repository): \(said)")
         }
         return try Self.upstream(from: result.stdout, number: number)
     }
@@ -39,16 +39,16 @@ public struct EpicUpstreamReader: Sendable {
               let url = object["url"] as? String,
               let headRef = object["headRefName"] as? String
         else {
-            throw PullRequestCheckFailure("`gh pr view` printed no pull request for #\(number): \(json)")
+            throw PullRequestCheckFailure("`gh pr view` printed no pull request for \(IssueReference.short(number)): \(json)")
         }
         guard state.uppercased() == "OPEN" else {
             throw PullRequestCheckFailure(
-                "Pull request #\(number) is \(state.lowercased()), not open; an epic can only build on an open pull request."
+                "Pull request \(IssueReference.short(number)) is \(state.lowercased()), not open; an epic can only build on an open pull request."
             )
         }
         if object["isCrossRepository"] as? Bool ?? false {
             throw PullRequestCheckFailure(
-                "Pull request #\(number) comes from a fork; an epic can only build on a pull request whose head "
+                "Pull request \(IssueReference.short(number)) comes from a fork; an epic can only build on a pull request whose head "
                     + "branch is in this repository."
             )
         }

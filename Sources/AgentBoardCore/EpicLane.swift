@@ -80,6 +80,6 @@ public enum EpicLane {
     /// The lane's state badge. A PR-open epic names its pull request, as a task card's pill does.
     public static func stateLabel(state: EpicState, pullRequest: PullRequestReference?) -> String {
         guard state == .pullRequestOpen else { return state.rawValue }
-        return pullRequest.map { "PR #\($0.number) open" } ?? "PR open"
+        return pullRequest.map { "PR \(IssueReference.short($0.number)) open" } ?? "PR open"
     }
 }

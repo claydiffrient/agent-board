@@ -35,7 +35,7 @@ public struct PullRequestUpstreamState: Sendable, Equatable {
 
     /// Why nothing may be pushed onto `upstream`'s head, or nil when the pull request still takes it.
     public func refusal(for upstream: EpicUpstream) -> String? {
-        let pr = "pull request #\(upstream.pullRequest.number) (\(upstream.pullRequest.url))"
+        let pr = "pull request \(IssueReference.short(upstream.pullRequest.number)) (\(upstream.pullRequest.url))"
         if state.uppercased() != "OPEN" {
             return "\(pr) is \(state.lowercased()), so nothing was pushed to `\(upstream.headRef)`."
         }

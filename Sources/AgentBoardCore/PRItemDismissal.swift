@@ -113,7 +113,7 @@ extension PRWatchStore {
                 continue
             }
             try TaskStore.close(
-                db, taskId, reason: "Round \(round.number) of #\(watch.number) has nothing left to fix: its items were dismissed.",
+                db, taskId, reason: "Round \(round.number) of \(IssueReference.short(watch.number)) has nothing left to fix: its items were dismissed.",
                 by: "follow-through", at: now
             )
         }
@@ -151,7 +151,7 @@ extension Board {
             guard let watch = try PRWatch.filter(Column("id") == watchId && Column("project_id") == projectId).fetchOne(db)
             else { throw PRVerdictRejection("Pull request watch \(watchId) not found in this project.") }
             guard let item = try PRItem.fetchOne(db, key: itemId), item.watchId == watch.id else {
-                throw PRVerdictRejection("Item \(itemId) not found on #\(watch.number).")
+                throw PRVerdictRejection("Item \(itemId) not found on \(IssueReference.short(watch.number)).")
             }
             guard item.state == .open else {
                 throw PRVerdictRejection("Item \(itemId) is \(item.state.rawValue), not open, so there is nothing to dismiss.")
@@ -165,7 +165,7 @@ extension Board {
             let source = [item.author, item.kind.rawValue].compactMap { $0 }.joined(separator: ", ")
             return try ApprovalStore.insert(
                 db, projectId: projectId, kind: .prItemDismissal, taskId: nil, epicId: nil, requestedBy: requestedBy,
-                reason: "#\(watch.number) \(watch.title)\nItem \(itemId) (\(source)): \(item.firstLine())\nReason: \(reason)",
+                reason: "\(IssueReference.short(watch.number)) \(watch.title)\nItem \(itemId) (\(source)): \(item.firstLine())\nReason: \(reason)",
                 payload: try PRItemDismissalRequest(watchId: watch.id, itemId: itemId, reason: reason).encoded()
             )
         }
@@ -183,10 +183,10 @@ extension Board {
                     db, itemId: request.itemId, reason: request.reason,
                     by: "orchestrator \(approval.requestedBy) via approval \(approval.id)", now: now
                 )
-                let moved = before == watch.state ? "" : " #\(watch.number) went from \(before?.rawValue ?? "?") to \(watch.state.rawValue)."
+                let moved = before == watch.state ? "" : " \(IssueReference.short(watch.number)) went from \(before?.rawValue ?? "?") to \(watch.state.rawValue)."
                 _ = try ReportStore.insert(
                     db, projectId: approval.projectId, taskId: nil, sessionId: nil, kind: .decision,
-                    body: "Item \(request.itemId) on #\(watch.number) dismissed: \(request.reason)\(moved)"
+                    body: "Item \(request.itemId) on \(IssueReference.short(watch.number)) dismissed: \(request.reason)\(moved)"
                 )
                 return watch
             }

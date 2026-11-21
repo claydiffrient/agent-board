@@ -197,7 +197,7 @@ struct PRWatchTools: Sendable {
                 projectId: identity.projectId, watchId: watch.id, itemId: itemId, reason: reason,
                 requestedBy: identity.sessionId ?? "orchestrator"
             )
-            return ToolResult(text: "dismissal approval \(approval.id) pending; item \(itemId) on #\(watch.number) "
+            return ToolResult(text: "dismissal approval \(approval.id) pending; item \(itemId) on \(IssueReference.short(watch.number)) "
                 + "stays as it is until the human grants it. The outcome reaches you via list_reports.")
         } catch let rejection as PRVerdictRejection {
             throw ToolError(rejection.reason)
@@ -212,7 +212,7 @@ struct PRWatchTools: Sendable {
                 projectId: identity.projectId, watchId: watch.id, reason: reason,
                 requestedBy: identity.sessionId ?? "orchestrator"
             )
-            return ToolResult(text: "resume approval \(approval.id) pending; #\(watch.number) stays "
+            return ToolResult(text: "resume approval \(approval.id) pending; \(IssueReference.short(watch.number)) stays "
                 + "\(watch.state.rawValue) until the human grants it. The outcome reaches you via list_reports.")
         } catch let rejection as PRVerdictRejection {
             throw ToolError(rejection.reason)
@@ -229,7 +229,7 @@ struct PRWatchTools: Sendable {
                 projectId: identity.projectId, number: Int(number), reason: reason,
                 requestedBy: identity.sessionId ?? "orchestrator"
             )
-            return ToolResult(text: "watch approval \(approval.id) pending; #\(number) is not watched until the human "
+            return ToolResult(text: "watch approval \(approval.id) pending; \(IssueReference.short(number)) is not watched until the human "
                 + "grants it. The outcome reaches you via list_reports.")
         } catch let rejection as PRVerdictRejection {
             throw ToolError(rejection.reason)
@@ -249,11 +249,11 @@ struct PRWatchTools: Sendable {
         }
         let matches = try watches.watches(number: Int(number), projectId: identity.projectId)
         guard let watch = matches.first else {
-            throw ToolError("Pull request #\(number) not found in this project.")
+            throw ToolError("Pull request \(IssueReference.short(number)) not found in this project.")
         }
         guard matches.count == 1 else {
             let repos = matches.map { "\($0.repoOwner)/\($0.repoName) (watch_id \($0.id))" }.joined(separator: ", ")
-            throw ToolError("#\(number) is watched in more than one repository: \(repos). Pass its watch_id.")
+            throw ToolError("\(IssueReference.short(number)) is watched in more than one repository: \(repos). Pass its watch_id.")
         }
         return watch
     }

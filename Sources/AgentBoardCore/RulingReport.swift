@@ -68,12 +68,12 @@ public enum RulingReport {
                     arguments: [$0]
                 )
             }
-            return "item \(ruling.prItemId.map(String.init) ?? "?")" + (number.map { " of pull request #\($0)" } ?? "")
+            return "item \(ruling.prItemId.map(String.init) ?? "?")" + (number.map { " of pull request " + IssueReference.short($0) } ?? "")
         case .prWatch:
             let number = try ruling.prWatchId.flatMap {
                 try Int.fetchOne(db, sql: "SELECT number FROM pr_watch WHERE id = ?", arguments: [$0])
             }
-            return "watch \(ruling.prWatchId ?? "?")" + (number.map { " on pull request #\($0)" } ?? "")
+            return "watch \(ruling.prWatchId ?? "?")" + (number.map { " on pull request " + IssueReference.short($0) } ?? "")
         }
     }
 

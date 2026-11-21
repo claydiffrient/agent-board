@@ -219,7 +219,7 @@ extension Board {
                 throw PRVerdictRejection("No watched pull request \(watchId).")
             }
             let task = try TaskStore.insert(
-                db, projectId: watch.projectId, title: "Triage #\(watch.number): \(watch.title)", body: nil,
+                db, projectId: watch.projectId, title: "Triage \(IssueReference.short(watch.number)): \(watch.title)", body: nil,
                 acceptance: nil, priority: nil, column: .ready, origin: .triage, epicId: nil
             )
             try PRTriage(

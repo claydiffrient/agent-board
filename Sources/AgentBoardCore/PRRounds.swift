@@ -49,7 +49,7 @@ extension PRWatchStore {
         let rounds = try roundsSinceResume(db, watch: watch)
         guard rounds >= cap else { return false }
         watch.park(
-            reason: "#\(watch.number) has run its round cap of \(cap) round\(cap == 1 ? "" : "s") without the "
+            reason: "\(IssueReference.short(watch.number)) has run its round cap of \(cap) round\(cap == 1 ? "" : "s") without the "
                 + "feedback settling. Resume it to allow \(cap) more.",
             at: now
         )
@@ -371,7 +371,7 @@ extension Board {
         let base = try Project.fetchOne(db, key: watch.projectId)?.baseBranch
         if let base, watch.baseRef != base {
             watch.park(
-                reason: "#\(watch.number) is stacked on `\(watch.baseRef)`, not `\(base)`, so a fix "
+                reason: "\(IssueReference.short(watch.number)) is stacked on `\(watch.baseRef)`, not `\(base)`, so a fix "
                     + "round would leave the layers above it to restack, which is yours to do.",
                 at: .nowMillis
             )
@@ -422,7 +422,7 @@ extension Board {
             guard !items.isEmpty else { return nil }
             let branch = PRRound.branch(pullRequest: watch.number, round: round.number)
             let task = try TaskStore.insert(
-                db, projectId: watch.projectId, title: "Fix round \(round.number) of #\(watch.number): \(watch.title)",
+                db, projectId: watch.projectId, title: "Fix round \(round.number) of \(IssueReference.short(watch.number)): \(watch.title)",
                 body: try Self.fixRoundBody(db, items: items, watch: watch, branch: branch), acceptance: nil, priority: nil,
                 column: .ready, origin: .fixRound, epicId: nil, model: model, type: .code
             )
@@ -458,12 +458,12 @@ extension Board {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { !$0.isEmpty } ?? item.kind.rawValue
         let snippet = line.count > 72 ? String(line.prefix(71)) + "…" : line
-        return "\(lead) from #\(watch.number): \(snippet)"
+        return "\(lead) from \(IssueReference.short(watch.number)): \(snippet)"
     }
 
     static func itemTaskBody(_ db: Database, item: PRItem, watch: PRWatch) throws -> String {
         """
-        From review feedback on pull request #\(watch.number) "\(watch.title)": \(watch.url)
+        From review feedback on pull request \(IssueReference.short(watch.number)) "\(watch.title)": \(watch.url)
 
         \(itemSection(item, answer: try PRWatchStore.authorAnswer(db, item: item), watch: watch))
         """
@@ -485,7 +485,7 @@ extension Board {
         item requires it.
         """
         return """
-        Fix the review feedback below on pull request #\(watch.number) "\(watch.title)": \(watch.url)
+        Fix the review feedback below on pull request \(IssueReference.short(watch.number)) "\(watch.title)": \(watch.url)
 
         You are on `\(branch)`, cut from the pull request's head. Make new commits only: no amend, no \
         rebase, no push. Agent Board pushes the round once it has been checked.\(foldedIn)

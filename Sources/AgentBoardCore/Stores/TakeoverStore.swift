@@ -226,7 +226,7 @@ public struct TakeoverStore: Sendable {
             guard row.kind == .issue, let task = try row.taskId.flatMap({ try Task.fetchOne(db, key: $0) }),
                   [.proposed, .backlog, .ready].contains(task.column)
             else { return row }
-            let reason = "Issue #\(row.number) was released from takeover: it lost a trigger label or is no "
+            let reason = "Issue \(IssueReference.short(row.number)) was released from takeover: it lost a trigger label or is no "
                 + "longer assigned to the human."
             guard try Board.closeRefusal(db, task: task, reason: reason) == nil else { return row }
             try Board.retire(db, task: task, reason: reason, by: "takeover")

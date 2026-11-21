@@ -242,12 +242,12 @@ public struct TakeoverIssue: Sendable, Equatable {
 
     /// The `code` task's title and body. The issue's own text is quoted and labeled as data, the way a
     /// fix round quotes review comments (SPEC §13.8).
-    public var taskTitle: String { "Issue #\(number): \(title)" }
+    public var taskTitle: String { "Issue \(IssueReference.short(number)): \(title)" }
 
     public var taskBody: String {
         var sections = [
             """
-            Taken over from GitHub issue #\(number): \(url)
+            Taken over from GitHub issue \(IssueReference.short(number)): \(url)
 
             Resolve this issue in this repository. When the task is accepted, the pull request Agent Board \
             requests for it says `\(IssueClosingReference.line(number: number))`, so merging it closes the issue. \
@@ -266,7 +266,7 @@ public struct TakeoverIssue: Sendable, Equatable {
             sections.append("\(heading)\n\n\(Self.quote(comment.body))")
         }
         if !linkedPullRequests.isEmpty {
-            let listed = linkedPullRequests.map { "- #\($0.number): \($0.url)" }.joined(separator: "\n")
+            let listed = linkedPullRequests.map { "- \(IssueReference.short($0.number)): \($0.url)" }.joined(separator: "\n")
             sections.append("## Linked pull requests\n\nGitHub links these open pull requests to the issue:\n\(listed)")
         }
         return sections.joined(separator: "\n\n")
@@ -282,13 +282,13 @@ public struct TakeoverIssue: Sendable, Equatable {
 /// GitHub's closing keywords (SPEC §13.8): a pull request whose body says `Closes #12`, `fixes
 /// owner/name#12` or names the issue's URL after a keyword closes that issue when it merges.
 public enum IssueClosingReference {
-    public static func line(number: Int) -> String { "Closes #\(number)" }
+    public static func line(number: Int) -> String { "Closes \(IssueReference.short(number))" }
 
     /// The closing line a pull request on `pullRequestRepository` carries; qualified when the issue lives elsewhere.
     public static func line(number: Int, issueRepository: String, pullRequestRepository: String) -> String {
         issueRepository.caseInsensitiveCompare(pullRequestRepository) == .orderedSame
             ? line(number: number)
-            : "Closes \(issueRepository)#\(number)"
+            : "Closes " + IssueReference.full(repository: issueRepository, number)
     }
 
     /// `owner/name` from an issue or pull request URL on github.com.

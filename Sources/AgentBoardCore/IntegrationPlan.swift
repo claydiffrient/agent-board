@@ -230,7 +230,7 @@ public enum IntegrationPlan {
             mergedBranches: merged
         )
         let publishing = upstream.map {
-            "`\(epic.branch)` is pushed onto `\($0.headRef)`, the head of pull request #\($0.pullRequest.number), "
+            "`\(epic.branch)` is pushed onto `\($0.headRef)`, the head of pull request \(IssueReference.short($0.pullRequest.number)), "
                 + "outside this session, by the orchestrator through an approval the human grants."
         } ?? "The pull request from `\(epic.branch)` into `\(baseBranch)` is opened outside this session, by a human or "
             + "by the orchestrator through an approval the human grants."

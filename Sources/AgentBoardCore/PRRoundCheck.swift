@@ -231,7 +231,7 @@ extension Board {
             else { return nil }
             let task = try TaskStore.insert(
                 db, projectId: watch.projectId,
-                title: "Follow-up check of round \(round.number) of #\(watch.number): \(watch.title)", body: nil,
+                title: "Follow-up check of round \(round.number) of \(IssueReference.short(watch.number)): \(watch.title)", body: nil,
                 acceptance: nil, priority: nil, column: .ready, origin: .followupCheck, epicId: nil
             )
             round.followupTaskId = task.id
@@ -488,7 +488,7 @@ extension Board {
             guard let task = try Task.fetchOne(db, key: taskId), task.column != .done, task.column != .closed,
                   try SessionStore.activeHolder(db, taskId: taskId) == nil
             else { continue }
-            try TaskStore.close(db, taskId, reason: "Pull request #\(watch.number) parked: \(reason)", by: "follow-through", at: now)
+            try TaskStore.close(db, taskId, reason: "Pull request \(IssueReference.short(watch.number)) parked: \(reason)", by: "follow-through", at: now)
         }
         watch.park(reason: reason, at: now)
         watch.updatedAt = now

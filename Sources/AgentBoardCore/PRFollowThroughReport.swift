@@ -13,7 +13,7 @@ enum PRMilestone {
     case closed
 
     func body(_ watch: PRWatch) -> String {
-        "#\(watch.number) \(watch.title) — \(watch.url)\n\(state): \(reason(watch))"
+        "\(IssueReference.short(watch.number)) \(watch.title) — \(watch.url)\n\(state): \(reason(watch))"
     }
 
     private var state: String {

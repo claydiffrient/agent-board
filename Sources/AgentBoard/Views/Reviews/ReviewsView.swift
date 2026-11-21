@@ -1,3 +1,4 @@
+import AgentBoardCore
 import AgentBoardRuntime
 import AppKit
 import SwiftUI
@@ -172,7 +173,7 @@ enum ReviewsPage {
         case .available(let list):
             guard !list.isEmpty else { return [] }
             section.rows = list.enumerated().map { index, escalation in
-                let name = "\(escalation.repo ?? "?") #\(escalation.pr.map(String.init) ?? "?")"
+                let name = IssueReference.full(repository: escalation.repo, escalation.pr)
                 let posted = escalation.postedDate.map { "asked \(Format.relative($0))" }
                 let argued = escalation.argued?.split(whereSeparator: \.isWhitespace).joined(separator: " ")
                 let verdict = escalation.arguedVerdict.map { " (\($0))" } ?? ""
@@ -254,7 +255,7 @@ enum ReviewsPage {
             section.rows = withinWindow.enumerated().map { index, recent in
                 let target = recent.target
                 let review = recent.review
-                let name = "\(target.owner ?? "?")/\(target.repo ?? "?") #\(target.pr.map(String.init) ?? "?")"
+                let name = IssueReference.full(owner: target.owner, repo: target.repo, target.pr)
                 var parts = [name, review.verdict ?? (review.finishedAt == nil ? "still running" : "no verdict")]
                 if let findings = review.findings { parts.append(findings == 1 ? "1 finding" : "\(findings) findings") }
                 if let source = review.source { parts.append(source) }
@@ -314,7 +315,7 @@ enum ReviewsPage {
     }
 
     private static func prName(_ entry: CDRQueueEntry) -> String {
-        "\(entry.repo ?? "?") #\(entry.pr.map(String.init) ?? "?")"
+        IssueReference.full(repository: entry.repo, entry.pr)
     }
 
     private static func time(_ label: String, _ text: String?) -> String? {
