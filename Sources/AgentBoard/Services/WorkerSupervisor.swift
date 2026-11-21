@@ -208,6 +208,7 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
     @ObservationIgnored private var prWatchSearchFailures = 0
     /// Items with a post in flight, so an answer's post and a round point's never both post one.
     @ObservationIgnored private var postingReplies: Set<Int64> = []
+    @ObservationIgnored private var resolvingThreads: Set<Int64> = []
     /// Consecutive polls on which git could not read a project's `origin`, by project id.
     @ObservationIgnored private var prWatchRemoteFailures: [String: Int] = [:]
     /// Watches whose pull request could not be read after a reply to it came back not found (SPEC
@@ -3622,15 +3623,20 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
 
     /// SPEC §13.2: every reply the watch still owes, as `pendingReplies` gates them.
     private func postFactualReplies(watchId: String, project: Project) async {
-        guard let items = try? prWatches.pendingReplies(watchId: watchId), !items.isEmpty else { return }
-        await postReplies(items, watchId: watchId, project: project)
+        await postReplies((try? prWatches.pendingReplies(watchId: watchId)) ?? [], watchId: watchId, project: project)
     }
 
     /// SPEC §13.2: each thread item gets a thread reply and each review body or comment a PR comment, its
-    /// URL recorded. Nothing is resolved. A failed post is recorded on the item, and abandoned when GitHub
-    /// says its comment is gone while the pull request still reads: GitHub says the same of a whole
-    /// repository the token cannot see.
+    /// URL recorded, and then each fixed thread is resolved. A failed post is recorded on the item, and
+    /// abandoned when GitHub says its comment is gone while the pull request still reads: GitHub says the
+    /// same of a whole repository the token cannot see.
     func postReplies(_ items: [PRItem], watchId: String, project: Project) async {
+        await postEachReply(items, watchId: watchId, project: project)
+        await resolveFixedThreads(watchId: watchId, project: project)
+    }
+
+    private func postEachReply(_ items: [PRItem], watchId: String, project: Project) async {
+        guard !items.isEmpty else { return }
         guard let watch = try? prWatches.get(watchId) else { return }
         let pushed = Dictionary(
             ((try? prWatches.rounds(watchId: watchId)) ?? []).map { ($0.number, $0.pushedHeadOid) },
@@ -3666,6 +3672,29 @@ final class WorkerSupervisor: WorkerSupervising, WorkerControl, BoardEventSink {
                     gone = readable == true
                 }
                 try? prWatches.recordReplyFailure(itemId: id, error: describe(error), gone: gone)
+            }
+        }
+    }
+
+    /// SPEC §13.2: with `resolveFixedThreads` on, resolves every thread whose item qualifies and is not yet
+    /// resolved, never on a verified pull request. A failure is logged and tried again at the next posting point.
+    private func resolveFixedThreads(watchId: String, project: Project) async {
+        guard let settings = try? projects.get(project.id)?.settings.prFollowThrough, settings.resolveFixedThreads,
+              let watch = try? prWatches.get(watchId), watch.state != .verified,
+              let items = try? prWatches.threadsToResolve(watchId: watchId)
+        else { return }
+        let replier = pullRequestReplies
+        let cwd = URL(fileURLWithPath: project.repoPath)
+        for item in items {
+            guard let id = item.id, !resolvingThreads.contains(id) else { continue }
+            resolvingThreads.insert(id)
+            defer { resolvingThreads.remove(id) }
+            let thread = item.githubNodeId
+            do {
+                try await offMain { try replier.resolveThread(threadId: thread, cwd: cwd) }
+                try prWatches.recordThreadResolved(itemId: id)
+            } catch {
+                NSLog("PR follow-through: thread %@ on %@ was not resolved: %@", thread, watch.url, describe(error))
             }
         }
     }

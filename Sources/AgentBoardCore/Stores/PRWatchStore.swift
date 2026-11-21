@@ -134,6 +134,7 @@ public struct PRWatchStore: Sendable {
                     }
                     item.replyError = nil
                     item.replyAbandonedAt = nil
+                    item.threadResolvedAt = nil
                     item.followupGrade = nil
                     feedbackArrived = feedbackArrived || !item.isBatched(among: batched)
                 }

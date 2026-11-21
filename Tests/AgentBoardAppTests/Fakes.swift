@@ -211,6 +211,12 @@ final class FakeGh: GhRunning, @unchecked Sendable {
         }
     }
 
+    /// What resolving a review thread prints.
+    func answerResolves() {
+        let resolved = #"{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}"#
+        lock.withLock { answers[Self.resolveKey] = CommandResult(status: 0, stdout: resolved, stderr: "") }
+    }
+
     /// What re-requesting review prints.
     func answerReviewRequests() {
         lock.withLock { answers[Self.reviewRequestKey] = CommandResult(status: 0, stdout: "{}", stderr: "") }
@@ -228,6 +234,7 @@ final class FakeGh: GhRunning, @unchecked Sendable {
 
     private static let searchKey = "search prs"
     private static let replyKey = "reply"
+    private static let resolveKey = "resolve"
     private static let commentKey = "comment"
     private static let reviewRequestKey = "requested reviewers"
 
@@ -239,6 +246,9 @@ final class FakeGh: GhRunning, @unchecked Sendable {
         if arguments.starts(with: ["search", "prs"]) { return searchKey }
         if arguments.starts(with: ["run", "view", "--job"]), arguments.count > 3, let job = Int64(arguments[3]) {
             return failedLogKey(job)
+        }
+        if arguments.starts(with: ["api", "graphql"]), arguments.contains(where: { $0.contains("resolveReviewThread(") }) {
+            return resolveKey
         }
         if arguments.starts(with: ["api", "graphql"]), arguments.contains(where: { $0.hasPrefix("query=mutation") }) {
             return replyKey

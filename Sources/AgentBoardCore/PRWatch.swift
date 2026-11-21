@@ -223,6 +223,8 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
     /// `human`, or the orchestrator session and the approval that granted it (SPEC §13.4).
     public var dismissedBy: String? = nil
     public var dismissedAt: Int64? = nil
+    /// When publishing resolved the item's review thread (SPEC §13.2).
+    public var threadResolvedAt: Int64? = nil
 
     public enum CodingKeys: String, CodingKey {
         case id
@@ -256,6 +258,7 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
         case dismissReason = "dismiss_reason"
         case dismissedBy = "dismissed_by"
         case dismissedAt = "dismissed_at"
+        case threadResolvedAt = "thread_resolved_at"
     }
 
     public mutating func didInsert(_ inserted: InsertionSuccess) {
@@ -280,6 +283,12 @@ public struct PRItem: Codable, FetchableRecord, MutablePersistableRecord, Identi
     public var infraFailure: PRInfraFailure? {
         guard kind == .check, verdict == .answer, let approach else { return nil }
         return PRInfraFailure(rawValue: approach)
+    }
+
+    /// SPEC §13.2: a review thread triaged `fix`, graded fixed by the follow-up check, with its reply posted,
+    /// and never a human's decision. Only such a thread is resolved, and only with `resolveFixedThreads` on.
+    public var qualifiesForResolving: Bool {
+        kind == .thread && verdict == .fix && followupGrade == .fixed && replyURL != nil && decisionAnswer == nil
     }
 
     /// SPEC §13.1: an open fix or decision outlives an outdated or viewer-latest thread; an untriaged item

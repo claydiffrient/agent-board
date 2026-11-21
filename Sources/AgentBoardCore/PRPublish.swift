@@ -206,6 +206,28 @@ extension PRWatchStore {
         }
     }
 
+    /// The watch's items that qualify for resolving and whose thread publishing has not resolved yet (SPEC §13.2).
+    public func threadsToResolve(watchId: String) throws -> [PRItem] {
+        try db.reader.read { db in
+            try PRItem.fetchAll(
+                db,
+                sql: """
+                SELECT * FROM pr_item WHERE watch_id = ? AND kind = 'thread' AND reply_url IS NOT NULL
+                AND thread_resolved_at IS NULL ORDER BY id
+                """,
+                arguments: [watchId]
+            ).filter(\.qualifiesForResolving)
+        }
+    }
+
+    public func recordThreadResolved(itemId: Int64, now: Int64 = .nowMillis) throws {
+        try db.writer.write { db in
+            try db.execute(
+                sql: "UPDATE pr_item SET thread_resolved_at = ?, updated_at = ? WHERE id = ?", arguments: [now, now, itemId]
+            )
+        }
+    }
+
     /// Claims a pushed round's review re-request (SPEC §13.2) and returns the authors of the thread,
     /// review and comment items it handled. Nil when the round never pushed or was already claimed, so it runs once.
     public func claimReviewRequests(watchId: String, round number: Int, now: Int64 = .nowMillis) throws -> [String]? {
