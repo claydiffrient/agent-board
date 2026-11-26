@@ -237,6 +237,12 @@ sent and nothing restarts. With focus anywhere else — a text field, the board 
 the key is not consumed. Every construction site builds a `BoardTerminalView`,
 which handles it in `performKeyEquivalent`.
 
+A click inside any of those terminals makes it first responder before the click
+is handled, so typing resumes there after focus moved elsewhere, such as the
+Approvals sidebar. That holds while the child has mouse reporting on, when the
+click itself is forwarded to the PTY. `BoardTerminalView` does this in
+`mouseDown`, because SwiftTerm's handler never takes focus.
+
 A worker's worktree gets its own shell instead of using this screen: the
 `apple.terminal` button beside the attach button on a session row opens a
 `worktree-shell` window keyed by session id, its working directory the

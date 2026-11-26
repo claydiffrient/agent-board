@@ -13,6 +13,14 @@ class BoardTerminalView: LocalProcessTerminalView {
         return true
     }
 
+    /// SwiftTerm's `mouseDown` never takes focus, and returns early while the child has mouse reporting on (SPEC §10, Terminal).
+    override func mouseDown(with event: NSEvent) {
+        if window?.firstResponder !== self {
+            window?.makeFirstResponder(self)
+        }
+        super.mouseDown(with: event)
+    }
+
     /// Writes the form feed straight to the process, not through `send(source:data:)`, because it is
     /// not keystrokes a subclass should account for as typing.
     func clearScreenAndScrollback() {
